@@ -472,6 +472,10 @@
 	align-items: end;
 }
 .messages-new__form .form-group { margin-bottom: 0; }
+/* The select, the text box and the button stand in one row: one 44px
+   height for all three (a select's native chrome otherwise sits 2-3px taller
+   than the text box, and the button shorter), so their edges line up. */
+.messages-new__form .form-input, .messages-new__submit { height: 44px; }
 @media (max-width: 720px) {
 	.messages-new__form { grid-template-columns: 1fr; }
 }
@@ -479,16 +483,6 @@
 	display: flex; flex-direction: column;
 	gap: var(--space-1);
 	margin-top: var(--space-4);
-}
-.messages-list__empty {
-	padding: var(--space-8) var(--space-4);
-	text-align: center;
-	color: var(--text-muted);
-	border: 1px dashed var(--border-light);
-	border-radius: var(--radius-lg);
-	/* surface-3, not surface-2 — the darker grey read as a heavy dead slab
-	   against the white page card. */
-	background: var(--surface-3);
 }
 .messages-list__item {
 	display: grid;
@@ -537,17 +531,14 @@
 
 /* ===== Message card (Messages block entry_card) =====
    Three accent variants keyed off entry kind/role — neutral (default/
-   artifact/status/agent), warning (notification/system), and the brand
-   "user" tint. #fefce8/#eab308 (warning) and #fff1e6 (user) have no
-   matching design token: #fff1e6 is an already-established literal value
-   elsewhere in the codebase (`.form-tabs li.is-active a`, styles/layouts/
-   page.css) for the same "active brand tint" concept, reused verbatim
-   here rather than invented; #fefce8/#eab308 have no precedent elsewhere
-   and are carried over unchanged from the original inline styles — see
-   task-12b report. */
+   artifact/status/agent), warning (notification/system), and "user": the
+   person's own turns, a slate tint with a slate rule, set apart from the
+   machine's without the brand red, which on a bordered card reads as an
+   error. #fefce8/#eab308 (warning) have no matching design token and are
+   carried over unchanged from the original inline styles. */
 .message-card--neutral { margin-bottom: var(--space-3); background: var(--surface-3); border-left: 3px solid var(--border-color); }
 .message-card--warning { margin-bottom: var(--space-3); background: #fefce8; border-left: 3px solid #eab308; }
-.message-card--user { margin-bottom: var(--space-3); background: #fff1e6; border-left: 3px solid var(--primary-color); }
+.message-card--user { margin-bottom: var(--space-3); background: var(--bg-hover); border-left: 3px solid var(--text-muted); }
 .message-card__content { margin: 0; white-space: pre-wrap; word-break: break-word; }
 /* An assistant turn is markdown rendered to HTML (`llm-chat.js`), whose own
    paragraphs and lists carry the line breaks; pre-wrap would double them. */
@@ -555,6 +546,23 @@
 .message-card__content--markdown > :first-child { margin-top: 0; }
 .message-card__content--markdown > :last-child { margin-bottom: 0; }
 .message-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
+.message-card__date { margin-left: auto; font-size: var(--text-xs); color: var(--text-muted); }
+
+/* ===== Composer (Messages block's conversation and "Add entry" forms) =====
+   A text box and its submit button on one row: the box takes the width and
+   may shrink (min-width: 0, so a phone keeps it usable rather than letting
+   the button push it out), the button keeps its own width at the box's
+   bottom edge. */
+.composer { display: flex; align-items: flex-end; gap: var(--space-2); }
+.composer__input { flex: 1; min-width: 0; resize: none; }
+.composer__submit { flex: none; min-height: 44px; }
+/* The "Add entry" form's kind and role pickers, side by side above the
+   composer; stacked on a phone. */
+.entry-form__meta { display: grid; grid-template-columns: repeat(2, minmax(0, 12rem)); gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
+.entry-form__meta .form-group { margin-bottom: 0; }
+@media (max-width: 480px) {
+	.entry-form__meta { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* The assistant turn while it is being written (`llm-chat.js`): a pulsing
    "Thinking..." until the first token, then a blinking caret after the text.
@@ -625,12 +633,28 @@
 .model-progress-track { background: var(--bg-secondary); border-radius: 0.25rem; height: 6px; overflow: hidden; }
 .model-progress-fill { height: 100%; background: var(--primary-color); width: 0%; transition: width 0.3s; }
 
-/* ===== Storage quota bar (blocks/files/pages_user/cloudstorage.rs) =====
+/* ===== Storage quota meter (blocks/files/pages_user/cloudstorage.rs) =====
    Same shape as .model-progress-track/-fill above; `--fill-pct` is a
    per-render percentage computed in Rust, handed to CSS as a custom
-   property rather than a literal `width:`. */
-.quota-bar { background: var(--bg-secondary); border-radius: 0.25rem; height: 8px; overflow: hidden; }
-.quota-bar__fill { height: 100%; background: var(--primary-color); width: var(--fill-pct); transition: width 0.3s; }
+   property rather than a literal `width:`. The fill is rendered only when
+   something is used, and is never narrower than a visible sliver, so a few
+   kilobytes against a gigabyte do not read as an empty bar. At 90% the bar
+   and its "Almost full" note turn to the warning colour (the note says it in
+   words too). */
+.quota__summary, .quota-bar { max-width: 40rem; }
+.quota__summary { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.quota__warning { color: var(--accent-warning-text); font-weight: 500; }
+.quota-bar { background: var(--bg-secondary); border-radius: var(--radius-full); height: 8px; overflow: hidden; }
+.quota-bar__fill { height: 100%; background: var(--text-secondary); width: max(var(--fill-pct), 6px); border-radius: inherit; transition: width 0.3s; }
+.quota-bar--warning .quota-bar__fill { background: var(--accent-warning); }
+@media (prefers-reduced-motion: reduce) { .quota-bar__fill { transition: none; } }
+
+/* A page body made of `section_header` sections, one under the other: the
+   sections are spaced apart rather than butted together. */
+.page-sections { display: flex; flex-direction: column; gap: var(--space-8); }
+/* A share link's token: a long random string, set to wrap anywhere rather
+   than widen its column. */
+.share-token { overflow-wrap: anywhere; font-size: var(--text-xs); }
 
 /* ===== LLM chat options (the chat page's rail, blocks/llm/pages.rs) =====
    A column in the desktop rail; on a phone the rail is a one-row toolbar

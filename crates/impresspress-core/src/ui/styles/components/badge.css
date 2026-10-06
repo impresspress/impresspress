@@ -35,7 +35,7 @@
    both call sites rather than re-declared per-enum. None of these five
    colours has a matching design token; carried over unchanged from the
    original inline styles (#fff1e6 already has precedent as a literal "brand
-   tint" — see card.css's .message-card--user — the other four do not and are
+   tint" — see page.css's `.form-tabs li.is-active a` — the other four do not and are
    flagged here). --primary-hover (#e02523) on #fff1e6 is only 4.26:1
    (computed, Task 12c) -- below the 4.5:1 AA floor; --primary-button
    (4.51:1, computed, same as .form-tabs li.is-active a in layouts/page.css)

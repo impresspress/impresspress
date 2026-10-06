@@ -7,7 +7,12 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::files::repo,
     db_read::CappedList,
-    ui::{self, templates::list_page},
+    ui::{
+        self,
+        components::{self, DataTable, TableCol, TableRow},
+        icons,
+    },
+    util::format_bytes,
 };
 
 #[derive(Clone, Debug)]
@@ -48,6 +53,8 @@ impl From<&repo::shares::ShareRow> for ShareRow {
     }
 }
 
+/// The share of `limit` that `used` is, in whole percent (0 when there is no
+/// limit to measure against).
 fn quota_pct(used: i64, limit: i64) -> i64 {
     if limit <= 0 {
         return 0;
@@ -55,66 +62,96 @@ fn quota_pct(used: i64, limit: i64) -> i64 {
     ((used.max(0) as f64 / limit as f64) * 100.0).round() as i64
 }
 
-pub fn render_quota_card(q: &QuotaInfo) -> Markup {
-    let pct = quota_pct(q.used_bytes, q.limit_bytes);
-    let warn = pct >= 90;
-    html! {
-        div class={ "quota-card" @if warn { " quota-warning" } } {
-            h3 { "Storage quota" }
-            p {
-                (q.used_bytes) " / " (q.limit_bytes) " bytes"
-                " · " (pct) "%"
-            }
-            div .quota-bar { div .quota-bar__fill style={"--fill-pct:" (pct) "%"} {} }
-        }
+/// The percentage as it reads: a usage that rounds to 0% but is not nothing
+/// says "<1%", so a few files never read as an empty account.
+fn quota_pct_text(used: i64, limit: i64) -> String {
+    match quota_pct(used, limit) {
+        0 if used > 0 && limit > 0 => "<1%".to_string(),
+        pct => format!("{pct}%"),
     }
 }
 
-pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
-    if rows.is_empty() {
-        return html! {
-            div .empty-state { p { "No active shares yet." } }
-        };
-    }
+/// The storage quota: "8.3 KB of 1.0 GB used · <1%" over a meter. The meter
+/// is `role="meter"` with its value in bytes and the same sentence as its
+/// value text, so a screen reader hears what the eye reads; any use at all
+/// fills a visible sliver (the stylesheet's minimum width), and at 90% or
+/// more the bar and the text turn to the warning colour and say so.
+pub fn render_quota_card(q: &QuotaInfo) -> Markup {
+    let pct = quota_pct(q.used_bytes, q.limit_bytes);
+    let warn = pct >= 90;
+    let used = format_bytes(q.used_bytes.max(0));
+    let limit = format_bytes(q.limit_bytes);
+    let pct_text = quota_pct_text(q.used_bytes, q.limit_bytes);
+    let summary = format!("{used} of {limit} used · {pct_text}");
     html! {
-        table .data-table {
-            thead { tr {
-                th { "Token" }
-                th { "Source" }
-                th { "Created" }
-                th { "Expires" }
-                th { "Accesses" }
-                th {}
-            } }
-            tbody {
-                @for r in rows {
-                    tr data-share-id=(r.id) {
-                        td data-label="Token" { code { (r.token) } }
-                        td data-label="Source" { (r.bucket) "/" (r.key) }
-                        td data-label="Created" { (r.created_at) }
-                        td data-label="Expires" {
-                            @if let Some(exp) = &r.expires_at { (exp) } @else { "—" }
-                        }
-                        td data-label="Accesses" { (r.access_count) }
-                        td {
-                            // `data-share-id`, not the token: the revoke
-                            // button's only action is
-                            // `DELETE /b/cloudstorage/shares/{id}`, which is
-                            // keyed on the row id. It also doubles as the
-                            // marker that tells `files-browser.js`'s kebab
-                            // this is the shares table.
-                            button .kebab-trigger
-                                type="button"
-                                data-action-menu
-                                data-share-id=(r.id)
-                                aria-label={"Actions for share " (r.token)}
-                            { "⋯" }
-                        }
-                    }
+        section {
+            (components::section_header("Storage", None))
+            p .quota__summary {
+                (summary)
+                @if warn { span .quota__warning { " · Almost full" } }
+            }
+            div class={ "quota-bar" @if warn { " quota-bar--warning" } }
+                role="meter"
+                aria-label="Storage used"
+                aria-valuemin="0"
+                aria-valuemax=(q.limit_bytes.max(0))
+                aria-valuenow=(q.used_bytes.clamp(0, q.limit_bytes.max(0)))
+                aria-valuetext=(summary)
+            {
+                @if q.used_bytes > 0 {
+                    div .quota-bar__fill style={"--fill-pct:" (pct.min(100)) "%"} {}
                 }
             }
         }
     }
+}
+
+const SHARE_COLUMNS: [TableCol<'static>; 6] = [
+    TableCol::new("File").primary(),
+    TableCol::new("Token"),
+    TableCol::new("Created"),
+    TableCol::new("Expires"),
+    TableCol::new("Accesses"),
+    TableCol::new("Actions").actions(),
+];
+
+pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
+    DataTable::new(&SHARE_COLUMNS)
+        .rows(
+            rows.iter()
+                .map(|r| {
+                    let file = format!("{}/{}", r.bucket, r.key);
+                    TableRow::new(vec![
+                        html! { (components::breakable_id(&file)) },
+                        html! { code .share-token { (r.token) } },
+                        components::timestamp(&r.created_at),
+                        match &r.expires_at {
+                            Some(exp) => components::timestamp(exp),
+                            None => html! { "Never" },
+                        },
+                        html! { (r.access_count) },
+                        // `data-share-id`, not the token: the button's only
+                        // action is `DELETE /b/cloudstorage/shares/{id}`,
+                        // which is keyed on the row id.
+                        html! {
+                            button .btn .btn--ghost-danger .btn--icon
+                                type="button"
+                                data-action="revoke-share"
+                                data-share-id=(r.id)
+                                aria-label={"Revoke the share link for " (file)}
+                            { (icons::trash()) }
+                        },
+                    ])
+                })
+                .collect(),
+        )
+        .empty(components::empty_state(
+            icons::link(),
+            "No share links yet",
+            "Share a file from its menu in Files to create a link.",
+            Some(html! { a .btn .btn--secondary .btn--md href="/b/storage/" { "Go to Files" } }),
+        ))
+        .render()
 }
 
 /// The user's share links, or the failure that stopped us reading them.
@@ -167,15 +204,19 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
         limit_bytes: limit.max_storage_bytes,
     };
 
-    let shares_with_js = html! {
-        @if shares.truncated {
-            p .text-muted .text-sm { "Showing the first " (shares.rows.len()) " share links." }
+    let body = html! {
+        div .page-sections {
+            (render_quota_card(&quota))
+            section {
+                (components::section_header("Share links", None))
+                @if shares.truncated {
+                    p .text-muted .text-sm { "Showing the first " (shares.rows.len()) " share links." }
+                }
+                (render_shares_table(&shares.rows))
+            }
         }
-        (render_shares_table(&shares.rows))
         (super::render_bootstrap_script("", ""))
     };
-
-    let body = list_page(Some(render_quota_card(&quota)), shares_with_js, None);
 
     ui::shell_page(
         ctx,
@@ -228,15 +269,56 @@ mod tests {
             limit_bytes: 1_000_000,
         };
         let html = render_quota_card(&q).into_string();
-        assert!(html.contains("100"), "used count missing");
         assert!(
-            html.contains("10%") || html.contains("10 %"),
-            "percent missing"
+            html.contains("97.7 KB of 976.6 KB used · 10%"),
+            "the usage reads in bytes units: {html}"
         );
         assert!(
-            !html.contains("quota-warning"),
+            html.contains(r#"role="meter""#),
+            "the bar is a meter: {html}"
+        );
+        assert!(
+            html.contains(r#"aria-valuenow="100000""#)
+                && html.contains(r#"aria-valuemax="1000000""#),
+            "the meter's value is in bytes: {html}"
+        );
+        assert!(
+            !html.contains("quota-bar--warning"),
             "should not be warning class"
         );
+    }
+
+    /// A few kilobytes against a gigabyte round to 0%; the card says "<1%"
+    /// and still draws the fill (the stylesheet gives it a minimum width), so
+    /// an account with files never reads as empty.
+    #[test]
+    fn render_quota_card_shows_a_little_use_as_some() {
+        let q = QuotaInfo {
+            used_bytes: 8_460,
+            limit_bytes: 1_073_741_824,
+        };
+        let html = render_quota_card(&q).into_string();
+        assert!(html.contains("8.3 KB of 1.0 GB used · &lt;1%"), "{html}");
+        assert!(html.contains("quota-bar__fill"), "{html}");
+        assert!(
+            !html.contains(" bytes"),
+            "no raw byte counts on the page: {html}"
+        );
+        assert!(
+            html.contains(r#"<h2 class="section-header__title">Storage</h2>"#),
+            "the section is headed by the shared h2: {html}"
+        );
+    }
+
+    #[test]
+    fn render_quota_card_with_nothing_used_draws_no_fill() {
+        let q = QuotaInfo {
+            used_bytes: 0,
+            limit_bytes: 1_073_741_824,
+        };
+        let html = render_quota_card(&q).into_string();
+        assert!(html.contains("0 B of 1.0 GB used · 0%"), "{html}");
+        assert!(!html.contains("quota-bar__fill"), "{html}");
     }
 
     #[test]
@@ -247,15 +329,19 @@ mod tests {
         };
         let html = render_quota_card(&q).into_string();
         assert!(
-            html.contains("quota-warning"),
-            "should mark near-quota: {html}"
+            html.contains("quota-bar--warning") && html.contains("Almost full"),
+            "should mark near-quota in colour and in words: {html}"
         );
     }
 
     #[test]
     fn render_shares_table_empty() {
         let html = render_shares_table(&[]).into_string();
-        assert!(html.contains("No active shares"));
+        assert!(html.contains(r#"<h2 class="empty__title">No share links yet</h2>"#));
+        assert!(
+            html.contains(r#"href="/b/storage/""#),
+            "the way to share a file: {html}"
+        );
     }
 
     #[test]
@@ -271,9 +357,16 @@ mod tests {
         }];
         let html = render_shares_table(&rows).into_string();
         assert!(html.contains("abc12345"));
-        assert!(html.contains("photos"));
-        assert!(html.contains("a.png"));
+        assert!(html.contains("photos/<wbr>a<wbr>.png"));
         assert!(html.contains(">4<"), "access count missing");
+        assert!(
+            html.contains(r#"aria-label="Revoke the share link for photos/a.png""#),
+            "the revoke button is named after its file: {html}"
+        );
+        assert!(
+            html.contains("2026-06-06 10:00 UTC"),
+            "expiry via timestamp: {html}"
+        );
     }
 }
 
@@ -338,7 +431,7 @@ mod integration_tests {
         let msg = admin_msg("retrieve", "/b/cloudstorage/");
         let body = output_html(cloudstorage_page(&ctx, &msg).await).await;
         assert!(
-            body.contains("1024 / 2048 bytes"),
+            body.contains("1.0 KB of 2.0 KB used · 50%"),
             "quota card must show summed usage against the override limit: {body}"
         );
     }
@@ -397,10 +490,10 @@ mod integration_tests {
             output_html(cloudstorage_page(&ctx, &admin_msg("retrieve", "/b/cloudstorage/")).await)
                 .await;
 
-        // The value the kebab hands `revokeShare`, read off the page.
+        // The value the revoke button hands `revokeShare`, read off the page.
         let attr = format!("{}=\"", revoke_id_attribute());
         let at = body.find(&attr).unwrap_or_else(|| {
-            panic!("the shares table renders no `{attr}` for the kebab to read: {body}")
+            panic!("the shares table renders no `{attr}` for the revoke button to read: {body}")
         }) + attr.len();
         let revoke_key = &body[at..at + body[at..].find('"').expect("attribute value ends")];
 

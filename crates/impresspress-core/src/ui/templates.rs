@@ -28,49 +28,32 @@ pub fn list_page(filters: Option<Markup>, table: Markup, pagination: Option<Mark
     }
 }
 
-/// Detail page hero — for a single resource.
-pub struct DetailHero<'a> {
-    pub icon: Option<Markup>, // typically `components::avatar(...)` or an icon
-    pub title: &'a str,
-    pub subtitle: Option<&'a str>,
-    pub badges: Vec<Markup>, // typically `components::badge(...)` calls
-    pub action_menu: Option<Markup>, // dropdown / button group
-}
-
 /// One key/value row in the right-rail metadata panel.
 pub struct DetailMeta<'a> {
     pub key: &'a str,
     pub value: Markup,
 }
 
-/// `detail_page` template.
+/// `detail_page` template: one resource's sections, with its key facts in a
+/// right-hand rail (stacked under the sections below 1024px).
+///
+/// There is no hero: the resource's name, its one-line description and its
+/// actions are the page header, which the shell topbar owns (its `h1`,
+/// subtitle and actions — `ui::Shell::trail`/`subtitle`/`actions`). A title
+/// repeated in the body is a second heading for the same thing. Each section
+/// opens with a `components::section_header`.
 pub fn detail_page(
-    hero: DetailHero<'_>,
-    sections: Vec<Markup>, // typically `section .card { .. }` panels
+    sections: Vec<Markup>, // typically `section { (section_header(..)) .. }`
     meta: Vec<DetailMeta<'_>>,
 ) -> Markup {
     html! {
         div .page .page--detail {
-            header .detail-hero {
-                @if let Some(icon) = hero.icon { div .detail-hero__icon { (icon) } }
-                div .detail-hero__text {
-                    // h2, not h1: the shell topbar owns the page's single h1
-                    // (the vector index detail page renders this hero inside
-                    // a shell whose last crumb is already the index name).
-                    h2 .detail-hero__title { (hero.title) }
-                    @if let Some(s) = hero.subtitle { p .detail-hero__subtitle { (s) } }
-                    @if !hero.badges.is_empty() {
-                        div .detail-hero__badges { @for b in &hero.badges { (b.clone()) } }
-                    }
-                }
-                @if let Some(a) = hero.action_menu { div .detail-hero__action { (a) } }
-            }
             div .detail-body {
                 div .detail-body__main {
                     @for s in sections { (s) }
                 }
                 @if !meta.is_empty() {
-                    aside .detail-meta {
+                    aside .detail-meta aria-label="Details" {
                         dl {
                             @for row in &meta {
                                 dt { (row.key) }
@@ -483,14 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_page_renders_hero_sections_and_meta() {
-        let hero = DetailHero {
-            icon: Some(html! { span .av {} }),
-            title: "alice@example.com",
-            subtitle: Some("Member since Jan 2026"),
-            badges: vec![html! { span .badge { "Admin" } }],
-            action_menu: None,
-        };
+    fn detail_page_renders_sections_and_meta_and_no_heading_of_its_own() {
         let sections = vec![
             html! { section .card { "Activity" } },
             html! { section .card { "Sessions" } },
@@ -505,10 +481,10 @@ mod tests {
                 value: html! { "2026-01-12" },
             },
         ];
-        let s = detail_page(hero, sections, meta).into_string();
-        assert!(s.contains("detail-hero"));
-        assert!(s.contains("alice@example.com"));
-        assert!(s.contains("Admin"));
+        let s = detail_page(sections, meta).into_string();
+        // The topbar owns the resource's name; the body repeats no heading.
+        assert!(!s.contains("<h1") && !s.contains("<h2"), "{s}");
+        assert!(s.contains(r#"<aside class="detail-meta" aria-label="Details">"#));
         assert!(s.contains("Activity"));
         assert!(s.contains("Sessions"));
         assert!(s.contains("u_42"));
@@ -517,14 +493,7 @@ mod tests {
 
     #[test]
     fn detail_page_omits_meta_aside_when_empty() {
-        let hero = DetailHero {
-            icon: None,
-            title: "X",
-            subtitle: None,
-            badges: vec![],
-            action_menu: None,
-        };
-        let s = detail_page(hero, vec![], vec![]).into_string();
+        let s = detail_page(vec![], vec![]).into_string();
         assert!(!s.contains("detail-meta"));
     }
 

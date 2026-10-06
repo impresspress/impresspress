@@ -16,13 +16,6 @@
 .page-pagination { padding-top: var(--space-2); }
 
 /* ===== Detail page ===== */
-.detail-hero { display: flex; align-items: center; gap: var(--space-4); }
-.detail-hero__icon { flex-shrink: 0; }
-.detail-hero__text { flex: 1; }
-.detail-hero__title { font-size: var(--text-xl); font-weight: 500; margin: 0; }
-.detail-hero__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: var(--space-1) 0 0; }
-.detail-hero__badges { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
-.detail-hero__action { margin-left: auto; }
 .detail-body { display: grid; grid-template-columns: 1fr; gap: var(--space-6); }
 @media (min-width: 1024px) {
 	.detail-body { grid-template-columns: minmax(0,1fr) 280px; }

@@ -9,7 +9,10 @@ use crate::{
     db_read::CappedList,
     ui::{
         self,
-        components::{self, button, BtnVariant, CtrlSize},
+        components::{
+            self, button, BadgeVariant, BtnVariant, CtrlSize, DataTable, TableCol, TableRow,
+        },
+        icons,
         templates::list_page,
     },
     util::url_path_encode,
@@ -40,41 +43,64 @@ impl From<(&repo::buckets::BucketRow, i64)> for BucketRow {
     }
 }
 
+/// A bucket's visibility as one badge, the same on every page that lists
+/// buckets: "Public" in the positive colour (anyone with an object's URL can
+/// read it), "Private" neutral (the default, nothing to call out).
+pub(crate) fn visibility_badge(public: bool) -> Markup {
+    if public {
+        components::badge(BadgeVariant::Success, "Public")
+    } else {
+        components::badge(BadgeVariant::Secondary, "Private")
+    }
+}
+
+/// The "+ New bucket" trigger, as the topbar action and the empty state's
+/// call to action both render it.
+pub(crate) fn new_bucket_button() -> Markup {
+    button(
+        BtnVariant::Primary,
+        CtrlSize::Md,
+        "+ New bucket",
+        new_bucket_trigger_attrs(),
+    )
+}
+
+/// The empty state a bucket list shows before any bucket exists, with the
+/// "+ New bucket" trigger as its call to action. One wording for the user's
+/// list and administration's.
+pub(crate) fn no_buckets_empty_state() -> Markup {
+    components::empty_state(
+        icons::folder(),
+        "No buckets yet",
+        "Buckets hold uploaded files. Create one to start uploading.",
+        Some(new_bucket_button()),
+    )
+}
+
+const BUCKET_COLUMNS: [TableCol<'static>; 4] = [
+    TableCol::new("Name").primary(),
+    TableCol::new("Visibility"),
+    TableCol::new("Created"),
+    TableCol::new("Objects"),
+];
+
 /// Render the bucket-list table (or empty state).
 pub fn render_buckets_table(rows: &[BucketRow]) -> Markup {
-    if rows.is_empty() {
-        return html! {
-            div .empty-state {
-                p { "No buckets yet — create one to upload files." }
-            }
-        };
-    }
-    html! {
-        table .data-table {
-            thead { tr {
-                th { "Name" }
-                th { "Visibility" }
-                th { "Created" }
-                th { "Objects" }
-            } }
-            tbody {
-                @for r in rows {
-                    tr data-bucket=(r.name) {
-                        td data-label="Name" { a href={"/b/storage/" (url_path_encode(&r.name)) "/"} { (r.name) } }
-                        td data-label="Visibility" {
-                            @if r.public {
-                                span .badge.badge-success { "Public" }
-                            } @else {
-                                span .badge { "Private" }
-                            }
-                        }
-                        td data-label="Created" { (components::timestamp(&r.created_at)) }
-                        td data-label="Objects" { (r.object_count) }
-                    }
-                }
-            }
-        }
-    }
+    DataTable::new(&BUCKET_COLUMNS)
+        .rows(
+            rows.iter()
+                .map(|r| {
+                    TableRow::new(vec![
+                        html! { a href={"/b/storage/" (url_path_encode(&r.name)) "/"} { (r.name) } },
+                        visibility_badge(r.public),
+                        components::timestamp(&r.created_at),
+                        html! { (r.object_count) },
+                    ])
+                })
+                .collect(),
+        )
+        .empty(no_buckets_empty_state())
+        .render()
 }
 
 /// The "+ New bucket" modal's element id, which its triggers name in
@@ -194,13 +220,6 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
         Err(e) => return crud::db_error_page(msg, e, "bucket list page"),
     };
 
-    let new_bucket_btn = button(
-        BtnVariant::Primary,
-        CtrlSize::Md,
-        "+ New bucket",
-        new_bucket_trigger_attrs(),
-    );
-
     // The table cell carries the modal markup + JS so it lives inside the
     // shelled response without needing a new template parameter.
     let js_url = crate::blocks::files::assets::files_browser_js_url();
@@ -220,7 +239,7 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
         msg,
         ui::Shell::portal("Files", "Files")
             .subtitle("Your buckets and their object counts.")
-            .actions(vec![new_bucket_btn]),
+            .actions(vec![new_bucket_button()]),
         body,
     )
     .await

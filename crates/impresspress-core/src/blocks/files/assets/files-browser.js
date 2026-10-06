@@ -86,17 +86,21 @@
       await uploadFiles(e.dataTransfer.files, bucket, prefix);
     });
 
-    // Topbar Upload button: trigger the hidden file picker, then upload.
-    const trigger = document.querySelector('[data-action="open-upload"]');
+    // Every "+ Upload" trigger (the topbar's, an empty folder's) opens the
+    // hidden file picker, then uploads what was picked.
     const fileInput = document.getElementById('file-upload-input');
-    if (trigger && fileInput) {
-      trigger.addEventListener('click', () => fileInput.click());
+    if (fileInput) {
+      document.querySelectorAll('[data-action="open-upload"]').forEach((trigger) => {
+        trigger.addEventListener('click', () => fileInput.click());
+      });
       fileInput.addEventListener('change', async () => {
         await uploadFiles(fileInput.files, bucket, prefix);
       });
     }
   }
 
+  // The bar above the table (`objects::render_bulk_bar`): "Select all
+  // files", and the count and bulk delete once anything is selected.
   function bulkSelect() {
     const all = document.querySelector('[data-bulk-toggle]');
     if (!all) return;
@@ -108,6 +112,8 @@
       updateBulkBar();
     });
     rows.forEach((r) => r.addEventListener('change', updateBulkBar));
+    const del = document.querySelector('[data-bulk-delete]');
+    if (del) del.addEventListener('click', bulkDelete);
   }
 
   function selectedKeys() {
@@ -117,19 +123,18 @@
   }
 
   function updateBulkBar() {
-    let bar = document.getElementById('bulk-action-bar');
-    const keys = selectedKeys();
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'bulk-action-bar';
-      bar.className = 'bulk-action-bar';
-      bar.innerHTML = '<button type="button" data-bulk-delete>Delete selected</button>';
-      const target = document.querySelector('.page--list .page-body');
-      if (target) target.prepend(bar);
-      bar.querySelector('[data-bulk-delete]').addEventListener('click', bulkDelete);
+    const bar = document.getElementById('bulk-action-bar');
+    const all = document.querySelector('[data-bulk-toggle]');
+    const total = document.querySelectorAll('.bulk-select').length;
+    const n = selectedKeys().length;
+    if (all) {
+      all.checked = total > 0 && n === total;
+      all.indeterminate = n > 0 && n < total;
     }
-    bar.style.display = keys.length > 0 ? '' : 'none';
-    bar.dataset.count = String(keys.length);
+    if (!bar) return;
+    bar.hidden = n === 0;
+    const count = bar.querySelector('[data-bulk-count]');
+    if (count) count.textContent = n + (n === 1 ? ' file selected' : ' files selected');
   }
 
   async function bulkDelete() {
@@ -159,60 +164,125 @@
     window.location.reload();
   }
 
-  function kebabMenu() {
+  // A file row's "more actions" menu. The trigger is a button with
+  // `aria-haspopup="menu"`; the menu is a `role="menu"` list of
+  // `role="menuitem"` buttons, opened under it and driven from the keyboard
+  // the way the ARIA menu-button pattern describes: Enter, Space or
+  // ArrowDown open it on the first item (ArrowUp on the last), the arrows,
+  // Home and End move between items, Escape closes it and returns focus to
+  // the trigger, Tab closes it and lets focus move on.
+  let openMenu = null;
+
+  function rowMenus() {
     document.addEventListener('click', (e) => {
       const trigger = e.target.closest('[data-action-menu]');
       if (trigger) {
         e.stopPropagation();
-        openKebab(trigger);
+        if (openMenu && openMenu.trigger === trigger) {
+          closeMenu(true);
+        } else {
+          openRowMenu(trigger, 0);
+        }
         return;
       }
-      closeAllKebabs();
+      if (openMenu && !openMenu.menu.contains(e.target)) closeMenu(false);
+    });
+    // The menu is placed against the trigger once; it closes rather than
+    // drift away from the row when the page scrolls or resizes under it.
+    window.addEventListener('resize', () => closeMenu(false));
+    document.addEventListener('scroll', () => closeMenu(false), true);
+    document.addEventListener('keydown', (e) => {
+      const trigger = e.target.closest && e.target.closest('[data-action-menu]');
+      if (trigger && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        openRowMenu(trigger, e.key === 'ArrowUp' ? -1 : 0);
+      }
     });
   }
 
-  function closeAllKebabs() {
-    document.querySelectorAll('.kebab-popup').forEach((p) => p.remove());
+  function closeMenu(restoreFocus) {
+    if (!openMenu) return;
+    const { menu, trigger } = openMenu;
+    openMenu = null;
+    menu.remove();
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) trigger.focus();
   }
 
-  function openKebab(trigger) {
-    closeAllKebabs();
-    const popup = document.createElement('div');
-    popup.className = 'kebab-popup';
-    if (trigger.dataset.shareId) {
-      // Shares table kebab.
-      popup.innerHTML = '<button type="button" data-action="revoke">Revoke share</button>';
-      popup.querySelector('[data-action="revoke"]').addEventListener('click', () => {
-        revokeShare(trigger.dataset.shareId);
-      });
-    } else if (trigger.dataset.key) {
-      // Object table kebab.
-      popup.innerHTML =
-        '<button type="button" data-action="share">Share</button>' +
-        '<button type="button" data-action="copy">Copy link</button>' +
-        '<button type="button" data-action="delete">Delete</button>';
-      popup.querySelector('[data-action="share"]').addEventListener('click', () => {
-        shareModal(trigger.dataset.bucket, trigger.dataset.key, trigger);
-      });
-      popup.querySelector('[data-action="copy"]').addEventListener('click', () => {
+  function menuItem(label, onSelect, danger) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
+    item.className = 'row-menu__item' + (danger ? ' row-menu__item--danger' : '');
+    item.textContent = label;
+    item.addEventListener('click', () => {
+      closeMenu(false);
+      onSelect();
+    });
+    return item;
+  }
+
+  function openRowMenu(trigger, focusIndex) {
+    closeMenu(false);
+    const bucket = trigger.dataset.bucket;
+    const key = trigger.dataset.key;
+    if (!key) return;
+    const menu = document.createElement('div');
+    menu.className = 'row-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', trigger.getAttribute('aria-label') || 'Actions');
+    menu.append(
+      menuItem('Share', () => shareModal(bucket, key, trigger)),
+      menuItem('Copy link', () => {
         const url =
           window.location.origin +
           '/b/storage/api/buckets/' +
-          encodeURIComponent(trigger.dataset.bucket) +
+          encodeURIComponent(bucket) +
           '/objects/' +
-          encodeURIComponent(trigger.dataset.key);
+          encodeURIComponent(key);
         navigator.clipboard.writeText(url);
         showToast('Link copied', 'success');
-      });
-      popup.querySelector('[data-action="delete"]').addEventListener('click', () => {
-        confirmDelete(trigger.dataset.bucket, trigger.dataset.key);
-      });
-    }
+        trigger.focus();
+      }),
+      menuItem('Delete', () => confirmDelete(bucket, key, trigger), true)
+    );
+    const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+    menu.addEventListener('keydown', (e) => {
+      const at = items.indexOf(document.activeElement);
+      let next = null;
+      if (e.key === 'ArrowDown') next = (at + 1) % items.length;
+      else if (e.key === 'ArrowUp') next = (at - 1 + items.length) % items.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = items.length - 1;
+      else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMenu(true);
+        return;
+      } else if (e.key === 'Tab') {
+        closeMenu(false);
+        return;
+      }
+      if (next !== null) {
+        e.preventDefault();
+        items[next].focus();
+      }
+    });
     const rect = trigger.getBoundingClientRect();
-    popup.style.position = 'fixed';
-    popup.style.top = rect.bottom + 'px';
-    popup.style.right = window.innerWidth - rect.right + 'px';
-    document.body.appendChild(popup);
+    menu.style.top = rect.bottom + 'px';
+    menu.style.right = window.innerWidth - rect.right + 'px';
+    document.body.appendChild(menu);
+    trigger.setAttribute('aria-expanded', 'true');
+    openMenu = { menu: menu, trigger: trigger };
+    items[focusIndex < 0 ? items.length - 1 : focusIndex].focus();
+  }
+
+  // A share link's revoke button (`cloudstorage::render_shares_table`).
+  function revokeButtons() {
+    document.addEventListener('click', (e) => {
+      const trigger = e.target.closest('[data-action="revoke-share"]');
+      if (trigger) revokeShare(trigger.dataset.shareId);
+    });
   }
 
   // `shareId` is the share row's id (rendered as `data-share-id`), which is
@@ -239,7 +309,7 @@
   // (`pages_user::objects::render_share_modal`) as the shared
   // `components::modal` <dialog>. This fills in which object it is about and
   // asks chrome.js to open it — through the same `openModal` event the htmx
-  // trigger header uses — with the kebab trigger as the control focus returns
+  // trigger header uses — with the row's menu trigger as the control focus returns
   // to (the menu item that was clicked is gone by the time the modal closes).
   let shareTarget = null;
 
@@ -291,8 +361,11 @@
     });
   }
 
-  async function confirmDelete(bucket, key) {
-    if (!window.confirm('Delete ' + key + '?')) return;
+  async function confirmDelete(bucket, key, trigger) {
+    if (!window.confirm('Delete ' + key + '?')) {
+      trigger.focus();
+      return;
+    }
     const url =
       '/b/storage/api/buckets/' +
       encodeURIComponent(bucket) +
@@ -398,8 +471,10 @@
   window.impresspressFilesBrowser = {
     init: function () {
       const boot = readBootstrap();
-      // The kebab works without bootstrap too (the shares page).
-      kebabMenu();
+      // The row menus and revoke buttons need no bootstrap (the shares page
+      // has none).
+      rowMenus();
+      revokeButtons();
       // The share modal lives on the object list; the bucket-create modal on
       // the bucket lists (no boot bucket). Each binds only where it is.
       shareForm();

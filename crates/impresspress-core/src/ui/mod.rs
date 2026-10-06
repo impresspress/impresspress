@@ -3104,7 +3104,6 @@ mod tests {
             "expand-row",
             // No rule anywhere.
             "auth-form",
-            "bulk-select-all",
             "chat-form",
             "checkbox-inline",
             "custom-tab",
@@ -3115,8 +3114,6 @@ mod tests {
             "detail-body__main",
             "empty__action",
             "form-section__head",
-            "kebab-trigger",
-            "kv-list",
             "messages-new__title",
             "messages-new__type",
             "nav-icon",
@@ -3124,9 +3121,6 @@ mod tests {
             "page--detail",
             "page--form",
             "page--list",
-            "quota-card",
-            "quota-warning",
-            "section",
             "sidebar__brand--text",
         ];
 

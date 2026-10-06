@@ -13,7 +13,12 @@ use super::{
     service::{self, ListContextsParams, ListEntriesParams},
 };
 use crate::{
-    ui::{self, shell::Crumb},
+    ui::{
+        self,
+        components::{self, Badge, BadgeVariant},
+        icons,
+        shell::Crumb,
+    },
     util::{enum_column_or, wire_str, RecordExt},
 };
 
@@ -29,17 +34,18 @@ pub fn context_card(record: &db::Record) -> Markup {
     let context_type = record.str_field("type");
     let status = record.str_field("status");
     let updated_at = record.str_field("updated_at");
-    let date = updated_at.get(..10).unwrap_or(updated_at);
 
     html! {
         a .messages-list__item href={"/b/messages/contexts/" (id)} {
-            span .badge .messages-list__type { (context_type) }
+            span .messages-list__type {
+                (Badge::new(BadgeVariant::Secondary).classes("text-capitalize").render(html! { (context_type) }))
+            }
             span .messages-list__title {
                 @if title.is_empty() { "Untitled" } @else { (title) }
             }
-            span .messages-list__status .badge { (status) }
-            @if !date.is_empty() {
-                span .messages-list__date .text-muted { (date) }
+            span .messages-list__status { (components::status_badge(status)) }
+            @if !updated_at.is_empty() {
+                span .messages-list__date .text-muted { (components::timestamp(updated_at)) }
             }
         }
     }
@@ -59,30 +65,30 @@ pub fn entry_card(record: &db::Record) -> Result<Markup, WaferError> {
     let content = record.str_field("content");
     let content_type = record.str_field("content_type");
     let created_at = record.str_field("created_at");
-    let date = created_at.get(..10).unwrap_or(created_at);
 
-    // Card accents follow the brand: user entries get the brand tint (same
-    // pair as `.sidebar__nav-item.is-active`), machine entries stay neutral,
-    // and only genuinely semantic kinds keep a semantic hue (notification/
-    // system = warning yellow). The old palette hardcoded sky/indigo blues
-    // that clashed with the orange brand. Keep in sync with
-    // `messageCardHtml` in blocks/llm/assets/llm-chat.js — same cards, JS-rendered.
-    let (card_variant, badge_class) = match kind {
-        EntryKind::Artifact | EntryKind::Status => ("message-card--neutral", "badge"),
-        EntryKind::Notification => ("message-card--warning", "badge-warning"),
+    // Card accents: the person's own entries get a quiet slate tint, machine
+    // entries stay neutral, and only genuinely semantic kinds keep a semantic
+    // hue (notification/system = warning yellow). Keep in sync with
+    // `messageCardHtml` in blocks/llm/assets/llm-chat.js — same cards,
+    // JS-rendered.
+    let (card_variant, kind_badge) = match kind {
+        EntryKind::Artifact | EntryKind::Status => {
+            ("message-card--neutral", BadgeVariant::Secondary)
+        }
+        EntryKind::Notification => ("message-card--warning", BadgeVariant::Warning),
         EntryKind::Message => match role {
-            Some(EntryRole::User) => ("message-card--user", "badge"),
-            Some(EntryRole::Assistant) | None => ("message-card--neutral", "badge"),
-            Some(EntryRole::System) => ("message-card--warning", "badge-warning"),
+            Some(EntryRole::User) => ("message-card--user", BadgeVariant::Secondary),
+            Some(EntryRole::Assistant) | None => ("message-card--neutral", BadgeVariant::Secondary),
+            Some(EntryRole::System) => ("message-card--warning", BadgeVariant::Warning),
         },
     };
 
     Ok(html! {
         div .card .(card_variant) {
-            div .flex .items-center .gap-2 .mb-2 {
-                span .badge .(badge_class) .text-capitalize { (wire_str(&kind)) }
+            div .message-card__head {
+                (Badge::new(kind_badge).classes("text-capitalize").render(html! { (wire_str(&kind)) }))
                 @if let Some(role) = role {
-                    span .badge .text-capitalize { (wire_str(&role)) }
+                    (Badge::new(BadgeVariant::Secondary).classes("text-capitalize").render(html! { (wire_str(&role)) }))
                 }
                 @if kind == EntryKind::Artifact
                     && !content_type.is_empty()
@@ -90,8 +96,8 @@ pub fn entry_card(record: &db::Record) -> Result<Markup, WaferError> {
                 {
                     span .text-muted .text-xs { (content_type) }
                 }
-                @if !date.is_empty() {
-                    span .text-muted .text-xs .ml-auto { (date) }
+                @if !created_at.is_empty() {
+                    span .message-card__date { (components::timestamp(created_at)) }
                 }
             }
             p .message-card__content { (content) }
@@ -159,15 +165,20 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                         label .form-label for="new-context-title" { "Title" }
                         input .form-input .messages-new__title #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
                     }
-                    button .btn .btn--primary type="submit" { "Create" }
+                    button .btn .btn--primary .messages-new__submit type="submit" { "Create" }
                 }
             }
         }
 
         div #context-list .messages-list {
             @if contexts.is_empty() {
-                div #context-list-empty .messages-list__empty {
-                    p { "No contexts yet — create one above." }
+                div #context-list-empty {
+                    (components::empty_state(
+                        icons::message_square(),
+                        "No messages yet",
+                        "Start a conversation, a task or a notification with the form above.",
+                        None,
+                    ))
                 }
             } @else {
                 @for context in &contexts {
@@ -180,13 +191,29 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     ui::shell_page(ctx, msg, list_shell(), content).await
 }
 
-/// The context list's chrome — its page and its error page share it.
+/// The context list's chrome — its page and its error page share it. Named
+/// "Messages", as the sidebar names it.
 fn list_shell() -> ui::Shell<'static> {
-    ui::Shell::admin("Messages", "Contexts").subtitle("Conversations, tasks, and notifications")
+    ui::Shell::admin("Messages", "Messages").subtitle("Conversations, tasks, and notifications")
+}
+
+/// A context page's trail: "Messages ›" above the context's title, whatever
+/// its type.
+fn detail_trail(title: &str) -> Vec<Crumb<'_>> {
+    vec![
+        Crumb {
+            label: "Messages",
+            href: Some("/b/messages/"),
+        },
+        Crumb {
+            label: title,
+            href: None,
+        },
+    ]
 }
 
 /// A context page whose read failed: drawn in the shell under the
-/// "Contexts" trail, with a link back to the list.
+/// "Messages" trail, with a link back to the list.
 async fn detail_error_page(
     ctx: &dyn Context,
     msg: &Message,
@@ -196,19 +223,10 @@ async fn detail_error_page(
     ui::shell_error_page(
         ctx,
         msg,
-        ui::Shell::admin("Messages", "Messages").trail(vec![
-            Crumb {
-                label: "Contexts",
-                href: Some("/b/messages/"),
-            },
-            Crumb {
-                label: "Context",
-                href: None,
-            },
-        ]),
+        ui::Shell::admin("Messages", "Messages").trail(detail_trail("Context")),
         None,
         ui::BackLink {
-            label: "Back to Contexts",
+            label: "Back to Messages",
             href: "/b/messages/",
         },
         error,
@@ -293,32 +311,24 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
         }
     };
 
-    // Build crumbs locally so the conversation branch can carry a working
-    // [Messages] link back to /b/messages/. The default branch keeps a
-    // single crumb (matches its inline "← Back" affordance in
-    // render_default_view). `shell_page` supports a full `Vec<Crumb>`, so
-    // the variable crumb shape rides through without a bespoke wrapper.
-    let crumbs = if context.str_field("type") == "conversation" {
-        vec![
-            Crumb {
-                label: "Messages",
-                href: Some("/b/messages/"),
-            },
-            Crumb {
-                label: display_title,
-                href: None,
-            },
-        ]
+    // A task or notification shows its type and status beside its title; a
+    // conversation is a chat, and needs neither.
+    let actions = if context.str_field("type") == "conversation" {
+        Vec::new()
     } else {
-        vec![Crumb {
-            label: display_title,
-            href: None,
-        }]
+        vec![
+            Badge::new(BadgeVariant::Secondary)
+                .classes("text-capitalize")
+                .render(html! { (context.str_field("type")) }),
+            components::status_badge(context.str_field("status")),
+        ]
     };
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin(display_title, display_title).trail(crumbs),
+        ui::Shell::admin(display_title, display_title)
+            .trail(detail_trail(display_title))
+            .actions(actions),
         body,
     )
     .await
@@ -347,7 +357,7 @@ fn render_context_detail_body(
     }
 
     // Existing single-pane render path for non-conversation types.
-    render_default_view(context, entries, context_id).map(Into::into)
+    render_default_view(entries, context_id).map(Into::into)
 }
 
 /// Conversation-type view: chat_page template with sibling thread list,
@@ -387,11 +397,7 @@ fn render_conversation_view(
 }
 
 /// Default single-pane view for task/notification/etc.
-fn render_default_view(
-    context: &db::Record,
-    entries: &[db::Record],
-    context_id: &str,
-) -> Result<Markup, WaferError> {
+fn render_default_view(entries: &[db::Record], context_id: &str) -> Result<Markup, WaferError> {
     // Rendered up front rather than inside the `@for`: maud's loop body has
     // no way to carry a `?` out, and a card that cannot be decoded must stop
     // the page rather than be skipped.
@@ -399,28 +405,18 @@ fn render_default_view(
         .iter()
         .map(entry_card)
         .collect::<Result<Vec<_>, _>>()?;
-    let context_title = context.str_field("title");
-    let context_type = context.str_field("type");
-    let context_status = context.str_field("status");
-    let display_title = if context_title.is_empty() {
-        "Untitled"
-    } else {
-        context_title
-    };
     let post_url = format!("/b/messages/api/contexts/{context_id}/entries");
 
     Ok(html! {
-        div .flex .items-center .gap-3 .mb-6 {
-            a .btn .btn--ghost .btn--sm href="/b/messages/" { (ui::icons::arrow_left()) " Back" }
-            h2 .page-title .m-0 { (display_title) }
-            span .badge .text-capitalize { (context_type) }
-            span .badge { (context_status) }
-        }
-
         div #entries-list .entries-list--scroll .mb-6 {
             @if entries.is_empty() {
-                div #entries-empty .text-center .text-muted .p-8 {
-                    "No entries yet. Add one below."
+                div #entries-empty {
+                    (components::empty_state(
+                        icons::message_square(),
+                        "No entries yet",
+                        "Add the first one below.",
+                        None,
+                    ))
                 }
             } @else {
                 @for card in &cards {
@@ -429,10 +425,8 @@ fn render_default_view(
             }
         }
 
-        div .card {
-            h3 .text-sm .font-semibold .text-muted .mb-3 {
-                "Add Entry"
-            }
+        section .card { div .card__body {
+            (components::section_header("Add entry", None))
             form
                 hx-post=(post_url)
                 hx-target="#entries-list"
@@ -444,35 +438,61 @@ fn render_default_view(
                 data-remove-on-success="entries-empty"
                 data-scroll-on-success="entries-list"
             {
-                div .flex .gap-2 .mb-2 {
-                    select .form-input .w-auto name="kind" {
-                        option value="message" { "message" }
-                        option value="artifact" { "artifact" }
-                        option value="notification" { "notification" }
-                        option value="status" { "status" }
+                div .entry-form__meta {
+                    div .form-group {
+                        label .form-label for="entry-kind" { "Kind" }
+                        select .form-input #entry-kind name="kind" {
+                            option value="message" { "Message" }
+                            option value="artifact" { "Artifact" }
+                            option value="notification" { "Notification" }
+                            option value="status" { "Status" }
+                        }
                     }
-                    select .form-input .w-auto name="role" {
-                        option value="user" { "user" }
-                        // `assistant`, not `agent`: both reach the same
-                        // stored value (`agent` is a deserialisation alias
-                        // of it) and this is the spelling the column holds
-                        // and the schema publishes.
-                        option value="assistant" { "assistant" }
-                        option value="system" { "system" }
+                    div .form-group {
+                        label .form-label for="entry-role" { "Role" }
+                        select .form-input #entry-role name="role" {
+                            option value="user" { "User" }
+                            // `assistant`, not `agent`: both reach the same
+                            // stored value (`agent` is a deserialisation
+                            // alias of it) and this is the spelling the
+                            // column holds and the schema publishes.
+                            option value="assistant" { "Assistant" }
+                            option value="system" { "System" }
+                        }
                     }
                 }
-                div .flex .gap-2 .items-end {
-                    textarea .form-input .flex-1 .resize-vertical
-                        name="content"
-                        placeholder="Entry content"
-                        rows="3"
-                        required
-                    {}
-                    button .btn .btn--primary type="submit" { "Add" }
-                }
+                (composer_row("entry-content", "Entry", "Entry content", "Add", false))
             }
-        }
+        } }
     })
+}
+
+/// A composer's text box and its submit button on one row: the box takes
+/// the width, the button keeps its own and sits at the box's bottom edge. The
+/// box is named by a visually hidden label — a placeholder is not a name.
+/// `submit_on_enter` makes Enter send (Shift+Enter for a new line), for a
+/// chat; a free-form entry keeps Enter as a line break.
+fn composer_row(
+    id: &str,
+    label: &str,
+    placeholder: &str,
+    submit: &str,
+    submit_on_enter: bool,
+) -> Markup {
+    html! {
+        div .composer {
+            label .sr-only for=(id) { (label) }
+            textarea .form-input .composer__input
+                id=(id)
+                name="content"
+                placeholder=(placeholder)
+                rows="3"
+                required
+                data-submit-on-enter[submit_on_enter]
+            {}
+            button .btn .btn--primary .composer__submit type="submit" { (submit) }
+        }
+    }
 }
 
 fn render_conversation_thread_list(siblings: &[&db::Record], active_id: &str) -> Markup {
@@ -534,8 +554,13 @@ fn render_conversation_messages(entries: &[db::Record]) -> Result<Markup, WaferE
     Ok(html! {
         div #entries-list {
             @if cards.is_empty() {
-                div #entries-empty .text-center .text-muted .p-8 {
-                    "No messages yet. Send the first one below."
+                div #entries-empty {
+                    (components::empty_state(
+                        icons::message_square(),
+                        "No messages yet",
+                        "Send the first one below.",
+                        None,
+                    ))
                 }
             } @else {
                 @for card in &cards {
@@ -567,17 +592,7 @@ fn render_conversation_composer(post_url: &str) -> Markup {
             // direct API) can still post other kinds/roles.
             input type="hidden" name="kind" value="message";
             input type="hidden" name="role" value="user";
-            div .flex .gap-2 .items-end {
-                textarea
-                    .form-input .flex-1 .resize-none
-                    name="content"
-                    placeholder="Type your message..."
-                    rows="3"
-                    required
-                    data-submit-on-enter
-                {}
-                button .btn .btn--primary .h-fit type="submit" { "Send" }
-            }
+            (composer_row("message-content", "Message", "Type your message…", "Send", true))
         }
     }
 }
@@ -645,6 +660,86 @@ mod tests {
         assert!(
             html.contains(r#"id="entries-list""#),
             "single-pane shell still has the entries-list container"
+        );
+        // The title is the topbar's; the body repeats no heading for it and
+        // draws no second way back beside the trail.
+        assert!(!html.contains("Do thing"), "{html}");
+        assert!(!html.contains("page-title"), "{html}");
+        // Both pickers are labelled, and the composer is the shared row.
+        assert!(
+            html.contains(r#"<label class="form-label" for="entry-kind">Kind</label>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<label class="form-label" for="entry-role">Role</label>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<div class="composer"><label class="sr-only" for="entry-content">Entry</label>"#
+            ),
+            "{html}"
+        );
+    }
+
+    fn entry(role: &str) -> db::Record {
+        let mut r = make_record("e-1");
+        r.data
+            .insert("kind".to_string(), serde_json::json!("message"));
+        r.data.insert("role".to_string(), serde_json::json!(role));
+        r.data
+            .insert("content".to_string(), serde_json::json!("hi"));
+        r.data.insert(
+            "created_at".to_string(),
+            serde_json::json!("2026-05-06T10:00:00Z"),
+        );
+        r
+    }
+
+    /// Entry badges come from the shared component: neutral for kind and
+    /// role, warning for a system turn. The person's own turn is the
+    /// `--user` card (a slate tint, see card.css), never a danger colour.
+    #[test]
+    fn entry_cards_draw_shared_badges() {
+        let user = entry_card(&entry("user")).expect("decodes").into_string();
+        assert!(
+            user.contains(r#"class="card message-card--user""#),
+            "{user}"
+        );
+        assert!(
+            user.contains(r#"<span class="badge badge-secondary text-capitalize">message</span>"#),
+            "{user}"
+        );
+        assert!(
+            user.contains(r#"<span class="badge badge-secondary text-capitalize">user</span>"#),
+            "{user}"
+        );
+        assert!(user.contains("<time"), "the date is a timestamp: {user}");
+        assert!(!user.contains("danger"), "{user}");
+
+        let system = entry_card(&entry("system")).expect("decodes").into_string();
+        assert!(
+            system.contains(r#"<span class="badge badge-warning text-capitalize">message</span>"#),
+            "{system}"
+        );
+    }
+
+    #[test]
+    fn a_list_row_draws_shared_badges() {
+        let mut r = make_record("c-1");
+        r.data.insert("type".to_string(), serde_json::json!("task"));
+        r.data
+            .insert("status".to_string(), serde_json::json!("active"));
+        r.data
+            .insert("title".to_string(), serde_json::json!("Rotate keys"));
+        let html = context_card(&r).into_string();
+        assert!(
+            html.contains(r#"<span class="badge badge-secondary text-capitalize">task</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="badge badge-success">active</span>"#),
+            "{html}"
         );
     }
 
@@ -759,8 +854,8 @@ mod outage_tests {
         .id
     }
 
-    /// "No contexts yet — create one above." is what a fresh deployment
-    /// renders. An outage rendered the same sentence.
+    /// "No messages yet" is what a fresh deployment renders. An outage
+    /// rendered the same empty state.
     #[tokio::test]
     async fn a_failing_context_list_renders_the_error_page_not_no_contexts_yet() {
         let ctx = ctx_with_messages().await.break_reads();
@@ -865,6 +960,30 @@ mod form_contract_tests {
                 "form must send `{field}`; got: {html}"
             );
         }
+    }
+
+    /// The list is "Messages" in the topbar, as it is in the sidebar, and a
+    /// context's trail leads back to it under the same name.
+    #[tokio::test]
+    async fn the_pages_are_named_messages_as_the_nav_names_them() {
+        let ctx = ctx_with_messages().await;
+        let html = output_html(
+            context_list_page(&ctx, &routed(admin_msg("retrieve", "/b/messages/"))).await,
+        )
+        .await;
+        assert!(
+            html.contains(r#"<h1 class="topbar__title">Messages</h1>"#),
+            "{html}"
+        );
+        assert!(!html.contains("Contexts"), "{html}");
+        assert!(
+            html.contains(r#"<h2 class="empty__title">No messages yet</h2>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"class="btn btn--primary messages-new__submit""#),
+            "{html}"
+        );
     }
 
     #[tokio::test]
