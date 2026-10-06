@@ -165,7 +165,7 @@ fn is_blank(cell: &Markup) -> bool {
 ///   row's `outerHTML` after an enable/disable.
 /// - [`classes`](TableRow::classes) — extra classes on the `<tr>` itself,
 ///   for a row that carries a page-local behaviour or style
-///   (`.expand-row` on the network page).
+///   (`.network-row` on the network page).
 /// - [`after`](TableRow::after) — markup emitted immediately after the row's
 ///   `</tr>`, still inside the `<tbody>`. A row whose detail is loaded
 ///   lazily into a second, full-width `<tr>` needs one; the component does
@@ -289,10 +289,11 @@ impl TableRow {
     }
 }
 
-/// 32-bit FNV-1a of `s`: a short, stable id fragment for a row link, derived
-/// from its destination so a re-render (or a single-row htmx swap) emits the
-/// same ids.
-fn fnv1a(s: &str) -> u32 {
+/// 32-bit FNV-1a of `s`: a short, stable id fragment derived from what an
+/// element stands for (a row link's destination, a network route), so a
+/// re-render (or a single-row htmx swap) emits the same ids and any text —
+/// a path with `.`, `:` or `{` in it — becomes a valid id and CSS selector.
+pub(crate) fn fnv1a(s: &str) -> u32 {
     s.bytes().fold(0x811c_9dc5_u32, |h, b| {
         (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
     })
@@ -997,9 +998,9 @@ mod tests {
     /// test. Migrating one is not free: `.data-table` is a different chrome
     /// (rounded, bordered, sticky `thead`, dashed row rules, a `data-label`
     /// per cell that collapses to cards below 720px), so each entry is a
-    /// rendered change. All six sit on pages with no visual baseline
-    /// at all — `blocks/legalpages` and `blocks/tickets` have none — so the
-    /// gate there is a Rust render test, not a screenshot.
+    /// rendered change. Some sit on pages with no visual baseline at all —
+    /// `blocks/legalpages` has none — so the gate there is a Rust render
+    /// test, not a screenshot.
     ///
     /// The scope is maud's bare `.table` class shorthand, the form every one is
     /// written in; the counter is `test_support::count_bare_class_shorthand`,
@@ -1007,7 +1008,6 @@ mod tests {
     /// boundary maud accepts, unspaced ones included.
     const HAND_WRITTEN_TABLES: &[(&str, usize)] = &[
         ("blocks/legalpages/pages.rs", 3),
-        ("blocks/tickets/pages.rs", 3),
     ];
 
     #[test]

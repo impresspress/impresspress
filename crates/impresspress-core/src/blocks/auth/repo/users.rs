@@ -875,6 +875,8 @@ pub async fn active_count_and_created_since(
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let rows = db::aggregate(ctx, req)
         .await
@@ -940,6 +942,45 @@ pub async fn list_recent_active(ctx: &dyn Context, limit: u32) -> Result<Vec<Use
         .await
         .map_err(|e| db_failed("list recent users", e))?;
     list.records.iter().map(row_from_record).collect()
+}
+
+/// The email address of each account among `ids`, keyed by id: what an admin
+/// list that stores a user id (a request log, an audit entry, an API key)
+/// shows in its place. Soft-deleted accounts are included — the row they
+/// left behind still names them. An id with no account is absent from the
+/// map. One statement however many ids, duplicates and empty ids dropped.
+pub async fn emails_by_id(
+    ctx: &dyn Context,
+    ids: &[&str],
+) -> Result<HashMap<String, String>, WaferError> {
+    let mut wanted: Vec<&str> = ids.iter().copied().filter(|id| !id.is_empty()).collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let opts = ListOptions {
+        columns: Some(vec!["id".into(), "email".into()]),
+        filters: vec![Filter {
+            field: "id".to_string(),
+            operator: FilterOp::In,
+            value: Value::Array(wanted.iter().map(|id| json!(id)).collect()),
+        }],
+        limit: Some(u32::try_from(wanted.len()).unwrap_or(u32::MAX)),
+        skip_count: true,
+        ..Default::default()
+    };
+    let list = db::list(ctx, TABLE, &opts)
+        .await
+        .map_err(|e| db_failed("emails by id", e))?;
+    Ok(list
+        .records
+        .iter()
+        .map(|r| {
+            let id = map_opt_str(&r.data, "id").unwrap_or_else(|| r.id.clone());
+            (id, r.data.str_field("email").to_string())
+        })
+        .collect())
 }
 
 /// When the oldest live account was created (its stored `created_at`), or
@@ -1308,6 +1349,24 @@ mod lifecycle_and_listing_tests {
             (chrono::Utc::now() + chrono::Duration::days(1)).format("%Y-%m-%d")
         );
         assert!(daily_signups(&ctx, &future).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn emails_by_id_maps_known_ids_and_skips_the_rest() {
+        let ctx = ctx().await;
+        let a = seed(&ctx, "a@example.com").await;
+        let b = seed(&ctx, "b@example.com").await;
+        soft_delete(&ctx, &b.id).await.unwrap();
+        let emails = emails_by_id(&ctx, &[&a.id, &b.id, &a.id, "", "no-such-user"])
+            .await
+            .unwrap();
+        assert_eq!(emails.len(), 2, "{emails:?}");
+        assert_eq!(emails[&a.id], "a@example.com");
+        assert_eq!(
+            emails[&b.id], "b@example.com",
+            "a deleted account is still named"
+        );
+        assert!(emails_by_id(&ctx, &[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

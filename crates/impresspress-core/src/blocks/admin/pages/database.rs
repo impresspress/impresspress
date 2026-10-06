@@ -84,8 +84,18 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
         }
     }
 
+    // On a phone the list sits above the panel, 62 tables tall on a full
+    // deployment, so once there is a panel to read — a selected table's
+    // schema, or the SQL editor — it starts collapsed behind its summary
+    // (`TABLE_FILTER_JS` closes it below 720px); with nothing selected the
+    // list is what the visitor came for and stays open.
+    let collapse_on_phone = selected.is_some() || tab == Tab::Sql;
     html! {
-        aside .db-pane .db-pane--left {
+        details .db-pane .db-pane--left .db-tables open data-db-tables data-db-collapse-narrow[collapse_on_phone] {
+            summary .db-tables__summary {
+                span { "Tables" }
+                span .db-table-group__count { (tables.len()) }
+            }
             div .db-pane__head {
                 input #db-filter type="text"
                     placeholder="Filter tables…"
@@ -175,8 +185,15 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
 /// unlintable and untestable. It hides `[data-db-table]` rows that do not match,
 /// collapses a `[data-db-group]` whose rows are all hidden, and reveals
 /// `#db-filter-empty` when nothing matches at all.
+///
+/// It also closes the table list on a narrow screen when the page drew it
+/// `data-db-collapse-narrow` (see [`left_pane`]); that part runs on every
+/// render, the listener only once.
 const TABLE_FILTER_JS: &str = r#"
 (function () {
+  if (window.matchMedia('(max-width: 720px)').matches) {
+    document.querySelectorAll('[data-db-collapse-narrow]').forEach(function (d) { d.open = false; });
+  }
   if (window.__dbTableFilterInit) return;
   window.__dbTableFilterInit = true;
   document.addEventListener('input', function (e) {
@@ -275,8 +292,8 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
             vec![
                 html! { span .font-medium { (c.name) } },
                 html! { span .text-muted { (c.ty) } },
-                html! { @if c.notnull { span aria-label="Yes" { (icons::check()) } } },
-                html! { @if c.pk { span aria-label="Yes" { (icons::check()) } } },
+                yes_mark(c.notnull),
+                yes_mark(c.pk),
                 html! { span .text-muted { (c.default_value.as_deref().unwrap_or("")) } },
             ]
         })
@@ -286,7 +303,7 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
         div .db-panel {
             (components::section_header(
                 name,
-                Some(html! { span .text-muted .text-sm { (row_count) " rows" } }),
+                Some(html! { span .text-muted .text-sm .tabular-nums { (rows_label(row_count)) } }),
             ))
             (components::data_table::<fn(usize) -> Option<String>>(
                 &SCHEMA_COLUMNS,
@@ -296,6 +313,27 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
             ))
         }
     })
+}
+
+/// A schema flag's cell: a check for yes, read out as "Yes" (an `aria-label`
+/// on a `<span>` is not announced — a span has no role to name), and nothing
+/// for no.
+fn yes_mark(yes: bool) -> Markup {
+    html! {
+        @if yes {
+            span aria-hidden="true" { (icons::check()) }
+            span .sr-only { "Yes" }
+        }
+    }
+}
+
+/// `"1 row"` / `"3 rows"`.
+fn rows_label(n: i64) -> String {
+    if n == 1 {
+        format!("{n} row")
+    } else {
+        format!("{n} rows")
+    }
 }
 
 async fn right_pane(
@@ -362,7 +400,7 @@ fn sql_panel(selected: Option<&str>, query: Option<&str>, result: Option<Markup>
 fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
     if rows.is_empty() {
         return html! {
-            p .text-muted .text-sm { "0 rows in " (duration_ms) "ms" }
+            p .text-muted .text-sm role="status" { "0 rows in " (duration_ms) "ms" }
         };
     }
 
@@ -390,7 +428,7 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
     // grid at every width, in a labelled, focusable horizontal scroller,
     // rather than collapsing each row into a card.
     html! {
-        p .text-muted .text-sm { (rows.len()) " rows in " (duration_ms) "ms" }
+        p .text-muted .text-sm role="status" { (rows_label(i64::try_from(rows.len()).unwrap_or(i64::MAX))) " in " (duration_ms) "ms" }
         (components::DataTable::new(&cols).rows(cells).scroll("Query results").render())
     }
 }
@@ -406,10 +444,10 @@ fn format_cell(v: &serde_json::Value) -> Markup {
     }
 }
 
+/// A refused or failed query, as the shared error alert: `role="alert"`, so
+/// the message the Run button's swap inserts is announced, not only painted.
 fn render_sql_error(msg: &str) -> Markup {
-    html! {
-        div .login-error { (msg) }
-    }
+    components::alert_message(components::AlertVariant::Error, msg)
 }
 
 pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {

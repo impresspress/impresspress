@@ -543,10 +543,6 @@ async fn page_read_denials_are_the_403_page() {
         (every_op_on(ROLES_TABLE), "/b/admin/users?tab=roles"),
         (every_op_on(api_keys::TABLE), "/b/admin/users?tab=api-keys"),
         (every_op_on(variables::TABLE), "/b/admin/settings/variables"),
-        (
-            every_op_on(variables::TABLE),
-            "/b/admin/settings/variables?tab=all",
-        ),
     ] {
         assert_refused_page(&mut misses, &denied(&ctx, ops), path).await;
     }

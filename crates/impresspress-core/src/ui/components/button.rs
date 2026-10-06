@@ -50,6 +50,28 @@ pub fn tab_navigation(tabs: Vec<Tab<'_>>) -> Markup {
     }
 }
 
+/// A list filter that is either on or off ("Server errors", "Errors only"):
+/// a real `<button>` whose `aria-pressed` carries the state, and which swaps
+/// `#content` for `href` — the same list with this filter flipped — and
+/// pushes that URL, so the filter survives a reload and the back button.
+///
+/// `href` is the URL the page is at after the press, so the caller builds it
+/// with this filter's value inverted and every other filter kept.
+pub fn filter_toggle(label: &str, pressed: bool, href: &str) -> Markup {
+    html! {
+        button .btn .btn--secondary .btn--sm .filter-toggle
+            type="button"
+            aria-pressed=(if pressed { "true" } else { "false" })
+            hx-get=(href)
+            hx-target="#content"
+            hx-push-url="true"
+        {
+            span .filter-toggle__check aria-hidden="true" { (crate::ui::icons::check()) }
+            (label)
+        }
+    }
+}
+
 /// A block's own sections — separate pages of one block (Tickets' Inbox /
 /// Types / Settings / Endpoints) — as the same `.tabs` strip
 /// [`tab_navigation`] draws, but as plain links in a labelled `nav`, the
@@ -82,26 +104,27 @@ pub fn subnav(label: &str, tabs: Vec<Tab<'_>>) -> Markup {
     }
 }
 
-/// One page's own views of the same list — Active / Deleted products, an
-/// order status — as a row of chips: plain links in a labelled `nav`, the
-/// current one `aria-current="page"`.
+/// One page's views of the same list — Active / Deleted products, an order
+/// status — as a set of links of which exactly one is current: the
+/// [`filter_toggle`] look (`.filter-toggle`, the current one filled and
+/// checked), in a labelled `nav`, the current link `aria-current="true"`.
 ///
+/// Links, not [`filter_toggle`]'s on/off buttons: only one view can be on.
 /// Not [`subnav`]: those are a block's separate pages, drawn above the
 /// content card; these narrow the list the page already shows, so they sit
-/// in the body beside its search box and must not read as a second section
-/// strip. Not an htmx swap either, for the reason [`subnav`] gives: a view
-/// changes the page's subtitle and actions, which live in the topbar. The
-/// current chip is marked by weight and border as well as fill, never by
-/// colour alone.
-pub fn filter_chips(label: &str, chips: Vec<Tab<'_>>) -> Markup {
+/// in its filter row. And plain navigations rather than an htmx swap, for
+/// the reason [`subnav`] gives: a view can change the page's subtitle and
+/// actions, which live in the topbar.
+pub fn filter_links(label: &str, links: Vec<Tab<'_>>) -> Markup {
     html! {
-        nav .filter-chips aria-label=(label) {
-            @for chip in chips {
-                a .filter-chip href=(chip.href) aria-current=[chip.active.then_some("page")] {
-                    @if let Some(icon) = chip.icon {
+        nav .filter-toggles aria-label=(label) {
+            @for link in links {
+                a .btn .btn--secondary .btn--sm .filter-toggle href=(link.href) aria-current=[link.active.then_some("true")] {
+                    span .filter-toggle__check aria-hidden="true" { (crate::ui::icons::check()) }
+                    @if let Some(icon) = link.icon {
                         (icon)
                     }
-                    (chip.label)
+                    (link.label)
                 }
             }
         }
@@ -184,8 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_chips_are_labelled_links_with_the_current_one_marked() {
-        let s = filter_chips(
+    fn filter_links_are_labelled_links_with_the_current_one_marked() {
+        let s = filter_links(
             "Product views",
             vec![
                 Tab {
@@ -203,9 +226,13 @@ mod tests {
             ],
         )
         .into_string();
-        assert_eq!(
-            s,
-            r#"<nav class="filter-chips" aria-label="Product views"><a class="filter-chip" href="/b/products/admin/manage" aria-current="page">Active</a><a class="filter-chip" href="/b/products/admin/manage?view=deleted">Deleted</a></nav>"#
+        assert!(
+            s.starts_with(r#"<nav class="filter-toggles" aria-label="Product views"><a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage" aria-current="true"><span class="filter-toggle__check" aria-hidden="true">"#),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"<a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage?view=deleted"><span"#),
+            "{s}"
         );
         // Plain links: a view changes the topbar, so it is never a swap.
         assert!(!s.contains("hx-"), "{s}");

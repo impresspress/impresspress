@@ -14507,7 +14507,8 @@ export interface paths {
                         /**
                          * @description Why the change was made, ≤4000 characters. Required when closing a
                          *     ticket (`"resolved"`, `"rejected"`, `"spam"`, `"duplicate"`) and
-                         *     recorded on the audit timeline.
+                         *     recorded on the audit timeline with the change it explains. A reason
+                         *     sent with no change is refused with 400: a comment is a note.
                          * @default
                          */
                         reason?: string;

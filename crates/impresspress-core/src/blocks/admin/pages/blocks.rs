@@ -191,7 +191,8 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                 // Runtime filter dropdown
                 div .block-cards__filter {
-                    select .form-input
+                    label .form-label for="blocks-runtime-filter" { "Runtime" }
+                    select .form-input #blocks-runtime-filter
                         data-action="blocks-runtime-filter"
                         data-blocks-tab=(active_tab)
                     {
@@ -233,9 +234,15 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                     { (block.name) }
                                 }
                                 @if is_enabled {
-                                    span .block-card__check title="Enabled" { (ui::icons::check()) }
+                                    span .block-card__check title="Enabled" {
+                                        span aria-hidden="true" { (ui::icons::check()) }
+                                        span .sr-only { "Enabled" }
+                                    }
                                 } @else {
-                                    span .block-card__check .block-card__check--off title="Disabled" { (ui::icons::x()) }
+                                    span .block-card__check .block-card__check--off title="Disabled" {
+                                        span aria-hidden="true" { (ui::icons::x()) }
+                                        span .sr-only { "Disabled" }
+                                    }
                                 }
                             }
                             p .block-card__summary { (block.summary) }
@@ -247,8 +254,9 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                 }
                                 span .block-card__version { "v" (block.version) }
                                 @if is_enabled && !block.admin_url.is_empty() {
-                                    a .btn .btn--sm .btn--primary .block-card__open
+                                    a .btn .btn--sm .btn--secondary .block-card__open
                                         href=(block.admin_url)
+                                        aria-label=(format!("Open {} admin", block.name))
                                     { "Open" }
                                 }
                             }
@@ -488,19 +496,7 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
         // Endpoints
         @if !block.endpoints.is_empty() {
             h3 .modal-section-title { "Endpoints" }
-            @let rows: Vec<Vec<Markup>> = block.endpoints.iter().map(|ep| vec![
-                Badge::new(method_badge_tone(ep.method)).classes("text-11").render(html! { (ep.method) }),
-                html! { code .text-xs { (ep.path) } },
-                html! { span .text-muted { (ep.summary) } },
-                Badge::new(auth_badge_tone(ep.auth)).classes("text-10").render(html! { (ep.auth) }),
-            ]).collect();
-
-            (components::data_table::<fn(usize) -> Option<String>>(
-                &ENDPOINT_COLUMNS,
-                rows,
-                None,
-                html! {},
-            ))
+            (components::endpoint_table("Endpoints", &block.endpoints))
         }
 
         // Config Keys
@@ -553,28 +549,6 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
 /// the `<dialog>` with and asks chrome.js to open.
 const DETAIL_MODAL_ID: &str = "block-detail";
 
-/// Tone variant for an endpoint's HTTP-method badge. Shares its colour set with
-/// [`auth_badge_tone`] — `Post`/`Public` and `Patch`/`Authenticated` render
-/// identically, so the tones live once in `styles/components/badge.css`
-/// rather than being declared per-enum.
-fn method_badge_tone(method: wafer_run::HttpMethod) -> BadgeVariant {
-    match method {
-        wafer_run::HttpMethod::Get => BadgeVariant::ToneBrand,
-        wafer_run::HttpMethod::Post => BadgeVariant::ToneGreen,
-        wafer_run::HttpMethod::Patch => BadgeVariant::ToneAmber,
-        wafer_run::HttpMethod::Delete => BadgeVariant::ToneRed,
-    }
-}
-
-/// Tone variant for an endpoint's auth-level badge. See [`method_badge_tone`].
-fn auth_badge_tone(auth: wafer_run::AuthLevel) -> BadgeVariant {
-    match auth {
-        wafer_run::AuthLevel::Public => BadgeVariant::ToneGreen,
-        wafer_run::AuthLevel::Admin => BadgeVariant::ToneRed,
-        wafer_run::AuthLevel::Authenticated => BadgeVariant::ToneAmber,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Custom tab
 // ---------------------------------------------------------------------------
@@ -605,17 +579,9 @@ fn custom_tab_content() -> maud::Markup {
     }
 }
 
-/// The block-detail modal's two tables' columns. Declared once each so the
-/// `<td data-label>` the component stamps on every cell names the same column
-/// its header does; the two widths are the ones the old `th .w-70` / `.w-80`
-/// utility classes gave those headers.
-const ENDPOINT_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol::new("Method").width("70px"),
-    components::TableCol::new("Path"),
-    components::TableCol::new("Description"),
-    components::TableCol::new("Auth").width("80px"),
-];
-
+/// The block-detail modal's configuration table's columns, declared once so
+/// the `<td data-label>` the component stamps on every cell names the same
+/// column its header does.
 const CONFIG_KEY_COLUMNS: [components::TableCol<'static>; 3] = [
     components::TableCol::new("Key"),
     components::TableCol::new("Description"),
@@ -878,50 +844,6 @@ mod toggle_feature_tests {
                 .expect("read block setting"),
             "the toggle must have re-enabled the unloaded block",
         );
-    }
-}
-
-#[cfg(test)]
-mod badge_tone_tests {
-    use maud::html;
-
-    use super::*;
-
-    /// The block-detail modal is the only place these two colour sets render,
-    /// and the seeded block in `page_link_tests` declares no endpoints, so no
-    /// page render exercises them. Pinned here against the exact class each
-    /// arm emitted before the tones became `BadgeVariant` values.
-    #[test]
-    fn method_and_auth_tones_render_the_classes_they_always_did() {
-        let rendered = |variant| {
-            Badge::new(variant)
-                .classes("text-11")
-                .render(html! { "x" })
-                .into_string()
-        };
-        for (method, class) in [
-            (wafer_run::HttpMethod::Get, "badge--tone-brand"),
-            (wafer_run::HttpMethod::Post, "badge--tone-green"),
-            (wafer_run::HttpMethod::Patch, "badge--tone-amber"),
-            (wafer_run::HttpMethod::Delete, "badge--tone-red"),
-        ] {
-            assert_eq!(
-                rendered(method_badge_tone(method)),
-                format!(r#"<span class="badge {class} text-11">x</span>"#),
-                "{method:?}"
-            );
-        }
-        for (auth, class) in [
-            (wafer_run::AuthLevel::Public, "badge--tone-green"),
-            (wafer_run::AuthLevel::Admin, "badge--tone-red"),
-            (wafer_run::AuthLevel::Authenticated, "badge--tone-amber"),
-        ] {
-            assert_eq!(
-                rendered(auth_badge_tone(auth)),
-                format!(r#"<span class="badge {class} text-11">x</span>"#),
-                "{auth:?}"
-            );
-        }
     }
 }
 

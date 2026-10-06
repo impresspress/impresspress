@@ -708,10 +708,10 @@ fn with_search(href: &str, search: &str) -> String {
 }
 
 /// The Active / Deleted views of a product list (`base` is the list's own
-/// path), as filter chips: views of one list, not sections of the block.
+/// path), as filter links: views of one list, not sections of the block.
 fn product_views(base: &str, deleted_view: bool) -> Markup {
     let deleted = format!("{base}?view=deleted");
-    components::filter_chips(
+    components::filter_links(
         "Product views",
         vec![
             components::Tab {
@@ -2586,13 +2586,13 @@ fn order_list_href(base: &str, status: &str) -> String {
     }
 }
 
-/// The status filter of an order list at `base`, as filter chips.
+/// The status filter of an order list at `base`, as filter links.
 fn order_status_chips(base: &str, current: &str) -> Markup {
     let hrefs: Vec<String> = ORDER_STATUSES
         .iter()
         .map(|(value, _)| order_list_href(base, value))
         .collect();
-    components::filter_chips(
+    components::filter_links(
         "Order status",
         ORDER_STATUSES
             .iter()

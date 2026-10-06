@@ -69,13 +69,17 @@ pub async fn permissions_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
     super::settings::settings_page(ctx, msg, "permissions").await
 }
 
-/// The access a grant confers, as the grant tables badge it.
+/// The access a grant confers, as the grant tables badge it. Neutral, like
+/// every classification badge (D5): the access level is a kind of grant, not
+/// a status, and red/amber/green read as "broken/warning/fine" — the words
+/// carry the difference.
 fn access_badge(write: GrantWrite) -> Markup {
-    match write {
-        GrantWrite::Full => badge(BadgeVariant::Danger, "read + write"),
-        GrantWrite::Append => badge(BadgeVariant::Warning, "append only"),
-        GrantWrite::None => badge(BadgeVariant::Success, "read only"),
-    }
+    let label = match write {
+        GrantWrite::Full => "read + write",
+        GrantWrite::Append => "append only",
+        GrantWrite::None => "read only",
+    };
+    badge(BadgeVariant::Secondary, label)
 }
 
 /// A code-declared grant as the "All" tab words it: the grantee, what it may
@@ -113,7 +117,7 @@ fn grants_code_tab(ctx: &dyn Context) -> Markup {
                         Badge::new(BadgeVariant::Info).render(components::breakable_id(&block.name)),
                         html! {
                             @if grant.grantee == "*" {
-                                (badge(BadgeVariant::Warning, "* (all blocks)"))
+                                (badge(BadgeVariant::Secondary, "* (all blocks)"))
                             } @else {
                                 code { (components::breakable_id(&grant.grantee)) }
                             }
@@ -182,7 +186,7 @@ pub(crate) async fn grants_custom_tab(
                         vec![
                             html! {
                                 @if grantee == "*" {
-                                    (badge(BadgeVariant::Warning, "* (all blocks)"))
+                                    (badge(BadgeVariant::Secondary, "* (all blocks)"))
                                 } @else {
                                     code { (components::breakable_id(grantee)) }
                                 }
@@ -200,7 +204,10 @@ pub(crate) async fn grants_custom_tab(
                             },
                             html! { span .text-13 { (grant.description) } },
                             html! {
-                                button .btn .btn--danger .btn--sm
+                                button .btn .btn--ghost-danger .btn--icon
+                                    type="button"
+                                    title="Delete grant"
+                                    aria-label=(format!("Delete grant of {} to {grantee}", grant.resource))
                                     hx-delete={"/b/admin/grants/rules/" (grant.id)}
                                     hx-target="#content"
                                     hx-confirm="Delete this grant?"

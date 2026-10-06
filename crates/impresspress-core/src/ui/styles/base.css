@@ -80,7 +80,10 @@ summary { cursor: pointer; }
 .data-table--scroll:focus-visible,
 a.pagination__link:focus-visible,
 .account-nav__item:focus-visible,
-.chart__values summary:focus-visible {
+.chart__values summary:focus-visible,
+.network-group__toggle:focus-visible,
+.db-tables__summary:focus-visible,
+.var-group__summary:focus-visible {
 	outline: 2px solid transparent;
 	outline-offset: -2px;
 	box-shadow: var(--focus-ring);

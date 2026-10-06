@@ -9,7 +9,7 @@ import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
  *   marker moves with Continue; at 390px its five steps stay on one row.
  * - A product page has one primary action per section: the topbar's
  *   (Publish), the details form's (Save), and a draft offer's (Publish).
- * - The Active / Deleted views are filter chips, and Manage's search box
+ * - The Active / Deleted views are filter links, and Manage's search box
  *   sits in the filter row rather than a card of its own.
  * - The portal buttons page's add form collapses to one column at 390px.
  *
@@ -121,11 +121,11 @@ test.describe.serial('products admin pages', () => {
     await expect(page.getByText('Create a product with pricing')).toHaveCount(0);
   });
 
-  test('Manage filters with chips and searches in the filter row', async ({ page }) => {
+  test('Manage filters with view links and searches in the filter row', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/products/admin/manage', { waitUntil: 'networkidle' });
     const views = page.getByRole('navigation', { name: 'Product views' });
-    await expect(views.getByRole('link', { name: 'Active' })).toHaveAttribute('aria-current', 'page');
+    await expect(views.getByRole('link', { name: 'Active' })).toHaveAttribute('aria-current', 'true');
 
     // A search swaps the page body: one search box, one title, the result.
     const search = page.getByRole('searchbox', { name: 'Search by product name' });
@@ -139,7 +139,7 @@ test.describe.serial('products admin pages', () => {
     await expect(page).toHaveURL(/view=deleted$/);
     await expect(
       page.getByRole('navigation', { name: 'Product views' }).getByRole('link', { name: 'Deleted' }),
-    ).toHaveAttribute('aria-current', 'page');
+    ).toHaveAttribute('aria-current', 'true');
     // A view, not a section: the section link stays on Products.
     await expect(
       page.getByRole('navigation', { name: 'Products sections' }).getByRole('link', { name: 'Products' }),

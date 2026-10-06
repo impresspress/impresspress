@@ -3,10 +3,10 @@ use wafer_block::db::{Filter, FilterOp, SortField};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
-use super::{admin_page, crumb, status_code_badge_variant};
+use super::{admin_page, crumb, request_path_cell, status_code_badge_variant, user_cell};
 use crate::{
-    blocks::admin::AUDIT_LOGS_TABLE as AUDIT_LOGS,
-    platform_state::request_logs,
+    blocks::{admin::AUDIT_LOGS_TABLE as AUDIT_LOGS, auth::repo::users},
+    platform_state::request_logs::{self, ErrorFilter},
     ui::{
         components::{self, badge, pagination, Badge, BadgeVariant},
         icons,
@@ -16,27 +16,34 @@ use crate::{
     util::{urlencode, RecordExt},
 };
 
-/// The query parameter the System Logs tab narrows to error rows with, and
-/// the one value that turns it on. The rows it selects are the ones
-/// [`request_logs::is_error_status`] answers for — a `status_code` filter.
-/// The stored `status` label is a display column no reader selects on, so the
-/// parameter is not named after it.
-const ERRORS_PARAM: &str = "errors";
-const ERRORS_ON: &str = "1";
+/// The query parameters the System Logs tab's two error filters set, and the
+/// one value that turns each on. The rows each selects are a
+/// [`request_logs::StatusClass`] — a `status_code` filter. The stored
+/// `status` label is a display column no reader selects on, so neither
+/// parameter is named after it.
+const SERVER_ERRORS_PARAM: &str = "server_errors";
+const CLIENT_ERRORS_PARAM: &str = "client_errors";
+const FILTER_ON: &str = "1";
 
-/// Whether this request asked for error rows only.
-fn errors_only(msg: &Message) -> bool {
-    msg.query(ERRORS_PARAM) == ERRORS_ON
+/// The error filters this request asked for.
+fn error_filter(msg: &Message) -> ErrorFilter {
+    ErrorFilter {
+        server: msg.query(SERVER_ERRORS_PARAM) == FILTER_ON,
+        client: msg.query(CLIENT_ERRORS_PARAM) == FILTER_ON,
+    }
 }
 
 /// `/b/admin/logs` carrying the System Logs tab's active filters, so a
-/// refresh, a search, a page step or the filter toggle itself keeps the rest
-/// of the filter. `search` is omitted where the link's own control supplies
-/// it (the search box appends its field to the URL it is given).
-fn system_logs_href(search: &str, errors_only: bool) -> String {
+/// refresh, a search, a page step or a filter toggle keeps the rest of the
+/// filter. `search` is omitted where the link's own control supplies it (the
+/// search box appends its field to the URL it is given).
+fn system_logs_href(search: &str, errors: ErrorFilter) -> String {
     let mut params: Vec<String> = Vec::new();
-    if errors_only {
-        params.push(format!("{ERRORS_PARAM}={ERRORS_ON}"));
+    if errors.server {
+        params.push(format!("{SERVER_ERRORS_PARAM}={FILTER_ON}"));
+    }
+    if errors.client {
+        params.push(format!("{CLIENT_ERRORS_PARAM}={FILTER_ON}"));
     }
     if !search.is_empty() {
         params.push(format!("search={}", urlencode(search)));
@@ -62,7 +69,7 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let refresh_href = match active_tab {
         "audit" => "/b/admin/logs?tab=audit".to_string(),
         "storage" => STORAGE_LOGS_HREF.to_string(),
-        _ => system_logs_href(msg.query("search"), errors_only(msg)),
+        _ => system_logs_href(msg.query("search"), error_filter(msg)),
     };
     let refresh_action = html! {
         button .btn .btn--secondary .btn--sm
@@ -133,55 +140,55 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, WaferError> {
     let (page, page_size, _) = msg.pagination_params(50);
     let search = msg.query("search").to_string();
-    let errors_only = errors_only(msg);
+    let errors = error_filter(msg);
 
-    let list =
-        request_logs::paginated(ctx, page as i64, page_size as i64, &search, errors_only).await?;
+    let list = request_logs::paginated(ctx, page as i64, page_size as i64, &search, errors).await?;
+    let user_ids: Vec<&str> = list.rows.iter().map(|r| r.user_id.as_str()).collect();
+    let emails = users::emails_by_id(ctx, &user_ids).await?;
 
     // The search box appends its own `search` field to whatever URL it is
-    // given, so it gets the filter without one; everything else carries both.
-    let search_href = system_logs_href("", errors_only);
-    let all_rows_href = system_logs_href(&search, false);
-    let errors_href = system_logs_href(&search, true);
-    let page_href = system_logs_href(&search, errors_only);
+    // given, so it gets the filters without one; everything else carries all.
+    let search_href = system_logs_href("", errors);
+    let server_toggle_href = system_logs_href(
+        &search,
+        ErrorFilter {
+            server: !errors.server,
+            ..errors
+        },
+    );
+    let client_toggle_href = system_logs_href(
+        &search,
+        ErrorFilter {
+            client: !errors.client,
+            ..errors
+        },
+    );
+    let page_href = system_logs_href(&search, errors);
+    let empty = match (errors.server, errors.client) {
+        (true, true) => "No server or client errors logged",
+        (true, false) => "No server errors logged",
+        (false, true) => "No client errors logged",
+        (false, false) => "No request logs yet",
+    };
 
     Ok(html! {
         div .filter-bar {
             (components::search_input_with_value("search", "Search by path...", &search_href, "#content", &search))
-
-            @if errors_only {
-                div .flex .items-center .gap-2 .mb-2 .text-sm {
-                    span .text-muted { "4xx/5xx only (status " (request_logs::ERROR_STATUS_FLOOR) "+)" }
-                    a .btn .btn--ghost .btn--sm
-                        href=(all_rows_href)
-                        hx-get=(all_rows_href)
-                        hx-target="#content"
-                    { (icons::x()) " Show all" }
-                }
-            } @else {
-                a .btn .btn--ghost .btn--sm
-                    href=(errors_href)
-                    hx-get=(errors_href)
-                    hx-target="#content"
-                { (icons::triangle_alert()) " 4xx/5xx only" }
+            div .filter-toggles role="group" aria-label="Show only" {
+                (components::filter_toggle("Server errors", errors.server, &server_toggle_href))
+                (components::filter_toggle("Client errors", errors.client, &client_toggle_href))
             }
         }
 
         @let rows: Vec<Vec<Markup>> = list.rows.iter().map(|row| {
-            let path = row.path.as_str();
-            let user_id = row.user_id.as_str();
             let created = row.created_at.as_str();
             let status_code = row.status_code;
             vec![
                 Badge::new(status_code_badge_variant(status_code)).render(html! { (status_code) }),
-                html! { span .font-medium { (row.method.to_uppercase()) } },
-                html! { (components::breakable_id(path)) },
-                html! { span .text-muted { (row.duration_ms) "ms" } },
-                html! {
-                    @if !user_id.is_empty() {
-                        span .text-muted { (user_id.get(..8).unwrap_or(user_id)) }
-                    }
-                },
+                html! { span .font-medium { (row.method) } },
+                request_path_cell(&row.path),
+                html! { span .text-muted .tabular-nums { (row.duration_ms) "ms" } },
+                user_cell(&row.user_id, &emails),
                 html! { span .text-muted { (components::timestamp(created)) } },
             ]
         }).collect();
@@ -190,11 +197,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
             &SYSTEM_LOG_COLUMNS,
             rows,
             None,
-            html! {
-                p .text-center .text-muted {
-                    @if errors_only { "No 4xx/5xx request logs" } @else { "No request logs yet" }
-                }
-            },
+            html! { p .text-center .text-muted { (empty) } },
         ))
 
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) {
@@ -230,6 +233,12 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
         sort,
     )
     .await?;
+    let user_ids: Vec<&str> = list
+        .records
+        .iter()
+        .map(|record| record.str_field("user_id"))
+        .collect();
+    let emails = users::emails_by_id(ctx, &user_ids).await?;
 
     Ok(html! {
         div .filter-bar {
@@ -237,12 +246,11 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
         }
 
         @let rows: Vec<Vec<Markup>> = list.records.iter().map(|record| {
-            let user_id = record.str_field("user_id");
             let created = record.str_field("created_at");
             vec![
                 badge(BadgeVariant::Info, record.str_field("action")),
                 html! { (record.str_field("resource")) },
-                html! { span .text-muted { (user_id.get(..8).unwrap_or(user_id)) } },
+                user_cell(record.str_field("user_id"), &emails),
                 html! { span .text-muted { (record.str_field("ip_address")) } },
                 html! { span .text-muted { (components::timestamp(created)) } },
             ]
@@ -349,43 +357,71 @@ mod tests {
         out
     }
 
-    /// The filter the dashboard's error links ask for: only rows whose
-    /// `status_code` is an error, by the one rule every reader uses.
+    /// Each filter narrows to its own class by `status_code`, and both
+    /// together list every error row.
     #[tokio::test]
-    async fn the_logs_page_narrows_to_error_rows() {
+    async fn the_two_filters_narrow_to_their_own_class() {
         let unfiltered = logs_html(&[]).await;
-        assert!(unfiltered.contains("/served-ok"), "{unfiltered}");
-        assert!(unfiltered.contains("/served-boom"), "{unfiltered}");
+        for path in ["/served-ok", "/served-missing", "/served-boom"] {
+            assert!(unfiltered.contains(path), "{path}: {unfiltered}");
+        }
 
-        let filtered = logs_html(&[("errors", "1")]).await;
+        let server = logs_html(&[("server_errors", "1")]).await;
+        assert!(server.contains("/served-boom"), "{server}");
         assert!(
-            !filtered.contains("/served-ok"),
-            "a 200 row must not be listed under the error filter: {filtered}"
+            !server.contains("/served-ok") && !server.contains("/served-missing"),
+            "a 200 and a 404 are not server errors: {server}"
         );
+
+        let client = logs_html(&[("client_errors", "1")]).await;
+        assert!(client.contains("/served-missing"), "{client}");
         assert!(
-            filtered.contains("/served-boom") && filtered.contains("/served-missing"),
-            "both error rows must still be listed: {filtered}"
+            !client.contains("/served-ok") && !client.contains("/served-boom"),
+            "a 200 and a 500 are not client errors: {client}"
         );
-        // The total rides on the pagination bar, which renders only when the
-        // rows span more than one page.
-        let counted = logs_html(&[("errors", "1"), ("page_size", "1")]).await;
+
+        let both = logs_html(&[
+            ("server_errors", "1"),
+            ("client_errors", "1"),
+            ("page_size", "1"),
+        ])
+        .await;
         assert!(
-            counted.contains("2 total"),
-            "the count is of the filtered set: {counted}"
+            both.contains("2 total"),
+            "both filters list both error rows, and the count is of that set: {both}"
         );
     }
 
-    /// The link the dashboard emits and the filter the Logs page reads are
-    /// one contract: whatever the dashboard's "Recent 4xx/5xx" and error-chart
-    /// cards link to must narrow the page. A link naming a parameter the page
-    /// does not read is silent — it opens the unfiltered list — so nothing but
-    /// a test that follows the link itself can catch the two drifting apart.
+    /// Each filter is a toggle button whose `aria-pressed` is its state, and
+    /// which leads to the same list with that one filter flipped.
+    #[tokio::test]
+    async fn each_filter_is_a_pressed_toggle_that_flips_only_itself() {
+        let html = logs_html(&[("server_errors", "1"), ("search", "served")]).await;
+        assert!(
+            html.contains(r#"aria-pressed="true" hx-get="/b/admin/logs?search=served""#),
+            "pressing the active server filter turns it off and keeps the search: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"aria-pressed="false" hx-get="/b/admin/logs?server_errors=1&client_errors=1&search=served""#
+            ),
+            "pressing the client filter adds it beside the server filter: {html}"
+        );
+        assert!(!html.contains("4xx/5xx"), "{html}");
+    }
+
+    /// The links the dashboard emits and the filters the Logs page reads are
+    /// one contract: whatever the dashboard's server-error card and charts
+    /// link to must narrow the page. A link naming a parameter the page does
+    /// not read is silent — it opens the unfiltered list — so nothing but a
+    /// test that follows the link itself can catch the two drifting apart.
     #[tokio::test]
     async fn the_dashboard_error_links_filter_the_logs_page() {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         seed(&ctx, "/served-ok", 200).await;
+        seed(&ctx, "/served-missing", 404).await;
         seed(&ctx, "/served-boom", 500).await;
 
         let dashboard = browser_request(&ctx, admin_msg("retrieve", "/b/admin/")).await;
@@ -398,8 +434,9 @@ mod tests {
             .filter(|link| link.contains('?'))
             .collect();
         assert!(
-            !error_links.is_empty(),
-            "the dashboard must link to the filtered Logs page: {html}"
+            error_links.iter().any(|l| l.contains("server_errors"))
+                && error_links.iter().any(|l| l.contains("client_errors")),
+            "the dashboard must link to both filtered Logs pages: {error_links:?}"
         );
 
         for link in error_links {
@@ -414,69 +451,96 @@ mod tests {
                 !page.contains("/served-ok"),
                 "{link} must narrow the Logs page to error rows: {page}"
             );
-            assert!(page.contains("/served-boom"), "{link}: {page}");
+            let (wanted, unwanted) = if link.contains("server_errors") {
+                ("/served-boom", "/served-missing")
+            } else {
+                ("/served-missing", "/served-boom")
+            };
+            assert!(page.contains(wanted), "{link}: {page}");
+            assert!(!page.contains(unwanted), "{link}: {page}");
         }
     }
 
-    /// The filter survives the controls on the page: paging, searching,
-    /// refreshing and clearing the search all keep it, and the page offers a
-    /// way out of it.
+    /// The filters survive the controls on the page: paging and searching
+    /// keep them.
     #[tokio::test]
     async fn the_active_filter_rides_on_every_link_the_page_emits() {
         // One row per page, so the next-page link is a real second page of
         // the two error rows rather than a clamp back to page 1.
-        let html = logs_html(&[("errors", "1"), ("search", "served"), ("page_size", "1")]).await;
+        let html = logs_html(&[
+            ("server_errors", "1"),
+            ("client_errors", "1"),
+            ("search", "served"),
+            ("page_size", "1"),
+        ])
+        .await;
 
         assert!(
-            html.contains("/b/admin/logs?errors=1&search=served&page=2"),
-            "the next page keeps both filters: {html}"
+            html.contains("/b/admin/logs?server_errors=1&client_errors=1&search=served&page=2"),
+            "the next page keeps every filter: {html}"
         );
         // The search box appends its own field, so its URL carries the error
-        // filter alone — a `search` in it would be sent twice.
+        // filters alone — a `search` in it would be sent twice.
         assert!(
-            html.contains("hx-get=\"/b/admin/logs?errors=1\""),
-            "the search box and the Clear-search link keep the error filter: {html}"
-        );
-        assert!(
-            html.contains("/b/admin/logs?search=served\""),
-            "the page offers a way back to all rows, keeping the search: {html}"
-        );
-        assert!(
-            html.contains("4xx/5xx only"),
-            "the active filter is named on the page: {html}"
-        );
-        // The search box's own Clear and the error filter's way out are two
-        // controls; they must not share a label.
-        assert_eq!(
-            html.matches(" Clear<").count(),
-            1,
-            "only the search box offers Clear: {html}"
-        );
-        assert!(
-            html.contains(" Show all<"),
-            "the error filter's way out is labelled apart from Clear: {html}"
+            html.contains(r#"hx-get="/b/admin/logs?server_errors=1&client_errors=1""#),
+            "the search box and the Clear-search link keep the error filters: {html}"
         );
 
         // A search the URL must encode rides along the same way.
-        // (It has to match rows across two pages: a one-page result renders
-        // no pagination links at all.)
-        let encoded =
-            logs_html(&[("errors", "1"), ("search", "/served"), ("page_size", "1")]).await;
+        let encoded = logs_html(&[
+            ("client_errors", "1"),
+            ("server_errors", "1"),
+            ("search", "/served"),
+            ("page_size", "1"),
+        ])
+        .await;
         assert!(
-            encoded.contains("/b/admin/logs?errors=1&search=%2Fserved&page="),
+            encoded
+                .contains("/b/admin/logs?server_errors=1&client_errors=1&search=%2Fserved&page="),
             "the search is form-encoded in the links: {encoded}"
         );
     }
 
-    /// Without the parameter the page lists every row and offers the filter.
+    /// Without the parameters the page lists every row and offers both
+    /// filters, neither pressed.
     #[tokio::test]
-    async fn the_unfiltered_page_offers_the_filter() {
+    async fn the_unfiltered_page_offers_both_filters() {
         let html = logs_html(&[("page_size", "1")]).await;
-        assert!(
-            html.contains("/b/admin/logs?errors=1"),
-            "the filter must be reachable from the page: {html}"
-        );
+        assert_eq!(html.matches(r#"aria-pressed="false""#).count(), 2, "{html}");
+        assert!(html.contains("/b/admin/logs?server_errors=1"), "{html}");
+        assert!(html.contains("/b/admin/logs?client_errors=1"), "{html}");
         assert!(html.contains("3 total"), "{html}");
+    }
+
+    /// The collapsed unmatched-path label reads as what it stands for, and a
+    /// signed-in request names its account by email, not by an id prefix.
+    #[tokio::test]
+    async fn rows_name_the_unmatched_route_and_the_user_by_email() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        request_logs::insert(
+            &ctx,
+            &NewRequestLog {
+                method: "GET",
+                path: crate::pipeline::UNMATCHED_PATH_LABEL,
+                status_code: 404,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "u-1",
+            },
+        )
+        .await
+        .expect("seed");
+        let html = render_logs(&ctx, &[]).await;
+        assert!(html.contains("Unmatched route"), "{html}");
+        assert!(!html.contains("&lt;unmatched&gt;"), "{html}");
+        assert!(
+            html.contains("u-1<wbr>@example"),
+            "the fixture account's email, u-1@example.com: {html}"
+        );
     }
 }
 

@@ -1047,7 +1047,7 @@
                 },
                 "reason": {
                   "default": "",
-                  "description": "Why the change was made, ≤4000 characters. Required when closing a\nticket (`\"resolved\"`, `\"rejected\"`, `\"spam\"`, `\"duplicate\"`) and\nrecorded on the audit timeline.",
+                  "description": "Why the change was made, ≤4000 characters. Required when closing a\nticket (`\"resolved\"`, `\"rejected\"`, `\"spam\"`, `\"duplicate\"`) and\nrecorded on the audit timeline with the change it explains. A reason\nsent with no change is refused with 400: a comment is a note.",
                   "type": "string"
                 },
                 "status": {

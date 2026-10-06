@@ -76,7 +76,7 @@
  * once, in components/stat.css. */
 
 .dashboard-charts { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
-@media (min-width: 1024px) { .dashboard-charts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1024px) { .dashboard-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .dashboard-grid { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
 @media (min-width: 1024px) { .dashboard-grid { grid-template-columns: 2fr 1fr; } }
 .dashboard-wide > * { width: 100%; }

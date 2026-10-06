@@ -149,7 +149,6 @@ fn entries() -> Vec<Entry> {
             "/b/admin/database?tab=sql",
             "/b/admin/logs?tab=audit",
             "/b/admin/logs?tab=storage",
-            "/b/admin/settings/variables?tab=all",
             "/b/admin/settings/permissions?subtab=database",
         ],
         cannot_succeed: &[],

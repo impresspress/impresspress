@@ -1,6 +1,6 @@
 //! The products pages' chrome: the topbar owns the page's one title and its
 //! actions, the block's sections are plain links above the content card, one
-//! list's views are filter chips, and each section of a page has at most one
+//! list's views are filter links, and each section of a page has at most one
 //! primary action.
 
 use super::harness::*;
@@ -72,14 +72,18 @@ async fn admin_pages_carry_section_links_and_one_title() {
     }
 }
 
-/// Active / Deleted are views of one list — filter chips in the body, not a
+/// Active / Deleted are views of one list — filter links in the body, not a
 /// second tab strip that looks like the section links.
 #[tokio::test]
-async fn manage_views_are_filter_chips() {
+async fn manage_views_are_filter_links() {
     let ctx = ctx().await;
     let html = admin_page(&ctx, "/b/products/admin/manage?view=deleted").await;
     assert!(
-        html.contains(r#"<nav class="filter-chips" aria-label="Product views"><a class="filter-chip" href="/b/products/admin/manage">Active</a><a class="filter-chip" href="/b/products/admin/manage?view=deleted" aria-current="page">"#),
+        html.contains(r#"<nav class="filter-toggles" aria-label="Product views"><a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage"><span"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage?view=deleted" aria-current="true">"#),
         "{html}"
     );
     // The Deleted view has no create action: nothing to create there.
