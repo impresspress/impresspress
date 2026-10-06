@@ -130,16 +130,24 @@ async fn users_tab(
     )
     .await?;
     let table = users_table(&list.rows, ctx, current_user_id).await?;
+    let search_box = components::SearchInput {
+        id: "users-search",
+        name: "search",
+        label: "Search by email or user ID...",
+        href: "/b/admin/users",
+        value: &search,
+        result_count: u64::try_from(list.total_count).unwrap_or(0),
+    };
 
     Ok(html! {
         div .filter-bar {
-            (components::search_input_with_value("search", "Search by email or user ID...", "/b/admin/users", "#content", &search))
+            (search_box.render())
         }
 
         (table)
 
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) {
-            (pagination(list.page as u32, per_page, list.total_count as u32, "/b/admin/users"))
+            (pagination(list.page as u32, per_page, list.total_count as u32, &search_box.results_href()))
         }
     })
 }

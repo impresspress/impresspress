@@ -29,9 +29,7 @@ pub use card::page_header;
 pub use chart::{bar_chart_card, line_chart_card, sparkline, ChartHistory};
 pub use empty::empty_state;
 pub use endpoints::endpoint_table;
-pub use form::{
-    password_field, reveal_toggle, search_input, search_input_with_value, PasswordPurpose,
-};
+pub use form::{password_field, reveal_toggle, PasswordPurpose, SearchInput};
 pub use modal::{modal, modal_cancel, modal_footer, Modal, ModalSize};
 pub use pagination::pagination;
 pub use section::section_header;

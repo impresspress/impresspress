@@ -12,10 +12,12 @@
 //   3. toasts           (was emitted by `ui::layout::page`)
 //   4. modals           (was emitted by `ui::layout::page`)
 //   5. htmx after-success effects (never inline; appended after section 4)
+//   6. list search: stale responses, announcement, focus after Clear (never
+//      inline; appended after section 5)
 //
-// Sections 1, 2, 4 and 5 are IIFEs with their own idempotence guards. Section 3's
-// `showToast` listener is deliberately NOT wrapped: it binds `document.body`
-// directly and declares nothing. The htmx error listeners that follow it ARE
+// Sections 1, 2, 4 and 5 are IIFEs with their own idempotence guards. Section
+// 3's `showToast` listener and section 6's two listeners are deliberately NOT
+// wrapped: they bind `document.body` directly and declare nothing. The htmx error listeners that follow it ARE
 // wrapped, because the three of them share one `toast()` helper and a shared
 // helper at the top level of this file would be a global. Section 4 was
 // unwrapped too until the pages
@@ -1006,3 +1008,50 @@ document.addEventListener("input", function (e) {
         }
     });
 })();
+
+// --- 6. list search ---
+// A list's search box (`ui::components::SearchInput`, marked
+// `data-search-input`) searches as the operator types and its response
+// re-renders the page body, the box included.
+//
+// Which element made the request is `detail.requestConfig.elt`, which htmx
+// documents for both events below. `detail.elt` is NOT it here: htmx fires
+// `htmx:beforeSwap` and `htmx:afterSwap` on the swap target, and `elt` is the
+// element an event fires on — `main#content`.
+//
+// Stale responses. When the operator types on while a request is in flight,
+// that response is for a term the box no longer holds: swapping it in would
+// put the shorter term back in the box (eating what was typed since) and put
+// a URL the operator has already moved past in the address bar. So it is
+// dropped — no swap, no URL change — and the box's own pending trigger
+// searches the term it holds now. A response whose box is no longer on the
+// page (a later response already replaced it) is dropped for the same reason.
+document.body.addEventListener("htmx:beforeSwap", function (e) {
+    var d = e.detail || {};
+    var cfg = d.requestConfig;
+    var box = cfg && cfg.elt;
+    if (!(box instanceof Element) || !box.hasAttribute("data-search-input")) return;
+    var sent = cfg.formData ? cfg.formData.get(box.getAttribute("name")) : null;
+    if (!box.isConnected || box.value !== sent) d.shouldSwap = false;
+});
+
+// Once a search's list is on screen — from the box, or from its Clear link,
+// which names the box in `data-search-clear` — the new box's
+// `data-search-status` ("12 results for “ali”") goes into the page's
+// `#search-status` live region, outside the swapped body, so a screen reader
+// hears what the search found. After Clear, focus goes back to the box: the
+// link that had it is gone, and the box is where the operator works next.
+document.body.addEventListener("htmx:afterSwap", function (e) {
+    var d = e.detail || {};
+    var from = d.requestConfig && d.requestConfig.elt;
+    if (!(from instanceof Element)) return;
+    var cleared = from.hasAttribute("data-search-clear");
+    if (!cleared && !from.hasAttribute("data-search-input")) return;
+    var box = document.getElementById(
+        cleared ? from.getAttribute("data-search-clear") : from.getAttribute("id")
+    );
+    if (!box) return;
+    var status = document.getElementById("search-status");
+    if (status) status.textContent = box.getAttribute("data-search-status") || "";
+    if (cleared && typeof box.focus === "function") box.focus();
+});
