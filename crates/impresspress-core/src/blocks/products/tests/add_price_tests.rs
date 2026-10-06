@@ -227,3 +227,68 @@ async fn create_mode_refusals_carry_the_reason() {
     assert_eq!(code, ErrorCode::InvalidArgument);
     assert_eq!(message, "This currency is not allowed for sellers");
 }
+
+/// A seller's editor offers the policy's currencies, as the wizard does, and
+/// a product whose currency the policy no longer allows seeds the first
+/// allowed one rather than a currency the create endpoint would refuse.
+#[tokio::test]
+async fn a_seller_seed_keeps_to_the_allowed_currencies() {
+    // The product is created while the policy allows its currency; then the
+    // policy moves on without it.
+    let mut ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES", "usd"),
+    ])
+    .await;
+    let (msg, input) = create_msg(
+        "/b/products/api/products",
+        "seller_two",
+        serde_json::json!({ "name": "Legacy print", "currency": "USD" }),
+    );
+    let product = output_to_json(dispatch(&ctx, msg, input).await).await;
+    let id = product["id"].as_str().expect("product id").to_string();
+    ctx.set_config(
+        "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES",
+        "nzd, eur",
+    );
+
+    let (msg, _input) = get_msg(&format!("/b/products/my-products/{id}"), "seller_two");
+    let html =
+        output_to_html(super::super::pages::product_manager(&ctx, &msg, &id, false).await).await;
+    assert_eq!(page_config(&html)["new_offer"]["currency"], "EUR", "{html}");
+    assert!(
+        html.contains(r#"list="manager-visual-currency-options""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"<datalist id="manager-visual-currency-options"><option value="EUR"></option><option value="NZD"></option></datalist>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains("Allowed seller currencies: EUR, NZD"),
+        "{html}"
+    );
+
+    // The seeded currency is one the seller's create endpoint takes.
+    let definition = priced(page_config(&html)["new_offer"].clone(), 700);
+    let (msg, input) = create_msg(
+        &format!("/b/products/api/products/{id}/offers"),
+        "seller_two",
+        definition,
+    );
+    let created = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(created["offer"]["currency"], "EUR", "{created}");
+}
+
+/// An administrator is under no currency policy: no list, no hint, and the
+/// product's own currency.
+#[tokio::test]
+async fn an_admin_seed_keeps_the_product_currency() {
+    let ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES", "eur")]).await;
+    let id = admin_product(&ctx, "Admin print").await;
+    let html = admin_manager(&ctx, &id).await;
+    assert_eq!(page_config(&html)["new_offer"]["currency"], "NZD");
+    assert!(!html.contains("Allowed seller currencies"), "{html}");
+}

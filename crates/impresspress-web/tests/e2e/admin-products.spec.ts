@@ -157,9 +157,9 @@ test.describe.serial('products admin pages', () => {
 
     // Nothing priced yet: refused beside the button, nothing created.
     await editor.getByRole('button', { name: 'Create price' }).click();
-    await expect(editor.getByRole('alert')).toHaveText(
-      'Amounts must be non-negative plain decimal numbers.',
-    );
+    await expect(editor.getByRole('alert')).toHaveText('Enter an amount');
+    await expect(amount).toHaveAttribute('aria-invalid', 'true');
+    await expect(amount).toBeFocused();
 
     await amount.fill('25.00');
     await editor.getByRole('button', { name: 'Create price' }).click();

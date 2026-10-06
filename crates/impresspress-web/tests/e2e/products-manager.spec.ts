@@ -92,7 +92,7 @@ function configurableManagerHtml() {
 </html>`;
 }
 
-function visualDraftManagerHtml() {
+function visualDraftManagerHtml(savedName?: string) {
   const definition = {
     name: "Team plan",
     mode: "subscription",
@@ -174,12 +174,21 @@ function visualDraftManagerHtml() {
     ],
     checkout: { automatic_tax: true, maximum_total_minor: 100000 },
   };
+  // `savedName`: the page as the refresh after a save fetches it, its
+  // pricing section re-rendered with the saved draft.
+  const card = savedName
+    ? `<section data-offer-card data-offer-url="/b/products/api/admin/products/product_1/offers/offer_draft">
+        <h2>${savedName}</h2>
+        <button type="button" data-action="pm-open-visual-editor">Edit visually</button>
+      </section>`
+    : `<section data-offer-card data-offer-url="/b/products/api/admin/products/product_1/offers/offer_draft">
+        <h2>Team plan</h2>
+        <button type="button" data-action="pm-open-visual-editor">Edit visually</button>
+        <textarea data-offer-definition>${JSON.stringify(definition)}</textarea>
+      </section>`;
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
     <p id="product-manager-error" role="alert" aria-live="assertive" hidden></p>
-    <section data-offer-card data-offer-url="/b/products/api/admin/products/product_1/offers/offer_draft">
-      <button type="button" data-action="pm-open-visual-editor">Edit visually</button>
-      <textarea data-offer-definition>${JSON.stringify(definition)}</textarea>
-    </section>
+    <section id="product-pricing"><h2>Prices and checkout</h2>${card}</section>
     <section id="product-manager-visual-editor" hidden>
       <h2 id="manager-visual-title">Edit pricing draft</h2>
       <label for="manager-visual-offer-name">Offer name</label><input id="manager-visual-offer-name">
@@ -194,6 +203,7 @@ function visualDraftManagerHtml() {
       <p id="manager-visual-error" role="alert" hidden></p>
       <button type="button" id="manager-visual-save" data-action="pm-save-visual-offer">Save visual changes</button>
     </section>
+    <script>window.__toasts=[];document.body.addEventListener('showToast',function(e){window.__toasts.push(e.detail)});</script>
     <script>${bundle("products-wizard.js")}</script>
     <script>${bundle("products-manager.js")}</script>
   </body></html>`;
@@ -545,11 +555,12 @@ test.describe("products manager Stripe catalog actions", () => {
     const bodies: unknown[] = [];
     await page.route(`${adminOrigin}/**`, async (route) => {
       const request = route.request();
-      if (request.resourceType() === "document") {
+      if (request.method() === "GET" && new URL(request.url()).pathname === "/b/products/admin/products/product_1") {
+        // The first load, then the refresh a successful save makes.
         return route.fulfill({
           status: 200,
           contentType: "text/html; charset=utf-8",
-          body: visualDraftManagerHtml(),
+          body: visualDraftManagerHtml(attempts === 2 ? "Team plan 2026" : undefined),
         });
       }
       if (request.method() === "PATCH") {
@@ -601,6 +612,14 @@ test.describe("products manager Stripe catalog actions", () => {
 
     await page.getByRole("button", { name: "Save visual changes" }).click();
     await expect.poll(() => attempts).toBe(2);
+    // Success: the pricing section is swapped for the re-rendered one, the
+    // editor closes, focus moves to the section and a toast says so.
+    await expect(page.locator("#product-pricing [data-offer-card] h2")).toHaveText("Team plan 2026");
+    await expect(page.locator("#product-manager-visual-editor")).toBeHidden();
+    await expect(page.locator("#product-pricing > h2")).toBeFocused();
+    expect(await page.evaluate(() => (window as any).__toasts)).toEqual([
+      { message: "Pricing draft saved.", type: "success" },
+    ]);
 
     const saved = bodies[1] as any;
     expect(saved.name).toBe("Team plan 2026");
@@ -677,11 +696,20 @@ test.describe("products manager Stripe catalog actions", () => {
     await expect(amount).toHaveValue("");
     await expect(amount).toBeFocused();
 
-    // A client-side refusal: no amount yet. Inline, beside Save; nothing sent.
+    // Cancel hands focus back to the button that opened the editor.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(editor).toBeHidden();
+    await expect(page.getByRole("button", { name: "Add a price" })).toBeFocused();
+    await page.getByRole("button", { name: "Add a price" }).click();
+    await expect(amount).toBeFocused();
+
+    // A client-side refusal: no amount yet. Inline, beside Save, on the
+    // field; nothing sent.
     await page.getByRole("button", { name: "Create price" }).click();
-    await expect(page.locator("#manager-visual-error")).toHaveText(
-      "Amounts must be non-negative plain decimal numbers.",
-    );
+    await expect(page.locator("#manager-visual-error")).toHaveText("Enter an amount");
+    await expect(amount).toHaveAttribute("aria-invalid", "true");
+    await expect(amount).toHaveAttribute("aria-describedby", "manager-visual-error");
+    await expect(amount).toBeFocused();
     expect(bodies).toHaveLength(0);
 
     // A server refusal: its message, inline, the form kept as typed.
@@ -693,6 +721,12 @@ test.describe("products manager Stripe catalog actions", () => {
     );
     await expect(page.locator("#product-manager-error")).toBeHidden();
     await expect(amount).toHaveValue("25.00");
+    // A currency refusal is pinned on the currency field; the amount the
+    // previous attempt marked is clear again.
+    const currency = page.locator("#manager-visual-currency");
+    await expect(currency).toHaveAttribute("aria-invalid", "true");
+    await expect(currency).toBeFocused();
+    await expect(amount).not.toHaveAttribute("aria-invalid", /.*/);
 
     await page.getByRole("button", { name: "Create price" }).click();
     await expect(page.locator("#product-pricing [data-offer-card] h2")).toHaveText("Poster print");

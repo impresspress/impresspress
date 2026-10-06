@@ -2212,6 +2212,27 @@ pub async fn product_manager(
             .await
         }
     };
+    // The wizard's currency policy, applied to the offer editor too: a
+    // seller picks from the allowed list, an administrator from any.
+    let mut seller_currencies = if admin {
+        Vec::new()
+    } else {
+        match super::handlers::seller_policy::allowed_currencies(ctx).await {
+            Ok(currencies) => currencies.into_iter().collect::<Vec<_>>(),
+            Err(e) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Portal(PortalSection::SellerProducts, true),
+                    "Product",
+                    e,
+                    "products page: seller policy read failed",
+                )
+                .await
+            }
+        }
+    };
+    seller_currencies.sort();
     let product_api_url = if admin {
         format!("/b/products/api/admin/products/{product_id}")
     } else {
@@ -2233,6 +2254,7 @@ pub async fn product_manager(
         "new_offer": new_offer_definition(
             product.str_field("name"),
             product.str_field("currency"),
+            &seller_currencies,
             automatic_tax,
         ),
     }));
@@ -2343,7 +2365,11 @@ pub async fn product_manager(
                     }
                     div .form-group {
                         label .form-label .required for="manager-visual-currency" { "Currency" }
-                        input #manager-visual-currency .form-input type="text" maxlength="3" required;
+                        input #manager-visual-currency .form-input type="text" maxlength="3" list="manager-visual-currency-options" required;
+                        @if !seller_currencies.is_empty() {
+                            datalist #manager-visual-currency-options { @for currency in &seller_currencies { option value=(currency) {} } }
+                            p .text-muted .text-sm { "Allowed seller currencies: " (seller_currencies.join(", ")) }
+                        }
                     }
                     div .form-group data-manager-recurring hidden {
                         label .form-label for="manager-visual-interval" { "Billing interval" }
@@ -2432,16 +2458,26 @@ fn add_price_button(variant: &str) -> Markup {
 /// sends for its simplest template. It has no price row; the editor adds the
 /// one row it asks the seller to price. A stored currency outside the ISO
 /// grammar seeds an empty field rather than a guess, so the editor asks for
-/// one.
+/// one. `allowed_currencies` is the seller policy's sorted list (empty for an
+/// administrator, or when the policy allows any): a product currency the
+/// policy no longer allows seeds its first entry instead, as the wizard does
+/// with the default currency, so the seed is one the create endpoint takes.
 fn new_offer_definition(
     product_name: &str,
     product_currency: &str,
+    allowed_currencies: &[String],
     automatic_tax: bool,
 ) -> OfferDefinitionRequest {
+    let mut currency = money::normalize_currency(product_currency).unwrap_or_default();
+    if let Some(first) = allowed_currencies.first() {
+        if !allowed_currencies.contains(&currency) {
+            currency = first.clone();
+        }
+    }
     OfferDefinitionRequest {
         name: product_name.to_string(),
         mode: OfferMode::Payment,
-        currency: money::normalize_currency(product_currency).unwrap_or_default(),
+        currency,
         pricing_model: PricingModel::Fixed,
         recurring_interval: None,
         interval_count: 1,

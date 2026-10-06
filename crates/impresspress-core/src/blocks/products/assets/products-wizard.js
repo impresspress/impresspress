@@ -67,7 +67,7 @@ function productWizardValidateStep(step){
     if(image.value&&!image.checkValidity()){productWizardShowError('Image URL must be a valid absolute URL.',image);return false}
   }
   if(step===3){
-    try{buildProductWizardOffer()}catch(error){productWizardShowError(error.message);return false}
+    try{buildProductWizardOffer()}catch(error){productWizardShowError(error.message,error.focus);return false}
   }
   return true;
 }
@@ -182,6 +182,13 @@ function wizardMoneyToMinor(raw,currency){
   if(minor>BigInt(Number.MAX_SAFE_INTEGER))throw new Error('Amount is too large.');
   return Number(minor);
 }
+// An amount read from one form field: an empty field asks for an amount,
+// and either refusal carries the field (`focus`) so the caller can mark and
+// focus it.
+function wizardFieldMoney(field,currency){
+  if(!field.value.trim())throw Object.assign(new Error('Enter an amount'),{focus:field});
+  try{return wizardMoneyToMinor(field.value,currency)}catch(error){throw Object.assign(error,{focus:field})}
+}
 function wizardMinorToDisplay(minor,currency){
   var exponent=wizardCurrencyExponent(currency),raw=String(minor).padStart(exponent+1,'0');
   return exponent===0?raw:raw.slice(0,-exponent)+'.'+raw.slice(-exponent);
@@ -295,9 +302,9 @@ function collectWizardComponents(variables,currency,subscription,interval,interv
     var numeric=type==='per_unit'||type==='flat_plus_per_unit'||type==='graduated'||type==='volume'||type==='package';
     if(type!=='fixed'&&!byKey[input])throw new Error('Price row '+key+' must reference an existing input.');
     if(numeric&&byKey[input].kind!=='integer'&&byKey[input].kind!=='number')throw new Error('Price row '+key+' must reference a number input.');
-    if(type==='fixed')amount={type:'fixed',unit_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency)};
-    else if(type==='per_unit')amount={type:'per_unit',input:input,unit_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency)};
-    else if(type==='flat_plus_per_unit')amount={type:'flat_plus_per_unit',base_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-base]').value,currency),input:input,unit_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency)};
+    if(type==='fixed')amount={type:'fixed',unit_amount_minor:wizardFieldMoney(row.querySelector('[data-component-amount]'),currency)};
+    else if(type==='per_unit')amount={type:'per_unit',input:input,unit_amount_minor:wizardFieldMoney(row.querySelector('[data-component-amount]'),currency)};
+    else if(type==='flat_plus_per_unit')amount={type:'flat_plus_per_unit',base_amount_minor:wizardFieldMoney(row.querySelector('[data-component-base]'),currency),input:input,unit_amount_minor:wizardFieldMoney(row.querySelector('[data-component-amount]'),currency)};
     else if(type==='lookup'){
       if(byKey[input].kind!=='select'&&byKey[input].kind!=='text')throw new Error('Lookup row '+key+' must reference a choice or text input.');
       amount={type:'lookup',input:input,prices:wizardParseLookup(row.querySelector('[data-component-details]').value,currency,key)};
@@ -305,7 +312,7 @@ function collectWizardComponents(variables,currency,subscription,interval,interv
     else if(type==='package'){
       var packageSize=Number(row.querySelector('[data-component-package-size]').value);
       if(!Number.isSafeInteger(packageSize)||packageSize<1)throw new Error('Package size on '+key+' must be a positive whole number.');
-      amount={type:'package',input:input,units_per_package:packageSize,package_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency),rounding:row.querySelector('[data-component-rounding]').value};
+      amount={type:'package',input:input,units_per_package:packageSize,package_amount_minor:wizardFieldMoney(row.querySelector('[data-component-amount]'),currency),rounding:row.querySelector('[data-component-rounding]').value};
     }else throw new Error('Price row '+key+' uses an unknown calculation.');
     var conditionType=row.querySelector('[data-component-condition]').value,conditionInput=row.querySelector('[data-condition-input]').value.trim(),rawCondition=row.querySelector('[data-condition-value]').value.trim();var condition={op:'always'};
     if(conditionType==='advanced_preserved'){
@@ -340,7 +347,7 @@ function buildProductWizardOffer(){
   var variables=[],components=[];
   if(configurable){variables=collectWizardVariables();components=collectWizardComponents(variables,currency,subscription,interval,intervalCount)}
   else{
-    var amount=wizardMoneyToMinor(wizardById('wizard-price').value,currency);
+    var amount=wizardFieldMoney(wizardById('wizard-price'),currency);
     var component={key:'price',label:wizardById('wizard-name').value.trim()||'Price',sort_order:0,required:true,amount:{type:'fixed',unit_amount_minor:amount},quantity:{type:'fixed',value:1},condition:{op:'always'}};
     if(subscription)component.recurrence={interval:interval,interval_count:intervalCount};components=[component];
   }
@@ -380,7 +387,7 @@ function renderProductWizardReview(){
       item.textContent=component.label+': '+description+(component.condition.op!=='always'?' when '+component.condition.input+' '+component.condition.op.replace(/_/g,' ')+' '+String(component.condition.value||component.condition.values||''):'');list.appendChild(item)});
     target.appendChild(list);
     var options=document.createElement('p');options.className='text-muted text-sm';options.textContent=offer.variables.length+' customer input(s), '+offer.components.length+' price row(s)'+(offer.checkout.minimum_total_minor!==undefined?', minimum '+wizardMinorToDisplay(offer.checkout.minimum_total_minor,offer.currency)+' '+offer.currency:'')+(offer.checkout.maximum_total_minor!==undefined?', maximum '+wizardMinorToDisplay(offer.checkout.maximum_total_minor,offer.currency)+' '+offer.currency:'')+(offer.checkout.automatic_tax?', automatic tax':'')+(offer.checkout.allow_promotion_codes?', promotion codes':'');target.appendChild(options);
-  }catch(error){productWizardShowError(error.message)}
+  }catch(error){productWizardShowError(error.message,error.focus)}
 }
 async function productWizardRequest(path,method,body){
   var response=await fetch(path,{method:method,credentials:'same-origin',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});var data={};try{data=await response.json()}catch(_){}
@@ -400,7 +407,7 @@ async function submitProductWizard(intent){
     }
     window.location.assign(config.return_url+'?created='+encodeURIComponent(productId)+(intent==='publish'?'&published=1':''));
   }catch(error){
-    productWizardShowError((productId?'Product draft '+productId+' was created, but setup did not finish. ':'')+(error.message||'Product setup failed.'));
+    productWizardShowError((productId?'Product draft '+productId+' was created, but setup did not finish. ':'')+(error.message||'Product setup failed.'),error.focus);
     buttons.forEach(function(button){button.disabled=false});
   }
 }
