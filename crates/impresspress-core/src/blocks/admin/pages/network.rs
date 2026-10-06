@@ -138,22 +138,31 @@ pub async fn settings_body(
         }
         .href(true)
     };
-    let sort_option = |label: &str, sort: PathSort| {
-        let href = sort_href(sort);
-        let current = query.sort == sort;
-        html! {
-            a .btn .btn--secondary .btn--sm .filter-toggle
-                href=(href)
-                hx-get=(href)
-                hx-target="#content"
-                hx-push-url="true"
-                aria-current=[current.then_some("true")]
-            {
-                span .filter-toggle__check aria-hidden="true" { (icons::check()) }
-                (label)
-            }
-        }
-    };
+    let sorts = [
+        ("Requests", PathSort::Requests),
+        ("Errors", PathSort::Errors),
+        ("Recent", PathSort::Recent),
+    ];
+    let sort_hrefs: Vec<String> = sorts.iter().map(|(_, sort)| sort_href(*sort)).collect();
+    // One of three orders, so links to the three orderings with the current
+    // one `aria-current` — not three toggles, which would read as three
+    // independent switches.
+    let sort_links = components::FilterLinks::new(
+        "Sort by",
+        sorts
+            .iter()
+            .zip(&sort_hrefs)
+            .map(|((label, sort), href)| components::Tab {
+                active: query.sort == *sort,
+                href,
+                label,
+                icon: None,
+            })
+            .collect(),
+    )
+    .visible_label("network-sort-label")
+    .swap("#content")
+    .render();
     let errors_href = Query {
         errors_only: !query.errors_only,
         ..query.clone()
@@ -165,15 +174,7 @@ pub async fn settings_body(
         div .filter-bar {
             (components::search_input_with_value("search", "Search by path...", &query.href(false), "#content", &query.search))
             div .network-controls {
-                // One of three orders, so links to the three orderings with
-                // the current one `aria-current` — not three toggles, which
-                // would read as three independent switches.
-                nav .filter-toggles aria-labelledby="network-sort-label" {
-                    span #network-sort-label .text-sm .text-muted { "Sort by" }
-                    (sort_option("Requests", PathSort::Requests))
-                    (sort_option("Errors", PathSort::Errors))
-                    (sort_option("Recent", PathSort::Recent))
-                }
+                (sort_links)
                 (components::filter_toggle("Errors only", query.errors_only, &errors_href))
                 button .btn .btn--secondary .btn--sm
                     type="button"

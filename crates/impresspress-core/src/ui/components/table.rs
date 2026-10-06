@@ -974,61 +974,6 @@ mod tests {
             "{s}"
         );
     }
-
-    /// Every file that still writes a first-generation `table .table` by hand
-    /// rather than through this module, with the number it writes. Same
-    /// ratchet as `only_the_declared_files_still_hand_write_badge_markup`: an
-    /// unlisted file must render none, and a listed file's count must be
-    /// exact, so a migration cannot half-land and a new raw table cannot
-    /// appear unrecorded.
-    ///
-    /// **This list is what blocks the deletion of the first-generation table
-    /// stylesheet.** `ui/styles/components/table.css` still carries
-    /// `.table-container`, `.table`, `.table th`, `.table td`,
-    /// `.table tbody tr:hover`, and the `max-width: 720px`
-    /// `white-space: nowrap` rule, for the tables listed below and nothing else —
-    /// administration's 19 moved to `.data-table` in the pull request before
-    /// this one. (`.table th.sortable` went in the same change as this test:
-    /// the sortable header was a `components.rs` affordance that the phase-3a
-    /// administration port deleted, and its two rules outlived it.) `pages_use_only_classes_defined_in_the_stylesheet`
-    /// (`ui/mod.rs`) fails the build if those rules are deleted while any
-    /// entry below survives, which is why the deletion could not ship here.
-    ///
-    /// When the last entry goes, delete those rules with it and delete this
-    /// test. Migrating one is not free: `.data-table` is a different chrome
-    /// (rounded, bordered, sticky `thead`, dashed row rules, a `data-label`
-    /// per cell that collapses to cards below 720px), so each entry is a
-    /// rendered change. `blocks/userportal` has no visual baseline for that
-    /// page, so the gate there is a Rust render test, not a screenshot.
-    ///
-    /// The scope is maud's bare `.table` class shorthand, the form every one is
-    /// written in; the counter is `test_support::count_bare_class_shorthand`,
-    /// shared with the badge ratchet rather than copied, and it reads every
-    /// boundary maud accepts, unspaced ones included.
-    const HAND_WRITTEN_TABLES: &[(&str, usize)] =
-        &[("blocks/userportal/pages/admin_buttons.rs", 1)];
-
-    #[test]
-    fn only_the_declared_files_still_hand_write_a_first_generation_table() {
-        let expected: std::collections::BTreeMap<&str, usize> =
-            HAND_WRITTEN_TABLES.iter().copied().collect();
-        // Skipped for the reason the badge ratchet skips its own pair: string
-        // literals are not masked, this file names `.table` in the assertion
-        // below and in the doc comment's rule list, and `ui/test_support.rs`
-        // holds the counter's own fixtures. Neither renders a page.
-        let found = crate::ui::test_support::hand_written_class_shorthand(
-            "table",
-            &["ui/components/table.rs", "ui/test_support.rs"],
-        );
-        let found_refs: std::collections::BTreeMap<&str, usize> =
-            found.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-        assert_eq!(
-            found_refs, expected,
-            "first-generation table markup moved; update HAND_WRITTEN_TABLES only to \
-             remove entries or lower counts, and when it empties delete the \
-             .table / .table-container rules from ui/styles/components/table.css"
-        );
-    }
 }
 
 #[cfg(test)]

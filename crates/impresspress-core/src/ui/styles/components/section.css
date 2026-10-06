@@ -13,3 +13,7 @@
 	min-width: 0; overflow-wrap: anywhere;
 }
 .section-header__action { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+/* A one-sentence description under a section's heading: pulled up to the
+   heading it describes, the section's spacing below it instead. */
+.section-header:has(+ .section-desc) { margin-bottom: var(--space-1); }
+.section-desc { margin: 0 0 var(--space-4); color: var(--text-muted); font-size: var(--text-sm); }

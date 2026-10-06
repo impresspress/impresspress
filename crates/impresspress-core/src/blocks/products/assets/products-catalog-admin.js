@@ -8,10 +8,9 @@ function productCatalogNew(){productCatalogClearError();var editor=productCatalo
 function productCatalogEditGroup(button){productCatalogNew();productCatalogById('group-editor-title').textContent='Edit group';productCatalogById('group-editor-id').value=button.dataset.recordId;productCatalogById('group-editor-name').value=button.dataset.recordName||'';productCatalogById('group-editor-description').value=button.dataset.recordDescription||'';productCatalogById('group-editor-status').value=button.dataset.recordStatus||'active'}
 async function productCatalogSaveGroup(event){event.preventDefault();productCatalogClearError();var form=event.target,name=productCatalogById('group-editor-name'),button=form.querySelector('button[type="submit"]');if(!form.checkValidity()){productCatalogError('Enter a group name before saving.',name);return}productCatalogBusy(button,true);try{var id=productCatalogById('group-editor-id').value,url='/b/products/api/admin/groups'+(id?'/'+encodeURIComponent(id):'');await productCatalogRequest(url,id?'PATCH':'POST',{name:name.value.trim(),description:productCatalogById('group-editor-description').value.trim(),status:productCatalogById('group-editor-status').value});window.location.reload()}catch(error){productCatalogError(error.message);productCatalogBusy(button,false)}}
 async function productCatalogDelete(button){if(!window.confirm('Delete group '+(button.dataset.recordName||'')+'? Products already using it may prevent deletion.'))return;productCatalogClearError();button.disabled=true;try{await productCatalogRequest('/b/products/api/admin/groups/'+encodeURIComponent(button.dataset.recordId),'DELETE');window.location.reload()}catch(error){productCatalogError(error.message);button.disabled=false}}
-// Guarded against htmx re-execution; see products-seller-admin.js. This is the page the
-// duplicate-listener defect was concrete on: Groups, Orders, Groups again used
-// to leave `pc-delete` bound twice, so one click raised two confirmations and
-// issued two DELETEs, the second answering not found.
+// Guarded against htmx re-execution; see products-seller-admin.js. Bound twice,
+// `pc-delete` would raise two confirmations and issue two DELETEs, the second
+// answering not found.
 (function(){
   if(window.__productCatalogDelegated)return;
   window.__productCatalogDelegated=true;

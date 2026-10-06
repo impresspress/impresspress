@@ -5,12 +5,12 @@
 //! guard and `ui/components/badge.rs`'s stylesheet-parity guard both need a
 //! `ui/styles/**/*.css` file with its comments removed and its rules split into
 //! selector/body pairs; `ui/mod.rs`'s component-class scan and the
-//! hand-written-markup ratchets in `badge.rs` and `components/table.rs` both
-//! need a `.rs` source with its comments removed, and those two ratchets need
-//! the same shorthand counter and the same source-tree walk on top of it. Every
-//! one of them lives in a `#[cfg(test)] mod tests`, so none can reach another's
-//! private helpers — which is exactly how the second copy of each appeared.
-//! This module is the one copy.
+//! hand-written-markup ratchet in `badge.rs` both need a `.rs` source with its
+//! comments removed, and the ratchet needs the shorthand counter and the
+//! source-tree walk on top of it. Every one of them lives in a
+//! `#[cfg(test)] mod tests`, so none can reach another's private helpers —
+//! which is how a second copy of each once appeared. This module is the one
+//! copy.
 
 use std::collections::{BTreeMap, HashSet};
 

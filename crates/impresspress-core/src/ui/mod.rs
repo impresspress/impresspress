@@ -3104,7 +3104,6 @@ mod tests {
             "form-section__head",
             "messages-new__title",
             "messages-new__type",
-            "nav-icon",
             "page--dashboard",
             "page--detail",
             "page--form",

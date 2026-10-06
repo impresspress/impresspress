@@ -1,25 +1,3 @@
-/* Tables */
-.table-container { overflow-x: auto; }
-
-.table { width: 100%; border-collapse: collapse; }
-
-.table th {
-	text-align: left; padding: var(--space-3);
-	background: var(--bg-secondary);
-	border-bottom: 1px solid var(--border-color);
-	font-size: 0.75rem; font-weight: 600;
-	text-transform: uppercase; color: var(--text-muted);
-	letter-spacing: 0.5px;
-}
-
-.table td {
-	padding: var(--space-3);
-	border-bottom: 1px solid var(--border-light);
-	font-size: 0.875rem;
-}
-
-.table tbody tr:hover { background: var(--bg-hover); }
-
 /* Empty State */
 /* The bare-text empty state, for a list that just needs one line ("No
    buckets", "No active shares"). Its richer sibling -- `.empty` below, built
@@ -366,20 +344,6 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.data-table:not(.data-table--scroll) td.data-table__row-href { grid-column: link; width: auto; margin-left: var(--space-1); }
 	.data-table:not(.data-table--scroll) .data-table__row-href a { margin: -0.5rem -0.5rem -0.5rem 0; }
 }
-/* ===== Mobile table fallback =====
-   This block used to also give an unwrapped `.table` its own horizontal
-   scroll, because the Logs, Network and Permissions administration pages
-   rendered `.table` directly, outside a `.table-container`. None of them
-   does any more — they render `.data-table`, which collapses to cards below
-   720px instead of scrolling — and every `.table` left in the tree is inside
-   a `.table-container`, which already has `overflow-x: auto`. Those two
-   selectors matched nothing and are gone.
-   The nowrap below is still live: it keeps the remaining raw tables'
-   columns (Permissions / Crypto pills) from wrapping inside that scroll. */
-@media (max-width: 720px) {
-	.table th, .table td { white-space: nowrap; }
-}
-
 /* ── Network (Settings › Network, blocks/admin/pages/network.rs) ───── */
 .network-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
 .network-summary { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }

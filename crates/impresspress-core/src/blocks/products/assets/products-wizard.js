@@ -34,9 +34,15 @@ function productWizardTemplateChanged(){
 function productWizardShowStep(step,scrollToStep){
   productWizardStep=Math.max(1,Math.min(5,step));
   document.querySelectorAll('[data-wizard-step]').forEach(function(el){el.hidden=Number(el.dataset.wizardStep)!==productWizardStep});
+  // The current step is `aria-current="step"`; a finished one shows its
+  // check mark. Only the colour classes are swapped, so the pill keeps the
+  // layout classes the page rendered it with.
   document.querySelectorAll('[data-wizard-indicator]').forEach(function(el){
     var current=Number(el.dataset.wizardIndicator);
-    el.className='badge '+(current===productWizardStep?'badge-primary':current<productWizardStep?'badge-success':'badge-secondary');
+    el.classList.remove('badge-primary','badge-success','badge-secondary');
+    el.classList.add(current===productWizardStep?'badge-primary':current<productWizardStep?'badge-success':'badge-secondary');
+    if(current===productWizardStep)el.setAttribute('aria-current','step');
+    else el.removeAttribute('aria-current');
     var check=el.querySelector('.wizard-step-check');
     if(check)check.hidden=current>=productWizardStep;
   });
@@ -406,9 +412,9 @@ function initProductWizard(){productWizardTemplateChanged();productWizardShippin
 // "+ Add input"/"+ Add row" buttons, which is why those two verbs work on both
 // pages from this one listener.
 //
-// Guarded for the reason spelled out at the top of products-seller-admin.js: an htmx tab swap
+// Guarded for the reason spelled out at the top of products-seller-admin.js: an htmx swap
 // re-executes this script against the same `document`, so an unguarded
-// registration accumulates one listener per visit.
+// registration would accumulate one listener per swap.
 (function(){
   if(window.__productWizardDelegated)return;
   window.__productWizardDelegated=true;

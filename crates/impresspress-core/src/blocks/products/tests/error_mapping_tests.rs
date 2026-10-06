@@ -591,9 +591,10 @@ async fn settings_page_config_denial_is_the_403_page_not_a_500() {
     assert!(!html.contains("settings-form"), "{html}");
 }
 
-/// Records a miss unless `msg` answers the styled 403 page a refused read
-/// gets — not a 200 page printing the refusal's own text where the table
-/// would be.
+/// Records a miss unless `msg` answers the 403 a refused read gets, drawn
+/// inside the shell under the products section links with a link back —
+/// not a 200 page printing the refusal's own text where the table would be,
+/// and not a bare full-screen page whose only way out is "Go home".
 async fn expect_refused_page(
     misses: &mut Vec<String>,
     ctx: &dyn wafer_run::context::Context,
@@ -604,7 +605,8 @@ async fn expect_refused_page(
     let parts =
         wafer_block::http_codec::collect_http_response(dispatch(ctx, msg, input).await).await;
     let html = String::from_utf8_lossy(&parts.body);
-    if parts.status != 403 || !html.contains("Go home") || html.contains("refused by") {
+    let in_shell = html.contains(r#"<nav class="subnav""#) && html.contains("Back to ");
+    if parts.status != 403 || !in_shell || html.contains("Go home") || html.contains("refused by") {
         misses.push(format!("{path}: {} {html}", parts.status));
     }
 }
