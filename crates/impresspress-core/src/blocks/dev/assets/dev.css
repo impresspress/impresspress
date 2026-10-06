@@ -194,8 +194,8 @@
 .dev-file {
 	display: block;
 	width: 100%;
-	/* 36px for a mouse, a denser row than a `.btn`; a finger's floor
-	   (--target-min, tokens.css) is higher and wins. */
+	/* 36px for a mouse, a list row a little under a `.btn`'s 40px; a
+	   finger's floor (--target-min, tokens.css) is higher and wins. */
 	min-height: max(36px, var(--target-min));
 	padding: var(--space-2) var(--space-3);
 	border: 0;

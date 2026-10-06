@@ -59,8 +59,11 @@
 .form-input,
 .form-select,
 .form-textarea {
-	width: 100%; min-height: var(--target-min);
-	padding: var(--space-3) var(--space-4);
+	/* The padding leaves the natural height under --control-height, so the
+	   token alone sets it and a select, a text box and a button in one row
+	   are the same height. */
+	width: 100%; min-height: var(--control-height);
+	padding: var(--space-2) var(--space-4);
 	border: 1px solid #e8ecf1; border-radius: 10px;
 	background: #f8fafc; color: #111827;
 	font-size: 0.9rem; transition: all 0.2s ease;
@@ -514,11 +517,11 @@
 .settings-section__gated { margin-top: var(--space-5); }
 
 /* The Color widget: the hex box and its swatch side by side, the swatch a
- * square about as tall as the box, for a mouse and a finger alike. */
+ * square as tall as the box. */
 .color-picker-row { display: flex; align-items: center; gap: var(--space-3); }
 .color-picker-row .form-input { flex: 1; }
 .color-swatch-input {
-	flex: none; width: 2.75rem; height: 2.75rem;
+	flex: none; width: var(--control-height); height: var(--control-height);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-md);
 	cursor: pointer;

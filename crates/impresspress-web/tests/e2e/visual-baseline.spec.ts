@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { targetFloor } from './fixtures/targets';
 
 const ANON_ROUTES = [
   { path: '/b/auth/login', name: 'auth-login' },
@@ -335,7 +336,10 @@ test.describe('visual baseline mobile — anonymous (375px)', () => {
     test(`anon-mobile ${r.name}`, async ({ page }) => {
       await page.setViewportSize(MOBILE_VIEWPORT);
       await page.goto(r.path, { waitUntil: 'networkidle' });
+      expect(await targetFloor(page)).toBe(44);
       await expectPageScreenshot(page, `anon-${r.name}-mobile.png`);
+      // Still touch after the capture, so the baseline is a phone's.
+      expect(await targetFloor(page)).toBe(44);
     });
   }
 });
@@ -350,7 +354,10 @@ test.describe('visual baseline mobile — admin (375px)', () => {
     test(`admin-mobile ${r.name}`, async ({ page }) => {
       await page.setViewportSize(MOBILE_VIEWPORT);
       await page.goto(r.path, { waitUntil: 'networkidle' });
+      expect(await targetFloor(page)).toBe(44);
       await expectPageScreenshot(page, `admin-${r.name}-mobile.png`, volatileMasks(page));
+      // Still touch after the capture, so the baseline is a phone's.
+      expect(await targetFloor(page)).toBe(44);
     });
   }
 });

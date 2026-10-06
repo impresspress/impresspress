@@ -476,12 +476,6 @@
 	align-items: end;
 }
 .messages-new__form .form-group { margin-bottom: 0; }
-/* The select, the text box and the button stand in one row: one height for
-   all three, a pixel over the text box's own (a select's native chrome
-   otherwise sits 2-3px taller than the text box, and the button shorter), so
-   their edges line up. It is a row height, not the target floor: the same for
-   a mouse and a finger, and no less than the floor for either. */
-.messages-new__form .form-input, .messages-new__submit { height: 44px; }
 @media (max-width: 720px) {
 	.messages-new__form { grid-template-columns: 1fr; }
 }

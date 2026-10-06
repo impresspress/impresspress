@@ -59,7 +59,7 @@ pub fn tab_navigation(tabs: Vec<Tab<'_>>) -> Markup {
 /// with this filter's value inverted and every other filter kept.
 pub fn filter_toggle(label: &str, pressed: bool, href: &str) -> Markup {
     html! {
-        button .btn .btn--secondary .btn--sm .filter-toggle
+        button .btn .btn--secondary .filter-toggle
             type="button"
             aria-pressed=(if pressed { "true" } else { "false" })
             hx-get=(href)
@@ -165,7 +165,7 @@ impl<'a> FilterLinks<'a> {
                     span #(id) .text-sm .text-muted { (self.label) }
                 }
                 @for link in self.links {
-                    a .btn .btn--secondary .btn--sm .filter-toggle
+                    a .btn .btn--secondary .filter-toggle
                         href=(link.href)
                         hx-get=[self.swap_target.map(|_| link.href)]
                         hx-target=[self.swap_target]
@@ -285,11 +285,11 @@ mod tests {
         )
         .into_string();
         assert!(
-            s.starts_with(r#"<nav class="filter-toggles" aria-label="Product views"><a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage" aria-current="true"><span class="filter-toggle__check" aria-hidden="true">"#),
+            s.starts_with(r#"<nav class="filter-toggles" aria-label="Product views"><a class="btn btn--secondary filter-toggle" href="/b/products/admin/manage" aria-current="true"><span class="filter-toggle__check" aria-hidden="true">"#),
             "{s}"
         );
         assert!(
-            s.contains(r#"<a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage?view=deleted"><span"#),
+            s.contains(r#"<a class="btn btn--secondary filter-toggle" href="/b/products/admin/manage?view=deleted"><span"#),
             "{s}"
         );
         // Plain links: a view changes the topbar, so it is never a swap.
@@ -312,7 +312,7 @@ mod tests {
         .render()
         .into_string();
         assert!(
-            s.starts_with(r##"<nav class="filter-toggles" aria-labelledby="network-sort-label"><span class="text-sm text-muted" id="network-sort-label">Sort by</span><a class="btn btn--secondary btn--sm filter-toggle" href="/b/admin/settings/network?sort=errors" hx-get="/b/admin/settings/network?sort=errors" hx-target="#content" hx-push-url="true" aria-current="true">"##),
+            s.starts_with(r##"<nav class="filter-toggles" aria-labelledby="network-sort-label"><span class="text-sm text-muted" id="network-sort-label">Sort by</span><a class="btn btn--secondary filter-toggle" href="/b/admin/settings/network?sort=errors" hx-get="/b/admin/settings/network?sort=errors" hx-target="#content" hx-push-url="true" aria-current="true">"##),
             "{s}"
         );
     }

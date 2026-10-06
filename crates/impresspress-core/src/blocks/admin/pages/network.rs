@@ -176,7 +176,7 @@ pub async fn settings_body(
             div .network-controls {
                 (sort_links)
                 (components::filter_toggle("Errors only", query.errors_only, &errors_href))
-                button .btn .btn--secondary .btn--sm
+                button .btn .btn--secondary
                     type="button"
                     hx-get=(page_href)
                     hx-target="#content"

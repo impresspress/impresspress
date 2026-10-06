@@ -375,9 +375,14 @@
 }
 .topbar__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: 0; }
 .topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+/* The actions stand in one row with the palette button, so a small one
+   takes the row's height (and an icon one its width) -- its text stays
+   small. */
+.topbar__actions .btn--sm { min-height: var(--control-height); }
+.topbar__actions .btn--icon.btn--sm { min-width: var(--control-height); }
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
-	min-height: max(36px, var(--target-min));
+	min-height: var(--control-height);
 	background: var(--surface-3); border: 1px solid var(--border-color);
 	border-radius: var(--radius-md); padding: var(--space-1) var(--space-3); font-size: var(--text-sm);
 	color: var(--text-secondary); cursor: pointer;

@@ -35,16 +35,15 @@
 	cursor: pointer;
 	transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 	text-decoration: none; white-space: nowrap;
-	/* The shared target floor (tokens.css): a no-op for a mouse, where every
-	   size below is already taller than 24px; 44px under a finger, whatever
-	   the window's width. */
-	min-height: var(--target-min);
+	/* One height with the form controls a button stands beside (tokens.css):
+	   40px for a mouse, 44px under a finger, whatever the window's width. */
+	min-height: var(--control-height);
 }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* ── Sizes ─────────────────────────────────────────────── */
-.btn--sm { padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
-.btn--md { padding: var(--space-2) var(--space-4); font-size: var(--text-base); }
+.btn--sm { min-height: var(--control-height-sm); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
+.btn--md { min-height: var(--control-height); padding: var(--space-2) var(--space-4); font-size: var(--text-base); }
 /* Vertical padding snaps to --space-3, not the nearer --space-2 (0.6rem is
    9.6px, 1.6px from --space-2's 8px vs 2.4px from --space-3's 12px) --
    nearest-neighbour would tie .btn--lg's vertical padding with .btn--md's
@@ -53,9 +52,10 @@
 .btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
    vertical rather than the text-button ratio. It has no words to make it
-   wide, so it takes the target floor across as well as down; it always
-   carries an `aria-label`, its only name. */
-.btn--icon { padding: var(--space-2); min-width: var(--target-min); }
+   wide, so it is as wide as its size is tall; it always carries an
+   `aria-label`, its only name. */
+.btn--icon { padding: var(--space-2); min-width: var(--control-height); }
+.btn--icon.btn--sm { min-width: var(--control-height-sm); }
 
 /* ── Variants ──────────────────────────────────────────── */
 .btn--primary { background: var(--primary-button); color: #fff; border-color: var(--primary-button); }

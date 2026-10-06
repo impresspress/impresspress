@@ -562,10 +562,11 @@ mod tests {
     /// 44px, a mouse keeps the compact controls with WCAG 2.5.8's 24px
     /// floor. Both values live in ONE token, `--target-min`, which tokens.css
     /// sets to 24px in `:root` and to 44px under `@media (any-pointer:
-    /// coarse)` -- the only pointer query anywhere. A control states its
-    /// floor as `min-height: var(--target-min)`, never as a number: a 44px
-    /// floor written out (or behind a width query, where it misses a tablet
-    /// in landscape and burdens a narrow desktop window) is what this
+    /// coarse)` -- the only pointer or hover query anywhere. A control states
+    /// its size through that token or the row heights built on it
+    /// (`--control-height`, `--control-height-sm`), never as a number: a
+    /// 44px floor written out (or behind a width query, where it misses a
+    /// tablet in landscape and burdens a narrow desktop window) is what this
     /// replaced. Covers the shared bundle and every block stylesheet.
     #[cfg(feature = "embed-assets")]
     #[test]
@@ -573,13 +574,18 @@ mod tests {
         let bundle = strip_css_comments(super::css());
         let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        assert_eq!(
-            parse_root_tokens(super::css())
-                .get("--target-min")
-                .map(String::as_str),
-            Some("24px"),
-            "tokens.css :root must set the fine-pointer floor, --target-min: 24px"
-        );
+        let tokens = parse_root_tokens(super::css());
+        for (token, value) in [
+            ("--target-min", "24px"),
+            ("--control-height", "max(2.5rem, var(--target-min))"),
+            ("--control-height-sm", "max(2rem, var(--target-min))"),
+        ] {
+            assert_eq!(
+                tokens.get(token).map(String::as_str),
+                Some(value),
+                "tokens.css :root must set {token}: {value}"
+            );
+        }
         const QUERY: &str = "@media (any-pointer: coarse)";
         let at = bundle
             .find(QUERY)
@@ -605,35 +611,257 @@ mod tests {
 
         let mut uses = 0;
         for (name, sheet) in all_stylesheets() {
-            let sheet = strip_css_comments(&sheet);
-            let queries = sheet.matches("pointer:").count() + sheet.matches("pointer :").count();
-            let allowed = usize::from(name == "app.css");
-            assert_eq!(
-                queries, allowed,
-                "{name}: a pointer media query outside tokens.css; size the control with var(--target-min)"
-            );
-            for (selector, body) in css_leaf_blocks(&sheet) {
-                for decl in body.split(';') {
-                    let Some((prop, value)) = decl.split_once(':') else {
-                        continue;
-                    };
-                    let (prop, value) = (prop.trim(), normalise(value));
-                    uses += value.matches("var(--target-min)").count();
-                    let floor = matches!(
-                        prop,
-                        "min-height" | "min-width" | "min-block-size" | "min-inline-size"
-                    );
-                    assert!(
-                        !(floor && (value.contains("44px") || value.contains("2.75rem"))),
-                        "{name}: `{selector}` writes a 44px floor (`{prop}: {value}`); use var(--target-min)"
-                    );
-                }
-            }
+            let allowed_queries = usize::from(name == "app.css");
+            let violations = touch_size_violations(&sheet, allowed_queries);
+            assert!(violations.is_empty(), "{name}:\n{}", violations.join("\n"));
+            uses += strip_css_comments(&sheet)
+                .matches("var(--target-min)")
+                .count()
+                + strip_css_comments(&sheet)
+                    .matches("var(--control-height")
+                    .count();
         }
         assert!(
             uses >= 30,
-            "expected the controls to use --target-min, found {uses} uses"
+            "expected the controls to use the target tokens, found {uses} uses"
         );
+    }
+
+    /// The checker above catches a 44px size however it is spelled, and a
+    /// pointer or hover query however it is spaced.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn touch_size_checker_sees_through_units_and_calc() {
+        for bad in [
+            ".btn { min-height: 2.75em; }",
+            ".btn { min-height: calc(22px * 2); }",
+            ".btn { height: 44px; }",
+            ".tab { block-size: 2.75rem; }",
+            "a.link { min-width: max(1rem, 3rem); }",
+            ".item { min-height: clamp(44px, 5vh, 60px); }",
+            "@media (hover: none) { .btn { padding: 0; } }",
+            "@media (any-pointer:coarse) { .btn { padding: 0; } }",
+        ] {
+            assert!(
+                !touch_size_violations(bad, 0).is_empty(),
+                "the checker passed `{bad}`"
+            );
+        }
+        for good in [
+            ".btn { min-height: var(--control-height); }",
+            ".btn--sm { min-height: var(--control-height-sm); }",
+            ".toast-dismiss { min-width: var(--target-min); }",
+            ".btn--lg { min-height: 2.5rem; }",
+            ".dev-file { min-height: max(36px, var(--target-min)); }",
+            ".btn:hover:not(:disabled) { background: red; }",
+            ".card { min-height: 360px; }",
+        ] {
+            assert_eq!(
+                touch_size_violations(good, 0),
+                Vec::<String>::new(),
+                "the checker refused `{good}`"
+            );
+        }
+    }
+
+    /// Every way a stylesheet can size a control to a touch target without
+    /// the tokens: a `min-height`, `height` or `block-size` of 44px or more,
+    /// or a 44-48px `min-width` (in
+    /// px, rem or em, bare or in `calc`/`max`/`min`/`clamp`) on a control
+    /// selector that does not go through `var(--target-min)` or
+    /// `var(--control-height*)`, and any `pointer`/`hover` media query beyond
+    /// `allowed_queries`.
+    #[cfg(feature = "embed-assets")]
+    fn touch_size_violations(sheet: &str, allowed_queries: usize) -> Vec<String> {
+        let sheet = strip_css_comments(sheet);
+        let mut out = Vec::new();
+        let query = regex::Regex::new(r"\(\s*(any-)?(pointer|hover)\s*:").expect("valid regex");
+        let queries = query.find_iter(&sheet).count();
+        if queries != allowed_queries {
+            out.push(format!(
+                "{queries} pointer/hover media queries (allowed: {allowed_queries}); size controls with var(--target-min)"
+            ));
+        }
+        for (selector, body) in css_leaf_blocks(&sheet) {
+            if !is_control_selector(&selector) {
+                continue;
+            }
+            for decl in body.split(';') {
+                let Some((prop, value)) = decl.split_once(':') else {
+                    continue;
+                };
+                let (prop, value) = (prop.trim(), value.trim());
+                let sizing = prop.starts_with("min-") || prop == "height" || prop == "block-size";
+                if !sizing
+                    || value.contains("var(--target-min)")
+                    || value.contains("var(--control-height")
+                {
+                    continue;
+                }
+                // Down: anything from 44px up is a touch floor in disguise
+                // (a control's height is its padding, line and the tokens).
+                // Across: a field's width legitimately runs to any size, so
+                // only a target-shaped 44-48px is.
+                let across = prop == "min-width" || prop == "min-inline-size";
+                let px = css_length_px(value).unwrap_or(0.0);
+                if px >= 44.0 && (!across || px <= 48.0) {
+                    out.push(format!(
+                        "`{selector}` sizes a control to a touch target without the tokens: `{prop}: {value}`"
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// A selector whose subject is an interactive control: a native control
+    /// element, a `role`, or a class named for one (a button, toggle, tab,
+    /// link, item, summary, input, close/dismiss control...). Matched on the
+    /// last compound of each selector in the list, pseudo-classes removed.
+    #[cfg(feature = "embed-assets")]
+    fn is_control_selector(selector: &str) -> bool {
+        const ELEMENTS: [&str; 7] = [
+            "a", "button", "input", "select", "textarea", "summary", "label",
+        ];
+        const CLASS_WORDS: [&str; 22] = [
+            "btn", "button", "toggle", "tab", "link", "item", "summary", "input", "select",
+            "close", "dismiss", "checkbox", "radio", "switch", "chevron", "trigger", "palette",
+            "swatch", "submit", "control", "crumbs", "option",
+        ];
+        selector.split(',').any(|one| {
+            let subject = one
+                .rsplit([' ', '>', '+', '~'])
+                .find(|part| !part.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            let subject = subject.split("::").next().unwrap_or(subject);
+            let mut compound = String::new();
+            let mut depth = 0;
+            let mut skipping = false;
+            for c in subject.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    ':' if depth == 0 => skipping = true,
+                    '.' | '[' | '#' if depth == 0 => skipping = false,
+                    _ => {}
+                }
+                if !skipping && depth == 0 && c != ')' {
+                    compound.push(c);
+                }
+            }
+            let element: String = compound
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            ELEMENTS.contains(&element.as_str())
+                || compound.contains("[role")
+                || compound.split(['.', '#', '[']).skip(1).any(|class| {
+                    CLASS_WORDS
+                        .iter()
+                        .any(|w| class.split(['-', '_']).any(|p| p == *w))
+                })
+        })
+    }
+
+    /// The smallest a CSS length can resolve to, in px (1rem = 1em = 16px),
+    /// through `calc`, `max`, `min` and `clamp`. `None` when it depends on
+    /// something unknown here (%, viewport units, a custom property, auto).
+    #[cfg(feature = "embed-assets")]
+    fn css_length_px(value: &str) -> Option<f64> {
+        fn args(inner: &str) -> Vec<&str> {
+            split_top_level(inner)
+        }
+        fn eval(expr: &str) -> Option<f64> {
+            let expr = expr.trim();
+            for (func, combine) in [("max(", 0u8), ("min(", 1), ("clamp(", 2), ("calc(", 3)] {
+                if let Some(inner) = expr.strip_prefix(func).and_then(|r| r.strip_suffix(')')) {
+                    let parts = args(inner);
+                    return match combine {
+                        // At least as large as any argument that is known.
+                        0 => parts.iter().filter_map(|p| eval(p)).reduce(f64::max),
+                        1 => parts
+                            .iter()
+                            .map(|p| eval(p))
+                            .collect::<Option<Vec<_>>>()?
+                            .into_iter()
+                            .reduce(f64::min),
+                        2 => parts.first().and_then(|p| eval(p)),
+                        _ => arith(inner),
+                    };
+                }
+            }
+            if expr.starts_with('(') && expr.ends_with(')') {
+                return arith(&expr[1..expr.len() - 1]);
+            }
+            arith(expr)
+        }
+        // `a op b op c` with + - * /, left to right with * and / first.
+        fn arith(expr: &str) -> Option<f64> {
+            let mut terms = Vec::new();
+            let mut ops = Vec::new();
+            let mut depth = 0;
+            let mut start = 0;
+            let bytes: Vec<char> = expr.chars().collect();
+            for (i, c) in bytes.iter().enumerate() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    '+' | '-' | '*' | '/' if depth == 0 && i > start => {
+                        let prev = bytes[..i].iter().rev().find(|c| !c.is_whitespace());
+                        // A sign, not an operator, after another operator.
+                        if (*c == '-' || *c == '+') && matches!(prev, Some('*' | '/' | '+' | '-')) {
+                            continue;
+                        }
+                        // `-` inside a token like `1e-3` is not used here.
+                        terms.push(bytes[start..i].iter().collect::<String>());
+                        ops.push(*c);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            terms.push(bytes[start..].iter().collect::<String>());
+            let mut values: Vec<f64> = Vec::new();
+            let mut pending: Vec<char> = Vec::new();
+            for (i, term) in terms.iter().enumerate() {
+                let v = atom(term)?;
+                if i > 0 && matches!(ops[i - 1], '*' | '/') {
+                    let last = values.pop()?;
+                    values.push(if ops[i - 1] == '*' {
+                        last * v
+                    } else {
+                        last / v
+                    });
+                } else {
+                    if i > 0 {
+                        pending.push(ops[i - 1]);
+                    }
+                    values.push(v);
+                }
+            }
+            let mut total = values[0];
+            for (op, v) in pending.iter().zip(&values[1..]) {
+                total = if *op == '+' { total + v } else { total - v };
+            }
+            Some(total)
+        }
+        fn atom(term: &str) -> Option<f64> {
+            let term = term.trim();
+            if term.contains('(') {
+                return eval(term);
+            }
+            for (unit, scale) in [("px", 1.0), ("rem", 16.0), ("em", 16.0)] {
+                if let Some(n) = term.strip_suffix(unit) {
+                    return n.trim().parse::<f64>().ok().map(|n| n * scale);
+                }
+            }
+            term.parse::<f64>().ok()
+        }
+        // A bare number is a multiplier, not a length.
+        let px = eval(value)?;
+        let has_unit = ["px", "rem", "em"].iter().any(|u| value.contains(u));
+        has_unit.then_some(px)
     }
 
     /// Relative luminance per WCAG 2.1.

@@ -165,7 +165,7 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                         label .form-label for="new-context-title" { "Title" }
                         input .form-input .messages-new__title #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
                     }
-                    button .btn .btn--primary .messages-new__submit type="submit" { "Create" }
+                    button .btn .btn--primary type="submit" { "Create" }
                 }
             }
         }
@@ -981,7 +981,7 @@ mod form_contract_tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"class="btn btn--primary messages-new__submit""#),
+            html.contains(r#"<button class="btn btn--primary" type="submit">Create</button>"#),
             "{html}"
         );
     }
