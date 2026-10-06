@@ -43,6 +43,14 @@
    requirement than the `color-mix()` this bundle already ships (Chrome
    105 vs 111, Safari 15.4 vs 16.2, Firefox 121 vs 113). */
 .card { background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg); margin-bottom: var(--space-4); }
+/* A plain card's padding tightens on a phone. Stated here, beside the rule it
+   narrows and before every card modifier, so a modifier that sets its own
+   padding or margin (`.thread-card`, `.message-card--*`) still wins below
+   720px. Anywhere that loads after this file (layouts/page.css) it would
+   override them all. */
+@media (max-width: 720px) {
+	.card { padding: var(--space-4); }
+}
 .card:has(> .card__head), .card:has(> .card__body) { padding: 0; }
 .card__head { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--border-light); }
 .card__title { margin: 0; font-size: var(--text-lg); font-weight: 500; color: var(--text-primary); }
@@ -52,12 +60,6 @@
 /* Card nested inside a container that already draws a border/shadow (e.g. a
  * `<details>` disclosure) — drop the card's own so they don't double up. */
 .card--flat { border: 0; box-shadow: none; }
-/* Card whose single child runs to the card's edge — a `.table-container`,
- * whose cells supply their own padding, or an `.empty-state`, which supplies
- * its own. Replaces a bare `.p-0` utility on these two LLM cards: `p-0` said
- * "no padding" without saying why, and read as a bug next to the `.p-5` on
- * the card above it. */
-.card--flush { padding: 0; }
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 .card__head--end { align-items: flex-end; flex-wrap: wrap; }
@@ -547,6 +549,28 @@
 .message-card--warning { margin-bottom: var(--space-3); background: #fefce8; border-left: 3px solid #eab308; }
 .message-card--user { margin-bottom: var(--space-3); background: #fff1e6; border-left: 3px solid var(--primary-color); }
 .message-card__content { margin: 0; white-space: pre-wrap; word-break: break-word; }
+/* An assistant turn is markdown rendered to HTML (`llm-chat.js`), whose own
+   paragraphs and lists carry the line breaks; pre-wrap would double them. */
+.message-card__content--markdown { white-space: normal; line-height: 1.6; }
+.message-card__content--markdown > :first-child { margin-top: 0; }
+.message-card__content--markdown > :last-child { margin-bottom: 0; }
+.message-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
+
+/* The assistant turn while it is being written (`llm-chat.js`): a pulsing
+   "Thinking..." until the first token, then a blinking caret after the text.
+   Both are motion with no information of their own, so a reader who asks
+   for reduced motion gets them still. */
+@keyframes chatPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+@keyframes chatCaretBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.chat-thinking { animation: chatPulse 1.5s ease-in-out infinite; }
+.typing-cursor {
+	display: inline-block; width: 0.5em; height: 1.1em; margin-left: 2px;
+	vertical-align: text-bottom; background: var(--text-primary);
+	animation: chatCaretBlink 0.8s step-end infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.chat-thinking, .typing-cursor { animation: none; }
+}
 
 /* ===== Thread/conversation list pane =====
    Shared by blocks/llm/pages.rs (chat thread list) and blocks/messages/
@@ -608,11 +632,28 @@
 .quota-bar { background: var(--bg-secondary); border-radius: 0.25rem; height: 8px; overflow: hidden; }
 .quota-bar__fill { height: 100%; background: var(--primary-color); width: var(--fill-pct); transition: width 0.3s; }
 
-/* ===== LLM providers table (blocks/llm/ui.rs) =====
-   Long endpoint/model-list cells truncate instead of wrapping and blowing
-   out the table width. */
-.llm-cell--endpoint { max-width: 260px; }
-.llm-cell--models { max-width: 280px; }
+/* ===== LLM chat options (the chat page's rail, blocks/llm/pages.rs) =====
+   A column in the desktop rail; on a phone the rail is a one-row toolbar
+   above the conversation (layouts/page.css), so the picker and the settings
+   link share a row and the link keeps only its icon -- the sub-nav above
+   names the same page in words. */
+.chat-options { display: flex; flex-direction: column; gap: var(--space-4); }
+.chat-options__settings { align-self: flex-start; }
+/* `#model-status` is empty until llm-chat.js has something to say. */
+.chat-options__status:empty { display: none; }
+@media (max-width: 720px) {
+	.chat-options { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+	.chat-options__model { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
+	.chat-options__model .form-label { margin: 0; }
+	.chat-options__model .form-input { flex: 1; min-width: 0; }
+	.chat-options__status { flex-basis: 100%; }
+	.chat-options__progress { flex-basis: 100%; order: 1; }
+	.chat-options__settings { align-self: center; min-width: 44px; }
+	.chat-options__settings-text {
+		position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+		overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+	}
+}
 
 /* ===== Messages block: task/notification single-pane entries list ===== */
 .entries-list--scroll { max-height: 60vh; overflow-y: auto; }
@@ -652,7 +693,6 @@
 /* Below the two-column width the metadata comes first, under the hero. */
 @media (max-width: 1023px) { .ticket-detail .detail-meta { order: -1; } }
 .ticket-link:hover { text-decoration: underline; }
-.ticket-icon-button { min-width: 44px; min-height: 44px; }
 .ticket-form-actions { display: flex; justify-content: flex-start; margin-top: var(--space-3); }
 .ticket-timeline { list-style: none; margin: var(--space-6) 0 0; padding: 0; border-left: 2px solid var(--border-light); }
 .ticket-event { position: relative; padding: 0 0 var(--space-4) var(--space-4); }

@@ -1007,8 +1007,6 @@ mod tests {
     /// boundary maud accepts, unspaced ones included.
     const HAND_WRITTEN_TABLES: &[(&str, usize)] = &[
         ("blocks/legalpages/pages.rs", 3),
-        ("blocks/llm/pages.rs", 1),
-        ("blocks/llm/ui.rs", 2),
         ("blocks/userportal/pages/admin_buttons.rs", 1),
     ];
 
