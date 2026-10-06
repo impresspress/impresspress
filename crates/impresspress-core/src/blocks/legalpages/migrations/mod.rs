@@ -102,6 +102,46 @@ mod tests {
             .expect("another unnumbered draft");
     }
 
+    /// Publishing does not depend on migration 002 having run: on a table
+    /// without its unique index (a deployment that took the code but not the
+    /// schema change), a number already held is still not taken twice.
+    #[tokio::test]
+    async fn publishing_keeps_numbers_unique_without_the_index() {
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
+        crate::migration_helper::apply_migrations(
+            &ctx,
+            "impresspress/legalpages",
+            &[SQL_001_SQLITE],
+            &[],
+        )
+        .await
+        .expect("apply 001 only");
+        let live = legacy_row(&ctx, DocumentStatus::Published, 2).await;
+
+        let outcome = documents::publish(
+            &ctx,
+            DocumentType::Terms,
+            2,
+            documents::PublishSource::New {
+                title: "Terms",
+                content: "another",
+                created_by: "seed",
+            },
+        )
+        .await
+        .expect("the write runs");
+
+        assert!(matches!(outcome, documents::PublishOutcome::NumberTaken));
+        let row = documents::get(&ctx, &live)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!((row.status, row.version), (DocumentStatus::Published, 2));
+        assert_eq!(documents::count(&ctx).await.expect("count"), 1);
+    }
+
     fn new_draft() -> NewDraft<'static> {
         NewDraft {
             doc_type: DocumentType::Terms,

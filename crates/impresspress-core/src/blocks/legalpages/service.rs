@@ -13,7 +13,7 @@
 //! from one function, [`documents::publish`], and this file is its sole
 //! caller.
 
-use wafer_run::{context::Context, ErrorCode, WaferError};
+use wafer_run::{context::Context, WaferError};
 
 use super::{
     contracts::{DocumentStatus, DocumentType},
@@ -55,27 +55,18 @@ pub(super) enum PublishError {
     /// The draft was published by someone else between the read and the
     /// write; reloading shows what is live now.
     AlreadyPublished,
-    /// A database failure, including a version number another publish kept
-    /// taking first ([`PUBLISH_ATTEMPTS`] times in a row).
-    Db(WaferError),
-}
-
-impl From<WaferError> for PublishError {
-    fn from(e: WaferError) -> Self {
-        Self::Db(e)
-    }
-}
-
-/// Why an edit did not happen.
-#[derive(Debug)]
-pub(super) enum EditError {
-    /// The draft was published meanwhile; reloading shows what is live now.
-    NoLongerADraft,
+    /// `doc_id` is the live version and the request carries no text, so the
+    /// publish would only renumber the text already live. `draft` is the
+    /// type's newest draft — what such a request usually meant to publish.
+    AlreadyLive { version: i64, draft: Option<String> },
+    /// The number kept being taken by concurrent publishes
+    /// ([`PUBLISH_ATTEMPTS`] times in a row).
+    Contended,
     /// A database failure.
     Db(WaferError),
 }
 
-impl From<WaferError> for EditError {
+impl From<WaferError> for PublishError {
     fn from(e: WaferError) -> Self {
         Self::Db(e)
     }
@@ -86,28 +77,32 @@ impl From<WaferError> for EditError {
 /// place; a published or archived version is never changed — the edit is
 /// saved as a new draft of the same type, starting from that version's text
 /// (a `None` field keeps it). Returns the draft that holds the edit.
+///
+/// A draft that another publish took between the caller's read and this
+/// write is, by then, a published version, so the same rule applies to it:
+/// the edit lands in a new draft rather than being lost.
 pub(super) async fn edit_text(
     ctx: &dyn Context,
     row: &DocumentRow,
     title: Option<&str>,
     content: Option<&str>,
     created_by: &str,
-) -> Result<DocumentRow, EditError> {
-    if row.status != DocumentStatus::Draft {
-        return Ok(documents::insert_draft(
-            ctx,
-            NewDraft {
-                doc_type: row.doc_type,
-                title: title.unwrap_or(&row.title),
-                content: content.unwrap_or(&row.content),
-                created_by,
-            },
-        )
-        .await?);
+) -> Result<DocumentRow, WaferError> {
+    if row.status == DocumentStatus::Draft {
+        if let Some(draft) = documents::update_draft_text(ctx, &row.id, title, content).await? {
+            return Ok(draft);
+        }
     }
-    documents::update_draft_text(ctx, &row.id, title, content)
-        .await?
-        .ok_or(EditError::NoLongerADraft)
+    documents::insert_draft(
+        ctx,
+        NewDraft {
+            doc_type: row.doc_type,
+            title: title.unwrap_or(&row.title),
+            content: content.unwrap_or(&row.content),
+            created_by,
+        },
+    )
+    .await
 }
 
 /// How many times a publish reads the next version and tries to take it
@@ -119,17 +114,30 @@ const PUBLISH_ATTEMPTS: usize = 5;
 /// version it replaces.
 ///
 /// A draft is published in place. Anything else — no `doc_id` (a type's
-/// first version), or the live or an archived row — is published as a new
-/// row carrying that row's text (or the editor's), so a published version is
-/// never rewritten: the version it replaces stays, archived, as it was.
+/// first version), or an archived row — is published as a new row carrying
+/// that row's text (or the request's), so a published version is never
+/// rewritten: the version it replaces stays, archived, as it was. The live
+/// row itself is republished only with new text; without any it is refused
+/// ([`PublishError::AlreadyLive`]).
 ///
-/// The number is `latest_version + 1`, taken by the write itself under the
-/// unique `(doc_type, version)` index; when a concurrent publish took it
-/// first, the write fails as a whole and this reads the next number and
-/// tries again.
+/// The number is `latest_version + 1`, taken by the write itself
+/// ([`documents::publish`]); when a concurrent publish took it first, this
+/// reads the next number and tries again.
 pub(super) async fn publish_document(
     ctx: &dyn Context,
     req: PublishRequest<'_>,
+) -> Result<Published, PublishError> {
+    publish_numbered(ctx, req, None).await
+}
+
+/// [`publish_document`], with the first attempt's number given rather than
+/// read when `first_number` is `Some` — the seam a test uses to stand in for
+/// a concurrent publish having taken the number between the read and the
+/// write. Every later attempt reads.
+async fn publish_numbered(
+    ctx: &dyn Context,
+    req: PublishRequest<'_>,
+    first_number: Option<i64>,
 ) -> Result<Published, PublishError> {
     let existing = if req.doc_id.is_empty() {
         None
@@ -140,13 +148,23 @@ pub(super) async fn publish_document(
         if row.doc_type != req.doc_type {
             return Err(PublishError::WrongType);
         }
+        if row.status == DocumentStatus::Published && req.title.is_none() && req.content.is_none() {
+            return Err(PublishError::AlreadyLive {
+                version: row.version,
+                draft: documents::find_latest_draft(ctx, req.doc_type)
+                    .await?
+                    .map(|draft| draft.id),
+            });
+        }
         Some(row)
     };
 
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let version = documents::latest_version(ctx, req.doc_type).await? + 1;
+    let mut next = first_number;
+    for _ in 0..PUBLISH_ATTEMPTS {
+        let version = match next.take() {
+            Some(number) => number,
+            None => documents::latest_version(ctx, req.doc_type).await? + 1,
+        };
         let source = match &existing {
             Some(row) if row.status == DocumentStatus::Draft => PublishSource::Draft {
                 id: &row.id,
@@ -164,13 +182,13 @@ pub(super) async fn publish_document(
                 created_by: req.created_by,
             },
         };
-        match documents::publish(ctx, req.doc_type, version, source).await {
-            Ok(PublishOutcome::Published(row)) => return Ok(Published { row, version }),
-            Ok(PublishOutcome::NotADraft) => return Err(PublishError::AlreadyPublished),
-            Err(e) if e.code == ErrorCode::AlreadyExists && attempt < PUBLISH_ATTEMPTS => continue,
-            Err(e) => return Err(PublishError::Db(e)),
+        match documents::publish(ctx, req.doc_type, version, source).await? {
+            PublishOutcome::Published(row) => return Ok(Published { row, version }),
+            PublishOutcome::NotADraft => return Err(PublishError::AlreadyPublished),
+            PublishOutcome::NumberTaken => continue,
         }
     }
+    Err(PublishError::Contended)
 }
 
 #[cfg(test)]
@@ -506,8 +524,8 @@ mod tests {
         assert_eq!(stored(&ctx, &live.id).await, live);
     }
 
-    /// A number another publish already took fails the write, before the
-    /// archive step runs, so the live version stays live.
+    /// A number another row already holds is not taken: the write changes
+    /// nothing (the live version stays live) and says so.
     #[tokio::test]
     async fn a_taken_version_number_changes_nothing() {
         let ctx = test_ctx().await;
@@ -521,30 +539,34 @@ mod tests {
         .await;
         let draft = seed_doc(&ctx, DocumentType::Terms, "Next", DocumentStatus::Draft, 0).await;
 
-        let err = documents::publish(
-            &ctx,
-            DocumentType::Terms,
-            4,
+        for source in [
             PublishSource::Draft {
                 id: &draft.id,
                 title: None,
                 content: None,
             },
-        )
-        .await
-        .err()
-        .expect("v4 is taken");
-
-        assert_eq!(err.code, ErrorCode::AlreadyExists, "{err:?}");
+            PublishSource::New {
+                title: "New",
+                content: "body",
+                created_by: "admin_1",
+            },
+        ] {
+            let outcome = documents::publish(&ctx, DocumentType::Terms, 4, source)
+                .await
+                .expect("the write runs");
+            assert!(matches!(outcome, PublishOutcome::NumberTaken));
+        }
         assert_eq!(stored(&ctx, &live.id).await, live);
         assert_eq!(stored(&ctx, &draft.id).await, draft);
+        assert_eq!(documents::count(&ctx).await.expect("count"), 2);
     }
 
-    /// Two publishes of one type at once: each gets its own number (the one
-    /// that loses the race reads the next and retries), the higher one is
-    /// live, and the type is never left with nothing published.
+    /// A publish that finds its number taken by a concurrent one reads the
+    /// next number and takes that: the first attempt is made at the live
+    /// version's own number, as if another publish had committed it between
+    /// the read and the write.
     #[tokio::test]
-    async fn concurrent_publishes_number_apart_and_leave_one_live() {
+    async fn a_publish_that_loses_its_number_retries_with_the_next() {
         let ctx = test_ctx().await;
         seed_doc(
             &ctx,
@@ -554,31 +576,98 @@ mod tests {
             3,
         )
         .await;
-        let a = seed_doc(&ctx, DocumentType::Terms, "A", DocumentStatus::Draft, 0).await;
-        let b = seed_doc(&ctx, DocumentType::Terms, "B", DocumentStatus::Draft, 0).await;
-        let request = |id| PublishRequest {
-            doc_type: DocumentType::Terms,
-            doc_id: id,
-            title: None,
-            content: None,
-            created_by: "admin_1",
-        };
+        let draft = seed_doc(&ctx, DocumentType::Terms, "Next", DocumentStatus::Draft, 0).await;
 
-        let (first, second) = tokio::join!(
-            publish_document(&ctx, request(&a.id)),
-            publish_document(&ctx, request(&b.id)),
-        );
-        let mut versions = vec![
-            first.expect("first publish").version,
-            second.expect("second publish").version,
-        ];
-        versions.sort_unstable();
-        assert_eq!(versions, vec![4, 5]);
+        let published = publish_numbered(
+            &ctx,
+            PublishRequest {
+                doc_type: DocumentType::Terms,
+                doc_id: &draft.id,
+                title: None,
+                content: None,
+                created_by: "admin_1",
+            },
+            Some(3),
+        )
+        .await
+        .expect("the retry publishes");
 
+        assert_eq!(published.version, 4);
+        assert_eq!(published.row.id, draft.id);
         let live = documents::list_published(&ctx, DocumentType::Terms)
             .await
             .expect("list published");
         assert_eq!(live.len(), 1, "exactly one live version");
-        assert_eq!(live[0].version, 5);
+        assert_eq!(live[0].id, draft.id);
+    }
+
+    /// Publishing the live version with no new text would only renumber what
+    /// is already live — the usual meaning is "publish my draft" — so it is
+    /// refused, naming the draft.
+    #[tokio::test]
+    async fn republishing_the_live_version_without_text_is_refused() {
+        let ctx = test_ctx().await;
+        let live = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live Terms",
+            DocumentStatus::Published,
+            3,
+        )
+        .await;
+        let draft = seed_doc(&ctx, DocumentType::Terms, "Edit", DocumentStatus::Draft, 0).await;
+
+        let err = publish_document(
+            &ctx,
+            PublishRequest {
+                doc_type: DocumentType::Terms,
+                doc_id: &live.id,
+                title: None,
+                content: None,
+                created_by: "admin_1",
+            },
+        )
+        .await
+        .err()
+        .expect("refused");
+
+        match err {
+            PublishError::AlreadyLive {
+                version,
+                draft: named,
+            } => {
+                assert_eq!(version, 3);
+                assert_eq!(named, Some(draft.id.clone()));
+            }
+            other => panic!("expected AlreadyLive, got {other:?}"),
+        }
+        assert_eq!(stored(&ctx, &live.id).await, live);
+        assert_eq!(documents::count(&ctx).await.expect("count"), 2);
+    }
+
+    /// An edit to a draft another publish took meanwhile is not lost: the
+    /// row is a published version by then, so the edit lands in a new draft.
+    #[tokio::test]
+    async fn an_edit_to_a_draft_published_meanwhile_lands_in_a_new_draft() {
+        let ctx = test_ctx().await;
+        let draft = seed_doc(&ctx, DocumentType::Terms, "Draft", DocumentStatus::Draft, 0).await;
+        // The caller read `draft`; another tab publishes it before the save.
+        let taken = documents::set_state_for_test(&ctx, &draft.id, DocumentStatus::Published, 1)
+            .await
+            .expect("published elsewhere");
+
+        let saved = edit_text(&ctx, &draft, None, Some("my edit"), "admin_1")
+            .await
+            .expect("the edit is kept");
+
+        assert_ne!(saved.id, draft.id);
+        assert_eq!(saved.status, DocumentStatus::Draft);
+        assert_eq!(saved.title, "Draft");
+        assert_eq!(saved.content, "my edit");
+        assert_eq!(
+            stored(&ctx, &draft.id).await,
+            taken,
+            "the published row is untouched"
+        );
     }
 }

@@ -14,8 +14,11 @@
 //! computed. A request body cannot reach either column: that is the B10 fix,
 //! held by construction rather than by a validation list.
 
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::clients::database::{self as db, Record};
+use wafer_block::{
+    db::{Filter, FilterOp, ListOptions, SortField},
+    wire::database::{InsertGuardedResponse, UpdateGuardedResponse},
+};
+use wafer_core::clients::database::{self as db, CapGuard, Record};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use super::{
@@ -120,6 +123,9 @@ pub enum PublishOutcome {
     /// The draft was no longer a draft when the write ran (another publish
     /// took it first). Nothing was written.
     NotADraft,
+    /// Another row of the type already holds `version` (a concurrent publish
+    /// took it). Nothing was written; the caller reads the next number.
+    NumberTaken,
 }
 
 /// Every row of one document type. The first of the two filter shapes this
@@ -333,12 +339,16 @@ pub async fn update_draft_text(
 /// Make `source` live as `version` of `doc_type`, then archive every other
 /// published row of the type numbered below it.
 ///
-/// The write takes `version` itself: migration 002's partial unique index on
-/// `(doc_type, version)` refuses a second row with the same number, and the
-/// write then fails with `AlreadyExists` having changed nothing; the caller
-/// reads the next number and tries again. A draft is published only while it
-/// is still a draft (one conditional update), so a publish that lost its
-/// draft to another one writes nothing and archives nothing.
+/// The write takes `version` itself, as one guarded statement: it runs only
+/// while no row of the type holds the number (a `CountBelow` guard, atomic
+/// against every other guarded write to the table), and answers
+/// [`PublishOutcome::NumberTaken`] having changed nothing when one does; the
+/// caller reads the next number and tries again. The guard does not depend on
+/// migration 002 having run — the partial unique index on
+/// `(doc_type, version)` it adds is a second line, and its `AlreadyExists` is
+/// reported the same way. A draft is published only while it is still a
+/// draft (the update's own filter), so a publish that lost its draft to
+/// another one writes nothing and archives nothing.
 ///
 /// The archive is a second statement, and it only ever names rows numbered
 /// below the one just made live. That keeps the invariant every reader
@@ -379,8 +389,24 @@ pub async fn publish(
                     serde_json::json!(DocumentStatus::Draft),
                 ),
             ];
-            if db::update_by_filters_count(ctx, TABLE, still_a_draft, live).await? == 0 {
-                return Ok(PublishOutcome::NotADraft);
+            match db::update_guarded(
+                ctx,
+                TABLE,
+                &still_a_draft,
+                live,
+                &number_free(doc_type, version),
+            )
+            .await
+            {
+                Ok(UpdateGuardedResponse::Updated { .. }) => {}
+                Ok(UpdateGuardedResponse::Refused { .. }) => {
+                    return Ok(PublishOutcome::NumberTaken)
+                }
+                Ok(UpdateGuardedResponse::NoMatch) => return Ok(PublishOutcome::NotADraft),
+                Err(e) if e.code == ErrorCode::AlreadyExists => {
+                    return Ok(PublishOutcome::NumberTaken)
+                }
+                Err(e) => return Err(e),
             }
             match get(ctx, id).await? {
                 Some(row) => row,
@@ -399,7 +425,18 @@ pub async fn publish(
                 "created_by": created_by,
                 "created_at": now,
             })));
-            DocumentRow::from_record(&db::create(ctx, TABLE, live).await?)?
+            match db::insert_guarded(ctx, TABLE, live, &number_free(doc_type, version)).await {
+                Ok(InsertGuardedResponse::Inserted { record }) => {
+                    DocumentRow::from_record(&record)?
+                }
+                Ok(InsertGuardedResponse::Refused { .. }) => {
+                    return Ok(PublishOutcome::NumberTaken)
+                }
+                Err(e) if e.code == ErrorCode::AlreadyExists => {
+                    return Ok(PublishOutcome::NumberTaken)
+                }
+                Err(e) => return Err(e),
+            }
         }
     };
 
@@ -417,6 +454,21 @@ pub async fn publish(
     )
     .await?;
     Ok(PublishOutcome::Published(row))
+}
+
+/// The guard every publish write carries: no row of `doc_type` holds
+/// `version` yet.
+fn number_free(doc_type: DocumentType, version: i64) -> [CapGuard; 1] {
+    let mut holders = of_type(doc_type);
+    holders.push(filter(
+        "version",
+        FilterOp::Equal,
+        serde_json::json!(version),
+    ));
+    [CapGuard::CountBelow {
+        filters: holders,
+        cap: 1,
+    }]
 }
 
 /// One `field op value` predicate.

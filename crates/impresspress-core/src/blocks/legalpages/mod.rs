@@ -445,7 +445,7 @@ impl LegalPagesBlock {
         .await
         {
             Ok(draft) => ok_json(&DocumentView::from_row(&draft)),
-            Err(e) => edit_failed(e),
+            Err(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
         }
     }
 
@@ -514,16 +514,6 @@ impl LegalPagesBlock {
     }
 }
 
-/// The response for an edit that did not happen, for both edit surfaces.
-fn edit_failed(error: service::EditError) -> OutputStream {
-    match error {
-        service::EditError::NoLongerADraft => crate::http::err_conflict(
-            "This draft was published meanwhile; reload to edit what is live",
-        ),
-        service::EditError::Db(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
-    }
-}
-
 /// The response for a publish that did not happen, for both publish
 /// surfaces (the editor's and the JSON API's).
 fn publish_failed(error: service::PublishError) -> OutputStream {
@@ -535,6 +525,19 @@ fn publish_failed(error: service::PublishError) -> OutputStream {
         }
         PublishError::AlreadyPublished => crate::http::err_conflict(
             "This draft was published by someone else meanwhile; reload to see what is live",
+        ),
+        PublishError::AlreadyLive { version, draft } => crate::http::err_conflict(&match draft {
+            Some(id) => format!(
+                "This is the live version (v{version}) and the request carries no new text; \
+                 publish the draft {id} to make an edit live"
+            ),
+            None => format!(
+                "This is the live version (v{version}) and the request carries no new text, \
+                 so there is nothing to publish"
+            ),
+        }),
+        PublishError::Contended => crate::http::err_conflict(
+            "Other publishes of this document kept taking the next version; try again",
         ),
         PublishError::Db(e) => crud::db_error_internal(e, "Failed to publish legal page"),
     }

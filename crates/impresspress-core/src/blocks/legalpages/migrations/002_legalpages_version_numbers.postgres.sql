@@ -1,8 +1,15 @@
--- Legalpages version numbers (PostgreSQL). Mirrors 002_legalpages_version_numbers.sqlite.sql.
+-- Legalpages version numbers (PostgreSQL). Mirrors 002_legalpages_version_numbers.sqlite.sql,
+-- plus the column type change SQLite cannot make without rebuilding the table.
 --
 -- Version numbers are the server's: a draft is unnumbered (0) until it is
 -- published, and each number is taken at most once per document type.
--- Re-runnable: both updates are idempotent and the index is IF NOT EXISTS.
+-- Re-runnable: the type change is a no-op on INTEGER, both updates are
+-- idempotent and the index is IF NOT EXISTS.
+
+-- A table created before migration 001 (the implicit materialisation) has a
+-- TEXT version column; numbers must compare as numbers. A no-op on INTEGER.
+ALTER TABLE impresspress__legalpages__documents
+    ALTER COLUMN version TYPE INTEGER USING version::integer;
 
 -- Drafts used to be stored as version 1.
 UPDATE impresspress__legalpages__documents SET version = 0 WHERE status = 'draft';

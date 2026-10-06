@@ -440,7 +440,7 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
             .await
             {
                 Ok(draft) => draft,
-                Err(e) => return super::edit_failed(e),
+                Err(e) => return crud::db_error_internal(e, "Failed to save legal-page draft"),
             }
         }
         None => match documents::insert_draft(
