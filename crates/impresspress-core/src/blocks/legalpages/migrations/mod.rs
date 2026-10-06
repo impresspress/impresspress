@@ -4,15 +4,126 @@
 const SQL_001_SQLITE: &str = include_str!("001_legalpages_schema.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_legalpages_schema.postgres.sql");
+const SQL_002_SQLITE: &str = include_str!("002_legalpages_version_numbers.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_002_POSTGRES: &str = include_str!("002_legalpages_version_numbers.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
-pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_legalpages_schema", SQL_001_SQLITE)];
+pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_legalpages_schema", SQL_001_SQLITE),
+    ("002_legalpages_version_numbers", SQL_002_SQLITE),
+];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+
+#[cfg(test)]
+mod tests {
+    use wafer_core::clients::database as db;
+
+    use super::*;
+    use crate::blocks::legalpages::{
+        contracts::{DocumentStatus, DocumentType},
+        repo::documents::{self, NewDraft},
+    };
+
+    /// Migration 002 over data written before it: drafts stored as v1 become
+    /// unnumbered, and where publishes reused a number the published row (else
+    /// the most recently updated one) keeps it — after which the unique index
+    /// can be built and holds.
+    #[tokio::test]
+    async fn version_numbers_migration_unnumbers_drafts_and_resolves_clashes() {
+        let mut ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
+        let block = "impresspress/legalpages";
+        crate::migration_helper::apply_migrations(&ctx, block, &[SQL_001_SQLITE], &[])
+            .await
+            .expect("apply 001");
+
+        // Rows as the pre-002 code wrote them.
+        let row = |status: DocumentStatus, version: i64, updated_at: &'static str| {
+            serde_json::json!({
+                "doc_type": DocumentType::Terms,
+                "title": "Terms",
+                "content": "body",
+                "status": status,
+                "version": version,
+                "created_by": "seed",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": updated_at,
+            })
+        };
+        let mut ids = Vec::new();
+        for data in [
+            row(DocumentStatus::Draft, 1, "2026-03-01T00:00:00Z"),
+            row(DocumentStatus::Archived, 1, "2026-01-01T00:00:00Z"),
+            // v2 used twice: the published row keeps it.
+            row(DocumentStatus::Archived, 2, "2026-02-02T00:00:00Z"),
+            row(DocumentStatus::Published, 2, "2026-02-01T00:00:00Z"),
+            // v3 used twice by archived rows: the later one keeps it.
+            row(DocumentStatus::Archived, 3, "2026-01-03T00:00:00Z"),
+            row(DocumentStatus::Archived, 3, "2026-01-04T00:00:00Z"),
+        ] {
+            let rec = db::create(&ctx, documents::TABLE, crate::util::json_map(data))
+                .await
+                .expect("seed legacy row");
+            ids.push(rec.id);
+        }
+
+        ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
+        crate::migration_helper::apply_migrations(
+            &ctx,
+            block,
+            &[SQL_001_SQLITE, SQL_002_SQLITE],
+            &[],
+        )
+        .await
+        .expect("apply 002");
+
+        let mut versions = Vec::new();
+        for id in &ids {
+            let row = documents::get(&ctx, id).await.expect("read").expect("row");
+            versions.push((row.status, row.version));
+        }
+        assert_eq!(
+            versions,
+            vec![
+                (DocumentStatus::Draft, 0),
+                (DocumentStatus::Archived, 1),
+                (DocumentStatus::Archived, 0),
+                (DocumentStatus::Published, 2),
+                (DocumentStatus::Archived, 0),
+                (DocumentStatus::Archived, 3),
+            ]
+        );
+
+        // The index now refuses a second numbered row of the type …
+        let taken = db::create(
+            &ctx,
+            documents::TABLE,
+            crate::util::json_map(row(DocumentStatus::Archived, 3, "2026-05-01T00:00:00Z")),
+        )
+        .await
+        .expect_err("v3 is taken");
+        assert_eq!(taken.code, wafer_run::ErrorCode::AlreadyExists, "{taken:?}");
+        // … and leaves drafts, all unnumbered, alone.
+        documents::insert_draft(
+            &ctx,
+            NewDraft {
+                doc_type: DocumentType::Terms,
+                title: "Another draft",
+                content: "",
+                created_by: "seed",
+            },
+        )
+        .await
+        .expect("a second unnumbered draft");
+    }
+}

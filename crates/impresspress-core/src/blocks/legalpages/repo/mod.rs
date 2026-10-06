@@ -15,9 +15,8 @@
 //! above, and `status` was written from four of them; that is how a generic
 //! PATCH came to be able to publish a document without going through
 //! `service::publish_document` (review bug B10). Inside this module `status`
-//! is written by exactly two functions, [`documents::mark_published`] and
-//! [`documents::mark_archived`], and `service::publish_document` is the only
-//! caller of either.
+//! and `version` are written by exactly one function, [`documents::publish`],
+//! and `service::publish_document` is its only caller.
 
 use wafer_core::clients::database::{Record, RecordList};
 

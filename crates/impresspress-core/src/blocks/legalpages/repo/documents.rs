@@ -8,10 +8,11 @@
 //! spelled filter blocks in three files. Here they are two constructors,
 //! [`of_type`] and [`of_type_with_status`], and the functions built on them.
 //!
-//! `status` is written by exactly three functions, [`insert_published`],
-//! [`mark_published`] and [`mark_archived`], none of which takes the value
-//! from a caller. A request body cannot reach the column: that is the B10
-//! fix, held by construction rather than by a validation list.
+//! `status` and the version number are written by exactly one function,
+//! [`publish`], which takes neither from a caller: a draft is stored
+//! unnumbered (`version` 0) and [`publish`] stamps the number the service
+//! computed. A request body cannot reach either column: that is the B10 fix,
+//! held by construction rather than by a validation list.
 
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database::{self as db, Record};
@@ -21,10 +22,7 @@ use super::{
     super::contracts::{DocumentStatus, DocumentType},
     Page,
 };
-use crate::{
-    db_read::{self, Bound},
-    util::{enum_column, json_map, now_rfc3339, RecordExt},
-};
+use crate::util::{enum_column, json_map, now_rfc3339, RecordExt};
 
 /// Legal documents: one row per version of a `terms` / `privacy` document.
 pub const TABLE: &str = "impresspress__legalpages__documents";
@@ -43,9 +41,12 @@ pub struct DocumentRow {
     pub title: String,
     /// Markdown source, rendered by `markdown_to_html` on the way out.
     pub content: String,
-    /// Written only by [`insert_published`], [`mark_published`] and
-    /// [`mark_archived`], none of which takes the value from a caller.
+    /// Written only by [`publish`], which does not take the value from a
+    /// caller.
     pub status: DocumentStatus,
+    /// The published version number; `0` for a draft, which is numbered when
+    /// it is published. Unique per `doc_type` among numbered rows (the
+    /// partial unique index of migration 002).
     pub version: i64,
     pub created_by: String,
     /// RFC 3339 instant of the last publish; `None` for a row that has never
@@ -90,26 +91,35 @@ pub struct NewDraft<'a> {
     pub created_by: &'a str,
 }
 
-/// A document published without ever having been a draft, as
-/// [`insert_published`] stores it.
-pub struct NewPublished<'a> {
-    pub doc_type: DocumentType,
-    pub title: &'a str,
-    pub content: &'a str,
-    pub version: i64,
-    /// Recorded as `created_by`.
-    pub created_by: &'a str,
-    /// RFC 3339 instant stamped into `created_at`, `updated_at` and
-    /// `published_at`.
-    pub now: &'a str,
+/// What one [`publish`] makes live.
+pub enum PublishSource<'a> {
+    /// Publish this draft in place, with the editor's text when it sent any
+    /// (`None` keeps what is stored). Only while the row is still a draft:
+    /// a row that is already published or archived is history, and is never
+    /// rewritten.
+    Draft {
+        id: &'a str,
+        title: Option<&'a str>,
+        content: Option<&'a str>,
+    },
+    /// Insert a new published row with this text: the first version of a
+    /// type, or a publish of a document that is not a draft (the live one,
+    /// an archived one), which leaves that row as it is.
+    New {
+        title: &'a str,
+        content: &'a str,
+        /// Recorded as `created_by`.
+        created_by: &'a str,
+    },
 }
 
-/// The editor's text, when a publish carries one. `None` keeps what is
-/// stored (the JSON API's publish path sends no body).
-#[derive(Default)]
-pub struct PublishedContent<'a> {
-    pub title: Option<&'a str>,
-    pub content: Option<&'a str>,
+/// What a [`publish`] did.
+pub enum PublishOutcome {
+    /// The row now live.
+    Published(DocumentRow),
+    /// The draft was no longer a draft when the write ran (another publish
+    /// took it first). Nothing was written.
+    NotADraft,
 }
 
 /// Every row of one document type. The first of the two filter shapes this
@@ -215,11 +225,14 @@ pub async fn latest_version(ctx: &dyn Context, doc_type: DocumentType) -> Result
 }
 
 /// Every published row of `doc_type`. More than one is the state a publish
-/// exists to resolve.
+/// exists to resolve; tests read it to check that one did.
+#[cfg(test)]
 pub async fn list_published(
     ctx: &dyn Context,
     doc_type: DocumentType,
 ) -> Result<Vec<DocumentRow>, WaferError> {
+    use crate::db_read::{self, Bound};
+
     db_read::list_bounded(
         ctx,
         TABLE,
@@ -263,7 +276,7 @@ pub async fn count(ctx: &dyn Context) -> Result<i64, WaferError> {
     db::count(ctx, TABLE, &[]).await
 }
 
-/// Store a new version-1 draft.
+/// Store a new draft, unnumbered (`version` 0) until it is published.
 ///
 /// The insert names every column the table has except `published_at`, which
 /// is genuinely NULL for a document that has never been published — so the
@@ -275,39 +288,10 @@ pub async fn insert_draft(ctx: &dyn Context, new: NewDraft<'_>) -> Result<Docume
         "title": new.title,
         "content": new.content,
         "status": DocumentStatus::Draft,
-        "version": 1,
+        "version": 0,
         "created_by": new.created_by,
         "created_at": now,
         "updated_at": now,
-    }));
-    DocumentRow::from_record(&db::create(ctx, TABLE, data).await?)
-}
-
-/// Store a document that is published on creation — the shape a publish of a
-/// type that has no row yet produces (the Init seed, and the editor's
-/// Publish button on a document it has not saved).
-///
-/// One insert rather than a draft followed by a publish: a failure between
-/// the two would leave a draft behind, and the Init seed's "is the table
-/// already seeded?" count would then never let the type reach a published
-/// document again.
-///
-/// One of the three writers of `status` in the crate, and like the other two
-/// it does not take the value from a caller.
-pub async fn insert_published(
-    ctx: &dyn Context,
-    new: NewPublished<'_>,
-) -> Result<DocumentRow, WaferError> {
-    let data = json_map(serde_json::json!({
-        "doc_type": new.doc_type,
-        "title": new.title,
-        "content": new.content,
-        "status": DocumentStatus::Published,
-        "version": new.version,
-        "created_by": new.created_by,
-        "created_at": new.now,
-        "updated_at": new.now,
-        "published_at": new.now,
     }));
     DocumentRow::from_record(&db::create(ctx, TABLE, data).await?)
 }
@@ -334,47 +318,121 @@ pub async fn update_content(
     DocumentRow::from_record(&db::update(ctx, TABLE, id, data).await?)
 }
 
-/// Publish `id` as `version`, stamping `published_at` and `updated_at` with
-/// `now`, and applying the editor's text when it sent any.
+/// Make `source` live as `version` of `doc_type`, then archive every other
+/// published row of the type numbered below it.
 ///
-/// One of the three writers of `status` in the crate. `service::publish_document`
-/// is its only caller.
-pub async fn mark_published(
+/// The write takes `version` itself: migration 002's partial unique index on
+/// `(doc_type, version)` refuses a second row with the same number, and the
+/// write then fails with `AlreadyExists` having changed nothing; the caller
+/// reads the next number and tries again. A draft is published only while it
+/// is still a draft (one conditional update), so a publish that lost its
+/// draft to another one writes nothing and archives nothing.
+///
+/// The archive is a second statement, and it only ever names rows numbered
+/// below the one just made live. That keeps the invariant every reader
+/// relies on — the highest-numbered published row is the live one
+/// ([`find_published`]) — at every instant: between the two statements, if
+/// the archive fails, and when two publishes interleave (each archives what
+/// came before its own number, so the higher one stays live). The archive
+/// cannot be folded into one transaction with the write because the
+/// transaction cannot make it conditional on the draft's update having
+/// matched, and an unconditional one would archive the live version of a
+/// publish that wrote nothing.
+pub async fn publish(
     ctx: &dyn Context,
-    id: &str,
+    doc_type: DocumentType,
     version: i64,
-    now: &str,
-    text: PublishedContent<'_>,
-) -> Result<DocumentRow, WaferError> {
-    let mut data = json_map(serde_json::json!({
+    source: PublishSource<'_>,
+) -> Result<PublishOutcome, WaferError> {
+    let now = now_rfc3339();
+    let mut live = json_map(serde_json::json!({
         "status": DocumentStatus::Published,
         "version": version,
         "published_at": now,
         "updated_at": now,
     }));
-    if let Some(title) = text.title {
-        data.insert("title".to_string(), serde_json::json!(title));
-    }
-    if let Some(content) = text.content {
-        data.insert("content".to_string(), serde_json::json!(content));
-    }
-    DocumentRow::from_record(&db::update(ctx, TABLE, id, data).await?)
-}
+    let row = match source {
+        PublishSource::Draft { id, title, content } => {
+            if let Some(title) = title {
+                live.insert("title".to_string(), serde_json::json!(title));
+            }
+            if let Some(content) = content {
+                live.insert("content".to_string(), serde_json::json!(content));
+            }
+            let still_a_draft = vec![
+                filter("id", FilterOp::Equal, serde_json::json!(id)),
+                filter(
+                    "status",
+                    FilterOp::Equal,
+                    serde_json::json!(DocumentStatus::Draft),
+                ),
+            ];
+            if db::update_by_filters_count(ctx, TABLE, still_a_draft, live).await? == 0 {
+                return Ok(PublishOutcome::NotADraft);
+            }
+            match get(ctx, id).await? {
+                Some(row) => row,
+                None => return Ok(PublishOutcome::NotADraft),
+            }
+        }
+        PublishSource::New {
+            title,
+            content,
+            created_by,
+        } => {
+            live.extend(json_map(serde_json::json!({
+                "doc_type": doc_type,
+                "title": title,
+                "content": content,
+                "created_by": created_by,
+                "created_at": now,
+            })));
+            DocumentRow::from_record(&db::create(ctx, TABLE, live).await?)?
+        }
+    };
 
-/// Retire a previously published document.
-///
-/// `updated_at` is deliberately not stamped: archiving is a consequence of
-/// *another* document's publish, not an edit of this one, and `updated_at` is
-/// what orders the admin list by what an editor last touched.
-pub async fn mark_archived(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
-    db::update(
+    let mut below = of_type_with_status(doc_type, DocumentStatus::Published);
+    below.push(filter(
+        "version",
+        FilterOp::LessThan,
+        serde_json::json!(version),
+    ));
+    db::update_by_filters(
         ctx,
         TABLE,
-        id,
+        below,
         json_map(serde_json::json!({ "status": DocumentStatus::Archived })),
     )
-    .await
-    .map(|_| ())
+    .await?;
+    Ok(PublishOutcome::Published(row))
+}
+
+/// One `field op value` predicate.
+fn filter(field: &str, operator: FilterOp, value: serde_json::Value) -> Filter {
+    Filter {
+        field: field.to_string(),
+        operator,
+        value,
+    }
+}
+
+/// Put a row straight into `status` as `version`, archiving nothing — the
+/// states legacy data can hold (two published rows of one type) and that a
+/// test needs as its starting point. Test fixtures only: the block changes
+/// `status` through [`publish`] alone.
+#[cfg(test)]
+pub async fn set_state_for_test(
+    ctx: &dyn Context,
+    id: &str,
+    status: DocumentStatus,
+    version: i64,
+) -> Result<DocumentRow, WaferError> {
+    let data = json_map(serde_json::json!({
+        "status": status,
+        "version": version,
+        "published_at": (status != DocumentStatus::Draft).then(now_rfc3339),
+    }));
+    DocumentRow::from_record(&db::update(ctx, TABLE, id, data).await?)
 }
 
 /// Remove a document. A missing row surfaces as the client's `NotFound`.

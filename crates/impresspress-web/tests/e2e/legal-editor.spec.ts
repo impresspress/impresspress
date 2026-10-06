@@ -42,23 +42,24 @@ test.describe('legal editor', () => {
     );
   }
 
-  test('edit, preview, save a draft, then publish as a chosen version', async ({ page }) => {
+  test('edit, preview, save a draft, then publish as the next version', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto(TERMS, { waitUntil: 'networkidle' });
 
     const status = page.locator('#document-status .badge');
     const live = page.locator('#live-version');
-    const version = page.getByLabel('Publish as version', { exact: true });
+    const next = page.locator('#next-version');
     const title = page.getByLabel('Title', { exact: true });
     const content = page.getByLabel('Content', { exact: true });
     const editTab = page.getByRole('tab', { name: 'Edit' });
     const previewTab = page.getByRole('tab', { name: 'Preview' });
 
-    // A publish defaults to one past the highest version — never a draft's own 1.
+    // The server numbers a publish one past the highest version; the page only says which.
     const liveText = (await live.textContent()) ?? '';
     const liveVersion = Number(/v(\d+)/.exec(liveText)?.[1]);
     expect(liveVersion).toBeGreaterThan(0);
-    await expect(version).toHaveValue(String(liveVersion + 1));
+    await expect(next).toHaveText(`Publishes as v${liveVersion + 1}`);
+    await expect(page.locator('input[name="version"]')).toHaveCount(0);
 
     await title.fill('Terms of Service');
     await content.fill('## Use\n\nThe e2e terms, **in bold**.');
@@ -92,9 +93,8 @@ test.describe('legal editor', () => {
     await expect(status).toHaveText('Draft');
     await expect(live).toHaveText(`Live: v${liveVersion}`);
 
-    // Publish as an explicitly chosen version.
-    const chosen = liveVersion + 5;
-    await version.fill(String(chosen));
+    // Publish: the draft goes live as the next number, the old live version is archived.
+    const chosen = liveVersion + 1;
     const published = page.waitForResponse((r) => r.url().endsWith('/b/legalpages/admin/publish'));
     await page.getByRole('button', { name: 'Publish' }).click();
     const answer = await published;
@@ -102,12 +102,20 @@ test.describe('legal editor', () => {
     expect((await answer.json()).version).toBe(chosen);
     await expect(status).toHaveText('Published');
     await expect(live).toHaveText(`Live: v${chosen}`);
-    await expect(version).toHaveValue(String(chosen + 1));
+    await expect(next).toHaveText(`Publishes as v${chosen + 1}`);
+
+    // Publishing again with no draft makes a new version; it never rewrites the live one.
+    const again = page.waitForResponse((r) => r.url().endsWith('/b/legalpages/admin/publish'));
+    await page.getByRole('button', { name: 'Publish' }).click();
+    const second = await again;
+    expect(second.status()).toBe(200);
+    expect((await second.json()).version).toBe(chosen + 1);
+    await expect(live).toHaveText(`Live: v${chosen + 1}`);
 
     // The public page serves it.
     await page.goto('/b/legalpages/terms', { waitUntil: 'networkidle' });
     await expect(page.locator('.public-page__content')).toContainText('The e2e terms, in bold.');
-    await expect(page.locator('.public-page__version')).toHaveText(`v${chosen}`);
+    await expect(page.locator('.public-page__version')).toHaveText(`v${chosen + 1}`);
   });
 
   test('Ctrl+S saves on the editor and is left alone once the editor is gone', async ({
@@ -186,7 +194,7 @@ test.describe('legal editor', () => {
     await page.getByRole('button', { name: 'Write the privacy policy' }).click();
     await expect(page.getByLabel('Title', { exact: true })).toBeFocused();
     await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Privacy Policy');
-    await expect(page.getByLabel('Publish as version', { exact: true })).toHaveValue('1');
+    await expect(page.locator('#next-version')).toHaveText('Publishes as v1');
     await expect(page.locator('#legal-editor-empty')).toBeHidden();
 
     // Publishing the first version puts the type back as it was.

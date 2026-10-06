@@ -91,16 +91,6 @@
     function saveDocument(root, publish) {
         var btn = document.getElementById(publish ? 'btn-publish' : 'btn-save');
         if (!btn || btn.disabled) return;
-        var versionInput = document.getElementById('publish-version');
-        var version = parseInt(versionInput.value, 10);
-        if (publish && !(version > 0)) {
-            versionInput.setAttribute('aria-invalid', 'true');
-            versionInput.focus();
-            toast('Enter a version number of 1 or more to publish.', 'error');
-            return;
-        }
-        versionInput.removeAttribute('aria-invalid');
-
         var label = btn.textContent;
         btn.disabled = true;
         btn.setAttribute('aria-busy', 'true');
@@ -113,8 +103,7 @@
                 doc_type: root.dataset.docType,
                 doc_id: root.dataset.docId,
                 title: document.getElementById('title-input').value,
-                content: document.getElementById('editor').value,
-                version: publish ? version : 0
+                content: document.getElementById('editor').value
             })
         })
         .then(function(r) {
@@ -130,8 +119,9 @@
             if (data.doc_id) root.dataset.docId = data.doc_id;
             if (data.status) setStatus(data.status);
             if (data.version) {
+                // The server numbered it; the next publish takes the one after.
                 document.getElementById('live-version').textContent = 'Live: v' + data.version;
-                versionInput.value = data.version + 1;
+                document.getElementById('next-version').textContent = 'Publishes as v' + (data.version + 1);
             }
             var saved = document.getElementById('saved-at');
             if (saved) saved.textContent = publish ? 'Published just now' : 'Saved just now';

@@ -371,14 +371,13 @@ impl LegalPagesBlock {
                 doc_id: id,
                 title: None,
                 content: None,
-                version: 0,
                 created_by: msg.user_id(),
             },
         )
         .await
         {
             Ok(published) => ok_json(&DocumentView::from_row(&published.row)),
-            Err(e) => crud::db_error_internal(e, "Database error"),
+            Err(e) => publish_failed(e),
         }
     }
 
@@ -478,13 +477,35 @@ impl LegalPagesBlock {
                     doc_id: "",
                     title: Some(doc_type.title()),
                     content: Some(content),
-                    version: 1,
                     created_by: "system",
                 },
             )
-            .await?;
+            .await
+            .map_err(|e| match e {
+                service::PublishError::Db(e) => e,
+                other => WaferError::new(
+                    wafer_run::ErrorCode::Internal,
+                    format!("legalpages: seeding {doc_type:?} failed: {other:?}"),
+                ),
+            })?;
         }
         Ok(())
+    }
+}
+
+/// The response for a publish that did not happen, for both publish
+/// surfaces (the editor's and the JSON API's).
+fn publish_failed(error: service::PublishError) -> OutputStream {
+    use service::PublishError;
+    match error {
+        PublishError::NotFound => crate::http::err_not_found("Document not found"),
+        PublishError::WrongType => {
+            err_bad_request("The document is not of the type being published")
+        }
+        PublishError::AlreadyPublished => crate::http::err_conflict(
+            "This draft was published by someone else meanwhile; reload to see what is live",
+        ),
+        PublishError::Db(e) => crud::db_error_internal(e, "Failed to publish legal page"),
     }
 }
 
@@ -752,8 +773,10 @@ pub(super) async fn test_ctx() -> crate::test_support::TestContext {
 }
 
 /// One stored document in whichever status the test needs, built the way the
-/// block builds one: a draft, optionally taken through a status transition.
-/// Nothing outside `repo::documents` spells the table.
+/// block builds one: a draft, optionally put straight into a published or
+/// archived state as `version` (a draft is unnumbered and ignores it), with
+/// nothing archived around it. Nothing outside `repo::documents` spells the
+/// table.
 #[cfg(test)]
 pub(super) async fn seed_doc(
     ctx: &dyn Context,
@@ -778,20 +801,10 @@ pub(super) async fn seed_doc(
 
     match status {
         DocumentStatus::Draft => draft,
-        DocumentStatus::Published => documents::mark_published(
-            ctx,
-            &draft.id,
-            version,
-            &crate::util::now_rfc3339(),
-            documents::PublishedContent::default(),
-        )
-        .await
-        .expect("seed published"),
-        DocumentStatus::Archived => {
-            documents::mark_archived(ctx, &draft.id)
+        DocumentStatus::Published | DocumentStatus::Archived => {
+            documents::set_state_for_test(ctx, &draft.id, status, version)
                 .await
-                .expect("seed archived");
-            stored(ctx, &draft.id).await
+                .expect("seed status")
         }
     }
 }
@@ -1019,7 +1032,6 @@ mod write_loss_tests {
                 doc_id: &draft.id,
                 title: None,
                 content: None,
-                version: 0,
                 created_by: "admin_1",
             },
         )
@@ -1035,14 +1047,15 @@ mod write_loss_tests {
         assert_eq!(stored(&ctx, &draft.id).await.status, DocumentStatus::Draft);
     }
 
-    /// The archive pass runs after the new document is live, so a failure
-    /// there leaves the type with two published rows. That used to be a
-    /// `warn` and a `200`; it is now the caller's error, because it is a
-    /// state an operator has to be told about.
+    /// The archive runs after the new version is live, so a failure there
+    /// leaves the type with two published rows. That is the caller's error —
+    /// an operator has to be told — and the newer one is still the live one,
+    /// because the archive only ever names lower numbers and every reader
+    /// takes the highest-numbered published row.
     #[tokio::test]
-    async fn a_failed_archive_pass_surfaces() {
+    async fn a_failed_archive_pass_surfaces_and_the_new_version_is_live() {
         let ctx = test_ctx().await;
-        seed_doc(
+        let old = seed_doc(
             &ctx,
             DocumentType::Terms,
             "Live Terms",
@@ -1055,15 +1068,16 @@ mod write_loss_tests {
             DocumentType::Terms,
             "Next Terms",
             DocumentStatus::Draft,
-            1,
+            0,
         )
         .await;
 
-        // The publish itself is the first update; the archive pass is the
-        // one that follows it.
-        let failing =
-            FailingDbOpContext::new(ctx.clone(), vec![("database.update", documents::TABLE)])
-                .after_passing(1);
+        // The draft's publish is `database.update_where_count`; the archive
+        // is the `database.update_where` that follows it.
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.update_where", documents::TABLE)],
+        );
         let result = service::publish_document(
             &failing,
             service::PublishRequest {
@@ -1071,7 +1085,6 @@ mod write_loss_tests {
                 doc_id: &draft.id,
                 title: None,
                 content: None,
-                version: 6,
                 created_by: "admin_1",
             },
         )
@@ -1082,9 +1095,14 @@ mod write_loss_tests {
             "an archive pass that failed must be reported, not logged and answered 200"
         );
         assert_eq!(
-            stored(&ctx, &draft.id).await.status,
+            stored(&ctx, &old.id).await.status,
             DocumentStatus::Published
         );
+        let live = documents::find_published(&ctx, DocumentType::Terms)
+            .await
+            .expect("read live")
+            .expect("a live version");
+        assert_eq!((live.id, live.version), (draft.id, 6));
     }
 
     /// The typed PATCH still does what a PATCH is for.
@@ -1145,7 +1163,7 @@ mod write_loss_tests {
             .await;
 
         assert_eq!(output_http_status(out).await, 400);
-        assert_eq!(stored(&ctx, &draft.id).await.version, 1);
+        assert_eq!(stored(&ctx, &draft.id).await.version, 0);
     }
 
     /// The editor's save handler on a *published* document still forks a new
@@ -1490,7 +1508,7 @@ mod tests {
             title: title.to_string(),
             content: content.to_string(),
             status: contracts::DocumentStatus::Draft,
-            version: 1,
+            version: 0,
             created_by: "admin_1".to_string(),
             published_at: None,
             created_at: "2026-05-19T00:00:00Z".to_string(),
@@ -1536,11 +1554,7 @@ mod tests {
         let s = editor(Some(draft_row("Terms of Service", "body")))
             .body
             .into_string();
-        for (id, label) in [
-            ("title-input", "Title"),
-            ("publish-version", "Publish as version"),
-            ("editor", "Content"),
-        ] {
+        for (id, label) in [("title-input", "Title"), ("editor", "Content")] {
             assert!(
                 s.contains(&format!(
                     r#"<label class="form-label" for="{id}">{label}</label>"#
@@ -1550,9 +1564,9 @@ mod tests {
             assert!(s.contains(&format!(r#"id="{id}""#)), "{id} must render");
         }
         assert!(!s.contains("placeholder="), "no placeholder-only field");
-        // The version is a native number field, not a chip that opens prompt().
-        assert!(s.contains(r#"class="form-input" id="publish-version" type="number""#));
-        assert!(!s.contains("prompt"), "no prompt() version control");
+        // The server numbers a publish; nothing on the page sets the version.
+        assert!(!s.contains(r#"name="version""#));
+        assert!(!s.contains("prompt("), "no prompt() version control");
     }
 
     /// The Edit/Preview strip is a WAI-ARIA tablist: each tab names the panel
@@ -1589,17 +1603,19 @@ mod tests {
         assert!(s.contains(r#"value="Terms of Service""#));
     }
 
-    /// A draft is stored as version 1 until it is published, so the status
-    /// row shows the LIVE version and "Publish as version" starts one past
-    /// the highest — never the draft's own 1, which would publish over an
-    /// older number.
+    /// A draft is unnumbered until it is published, so the status row shows
+    /// the LIVE version and, read-only, the number the server will give the
+    /// next publish.
     #[test]
-    fn publish_version_starts_past_the_live_version() {
+    fn the_status_row_shows_the_live_and_the_next_version() {
         let s = editor(Some(draft_row("Terms of Service", "body")))
             .body
             .into_string();
         assert!(s.contains("Live: v3"), "{s}");
-        assert!(s.contains(r#"value="4""#), "{s}");
+        assert!(
+            s.contains(r#"id="next-version">Publishes as v4</span>"#),
+            "{s}"
+        );
         assert!(s.contains(r#"<span class="badge badge-warning">Draft</span>"#));
     }
 

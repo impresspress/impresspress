@@ -79,10 +79,10 @@ pub(super) struct EditorState {
     /// has no row at all.
     pub current: Option<DocumentRow>,
     /// The version number the public page shows, if one is published. A
-    /// draft's own `version` is not this: every draft is stored as version 1
+    /// draft has no number of its own: it is stored as version 0
     /// until it is published.
     pub live_version: Option<i64>,
-    /// Where "Publish as version" starts: one past the highest version of
+    /// What the next publish will be numbered: one past the highest version of
     /// this type in any status — the number `service::publish_document`
     /// would pick for an unnumbered publish.
     pub next_version: i64,
@@ -235,6 +235,7 @@ pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> Editor
                         None => "Not published yet",
                     }
                 }
+                span #next-version .legal-editor__meta { "Publishes as v" (state.next_version) }
                 span #saved-at .legal-editor__meta {
                     @if let Some(d) = doc {
                         "Saved " (components::timestamp(&d.updated_at))
@@ -242,24 +243,12 @@ pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> Editor
                 }
             }
 
-            div .legal-editor__fields {
-                div .form-group {
-                    label .form-label for="title-input" { "Title" }
-                    input #title-input .form-input type="text" name="title"
-                        value=(title) required autocomplete="off"
-                        aria-describedby="title-input-hint";
-                    p #title-input-hint .form-hint { "The heading of the public page." }
-                }
-                div .form-group {
-                    label .form-label for="publish-version" { "Publish as version" }
-                    input #publish-version .form-input type="number" name="version"
-                        min="1" step="1" inputmode="numeric" required
-                        value=(state.next_version)
-                        aria-describedby="publish-version-hint";
-                    p #publish-version-hint .form-hint {
-                        "Shown on the public page. Publishing replaces the live version."
-                    }
-                }
+            div .form-group {
+                label .form-label for="title-input" { "Title" }
+                input #title-input .form-input type="text" name="title"
+                    value=(title) required autocomplete="off"
+                    aria-describedby="title-input-hint";
+                p #title-input-hint .form-hint { "The heading of the public page." }
             }
 
             div .legal-editor__content-head {
@@ -407,8 +396,6 @@ struct SaveRequest {
     content: String,
     #[serde(default)]
     doc_id: String,
-    #[serde(default)]
-    version: i64,
 }
 
 /// Save a draft document. If the current doc is published, creates a new draft
@@ -472,9 +459,9 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
     }
 }
 
-/// Save and publish a document. Archives any previously published document
-/// of the same type (publish-then-archive ordering lives in
-/// `service::publish_document`).
+/// Save and publish a document as the next version of its type, archiving
+/// the one it replaces (`service::publish_document` numbers it and decides
+/// whether the row is published in place or as a new row).
 pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
@@ -495,14 +482,13 @@ pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream
             doc_id: &body.doc_id,
             title: Some(&body.title),
             content: Some(&body.content),
-            version: body.version,
             created_by: msg.user_id(),
         },
     )
     .await
     {
         Ok(p) => p,
-        Err(e) => return crud::db_error(e, "Document not found", "Failed to publish legal page"),
+        Err(e) => return super::publish_failed(e),
     };
 
     ok_json(&serde_json::json!({

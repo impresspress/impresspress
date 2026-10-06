@@ -166,7 +166,7 @@ pub const DOCUMENT_FIELDS: &[(&str, &str, &str)] = &[
     (
         "version",
         "integer",
-        "The version number the public page shows once published.",
+        "0 for a draft; the number the server gave this version when it was published.",
     ),
     (
         "created_by",
