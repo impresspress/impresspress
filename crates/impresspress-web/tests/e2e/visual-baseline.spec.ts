@@ -151,7 +151,13 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //
 // - Dates and timestamps, which the pages render as `<time>` — among them
 //   every "Created" date the suite captures (users, the dashboard's Recent
-//   Users, both bucket lists).
+//   Users, both bucket lists). In a table the owning `<td>` is masked, not
+//   the `<time>`: the element is as wide as its text, so "Oct 3" and
+//   "Oct 28" would paint different mask boxes, while the cell is as wide as
+//   its column. Only times on screen are masked: the dashboard charts' "Show
+//   values" tables sit closed in a `<details>`, yet still report a box per
+//   date cell, so masking them painted a text-wide rectangle per day over
+//   the cards below (seen 2026-10-06 on the admin dashboard).
 // - The dashboard charts' first/last-day labels, which move daily because the
 //   window ends today (`ui/components/chart.rs`). The whole
 //   `.chart__range` row is masked, not its two `<time>` spans: a span is
@@ -193,7 +199,11 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 // it plots the traffic on two days and fails once; a rerun passes.
 function volatileMasks(page: Page) {
   return [
-    page.locator('[data-relative-time], .relative-time, time'),
+    page
+      .locator(
+        'td:has(time, [data-relative-time], .relative-time), :is([data-relative-time], .relative-time, time):not(td *)',
+      )
+      .filter({ visible: true }),
     page.locator('.chart__range'),
     page.locator('tr[data-bucket] td[data-label="Owner"]'),
     page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
