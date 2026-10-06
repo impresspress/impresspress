@@ -150,7 +150,7 @@ function addWizardComponent(seed){
   row.querySelector('[data-component-label]').value=seed.label||'';
   row.querySelector('[data-component-description]').value=seed.description||'';
   row.querySelector('[data-component-type]').value=seed.amount_type||'fixed';
-  row.querySelector('[data-component-amount]').value=seed.amount||'0.00';
+  row.querySelector('[data-component-amount]').value=seed.amount===undefined?'0.00':seed.amount;
   row.querySelector('[data-component-input]').value=seed.input||'';
   row.querySelector('[data-component-base]').value=seed.base_amount||'0.00';
   row.querySelector('[data-component-package-size]').value=seed.units_per_package||'1';

@@ -1,3 +1,4 @@
+mod add_price_tests;
 mod bounded_read_tests;
 mod config_tests;
 mod error_mapping_tests;

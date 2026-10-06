@@ -12,10 +12,14 @@ import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
  * - The Active / Deleted views are filter links, and Manage's search box
  *   sits in the filter row rather than a card of its own.
  * - The portal buttons page's add form collapses to one column at 390px.
+ * - A product without pricing adds one from its empty pricing state: Add a
+ *   price opens the offer editor, Create price saves a draft offer, and the
+ *   draft publishes.
  *
- * It seeds a product and a draft offer over the API and deletes the product
- * again at the end, so it is part of `e2e:writes`, which CI runs against its
- * own fresh server.
+ * It seeds two products (one with a draft offer, one without pricing) over
+ * the API, creates and publishes an offer through the page, and deletes both
+ * products again at the end, so it is part of `e2e:writes`, which CI runs
+ * against its own fresh server.
  */
 
 test.use({ storageState: ADMIN_STATE_PATH });
@@ -30,7 +34,11 @@ async function overflowX(page: Page): Promise<number> {
 test.describe.serial('products admin pages', () => {
   const stamp = `pages${Date.now().toString(36)}`;
   const product = { ...uniqueShopProduct(stamp), status: 'draft' };
+  // Its own stamp, not one extending `stamp`: Manage's search for `stamp`
+  // must match `product` alone.
+  const unpriced = { ...uniqueShopProduct(`bare${Date.now().toString(36)}`), status: 'draft' };
   let productId = '';
+  let unpricedId = '';
 
   test.beforeAll(async ({ baseURL }) => {
     const api = await playwrightRequest.newContext({
@@ -48,6 +56,11 @@ test.describe.serial('products admin pages', () => {
       data: SHOP_OFFER,
     });
     expect(offer.status(), await offer.text()).toBe(200);
+    const bare = await api.post('/b/products/api/admin/products', { headers, data: unpriced });
+    expect(bare.status(), await bare.text()).toBe(200);
+    const bareBody = (await bare.json()) as { id?: string; data?: { id?: string } };
+    unpricedId = (bareBody.id ?? bareBody.data?.id) as string;
+    expect(unpricedId, JSON.stringify(bareBody)).toBeTruthy();
     await api.dispose();
   });
 
@@ -58,6 +71,7 @@ test.describe.serial('products admin pages', () => {
     });
     const headers = { Authorization: await adminBearer(api) };
     await api.delete(`/b/products/api/admin/products/${productId}`, { headers });
+    await api.delete(`/b/products/api/admin/products/${unpricedId}`, { headers });
     await api.dispose();
   });
 
@@ -119,6 +133,50 @@ test.describe.serial('products admin pages', () => {
     await expect(offer.locator('.btn--primary')).toHaveText('Publish');
 
     await expect(page.getByText('Create a product with pricing')).toHaveCount(0);
+  });
+
+  test('a product without pricing adds a price from its empty state, and it publishes', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto(`/b/products/admin/products/${encodeURIComponent(unpricedId)}`, {
+      waitUntil: 'networkidle',
+    });
+    const pricing = page.locator('#product-pricing');
+    await expect(pricing.getByRole('heading', { name: 'No prices yet' })).toBeVisible();
+    await expect(pricing.locator('[data-offer-card]')).toHaveCount(0);
+
+    await pricing.getByRole('button', { name: 'Add a price' }).click();
+    const editor = page.locator('#product-manager-visual-editor');
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole('heading', { name: 'Add a price' })).toBeVisible();
+    await expect(page.locator('#manager-visual-offer-name')).toHaveValue(unpriced.name);
+    await expect(page.locator('#manager-visual-currency')).toHaveValue('NZD');
+    const amount = editor.locator('[data-component-amount]');
+    await expect(amount).toBeFocused();
+
+    // Nothing priced yet: refused beside the button, nothing created.
+    await editor.getByRole('button', { name: 'Create price' }).click();
+    await expect(editor.getByRole('alert')).toHaveText(
+      'Amounts must be non-negative plain decimal numbers.',
+    );
+
+    await amount.fill('25.00');
+    await editor.getByRole('button', { name: 'Create price' }).click();
+    await expect(page.locator('.toast-success')).toContainText('Price added as a draft');
+    await expect(editor).toBeHidden();
+    const offer = pricing.locator('[data-offer-card]');
+    await expect(offer).toHaveCount(1);
+    await expect(offer.getByRole('heading', { name: unpriced.name })).toBeVisible();
+    await expect(pricing.getByText('No prices yet')).toHaveCount(0);
+    // The section's one primary is now the draft's Publish; adding another
+    // price stays available as a secondary action.
+    await expect(pricing.locator('.btn--primary')).toHaveCount(1);
+    await expect(pricing.getByRole('button', { name: 'Add a price' })).toHaveClass(/btn--secondary/);
+
+    await offer.getByRole('button', { name: 'Publish' }).click();
+    await expect(page.locator('#product-pricing [data-offer-card] .badge', { hasText: 'active' })).toBeVisible();
+    await expect(page.locator('#product-pricing [data-offer-card]').getByRole('button', { name: 'Publish' })).toHaveCount(0);
   });
 
   test('Manage filters with view links and searches in the filter row', async ({ page }) => {

@@ -14,10 +14,11 @@ use super::{
         STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET, WEBHOOK_URL,
     },
     contracts::{
-        AmountRule, ApprovalStatus, CommerceAnalytics, ManagedOffer, OfferStatus, OfferSyncStatus,
+        AmountRule, ApprovalStatus, BillingScheme, CheckoutPolicy, CommerceAnalytics, ManagedOffer,
+        OfferDefinitionRequest, OfferMode, OfferStatus, OfferSyncStatus, PricingModel,
         ProductStatus, SellerAccount, SellerFailureSummary, SellerStatus, StripeConnectionState,
-        StripeConnectionStatus, StripeEventType, VariableDefinition, VariableKind,
-        PRODUCT_SLUG_MAX_LEN, PRODUCT_SLUG_PATTERN,
+        StripeConnectionStatus, StripeEventType, TaxBehavior, UsageType, VariableDefinition,
+        VariableKind, PRODUCT_SLUG_MAX_LEN, PRODUCT_SLUG_PATTERN,
     },
     money, repo, stripe_provider,
 };
@@ -2193,6 +2194,24 @@ pub async fn product_manager(
                 .await
             }
         };
+    let automatic_tax = match super::stripe::automatic_tax_enabled(ctx).await {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                if admin {
+                    Sections::Admin(AdminSection::Products)
+                } else {
+                    Sections::Portal(PortalSection::SellerProducts, true)
+                },
+                "Product",
+                e,
+                "products page: automatic tax read failed",
+            )
+            .await
+        }
+    };
     let product_api_url = if admin {
         format!("/b/products/api/admin/products/{product_id}")
     } else {
@@ -2211,6 +2230,11 @@ pub async fn product_manager(
     let page_config = ui::script_json(&serde_json::json!({
         "product_url": product_api_url,
         "detail_base_url": detail_base_url,
+        "new_offer": new_offer_definition(
+            product.str_field("name"),
+            product.str_field("currency"),
+            automatic_tax,
+        ),
     }));
     let status = product.str_field("status");
     let approval = product.str_field("approval_status");
@@ -2345,17 +2369,23 @@ pub async fn product_manager(
                     div #wizard-components {}
                 }
                 p .text-muted .text-sm { "Checkout collection, shipping, tax, and fulfillment settings remain unchanged. Advanced nested conditions and quantity rules are preserved when saved." }
+                // The editor's own outcome, next to the button that caused
+                // it, in both modes: what to fix, or why the server refused.
+                p #manager-visual-error .login-error .mt-4 role="alert" hidden {}
                 div .flex .gap-2 .mt-4 .flex-wrap {
-                    button .btn .btn--primary .btn--sm type="button" data-action="pm-save-visual-offer" { "Save visual changes" }
-                    button .btn .btn--secondary .btn--sm type="button" data-action="pm-close-visual-editor" { "Cancel" }
+                    button #manager-visual-save .btn .btn--primary .btn--sm .btn--block type="button" data-action="pm-save-visual-offer" { "Save visual changes" }
+                    button .btn .btn--secondary .btn--sm .btn--block type="button" data-action="pm-close-visual-editor" { "Cancel" }
                 }
             }
         }
-        section .products-section {
-            (components::section_header("Prices and checkout", None))
+        section #product-pricing .products-section {
+            // The empty state's button is the section's one primary; once
+            // the product has a price, adding another is secondary to each
+            // draft's Publish.
+            (components::section_header("Prices and checkout", (!offers.is_empty()).then(|| add_price_button("btn--secondary"))))
             p .section-desc { "Published offers are immutable so existing orders and links retain their exact terms." }
             @if offers.is_empty() {
-                (components::empty_state(icons::dollar_sign(), "No pricing offers", "This product has no checkout price yet, so customers cannot buy it.", None))
+                (components::empty_state(icons::dollar_sign(), "No prices yet", "Customers cannot buy this product until it has a published price.", Some(add_price_button("btn--primary"))))
             } @else {
                 @for offer in &offers { (render_managed_offer(offer, &product_api_url)) }
             }
@@ -2385,6 +2415,46 @@ pub async fn product_manager(
         .subtitle("Update what customers see, manage pricing, and share checkout")
         .actions(actions);
     products_page(ctx, msg, shell, sections, content).await
+}
+
+/// The control that opens the offer editor in create mode. `variant` is the
+/// button's emphasis: primary in the empty state, where adding a price is
+/// the only thing the section can do, secondary beside existing offers.
+fn add_price_button(variant: &str) -> Markup {
+    html! {
+        button class=(format!("btn {variant} btn--sm")) type="button" data-action="pm-add-price" { (icons::plus()) " Add a price" }
+    }
+}
+
+/// The definition "Add a price" opens the offer editor with: a one-time,
+/// fixed-price offer named after the product, in the product's currency,
+/// with the deployment's automatic-tax setting — what the product wizard
+/// sends for its simplest template. It has no price row; the editor adds the
+/// one row it asks the seller to price. A stored currency outside the ISO
+/// grammar seeds an empty field rather than a guess, so the editor asks for
+/// one.
+fn new_offer_definition(
+    product_name: &str,
+    product_currency: &str,
+    automatic_tax: bool,
+) -> OfferDefinitionRequest {
+    OfferDefinitionRequest {
+        name: product_name.to_string(),
+        mode: OfferMode::Payment,
+        currency: money::normalize_currency(product_currency).unwrap_or_default(),
+        pricing_model: PricingModel::Fixed,
+        recurring_interval: None,
+        interval_count: 1,
+        usage_type: UsageType::Licensed,
+        billing_scheme: BillingScheme::PerUnit,
+        tax_behavior: TaxBehavior::Unspecified,
+        variables: Vec::new(),
+        components: Vec::new(),
+        checkout: CheckoutPolicy {
+            automatic_tax,
+            ..CheckoutPolicy::default()
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
