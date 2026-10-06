@@ -8,10 +8,15 @@ use wafer_core::clients::vector as vclient;
 use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::service::{display_index_name, vector_backend_available, IndexRow};
-use crate::ui::{
-    self, components,
-    shell::Crumb,
-    templates::{detail_page, list_page, DetailHero, DetailMeta},
+use crate::{
+    ui::{
+        self,
+        components::{self, BadgeVariant, DataTable, TableCol, TableRow},
+        icons,
+        shell::Crumb,
+        templates::{detail_page, list_page, DetailMeta},
+    },
+    util::url_path_encode,
 };
 
 /// htmx-friendly success render for `POST /b/vector/api/indexes` — re-loads
@@ -23,8 +28,10 @@ use crate::ui::{
 /// one more `<dialog id="create-vector-index">` to the page.
 pub async fn render_index_list_fragment(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let rows = super::service::list_index_rows(ctx).await?;
+    // The create form only exists where the backend does, so the list it
+    // swaps is the one with a backend behind it.
     Ok(html! {
-        div #vector-index-list { (render_index_list_table(&rows)) }
+        div #vector-index-list { (render_index_list_table(&rows, true)) }
     })
 }
 
@@ -61,43 +68,75 @@ pub fn render_create_index_modal() -> Markup {
     )
 }
 
-pub fn render_index_list_table(rows: &[IndexRow]) -> Markup {
-    if rows.is_empty() {
-        return html! {
-            div .empty-state {
-                p { "No vector indexes yet." }
-            }
-        };
-    }
+const INDEX_COLUMNS: [TableCol<'static>; 5] = [
+    TableCol::new("Name").primary(),
+    TableCol::new("Model"),
+    TableCol::new("Dimensions"),
+    TableCol::new("Vectors"),
+    TableCol::new("Keyword search"),
+];
 
-    html! {
-        table .data-table {
-            thead { tr {
-                th { "Name" }
-                th { "Model" }
-                th { "Dimensions" }
-                th { "Vectors" }
-                th { "Keyword search" }
-            } }
-            tbody {
-                @for r in rows {
-                    @let display = display_index_name(&r.name);
-                    tr data-index-name=(display) {
-                        td data-label="Name" { (display) }
-                        td data-label="Model" { (r.model) }
-                        td data-label="Dimensions" { (r.dimensions) }
-                        td data-label="Vectors" { (vector_count_text(r.vector_count)) }
-                        td data-label="Keyword search" {
-                            @if r.keyword_search {
-                                span .badge.badge-success { "Yes" }
-                            } @else {
-                                span .badge { "No" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+/// The topbar's "+ Create index" trigger, which the empty list's call to
+/// action repeats.
+fn create_index_button() -> Markup {
+    components::button(
+        components::BtnVariant::Primary,
+        components::CtrlSize::Md,
+        "+ Create index",
+        maud::PreEscaped(
+            r#"type="button" data-action="modal-open" data-modal-target="create-vector-index""#
+                .to_string(),
+        ),
+    )
+}
+
+/// "Yes" / "No" for an index's keyword search: positive when on, neutral
+/// when off.
+fn keyword_badge(on: bool) -> Markup {
+    if on {
+        components::badge(BadgeVariant::Success, "Yes")
+    } else {
+        components::badge(BadgeVariant::Secondary, "No")
+    }
+}
+
+/// The index list, each row linking to its detail page.
+///
+/// With no index there are two different pages: a deployment that can create
+/// one gets the empty state and its "+ Create index"; one with no vector
+/// backend (`backend_available == false`) renders nothing here, because the
+/// page's callout already says why there are none and what would change
+/// that — a second "No vector indexes yet" under it would only repeat it,
+/// and offer nothing to do.
+pub fn render_index_list_table(rows: &[IndexRow], backend_available: bool) -> Markup {
+    let names: Vec<&str> = rows.iter().map(|r| display_index_name(&r.name)).collect();
+    let table = DataTable::new(&INDEX_COLUMNS)
+        .rows(
+            rows.iter()
+                .zip(&names)
+                .map(|(r, display)| {
+                    TableRow::new(vec![
+                        html! { (display) },
+                        html! { (r.model) },
+                        html! { (r.dimensions) },
+                        html! { (vector_count_text(r.vector_count)) },
+                        keyword_badge(r.keyword_search),
+                    ])
+                })
+                .collect(),
+        )
+        .row_href(|i| Some(format!("/b/vector/{}/", url_path_encode(names[i]))));
+    if backend_available {
+        table
+            .empty(components::empty_state(
+                icons::database(),
+                "No vector indexes yet",
+                "An index stores embeddings for search. Create one to start adding documents.",
+                Some(create_index_button()),
+            ))
+            .render()
+    } else {
+        table.render()
     }
 }
 
@@ -111,50 +150,60 @@ fn vector_count_text(count: Option<u64>) -> String {
 /// (counts/model/dimensions/keyword toggle) and a Schema section showing
 /// the underlying storage table name plus introspected columns. Pure
 /// helper so the markup can be unit-tested without spinning a `Context`.
-pub fn render_index_detail_sections(
-    row: &IndexRow,
-    schema_cols: &[(String, String)],
-) -> Vec<Markup> {
-    let stats = html! {
-        section .section {
-            h3 { "Stats" }
-            dl .kv-list {
-                dt { "Vector count" } dd { (vector_count_text(row.vector_count)) }
-                dt { "Dimensions" }   dd { (row.dimensions) }
-                dt { "Model" }        dd { (row.model) }
-                dt { "Keyword search" }
-                dd {
-                    @if row.keyword_search {
-                        span .badge.badge-success { "Yes" }
-                    } @else {
-                        span .badge { "No" }
-                    }
-                }
-            }
-        }
-    };
+const SCHEMA_COLUMNS: [TableCol<'static>; 2] =
+    [TableCol::new("Column").primary(), TableCol::new("Type")];
 
+/// Render the body of an index detail page: the Schema section (the storage
+/// table's name and its introspected columns) and the index's key facts
+/// (vector count, dimensions, model, keyword search) for the detail rail.
+/// Pure helper so the markup can be unit-tested without spinning a
+/// `Context`.
+pub fn render_index_detail_body(row: &IndexRow, schema_cols: &[(String, String)]) -> Markup {
     let schema = html! {
-        section .section {
-            h3 { "Schema" }
-            p { "Storage table: " code { (row.name) } }
+        section {
+            (components::section_header("Schema", None))
+            p { "Storage table: " code { (components::breakable_id(&row.name)) } }
             @if !schema_cols.is_empty() {
-                table .data-table {
-                    thead { tr { th { "Column" } th { "Type" } } }
-                    tbody {
-                        @for (n, t) in schema_cols {
-                            tr {
-                                td data-label="Column" { (n) }
-                                td data-label="Type" { (t) }
-                            }
-                        }
-                    }
-                }
+                (DataTable::new(&SCHEMA_COLUMNS)
+                    .rows(
+                        schema_cols
+                            .iter()
+                            .map(|(n, t)| TableRow::new(vec![html! { code { (n) } }, html! { (t) }]))
+                            .collect(),
+                    )
+                    .render())
             }
         }
     };
-
-    vec![stats, schema]
+    let model = if row.model.is_empty() {
+        "Default"
+    } else {
+        row.model.as_str()
+    };
+    // No hero: the index's name is the page title, and the topbar's
+    // subtitle already gives its model and dimensions.
+    detail_page(
+        None,
+        vec![schema],
+        vec![
+            DetailMeta {
+                key: "Vectors",
+                value: html! { (vector_count_text(row.vector_count)) },
+            },
+            DetailMeta {
+                key: "Dimensions",
+                value: html! { (row.dimensions) },
+            },
+            DetailMeta {
+                key: "Model",
+                value: html! { (model) },
+            },
+            DetailMeta {
+                key: "Keyword search",
+                value: keyword_badge(row.keyword_search),
+            },
+        ],
+    )
 }
 
 /// GET `/b/vector/` — admin-facing index listing.
@@ -208,7 +257,7 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     None,
                 ))
             }
-            div #vector-index-list { (render_index_list_table(&rows)) }
+            div #vector-index-list { (render_index_list_table(&rows, backend_available)) }
             @if backend_available {
                 (render_create_index_modal())
             }
@@ -217,15 +266,7 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     );
 
     let actions = if backend_available {
-        vec![crate::ui::components::button(
-            crate::ui::components::BtnVariant::Primary,
-            crate::ui::components::CtrlSize::Sm,
-            "+ Create index",
-            maud::PreEscaped(
-                r#"type="button" data-action="modal-open" data-modal-target="create-vector-index""#
-                    .to_string(),
-            ),
-        )]
+        vec![create_index_button()]
     } else {
         Vec::new()
     };
@@ -323,27 +364,15 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
     let subtitle = format!(
         "{} · {} dimensions",
         if row.model.is_empty() {
-            "(no model)"
+            "Default model"
         } else {
             row.model.as_str()
         },
         row.dimensions
     );
 
-    let sections = render_index_detail_sections(&row, &schema_cols);
-    let body = detail_page(
-        DetailHero {
-            icon: None,
-            title: display,
-            subtitle: Some(&subtitle),
-            badges: Vec::new(),
-            action_menu: None,
-        },
-        sections,
-        Vec::<DetailMeta<'_>>::new(),
-    );
-
-    ui::shell_page(ctx, msg, detail_shell(display), body).await
+    let body = render_index_detail_body(&row, &schema_cols);
+    ui::shell_page(ctx, msg, detail_shell(display).subtitle(&subtitle), body).await
 }
 
 #[cfg(test)]
@@ -362,14 +391,18 @@ mod tests {
 
     #[test]
     fn render_index_list_table_renders_rows_and_empty_state() {
-        let empty = render_index_list_table(&[]).into_string();
+        let empty = render_index_list_table(&[], true).into_string();
         assert!(
             empty.contains("No vector indexes yet"),
             "missing empty hint: {empty}"
         );
+        assert!(
+            empty.contains(r#"data-modal-target="create-vector-index""#),
+            "the empty list offers to create one: {empty}"
+        );
 
         let rows = vec![sample_index("docs", "fastembed", 384, 1234, true)];
-        let html = render_index_list_table(&rows).into_string();
+        let html = render_index_list_table(&rows, true).into_string();
         assert!(html.contains("docs"), "missing index name");
         assert!(html.contains("fastembed"), "missing model");
         assert!(html.contains("384"), "missing dimensions");
@@ -379,7 +412,7 @@ mod tests {
     #[test]
     fn render_index_list_table_strips_storage_prefix() {
         let row = sample_index("impresspress__vector__docs", "fastembed", 384, 0, false);
-        let html = render_index_list_table(&[row]).into_string();
+        let html = render_index_list_table(&[row], true).into_string();
         assert!(html.contains(">docs<"), "prefix not stripped: {html}");
         assert!(
             !html.contains("impresspress__vector__"),
@@ -387,12 +420,30 @@ mod tests {
         );
     }
 
-    fn join(sections: &[Markup]) -> String {
-        sections.iter().map(|m| m.clone().into_string()).collect()
+    /// Without a backend the page's callout explains the empty list; the
+    /// table adds no second empty state under it.
+    #[test]
+    fn an_empty_list_without_a_backend_renders_no_empty_state() {
+        let html = render_index_list_table(&[], false).into_string();
+        assert!(!html.contains("No vector indexes yet"), "{html}");
+        assert!(!html.contains("create-vector-index"), "{html}");
+    }
+
+    /// Each row opens its index's detail page.
+    #[test]
+    fn each_row_links_to_its_detail_page() {
+        let row = sample_index("impresspress__vector__docs", "fastembed", 384, 3, true);
+        let html = render_index_list_table(&[row], true).into_string();
+        assert!(html.contains(r#"<a href="/b/vector/docs/""#), "{html}");
+        assert!(html.contains("data-table__row--linked"), "{html}");
+        assert!(
+            html.contains(r#"<span class="badge badge-success">Yes</span>"#),
+            "{html}"
+        );
     }
 
     #[test]
-    fn render_index_detail_sections_includes_count_and_model() {
+    fn render_index_detail_body_includes_count_and_model() {
         let row = IndexRow {
             name: "impresspress__vector__docs".into(),
             model: "fastembed".into(),
@@ -404,13 +455,13 @@ mod tests {
             ("id".to_string(), "TEXT".to_string()),
             ("vector".to_string(), "BLOB".to_string()),
         ];
-        let html = join(&render_index_detail_sections(&row, &schema_cols));
+        let html = render_index_detail_body(&row, &schema_cols).into_string();
 
         assert!(html.contains("42"), "missing vector count");
         assert!(html.contains("fastembed"), "missing model");
         assert!(html.contains("384"), "missing dimensions");
         assert!(
-            html.contains("impresspress__vector__docs"),
+            html.contains("impresspress__<wbr>vector__<wbr>docs"),
             "missing storage table name"
         );
         assert!(html.contains("vector"), "missing column name");
@@ -418,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn render_index_detail_sections_keyword_badge_off() {
+    fn render_index_detail_body_keyword_badge_off() {
         let row = IndexRow {
             name: "x".into(),
             model: "fastembed".into(),
@@ -426,7 +477,7 @@ mod tests {
             vector_count: Some(0),
             keyword_search: false,
         };
-        let html = join(&render_index_detail_sections(&row, &[]));
+        let html = render_index_detail_body(&row, &[]).into_string();
         assert!(html.contains("No"), "keyword badge missing for kw=false");
     }
 }
@@ -637,11 +688,34 @@ mod integration_tests {
         );
     }
 
+    /// No registry table at all and no vector backend: the page falls
+    /// through cleanly to the callout saying why there are no indexes — and
+    /// only that, not also an empty state offering nothing to do.
+    #[tokio::test]
+    async fn index_list_page_without_a_backend_shows_only_the_callout() {
+        let ctx = TestContext::with_vector().await;
+
+        let msg = admin_msg("retrieve", "/b/vector/");
+        let body = output_html(index_list_page(&ctx, &msg).await).await;
+
+        assert!(
+            body.contains("Vector backend not available"),
+            "missing callout: {body}"
+        );
+        assert!(
+            !body.contains("No vector indexes yet"),
+            "the callout already explains the empty list: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn index_list_page_renders_empty_state_on_fresh_db() {
-        // No registry table at all: handler must fall through cleanly to
-        // the "No vector indexes yet" empty state, not error out.
-        let ctx = TestContext::with_vector().await;
+        // No registry table at all, a backend registered: handler must fall
+        // through cleanly to the "No vector indexes yet" empty state, not
+        // error out.
+        let mut ctx = TestContext::with_vector().await;
+        let fake = FakeVectorBlock::over(&ctx);
+        ctx.register_block("wafer-run/vector", fake);
 
         let msg = admin_msg("retrieve", "/b/vector/");
         let resp = index_list_page(&ctx, &msg).await;
@@ -744,7 +818,10 @@ mod integration_tests {
         let out = index_detail_page(&ctx, &msg, "docs").await;
         let body = output_html(out).await;
 
-        assert!(body.contains("Vector count"), "missing stats label: {body}");
+        assert!(
+            body.contains("<dt>Vectors</dt>"),
+            "missing stats label: {body}"
+        );
         // seed_docs_index inserts one row in the _meta table.
         assert!(
             body.contains(">1<"),
@@ -753,7 +830,7 @@ mod integration_tests {
         assert!(body.contains("docs"), "missing display name");
         assert!(body.contains("fastembed"), "missing model");
         assert!(
-            body.contains("impresspress__vector__docs"),
+            body.contains("impresspress__<wbr>vector__<wbr>docs"),
             "missing storage table name in schema section: {body}"
         );
         assert!(

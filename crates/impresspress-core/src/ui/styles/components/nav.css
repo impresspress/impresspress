@@ -9,26 +9,19 @@
    else in the UI uses --font-ui. */
 .brand__wordmark { font-family: var(--font-brand); }
 
-/* ===== In-page breadcrumb trail (blocks/files/pages_user/objects.rs) =====
- * Deliberately separate from `.topbar__crumbs` (layouts/shell.css): that
- * component is page-chrome living inside `.topbar`, renders as `<ol><li>`
- * with a CSS `::before`/`::after` separator, and treats the *last* crumb as
- * the page's own `<h1>` rendered outside the nav (the shell owns the page's
- * single h1). This component instead is in-body navigation through a
- * virtual folder path inside the object browser's `.page-filters` slot --
- * every segment (bucket + folder path) is data, not admin nav, the last
- * segment is plain text INSIDE the nav (the current folder, not the page
- * title), and the markup already renders its own explicit separator
- * elements (`.breadcrumbs__sep`) rather than relying on list-item
- * pseudo-content. Given the different markup shape and semantic role, this
- * stays its own component rather than reusing `.topbar__crumbs`. No margin
- * here: `.page` (layouts/page.css) is a flex column with its own `gap`, so
- * spacing above/below comes from the parent, matching every other
- * `.page-filters` slot. */
-.breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; font-size: var(--text-sm); color: var(--text-secondary); }
-.breadcrumbs a { color: var(--text-secondary); text-decoration: none; }
+/* ===== Folder breadcrumbs (blocks/files/pages_user/objects.rs) =====
+ * The folder path inside a bucket, in the page body under the topbar. The
+ * topbar's trail ends at the bucket (the page's h1); this one continues it
+ * from the bucket into the folders, so it draws the same `›` separator as
+ * `.topbar__crumbs` between list items, and its last item is the current
+ * folder (`aria-current="page"`), plain text inside the nav. Each link is
+ * padded to a 44px-tall target. */
+.breadcrumbs ol { display: flex; flex-wrap: wrap; align-items: center; list-style: none; padding: 0; margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
+.breadcrumbs li { display: inline-flex; align-items: center; min-height: 44px; }
+.breadcrumbs li + li::before { content: "›"; padding: 0 var(--space-2); color: var(--text-muted); }
+.breadcrumbs a { color: var(--text-secondary); text-decoration: none; display: inline-flex; align-items: center; min-height: 44px; }
 .breadcrumbs a:hover { color: var(--primary-button); text-decoration: underline; }
-.breadcrumbs__sep { color: var(--text-muted); padding: 0 var(--space-1); }
+.breadcrumbs [aria-current="page"] { color: var(--text-primary); font-weight: 500; }
 
 /* ===== Sidebar shell (navy) =====
    Flush, full-height navy slab -- no radius, margin, or shadow (the

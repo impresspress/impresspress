@@ -6,7 +6,13 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
     blocks::files::repo,
-    ui::{self, components, icons, shell::Crumb, templates::list_page},
+    ui::{
+        self,
+        components::{self, DataTable, TableCol, TableRow},
+        icons,
+        shell::Crumb,
+        templates::list_page,
+    },
     util::{format_bytes, url_path_encode},
 };
 
@@ -87,80 +93,144 @@ fn url_encode_prefix(prefix: &str) -> String {
     parts.join("/") + "/"
 }
 
-/// Folder/file table for `/b/storage/{bucket}/...` views.
-///
-/// Folder rows link into `/b/storage/{bucket}/{prefix}{folder}/`.
-/// File rows show the filename portion (after the `current_prefix`),
-/// link to the download route, and carry a `data-action-menu` kebab
-/// trigger that the JS asset wires up to Share / Delete / Copy-link.
-pub fn render_objects_table(
-    bucket: &str,
-    current_prefix: &str,
-    listing: &FolderListing<'_>,
-) -> Markup {
-    if listing.folders.is_empty() && listing.files.is_empty() {
-        return html! {
-            div .empty-state {
-                p { "This folder is empty — drag files here to upload." }
-            }
-        };
-    }
+const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
+    TableCol::new("Select").select(),
+    TableCol::new("Name").primary(),
+    TableCol::new("Size"),
+    TableCol::new("Modified"),
+    TableCol::new("Actions").actions(),
+];
 
+/// The "+ Upload" trigger: it opens the hidden file picker
+/// (`files-browser.js` binds every `[data-action="open-upload"]`). The topbar
+/// action and the empty folder's call to action both render it.
+pub(crate) fn upload_button() -> Markup {
+    components::button(
+        components::BtnVariant::Primary,
+        components::CtrlSize::Md,
+        "+ Upload",
+        maud::PreEscaped(r#"type="button" data-action="open-upload""#.to_string()),
+    )
+}
+
+/// A file row's "more actions" trigger: the shared 44px icon button, named
+/// after the file. `files-browser.js` opens the row's menu (Share / Copy link
+/// / Delete) from it and drives the menu from the keyboard.
+fn row_menu_trigger(bucket: &str, key: &str, filename: &str) -> Markup {
     html! {
-        table .data-table {
-            thead { tr {
-                th { input type="checkbox" .bulk-select-all data-bulk-toggle; }
-                th { "Name" }
-                th { "Size" }
-                th { "Modified" }
-                th {} // kebab column
-            } }
-            tbody {
-                @for folder in &listing.folders {
-                    tr {
-                        td {} // bulk-select disabled on folders
-                        td data-label="Name" {
-                            a .row--folder__link href={"/b/storage/" (url_path_encode(bucket)) "/" (url_encode_prefix(current_prefix)) (url_path_encode(folder)) "/"} {
-                                span aria-hidden="true" { (icons::folder()) }
-                                (folder)
-                            }
-                        }
-                        td data-label="Size" { "—" }
-                        td data-label="Modified" { "—" }
-                        td {}
-                    }
-                }
-                @for f in &listing.files {
-                    @let filename = f.key.strip_prefix(current_prefix).unwrap_or(&f.key);
-                    @let download_href = format!(
-                        "/b/storage/api/buckets/{}/objects/{}",
-                        url_path_encode(bucket),
-                        f.key.split('/').map(url_path_encode).collect::<Vec<_>>().join("/"),
-                    );
-                    tr data-object-key=(f.key) {
-                        td { input type="checkbox" .bulk-select data-key=(f.key); }
-                        td data-label="Name" {
-                            a href=(download_href) { (filename) }
-                        }
-                        td data-label="Size" { (format_bytes(f.size)) }
-                        td data-label="Modified" { (components::timestamp(&f.modified)) }
-                        td {
-                            button .kebab-trigger
-                                type="button"
-                                data-action-menu
-                                data-bucket=(bucket)
-                                data-key=(f.key)
-                                aria-label={"Actions for " (filename)}
-                            { "⋯" }
-                        }
-                    }
-                }
+        button .btn .btn--ghost .btn--icon
+            type="button"
+            data-action-menu
+            data-bucket=(bucket)
+            data-key=(key)
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-label={"Actions for " (filename)}
+        { (icons::more_horizontal()) }
+    }
+}
+
+/// The bar above a folder's files: "Select all files" and, once anything is
+/// selected, how many and the bulk delete. A bar rather than a checkbox in the
+/// table header, because below 720px the table is cards and has no header.
+/// Rendered only when the folder holds files (folders cannot be selected).
+///
+/// The count is a polite live region that is always in the page — a region
+/// inserted together with its text is not announced — and it also carries
+/// the outcome of a bulk delete or an upload. Only the button hides while
+/// nothing is selected.
+fn render_bulk_bar() -> Markup {
+    html! {
+        div .bulk-bar {
+            label .form-checkbox {
+                input type="checkbox" data-bulk-toggle;
+                "Select all files"
+            }
+            span .bulk-bar__count aria-live="polite" data-bulk-count {}
+            button .btn .btn--ghost-danger .bulk-bar__delete type="button" data-bulk-delete hidden {
+                (icons::trash()) "Delete selected"
             }
         }
     }
 }
 
-/// The "Create share link" modal a row's kebab menu opens: the shared
+/// The dialog that confirms deleting one file or a selection: "Delete 40
+/// files? This can't be undone." (`files-browser.js` asks the question).
+pub(crate) fn render_delete_confirm_modal() -> Markup {
+    super::render_confirm_modal("delete-confirm", "Delete files", "Delete")
+}
+
+/// Folder/file table for `/b/storage/{bucket}/...` views.
+///
+/// Folder rows link into `/b/storage/{bucket}/{prefix}{folder}/`. File rows
+/// show the filename portion (after the `current_prefix`), link to the
+/// download route, carry a checkbox named after the file for bulk actions and
+/// a "more actions" menu trigger. A folder has neither, nor a size or date:
+/// those cells are empty, so a card drops them.
+pub fn render_objects_table(
+    bucket: &str,
+    current_prefix: &str,
+    listing: &FolderListing<'_>,
+) -> Markup {
+    let folder_rows = listing.folders.iter().map(|folder| {
+        TableRow::new(vec![
+            html! {},
+            html! {
+                a .row--folder__link href={"/b/storage/" (url_path_encode(bucket)) "/" (url_encode_prefix(current_prefix)) (url_path_encode(folder)) "/"} {
+                    span aria-hidden="true" { (icons::folder()) }
+                    (folder)
+                }
+            },
+            html! {},
+            html! {},
+            html! {},
+        ])
+    });
+    let file_rows = listing.files.iter().map(|f| {
+        let filename = f.key.strip_prefix(current_prefix).unwrap_or(&f.key);
+        let download_href = format!(
+            "/b/storage/api/buckets/{}/objects/{}",
+            url_path_encode(bucket),
+            f.key
+                .split('/')
+                .map(url_path_encode)
+                .collect::<Vec<_>>()
+                .join("/"),
+        );
+        TableRow::new(vec![
+            // The label is the checkbox's 44px hit area and its name.
+            html! {
+                label .form-checkbox {
+                    input type="checkbox" .bulk-select data-key=(f.key);
+                    span .sr-only { "Select " (filename) }
+                }
+            },
+            html! { a href=(download_href) { (filename) } },
+            html! { (format_bytes(f.size)) },
+            components::timestamp(&f.modified),
+            row_menu_trigger(bucket, &f.key, filename),
+        ])
+    });
+    // `#object-listing` is what `files-browser.js` re-fetches and swaps after
+    // a delete or an upload, so the page shows what the bucket now holds
+    // without a reload wiping the outcome it reports.
+    html! {
+        div #object-listing {
+        @if !listing.files.is_empty() { (render_bulk_bar()) }
+        (DataTable::new(&OBJECT_COLUMNS)
+            .rows(folder_rows.chain(file_rows).collect())
+            .empty(components::empty_state(
+                icons::upload(),
+                "This folder is empty",
+                "Drag files here, or upload them from your device.",
+                Some(upload_button()),
+            ))
+            .render())
+        }
+    }
+}
+
+/// The "Create share link" modal a row's menu opens: the shared
 /// `components::modal` dialog. `files-browser.js` (`shareModal`) writes the
 /// object it is about into `#share-object` and opens it through chrome.js's
 /// `openModal` event; its form handler POSTs `/b/cloudstorage/shares`.
@@ -203,38 +273,39 @@ pub(crate) fn render_share_modal() -> Markup {
     )
 }
 
-/// Render breadcrumb crumbs for the page body (below the topbar).
+/// The folder path inside a bucket, drawn in the page body below the topbar
+/// when the page is a folder rather than the bucket's root: the bucket, then
+/// each folder, each one a link except the current one
+/// (`aria-current="page"`).
 ///
-/// This is distinct from the shell `Topbar { crumbs: vec![Crumb {...}] }`
-/// system: the topbar shows the page-level chrome ("Files > {bucket}"),
-/// and this in-body breadcrumb shows the current folder path within the
-/// bucket. The bucket and each prefix segment except the last are
-/// clickable; the last segment is plain text. Returned `Markup` is a
-/// `<nav class="breadcrumbs">` block.
+/// The topbar carries "Files ›" and the bucket as the page title; this trail
+/// continues it into the bucket with the same separator, so the two never
+/// repeat each other. At the bucket's root it renders nothing — the topbar
+/// already says where the page is.
 pub fn render_breadcrumbs(bucket: &str, current_prefix: &str) -> Markup {
     let segments: Vec<&str> = current_prefix
         .trim_end_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
+    if segments.is_empty() {
+        return html! {};
+    }
     let last_idx = segments.len();
     let encoded_bucket = url_path_encode(bucket);
 
     html! {
         nav .breadcrumbs aria-label="Folder" {
-            a href="/b/storage/" { "Files" }
-            span .breadcrumbs__sep { " / " }
-            @if segments.is_empty() {
-                span { (bucket) }
-            } @else {
-                a href={"/b/storage/" (encoded_bucket) "/"} { (bucket) }
+            ol {
+                li { a href={"/b/storage/" (encoded_bucket) "/"} { (bucket) } }
                 @for (i, seg) in segments.iter().enumerate() {
-                    span .breadcrumbs__sep { " / " }
-                    @if i + 1 == last_idx {
-                        span { (seg) }
-                    } @else {
-                        @let cumulative: String = segments[..=i].iter().map(|s| url_path_encode(s)).collect::<Vec<_>>().join("/");
-                        a href={"/b/storage/" (encoded_bucket) "/" (cumulative) "/"} { (seg) }
+                    li {
+                        @if i + 1 == last_idx {
+                            span aria-current="page" { (seg) }
+                        } @else {
+                            @let cumulative: String = segments[..=i].iter().map(|s| url_path_encode(s)).collect::<Vec<_>>().join("/");
+                            a href={"/b/storage/" (encoded_bucket) "/" (cumulative) "/"} { (seg) }
+                        }
                     }
                 }
             }
@@ -282,39 +353,29 @@ pub async fn object_list_page(
     };
     let listing = group_objects_by_prefix(&all_objects, current_prefix);
 
-    let title = if current_prefix.is_empty() {
+    let document_title = if current_prefix.is_empty() {
         bucket.to_string()
     } else {
         format!("{bucket} / {}", current_prefix.trim_end_matches('/'))
     };
 
     let table = render_objects_table(bucket, current_prefix, &listing);
-    let table_with_js = html! {
-        // Hidden file input that the topbar Upload button triggers via
-        // [data-action="open-upload"]. Multi-select so users can pick
-        // many files at once. Same upload endpoint as drag-drop.
+    let body = html! {
+        (render_breadcrumbs(bucket, current_prefix))
+        // Hidden file input that every "+ Upload" trigger opens. Multi-select
+        // so users can pick many files at once. Same upload endpoint as
+        // drag-drop.
         input #file-upload-input type="file" multiple hidden;
         (table)
         (render_share_modal())
+        (render_delete_confirm_modal())
         (super::render_bootstrap_script(bucket, current_prefix))
     };
 
-    let body = list_page(
-        Some(render_breadcrumbs(bucket, current_prefix)),
-        table_with_js,
-        None,
-    );
-
-    let upload_btn = crate::ui::components::button(
-        crate::ui::components::BtnVariant::Primary,
-        crate::ui::components::CtrlSize::Sm,
-        "+ Upload",
-        maud::PreEscaped(r#"type="button" data-action="open-upload""#.to_string()),
-    );
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::portal(&title, &title)
+        ui::Shell::portal(&document_title, bucket)
             .trail(vec![
                 Crumb {
                     label: "Files",
@@ -326,8 +387,8 @@ pub async fn object_list_page(
                 },
             ])
             .subtitle("Drag files here to upload, or use the Upload button.")
-            .actions(vec![upload_btn]),
-        body,
+            .actions(vec![upload_button()]),
+        list_page(None, body, None),
     )
     .await
 }
@@ -493,15 +554,18 @@ mod tests {
         // file row: filename portion only, no leading prefix
         assert!(html.contains(">a.png<"), "filename missing: {html}");
         assert!(html.contains("1.0 KB"), "humanized size missing: {html}");
-        // kebab menu trigger
-        assert!(html.contains(r#"data-action-menu"#), "kebab missing");
+        // the row's menu trigger
+        assert!(
+            html.contains(r#"data-action-menu"#),
+            "row menu trigger missing"
+        );
         assert!(
             html.contains(r#"data-bucket="photos""#),
-            "kebab data-bucket missing/wrong: {html}"
+            "menu data-bucket missing/wrong: {html}"
         );
         assert!(
             html.contains(r#"data-key="a.png""#),
-            "kebab data-key missing/wrong: {html}"
+            "menu data-key missing/wrong: {html}"
         );
     }
 
@@ -604,12 +668,115 @@ mod tests {
         );
     }
 
+    /// Every control a file row carries is named after the file: the
+    /// selection checkbox, and the 44px icon button that opens its menu.
+    /// Folder rows carry neither, and their empty cells are left empty so a
+    /// card drops them.
     #[test]
-    fn render_breadcrumbs_root_only() {
-        let html = render_breadcrumbs("photos", "").into_string();
-        // bucket name visible, no extra crumbs.
-        assert!(html.contains("photos"));
-        assert!(!html.contains("nested"));
+    fn a_file_rows_controls_are_named_after_the_file() {
+        let f1 = ObjectRow {
+            key: "nested/report.pdf".into(),
+            size: 10,
+            modified: "2026-05-06T10:00:00Z".into(),
+        };
+        let listing = FolderListing {
+            folders: vec!["deeper".into()],
+            files: vec![&f1],
+        };
+        let html = render_objects_table("photos", "nested/", &listing).into_string();
+        assert!(
+            html.contains(r#"<label class="form-checkbox"><input class="bulk-select" type="checkbox" data-key="nested/report.pdf"><span class="sr-only">Select report.pdf</span></label>"#),
+            "the row checkbox is labelled: {html}"
+        );
+        assert!(
+            html.contains(r#"<button class="btn btn--ghost btn--icon" type="button" data-action-menu data-bucket="photos" data-key="nested/report.pdf" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for report.pdf"><svg"#),
+            "the menu trigger is the shared icon button with an SVG and a name: {html}"
+        );
+        assert!(!html.contains('⋯'), "no text glyph for an icon: {html}");
+        assert!(
+            html.contains(r#"<label class="form-checkbox"><input type="checkbox" data-bulk-toggle>Select all files</label>"#),
+            "select-all is a visible, labelled control: {html}"
+        );
+        // The select and actions columns are headed for screen readers only.
+        assert!(
+            html.contains(r#"<th><span class="sr-only">Select</span></th>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<th><span class="sr-only">Actions</span></th>"#),
+            "{html}"
+        );
+        // The folder row's control, size and date cells are empty cells.
+        assert_eq!(
+            html.matches("data-table__cell--empty").count(),
+            4,
+            "the folder row's four empty cells: {html}"
+        );
+    }
+
+    /// The selection count is a live region that is always rendered; only
+    /// the delete button hides. The listing is wrapped in the element the
+    /// script re-fetches after a delete or an upload.
+    #[test]
+    fn the_bulk_bar_keeps_its_live_region_and_hides_only_the_button() {
+        let f1 = ObjectRow {
+            key: "a.png".into(),
+            size: 1,
+            modified: "2026-05-06T10:00:00Z".into(),
+        };
+        let listing = FolderListing {
+            folders: Vec::new(),
+            files: vec![&f1],
+        };
+        let html = render_objects_table("photos", "", &listing).into_string();
+        assert!(html.starts_with(r#"<div id="object-listing">"#), "{html}");
+        assert!(
+            html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--ghost-danger bulk-bar__delete" type="button" data-bulk-delete hidden>"#),
+            "{html}"
+        );
+    }
+
+    /// Deleting asks through the shared dialog, and Cancel — not the
+    /// destructive button — is what opening it focuses.
+    #[test]
+    fn the_delete_confirmation_focuses_cancel() {
+        let html = render_delete_confirm_modal().into_string();
+        assert!(
+            html.contains(r#"<dialog class="modal" id="delete-confirm""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<p id="delete-confirm-question"></p>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-confirm>Delete</button>"#), "{html}");
+    }
+
+    /// An empty folder offers the upload it is waiting for, and no
+    /// "Select all" over nothing.
+    #[test]
+    fn an_empty_folder_offers_an_upload() {
+        let listing = FolderListing {
+            folders: Vec::new(),
+            files: Vec::new(),
+        };
+        let html = render_objects_table("photos", "", &listing).into_string();
+        assert!(
+            html.contains(r#"<h2 class="empty__title">This folder is empty</h2>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-action="open-upload""#), "{html}");
+        assert!(!html.contains("data-bulk-toggle"), "{html}");
+    }
+
+    #[test]
+    fn render_breadcrumbs_is_empty_at_the_bucket_root() {
+        // The topbar's "Files › photos" already says where the page is.
+        assert!(render_breadcrumbs("photos", "").into_string().is_empty());
     }
 
     #[test]
@@ -620,6 +787,10 @@ mod tests {
         assert!(html.contains("photos"));
         assert!(html.contains(r#"href="/b/storage/photos/nested/""#));
         assert!(html.contains(">sub<"));
+        assert!(
+            html.contains(r#"<span aria-current="page">sub</span>"#),
+            "the current folder is marked: {html}"
+        );
         // Last segment ("sub") must NOT be a link.
         assert!(
             !html.contains(r#"href="/b/storage/photos/nested/sub/""#),

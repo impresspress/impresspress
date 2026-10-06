@@ -27,12 +27,14 @@
   }
 
   // Upload `files` (a FileList or array of File) to `bucket`/`prefix`.
-  // Shared by drag-drop and the explicit "+ Upload" button.
+  // Shared by drag-drop and every "+ Upload" button. The listing is then
+  // re-fetched in place rather than the page reloaded, so the outcome stays
+  // on screen: the toast, and the bar's live region, say how many went up
+  // and name the ones that did not.
   async function uploadFiles(files, bucket, prefix) {
     const list = Array.from(files || []);
     if (list.length === 0) return;
-    let successes = 0;
-    let failures = 0;
+    const failed = [];
     for (const f of list) {
       const key = (prefix || '') + f.name;
       const fd = new FormData();
@@ -44,24 +46,92 @@
         encodeURIComponent(key);
       try {
         const resp = await fetch(url, { method: 'POST', body: fd });
-        if (resp.ok) {
-          successes++;
-        } else {
-          failures++;
-        }
+        if (!resp.ok) failed.push(f.name);
       } catch (err) {
-        failures++;
+        failed.push(f.name);
       }
     }
-    if (successes > 0) {
-      showToast(
-        successes + ' uploaded' + (failures > 0 ? ', ' + failures + ' failed' : ''),
-        failures > 0 ? 'error' : 'success'
-      );
-    } else {
-      showToast(failures + ' upload failed', 'error');
+    const done = list.length - failed.length;
+    let message = plural(done, 'file') + ' uploaded';
+    if (failed.length > 0) {
+      message += ', ' + failed.length + " couldn't be uploaded: " + failed.join(', ');
     }
-    window.location.reload();
+    await refreshListing([]);
+    announce(message, failed.length > 0 ? 'error' : 'success');
+  }
+
+  function plural(n, noun) {
+    return n + ' ' + noun + (n === 1 ? '' : 's');
+  }
+
+  // Say an outcome twice over: as a toast, and in the bulk bar's always-
+  // present live region when the folder has one.
+  function announce(message, type) {
+    showToast(message, type);
+    const count = document.querySelector('[data-bulk-count]');
+    if (count) count.textContent = message;
+  }
+
+  // Re-fetch this page and swap its region `id` for the fresh one — the
+  // block's one way to show the result of a change without a reload, which
+  // would wipe the outcome it reports. `what` names the region in the error
+  // if the refresh fails. Every handler here is delegated, so swapped-in
+  // markup needs no binding. Resolves to whether the swap happened.
+  async function refreshRegion(id, what) {
+    const current = document.getElementById(id);
+    if (!current) return false;
+    try {
+      const resp = await fetch(window.location.href, { headers: { Accept: 'text/html' } });
+      if (!resp.ok) throw new Error('status ' + resp.status);
+      const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+      const fresh = doc.getElementById(id);
+      if (!fresh) throw new Error('no #' + id + ' in the page');
+      current.replaceWith(document.importNode(fresh, true));
+      return true;
+    } catch (e) {
+      showToast('The ' + what + " couldn't be refreshed; reload the page to see it.", 'error');
+      return false;
+    }
+  }
+
+  // Refresh the folder's `#object-listing` (the bulk bar and the table,
+  // `objects::render_objects_table`), then re-select `keepSelected` — the
+  // files an action could not finish with — where they are still listed.
+  async function refreshListing(keepSelected) {
+    if (!(await refreshRegion('object-listing', 'file list'))) return;
+    const keep = new Set(keepSelected);
+    document.querySelectorAll('.bulk-select').forEach((box) => {
+      box.checked = keep.has(box.dataset.key);
+    });
+    updateBulkBar();
+  }
+
+  // Every destructive action asks first, through the block's one confirm
+  // dialog (`pages_user::render_confirm_modal`): `question` in it, Cancel
+  // focused, and `action` run when its `data-confirm` button is pressed.
+  // `opener` is where focus goes back if it is cancelled.
+  let pendingConfirm = null;
+
+  function askToConfirm(dialogId, question, opener, action) {
+    const dlg = document.getElementById(dialogId);
+    if (!dlg) return;
+    pendingConfirm = { dialog: dlg, action: action };
+    // textContent, never innerHTML: file names are user-chosen.
+    dlg.querySelector('#' + dialogId + '-question').textContent = question;
+    document.body.dispatchEvent(
+      new CustomEvent('openModal', { detail: { id: dialogId, opener: opener } })
+    );
+  }
+
+  function confirmButtons() {
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-confirm]');
+      if (!btn || !pendingConfirm || !pendingConfirm.dialog.contains(btn)) return;
+      const job = pendingConfirm;
+      pendingConfirm = null;
+      job.dialog.close();
+      job.action();
+    });
   }
 
   function dragDropHandler(boot) {
@@ -86,28 +156,40 @@
       await uploadFiles(e.dataTransfer.files, bucket, prefix);
     });
 
-    // Topbar Upload button: trigger the hidden file picker, then upload.
-    const trigger = document.querySelector('[data-action="open-upload"]');
+    // Every "+ Upload" trigger (the topbar's, an empty folder's — which a
+    // refresh swaps in) opens the hidden file picker, then uploads what was
+    // picked.
     const fileInput = document.getElementById('file-upload-input');
-    if (trigger && fileInput) {
-      trigger.addEventListener('click', () => fileInput.click());
+    if (fileInput) {
+      document.addEventListener('click', (e) => {
+        if (e.target.closest('[data-action="open-upload"]')) fileInput.click();
+      });
       fileInput.addEventListener('change', async () => {
         await uploadFiles(fileInput.files, bucket, prefix);
+        fileInput.value = '';
       });
     }
   }
 
+  // The bar above the table (`objects::render_bulk_bar`): "Select all
+  // files", the selection's count (a live region that is always there), and
+  // "Delete selected" once anything is selected. Delegated, because a
+  // refresh replaces the bar and the table.
   function bulkSelect() {
-    const all = document.querySelector('[data-bulk-toggle]');
-    if (!all) return;
-    const rows = document.querySelectorAll('.bulk-select');
-    all.addEventListener('change', () => {
-      rows.forEach((r) => {
-        r.checked = all.checked;
-      });
-      updateBulkBar();
+    document.addEventListener('change', (e) => {
+      if (e.target.matches('[data-bulk-toggle]')) {
+        document.querySelectorAll('.bulk-select').forEach((r) => {
+          r.checked = e.target.checked;
+        });
+        updateBulkBar();
+      } else if (e.target.matches('.bulk-select')) {
+        updateBulkBar();
+      }
     });
-    rows.forEach((r) => r.addEventListener('change', updateBulkBar));
+    document.addEventListener('click', (e) => {
+      const del = e.target.closest('[data-bulk-delete]');
+      if (del && !del.disabled) askToDelete(selectedKeys(), del);
+    });
   }
 
   function selectedKeys() {
@@ -117,28 +199,43 @@
   }
 
   function updateBulkBar() {
-    let bar = document.getElementById('bulk-action-bar');
-    const keys = selectedKeys();
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'bulk-action-bar';
-      bar.className = 'bulk-action-bar';
-      bar.innerHTML = '<button type="button" data-bulk-delete>Delete selected</button>';
-      const target = document.querySelector('.page--list .page-body');
-      if (target) target.prepend(bar);
-      bar.querySelector('[data-bulk-delete]').addEventListener('click', bulkDelete);
+    const all = document.querySelector('[data-bulk-toggle]');
+    const total = document.querySelectorAll('.bulk-select').length;
+    const n = selectedKeys().length;
+    if (all) {
+      all.checked = total > 0 && n === total;
+      all.indeterminate = n > 0 && n < total;
     }
-    bar.style.display = keys.length > 0 ? '' : 'none';
-    bar.dataset.count = String(keys.length);
+    const del = document.querySelector('[data-bulk-delete]');
+    if (del) del.hidden = n === 0;
+    const count = document.querySelector('[data-bulk-count]');
+    if (count) count.textContent = n === 0 ? '' : plural(n, 'file') + ' selected';
   }
 
-  async function bulkDelete() {
+  // A delete — a selection, or one file from its menu — asks first: "Delete
+  // 40 files? This can't be undone." While the deletes run, "Delete
+  // selected" is disabled and busy, so a second click cannot start them
+  // twice.
+  let deleting = false;
+
+  function askToDelete(keys, opener) {
     const boot = readBootstrap() || {};
+    if (!boot.bucket || !keys.length || deleting) return;
     const bucket = boot.bucket;
-    const keys = selectedKeys();
-    if (!bucket || !keys.length) return;
-    if (!window.confirm('Delete ' + keys.length + ' file(s)?')) return;
-    let failures = 0;
+    const name = keys.length === 1 ? keys[0].split('/').pop() : plural(keys.length, 'file');
+    askToConfirm('delete-confirm', 'Delete ' + name + "? This can't be undone.", opener, () =>
+      deleteKeys(bucket, keys, opener)
+    );
+  }
+
+  async function deleteKeys(bucket, keys, opener) {
+    deleting = true;
+    const busy = document.querySelector('[data-bulk-delete]');
+    if (busy) {
+      busy.disabled = true;
+      busy.setAttribute('aria-busy', 'true');
+    }
+    const failed = [];
     for (const key of keys) {
       const url =
         '/b/storage/api/buckets/' +
@@ -147,91 +244,185 @@
         encodeURIComponent(key);
       try {
         const resp = await fetch(url, { method: 'DELETE' });
-        if (!resp.ok) failures++;
+        if (!resp.ok) failed.push(key);
       } catch (e) {
-        failures++;
+        failed.push(key);
       }
     }
-    showToast(
-      keys.length - failures + ' deleted' + (failures > 0 ? ', ' + failures + ' failed' : ''),
-      failures > 0 ? 'error' : 'success'
-    );
-    window.location.reload();
+    // The refresh shows what the bucket now holds; a file that could not be
+    // deleted and is still there stays selected, ready to try again.
+    await refreshListing(failed);
+    deleting = false;
+    const deleted = keys.length - failed.length;
+    let message = plural(deleted, 'file') + ' deleted';
+    if (failed.length > 0) {
+      message +=
+        ', ' +
+        failed.length +
+        " couldn't be deleted: " +
+        failed.map((k) => k.split('/').pop()).join(', ');
+    }
+    announce(message, failed.length > 0 ? 'error' : 'success');
+    // The control that asked may have gone with the rows it deleted.
+    const back = opener && opener.isConnected ? opener : document.querySelector('[data-bulk-toggle]');
+    if (back) back.focus();
   }
 
-  function kebabMenu() {
+  // A file row's "more actions" menu. The trigger is a button with
+  // `aria-haspopup="menu"`; the menu is a `role="menu"` list of
+  // `role="menuitem"` buttons, opened under it and driven from the keyboard
+  // the way the ARIA menu-button pattern describes: Enter, Space or
+  // ArrowDown open it on the first item (ArrowUp on the last), the arrows,
+  // Home and End move between items, Escape closes it and returns focus to
+  // the trigger, Tab closes it and lets focus move on.
+  let openMenu = null;
+
+  function rowMenus() {
     document.addEventListener('click', (e) => {
       const trigger = e.target.closest('[data-action-menu]');
       if (trigger) {
         e.stopPropagation();
-        openKebab(trigger);
+        if (openMenu && openMenu.trigger === trigger) {
+          closeMenu(true);
+        } else {
+          openRowMenu(trigger, 0);
+        }
         return;
       }
-      closeAllKebabs();
+      if (openMenu && !openMenu.menu.contains(e.target)) closeMenu(false);
+    });
+    // The menu is placed against the trigger once; it closes rather than
+    // drift away from the row when the page scrolls or resizes under it.
+    window.addEventListener('resize', () => closeMenu(false));
+    document.addEventListener('scroll', () => closeMenu(false), true);
+    document.addEventListener('keydown', (e) => {
+      const trigger = e.target.closest && e.target.closest('[data-action-menu]');
+      if (trigger && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        openRowMenu(trigger, e.key === 'ArrowUp' ? -1 : 0);
+      }
     });
   }
 
-  function closeAllKebabs() {
-    document.querySelectorAll('.kebab-popup').forEach((p) => p.remove());
+  function closeMenu(restoreFocus) {
+    if (!openMenu) return;
+    const { menu, trigger } = openMenu;
+    openMenu = null;
+    menu.remove();
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) trigger.focus();
   }
 
-  function openKebab(trigger) {
-    closeAllKebabs();
-    const popup = document.createElement('div');
-    popup.className = 'kebab-popup';
-    if (trigger.dataset.shareId) {
-      // Shares table kebab.
-      popup.innerHTML = '<button type="button" data-action="revoke">Revoke share</button>';
-      popup.querySelector('[data-action="revoke"]').addEventListener('click', () => {
-        revokeShare(trigger.dataset.shareId);
-      });
-    } else if (trigger.dataset.key) {
-      // Object table kebab.
-      popup.innerHTML =
-        '<button type="button" data-action="share">Share</button>' +
-        '<button type="button" data-action="copy">Copy link</button>' +
-        '<button type="button" data-action="delete">Delete</button>';
-      popup.querySelector('[data-action="share"]').addEventListener('click', () => {
-        shareModal(trigger.dataset.bucket, trigger.dataset.key, trigger);
-      });
-      popup.querySelector('[data-action="copy"]').addEventListener('click', () => {
+  function menuItem(label, onSelect, danger) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
+    item.className = 'row-menu__item' + (danger ? ' row-menu__item--danger' : '');
+    item.textContent = label;
+    item.addEventListener('click', () => {
+      closeMenu(false);
+      onSelect();
+    });
+    return item;
+  }
+
+  function openRowMenu(trigger, focusIndex) {
+    closeMenu(false);
+    const bucket = trigger.dataset.bucket;
+    const key = trigger.dataset.key;
+    if (!key) return;
+    const menu = document.createElement('div');
+    menu.className = 'row-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', trigger.getAttribute('aria-label') || 'Actions');
+    menu.append(
+      menuItem('Share', () => shareModal(bucket, key, trigger)),
+      menuItem('Copy link', () => {
         const url =
           window.location.origin +
           '/b/storage/api/buckets/' +
-          encodeURIComponent(trigger.dataset.bucket) +
+          encodeURIComponent(bucket) +
           '/objects/' +
-          encodeURIComponent(trigger.dataset.key);
+          encodeURIComponent(key);
         navigator.clipboard.writeText(url);
         showToast('Link copied', 'success');
-      });
-      popup.querySelector('[data-action="delete"]').addEventListener('click', () => {
-        confirmDelete(trigger.dataset.bucket, trigger.dataset.key);
-      });
-    }
+        trigger.focus();
+      }),
+      menuItem('Delete', () => askToDelete([key], trigger), true)
+    );
+    const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+    menu.addEventListener('keydown', (e) => {
+      const at = items.indexOf(document.activeElement);
+      let next = null;
+      if (e.key === 'ArrowDown') next = (at + 1) % items.length;
+      else if (e.key === 'ArrowUp') next = (at - 1 + items.length) % items.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = items.length - 1;
+      else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMenu(true);
+        return;
+      } else if (e.key === 'Tab') {
+        // Back on the trigger, and the Tab itself is not stopped: focus moves
+        // on from the trigger, as if the menu had never opened.
+        closeMenu(true);
+        return;
+      }
+      if (next !== null) {
+        e.preventDefault();
+        items[next].focus();
+      }
+    });
     const rect = trigger.getBoundingClientRect();
-    popup.style.position = 'fixed';
-    popup.style.top = rect.bottom + 'px';
-    popup.style.right = window.innerWidth - rect.right + 'px';
-    document.body.appendChild(popup);
+    menu.style.top = rect.bottom + 'px';
+    menu.style.right = window.innerWidth - rect.right + 'px';
+    document.body.appendChild(menu);
+    trigger.setAttribute('aria-expanded', 'true');
+    openMenu = { menu: menu, trigger: trigger };
+    items[focusIndex < 0 ? items.length - 1 : focusIndex].focus();
+  }
+
+  // A share link's revoke button (`cloudstorage::render_shares_table`): it
+  // asks first ("Revoke the link to photos/a.png? Anyone who has it loses
+  // access."), then revokes.
+  function revokeButtons() {
+    document.addEventListener('click', (e) => {
+      const trigger = e.target.closest('[data-action="revoke-share"]');
+      if (!trigger) return;
+      askToConfirm(
+        'revoke-confirm',
+        'Revoke the link to ' + trigger.dataset.file + '? Anyone who has it loses access.',
+        trigger,
+        () => revokeShare(trigger.dataset.shareId)
+      );
+    });
   }
 
   // `shareId` is the share row's id (rendered as `data-share-id`), which is
   // what DELETE /b/cloudstorage/shares/{id} is keyed on — not the public
-  // token in the link.
+  // token in the link. The share list is then refreshed in place and the
+  // outcome toasted; focus lands on the list's heading, since the row it was
+  // on is gone.
   async function revokeShare(shareId) {
-    if (!window.confirm('Revoke this share link?')) return;
+    let revoked = false;
     try {
       const resp = await fetch('/b/cloudstorage/shares/' + encodeURIComponent(shareId), {
         method: 'DELETE',
       });
-      if (resp.ok) {
-        showToast('Share revoked', 'success');
-        window.location.reload();
-      } else {
-        showToast('Revoke failed', 'error');
-      }
+      revoked = resp.ok;
     } catch (e) {
-      showToast('Revoke failed', 'error');
+      revoked = false;
+    }
+    if (revoked) await refreshRegion('share-listing', 'share list');
+    showToast(
+      revoked ? 'Share link revoked' : "The share link couldn't be revoked. Try again.",
+      revoked ? 'success' : 'error'
+    );
+    const heading = document.querySelector('#share-listing h2');
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus();
     }
   }
 
@@ -239,7 +430,7 @@
   // (`pages_user::objects::render_share_modal`) as the shared
   // `components::modal` <dialog>. This fills in which object it is about and
   // asks chrome.js to open it — through the same `openModal` event the htmx
-  // trigger header uses — with the kebab trigger as the control focus returns
+  // trigger header uses — with the row's menu trigger as the control focus returns
   // to (the menu item that was clicked is gone by the time the modal closes).
   let shareTarget = null;
 
@@ -289,26 +480,6 @@
         showToast('Share creation failed', 'error');
       }
     });
-  }
-
-  async function confirmDelete(bucket, key) {
-    if (!window.confirm('Delete ' + key + '?')) return;
-    const url =
-      '/b/storage/api/buckets/' +
-      encodeURIComponent(bucket) +
-      '/objects/' +
-      encodeURIComponent(key);
-    try {
-      const resp = await fetch(url, { method: 'DELETE' });
-      if (resp.ok) {
-        showToast('Deleted', 'success');
-        window.location.reload();
-      } else {
-        showToast('Delete failed', 'error');
-      }
-    } catch (e) {
-      showToast('Delete failed', 'error');
-    }
   }
 
   // S3-style bucket name validation. Rules per AWS S3:
@@ -398,8 +569,11 @@
   window.impresspressFilesBrowser = {
     init: function () {
       const boot = readBootstrap();
-      // The kebab works without bootstrap too (the shares page).
-      kebabMenu();
+      // The row menus and revoke buttons need no bootstrap (the shares page
+      // has none).
+      rowMenus();
+      confirmButtons();
+      revokeButtons();
       // The share modal lives on the object list; the bucket-create modal on
       // the bucket lists (no boot bucket). Each binds only where it is.
       shareForm();
@@ -407,6 +581,7 @@
       if (!boot) return;
       dragDropHandler(boot);
       bulkSelect();
+
     },
   };
 

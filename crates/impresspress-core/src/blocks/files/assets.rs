@@ -14,7 +14,7 @@
 //! asset.
 
 /// Vanilla-JS bundle for the file-browser surfaces — drag-drop upload, bulk
-/// select, kebab menus, the share and new-bucket modals' forms, confirm-delete. Consumed
+/// select, row menus, share revoke, the share and new-bucket modals' forms, confirm-delete. Consumed
 /// by [`super::pages_user::objects::object_list_page`],
 /// [`super::pages_user::cloudstorage::cloudstorage_page`] and the admin
 /// storage pages.
@@ -23,7 +23,7 @@ const FILES_BROWSER_JS: &str = include_str!("assets/files-browser.js");
 
 /// The bundle's source, for the tests that hold the browser and the Rust
 /// handlers to one contract — the request fields the share modal sends, the
-/// `data-*` attribute the kebab reads, the URL it revokes through.
+/// `data-*` attribute the revoke button reads, the URL it revokes through.
 ///
 /// Those tests read the shipped file rather than a transcription of it: a
 /// transcription is what lets the two sides drift (a share modal posting
@@ -66,7 +66,7 @@ mod tests {
             "drop handler missing"
         );
         assert!(js.contains("data-bulk-toggle"), "bulk-select missing");
-        assert!(js.contains("data-action-menu"), "kebab handler missing");
+        assert!(js.contains("data-action-menu"), "row menu handler missing");
         // The share modal is the shared, server-rendered dialog; the bundle
         // opens it through chrome.js's `openModal` event, never builds one.
         assert!(

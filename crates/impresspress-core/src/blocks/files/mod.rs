@@ -990,7 +990,7 @@ mod test_support {
         }
     }
 
-    /// The HTML attribute the kebab's revoke button reads, derived from the
+    /// The HTML attribute the revoke button reads, derived from the
     /// `dataset` key the bundle uses (`dataset.shareId` ⇒ `data-share-id`).
     pub(super) fn revoke_id_attribute() -> String {
         let key = between(
