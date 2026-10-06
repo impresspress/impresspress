@@ -269,6 +269,32 @@ async fn groups_rows_dash_an_empty_description_and_mark_delete() {
     assert!(html.contains(r#"aria-label="Edit Consulting""#), "{html}");
 }
 
+/// A product that does not exist is the 404 page for a browser — not a 500,
+/// and not the error page inside the shell, which is for a read that failed.
+#[tokio::test]
+async fn a_missing_product_is_the_404_page() {
+    let ctx = ctx().await;
+    for path in [
+        "/b/products/admin/products/prod_absent",
+        "/b/products/admin/products/prod_absent/close",
+        "/b/products/admin/purchases/pur_absent",
+        "/b/products/admin/sellers/seller_absent",
+    ] {
+        let (mut msg, input) = admin_get_msg(path);
+        msg.set_meta("http.header.accept", "text/html");
+        let parts =
+            wafer_block::http_codec::collect_http_response(dispatch(&ctx, msg, input).await).await;
+        let html = String::from_utf8_lossy(&parts.body);
+        assert_eq!(parts.status, 404, "{path}: {html}");
+        assert!(
+            parts.headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("content-type") && v.starts_with("text/html")
+            }) && html.contains("404"),
+            "{path}: the styled 404 page, not JSON: {html}"
+        );
+    }
+}
+
 /// Sellers: the queue's count is a sentence, not "0 listing(s)".
 #[tokio::test]
 async fn sellers_queue_count_reads_as_a_sentence() {

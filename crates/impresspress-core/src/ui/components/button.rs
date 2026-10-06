@@ -104,31 +104,89 @@ pub fn subnav(label: &str, tabs: Vec<Tab<'_>>) -> Markup {
     }
 }
 
-/// One page's views of the same list — Active / Deleted products, an order
-/// status — as a set of links of which exactly one is current: the
+/// One list's views of which exactly one is current — Active / Deleted
+/// products, an order status, a sort order — as a set of links in the
 /// [`filter_toggle`] look (`.filter-toggle`, the current one filled and
 /// checked), in a labelled `nav`, the current link `aria-current="true"`.
+/// The one way a page draws such a set; an on/off filter is
+/// [`filter_toggle`].
 ///
-/// Links, not [`filter_toggle`]'s on/off buttons: only one view can be on.
-/// Not [`subnav`]: those are a block's separate pages, drawn above the
-/// content card; these narrow the list the page already shows, so they sit
-/// in its filter row. And plain navigations rather than an htmx swap, for
-/// the reason [`subnav`] gives: a view can change the page's subtitle and
-/// actions, which live in the topbar.
-pub fn filter_links(label: &str, links: Vec<Tab<'_>>) -> Markup {
-    html! {
-        nav .filter-toggles aria-label=(label) {
-            @for link in links {
-                a .btn .btn--secondary .btn--sm .filter-toggle href=(link.href) aria-current=[link.active.then_some("true")] {
-                    span .filter-toggle__check aria-hidden="true" { (crate::ui::icons::check()) }
-                    @if let Some(icon) = link.icon {
-                        (icon)
+/// Links, not [`filter_toggle`]'s on/off buttons: only one can be on. Not
+/// [`subnav`]: those are a block's separate pages, drawn above the content
+/// card; these narrow the list the page already shows, so they sit in its
+/// filter row.
+///
+/// Plain navigations by default, for the reason [`subnav`] gives: a view
+/// that changes the page's subtitle or actions (they live in the topbar)
+/// must load the whole page. A view that changes only the list
+/// ([`FilterLinks::swap`]) swaps the target and pushes the URL instead.
+pub struct FilterLinks<'a> {
+    label: &'a str,
+    label_id: Option<&'a str>,
+    swap_target: Option<&'a str>,
+    links: Vec<Tab<'a>>,
+}
+
+impl<'a> FilterLinks<'a> {
+    /// `links` named `label` (read by screen readers only, unless
+    /// [`visible_label`](Self::visible_label) shows it).
+    pub fn new(label: &'a str, links: Vec<Tab<'a>>) -> Self {
+        Self {
+            label,
+            label_id: None,
+            swap_target: None,
+            links,
+        }
+    }
+
+    /// Show the label in front of the links ("Sort by"), as the element
+    /// `id` the `nav` is labelled by.
+    pub fn visible_label(self, id: &'a str) -> Self {
+        Self {
+            label_id: Some(id),
+            ..self
+        }
+    }
+
+    /// Swap `target` (`"#content"`) with each link's page and push its URL,
+    /// rather than navigating — for views that change only the list.
+    pub fn swap(self, target: &'a str) -> Self {
+        Self {
+            swap_target: Some(target),
+            ..self
+        }
+    }
+
+    pub fn render(self) -> Markup {
+        let label = self.label_id.is_none().then_some(self.label);
+        html! {
+            nav .filter-toggles aria-label=[label] aria-labelledby=[self.label_id] {
+                @if let Some(id) = self.label_id {
+                    span #(id) .text-sm .text-muted { (self.label) }
+                }
+                @for link in self.links {
+                    a .btn .btn--secondary .btn--sm .filter-toggle
+                        href=(link.href)
+                        hx-get=[self.swap_target.map(|_| link.href)]
+                        hx-target=[self.swap_target]
+                        hx-push-url=[self.swap_target.map(|_| "true")]
+                        aria-current=[link.active.then_some("true")]
+                    {
+                        span .filter-toggle__check aria-hidden="true" { (crate::ui::icons::check()) }
+                        @if let Some(icon) = link.icon {
+                            (icon)
+                        }
+                        (link.label)
                     }
-                    (link.label)
                 }
             }
         }
     }
+}
+
+/// [`FilterLinks`] with neither a visible label nor a swap: plain links.
+pub fn filter_links(label: &str, links: Vec<Tab<'_>>) -> Markup {
+    FilterLinks::new(label, links).render()
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +294,27 @@ mod tests {
         );
         // Plain links: a view changes the topbar, so it is never a swap.
         assert!(!s.contains("hx-"), "{s}");
+    }
+
+    #[test]
+    fn swapping_filter_links_carry_a_visible_label_and_the_htmx_swap() {
+        let s = FilterLinks::new(
+            "Sort by",
+            vec![Tab {
+                active: true,
+                href: "/b/admin/settings/network?sort=errors",
+                label: "Errors",
+                icon: None,
+            }],
+        )
+        .visible_label("network-sort-label")
+        .swap("#content")
+        .render()
+        .into_string();
+        assert!(
+            s.starts_with(r##"<nav class="filter-toggles" aria-labelledby="network-sort-label"><span class="text-sm text-muted" id="network-sort-label">Sort by</span><a class="btn btn--secondary btn--sm filter-toggle" href="/b/admin/settings/network?sort=errors" hx-get="/b/admin/settings/network?sort=errors" hx-target="#content" hx-push-url="true" aria-current="true">"##),
+            "{s}"
+        );
     }
 
     #[test]

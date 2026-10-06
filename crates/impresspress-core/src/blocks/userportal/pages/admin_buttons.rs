@@ -104,7 +104,8 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
                         input .form-input #sort_order type="number" name="sort_order" value="0";
                     }
                     div .admin-buttons-form-grid__submit {
-                        button .btn .btn--primary type="submit" {
+                        // Full width on a phone (D4's opt-in `.btn--block`).
+                        button .btn .btn--primary .btn--block type="submit" {
                             (icons::plus()) " Add button"
                         }
                     }

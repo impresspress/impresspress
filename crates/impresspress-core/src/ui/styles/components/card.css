@@ -739,7 +739,6 @@
 }
 @media (max-width: 560px) {
 	.admin-buttons-form-grid { grid-template-columns: minmax(0, 1fr); }
-	.admin-buttons-form-grid__submit .btn { width: 100%; }
 }
 /* A button's icon beside its name, centred on one line. */
 .admin-buttons-icon { display: inline-flex; align-items: center; gap: var(--space-2); }
