@@ -9,7 +9,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 use super::{assets, SiteConfig};
 
 /// The `htmx-config` every page carries. See the comment where it is emitted.
-const HTMX_CONFIG: &str = r#"{"allowEval":false}"#;
+const HTMX_CONFIG: &str = r#"{"allowEval":false,"historyCacheSize":0,"refreshOnHistoryMiss":true}"#;
 
 /// Render a full HTML page with head (CSS + htmx) and body.
 /// Whether a response body is a whole document — what [`page`] renders —
@@ -55,6 +55,16 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
                 // `'unsafe-eval'`, so each of those would be refused by the
                 // browser anyway; with this off htmx refuses them first, with
                 // an `htmx:evalDisallowedError`, and never reaches the eval.
+                //
+                // `historyCacheSize: 0`: htmx keeps no page snapshots. Its
+                // cache lives in localStorage, which outlives sign-out, and
+                // the snapshots are admin pages — user emails, request paths.
+                // `refreshOnHistoryMiss`: so Back to an URL htmx pushed loads
+                // that URL as a page, from the server, with current data.
+                // Without it htmx re-requests the URL as an htmx request,
+                // which answers the body without the chrome, and swaps that
+                // into `body` — the sidebar and topbar vanish.
+                //
                 // Read at htmx's init, which waits for the document to be
                 // ready, so this tag only has to be in the head.
                 meta name="htmx-config" content=(HTMX_CONFIG);
@@ -79,6 +89,11 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
             body {
                 (body)
                 div #toast-container .toast-container role="status" aria-live="polite" {}
+                // What a list search found (`components::SearchInput`),
+                // written by chrome.js. Outside `main#content`, which each
+                // search re-renders: a live region announces changes to
+                // itself, not its own replacement.
+                div #search-status .sr-only role="status" aria-live="polite" {}
                 script src=(assets::webmcp_js_url()) defer {}
                 @for src in &config.embedded_scripts {
                     script type="module" src=(src) {}
@@ -113,7 +128,7 @@ mod tests {
 
     /// Every page turns htmx's eval off, and does so before htmx loads.
     #[test]
-    fn every_page_disables_htmx_eval() {
+    fn every_page_carries_the_htmx_config() {
         let config = SiteConfig {
             app_name: "Test".into(),
             logo_url: String::new(),
@@ -125,10 +140,10 @@ mod tests {
             auth_tagline: String::new(),
         };
         let rendered = page("Title", &config, maud::html! { p { "body" } }).into_string();
-        let meta = r#"<meta name="htmx-config" content="{&quot;allowEval&quot;:false}">"#;
-        let at = rendered
-            .find(meta)
-            .unwrap_or_else(|| panic!("no allowEval=false htmx-config: {rendered}"));
+        let meta = r#"<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;historyCacheSize&quot;:0,&quot;refreshOnHistoryMiss&quot;:true}">"#;
+        let at = rendered.find(meta).unwrap_or_else(|| {
+            panic!("no allowEval=false, no-history-cache htmx-config: {rendered}")
+        });
         let htmx = rendered
             .find(&assets::htmx_js_url())
             .expect("htmx is loaded");
