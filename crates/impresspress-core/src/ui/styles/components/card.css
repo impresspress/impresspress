@@ -373,6 +373,7 @@
 	margin-top: var(--space-4);
 }
 .block-cards__filter { margin-top: var(--space-4); max-width: 240px; }
+.block-cards__filter .form-label { margin-bottom: var(--space-1); }
 .block-card {
 	display: flex;
 	flex-direction: column;
@@ -387,7 +388,10 @@
 }
 .block-card:hover,
 .block-card:focus-within { border-color: var(--primary-color); box-shadow: var(--shadow-sm); }
-.block-card--disabled { opacity: 0.6; }
+/* A disabled block reads as set aside -- a dashed frame on the sunken
+   surface -- without fading its text below AA (an opacity of 0.6 took the
+   summary and meta lines to about 2.6:1). */
+.block-card--disabled { background: var(--surface-2); border-style: dashed; }
 .block-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .block-card__title {
 	font-size: var(--text-base); font-weight: 600;
@@ -698,6 +702,27 @@
 .var-cell__key { font-size: 13px; font-weight: 500; }
 .var-cell__name { font-size: var(--text-xs); color: var(--text-secondary); }
 .var-cell__note { font-size: var(--text-xs); color: var(--text-muted); }
+
+/* One owner's variables, collapsible (`<details>`): the summary row is the
+   whole 44px-plus control, the title on the left and its counts beside it. */
+.var-group { border: 1px solid var(--border-light); border-radius: var(--radius-lg); background: var(--surface-1); margin-top: var(--space-3); }
+.var-group__summary {
+	display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3);
+	min-height: 44px; padding: var(--space-3) var(--space-4);
+	cursor: pointer; list-style: none; border-radius: var(--radius-lg);
+}
+.var-group__summary::-webkit-details-marker { display: none; }
+.var-group__summary::before {
+	content: ""; align-self: center; width: 0.5rem; height: 0.5rem; flex: none;
+	border-right: 2px solid var(--text-muted); border-bottom: 2px solid var(--text-muted);
+	transform: rotate(-45deg); transition: transform 150ms ease-out;
+}
+.var-group[open] > .var-group__summary::before { transform: rotate(45deg); }
+.var-group__title { margin: 0; font-size: var(--text-base); font-weight: 600; }
+.var-group__stats { font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.var-group__body { padding: 0 var(--space-4) var(--space-4); }
+.var-group__access { margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--text-secondary); }
+@media (prefers-reduced-motion: reduce) { .var-group__summary::before { transition: none; } }
 
 /* ===== Variables admin warnings (blocks/admin/pages/variables.rs) =====
  * #92400e / #fef3c7 have no matching design token; carried over unchanged

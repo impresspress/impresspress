@@ -932,6 +932,8 @@ pub(crate) async fn daily_grouped(
         }],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     wafer_core::clients::database::aggregate(ctx, req).await
 }

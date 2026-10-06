@@ -133,7 +133,7 @@ pub async fn refuse_oversized_body(
     write_request_log(
         ctx,
         NewRequestLog {
-            method: msg.action(),
+            method: http_method(msg),
             path: msg.path(),
             status_code: 413,
             error_message: "",
@@ -164,7 +164,7 @@ async fn refuse_unchecked_credential(
     write_request_log(
         ctx,
         NewRequestLog {
-            method: msg.action(),
+            method: http_method(msg),
             path: msg.path(),
             status_code: i64::from(http_codec::resolve_error_status(&error)),
             error_message: &error.message,
@@ -273,7 +273,7 @@ pub async fn handle_request(
     }
 
     // Capture request info before routing (for logging)
-    let method = msg.action().to_string();
+    let method = http_method(&msg).to_string();
     let path = msg.path().to_string();
     let client_ip = msg.remote_addr().to_string();
     let user_id = msg.user_id().to_string();
@@ -824,6 +824,14 @@ fn resembles_a_declared_route(
         .any(|endpoint| endpoint_match::match_template(&endpoint.path, &normalized).is_some())
 }
 
+/// The HTTP method the client sent, as `http_codec::build_http_message`
+/// recorded it from the request head: what a request-log row names, because
+/// an operator reads `GET`/`POST`, not the `retrieve`/`create` action the
+/// router dispatches on (which folds `PUT` and `PATCH` into one).
+fn http_method(msg: &Message) -> &str {
+    msg.get_meta(http_codec::META_HTTP_METHOD)
+}
+
 /// What `request_logs` keeps. Set by
 /// [`crate::config_vars::REQUEST_LOG_CONFIG_KEY`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -863,7 +871,9 @@ impl RequestLogPolicy {
     fn keeps(self, status_code: i64) -> bool {
         match self {
             Self::All => true,
-            Self::Errors => status_code >= 500,
+            Self::Errors => {
+                request_logs::StatusClass::of(status_code) == request_logs::StatusClass::ServerError
+            }
             Self::Off => false,
         }
     }
@@ -3022,7 +3032,7 @@ mod streaming_audit_tests {
 
     /// Read by the test, not by the router the requests ran as.
     async fn request_log_count(ctx: &TestContext) -> i64 {
-        request_logs::paginated(&ctx.fixture(), 1, 20, "", false)
+        request_logs::paginated(&ctx.fixture(), 1, 20, "", request_logs::ErrorFilter::NONE)
             .await
             .expect("count request_logs")
             .total_count
@@ -3174,7 +3184,7 @@ mod secret_path_redaction_tests {
     /// The `(path, status_code)` of every audit row, so a test can pin the
     /// status its reasoning depends on instead of asserting it in a comment.
     async fn logged_rows(ctx: &TestContext) -> Vec<(String, i64)> {
-        request_logs::paginated(ctx, 1, 50, "", false)
+        request_logs::paginated(ctx, 1, 50, "", request_logs::ErrorFilter::NONE)
             .await
             .expect("list request_logs")
             .rows
@@ -3529,13 +3539,14 @@ mod request_log_policy_tests {
     /// `(path, status_code)` of every row written, sorted so a test states
     /// which rows exist without also pinning `paginated`'s newest-first order.
     async fn logged(ctx: &TestContext) -> Vec<(String, i64)> {
-        let mut rows: Vec<(String, i64)> = request_logs::paginated(ctx, 1, 1000, "", false)
-            .await
-            .expect("list request_logs")
-            .rows
-            .iter()
-            .map(|r| (r.path.clone(), r.status_code))
-            .collect();
+        let mut rows: Vec<(String, i64)> =
+            request_logs::paginated(ctx, 1, 1000, "", request_logs::ErrorFilter::NONE)
+                .await
+                .expect("list request_logs")
+                .rows
+                .iter()
+                .map(|r| (r.path.clone(), r.status_code))
+                .collect();
         rows.sort();
         rows
     }
@@ -3599,7 +3610,7 @@ mod request_log_policy_tests {
         reset_request_log_budget_for_test();
         drive(&ctx, MOVED_ROUTE).await;
 
-        let rows = request_logs::paginated(&ctx, 1, 10, "", false)
+        let rows = request_logs::paginated(&ctx, 1, 10, "", request_logs::ErrorFilter::NONE)
             .await
             .expect("list request_logs")
             .rows;
@@ -3611,12 +3622,31 @@ mod request_log_policy_tests {
         );
     }
 
-    /// The one stored row, and the dashboard's today/daily error counts over
-    /// it, after driving a single request.
+    /// A row names the HTTP method the client sent, not the router's action:
+    /// `PATCH` and `PUT` both dispatch as `update`, and an operator reading
+    /// the logs reads verbs.
+    #[tokio::test]
+    async fn the_row_names_the_http_method_not_the_action() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        let mut msg = anon_msg("update", OK_ROUTE);
+        msg.set_meta(http_codec::META_HTTP_METHOD, "PATCH");
+        drive_msg(&ctx, msg).await;
+
+        let rows = request_logs::paginated(&ctx, 1, 10, "", request_logs::ErrorFilter::NONE)
+            .await
+            .expect("list request_logs")
+            .rows;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].method, "PATCH");
+    }
+
+    /// The one stored row, and the dashboard's today/daily error counts (of
+    /// either class) over it, after driving a single request.
     async fn sole_row_and_dashboard_errors(
         ctx: &TestContext,
     ) -> (request_logs::RequestLogRow, i64, i64) {
-        let rows = request_logs::paginated(ctx, 1, 10, "", false)
+        let rows = request_logs::paginated(ctx, 1, 10, "", request_logs::ErrorFilter::NONE)
             .await
             .expect("list request_logs")
             .rows;
@@ -3630,9 +3660,13 @@ mod request_log_policy_tests {
             .await
             .expect("daily_counts")
             .iter()
-            .map(|d| d.errors)
+            .map(|d| d.server_errors + d.client_errors)
             .sum();
-        (rows[0].clone(), today.errors, daily)
+        (
+            rows[0].clone(),
+            today.server_errors + today.client_errors,
+            daily,
+        )
     }
 
     /// A handler that renders the styled HTML 500 page answers with a
@@ -4077,7 +4111,7 @@ mod oversized_body_tests {
             .collect_buffered()
             .await;
 
-        let rows = request_logs::paginated(&ctx, 1, 20, "", false)
+        let rows = request_logs::paginated(&ctx, 1, 20, "", request_logs::ErrorFilter::NONE)
             .await
             .expect("read request_logs")
             .rows;
