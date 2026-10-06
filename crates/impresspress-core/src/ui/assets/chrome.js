@@ -481,7 +481,7 @@ document.addEventListener("input", function (e) {
 //   for, in order: the element now carrying the opener's `id` (the row Edit
 //   buttons an htmx-loaded modal is opened from carry a stable one), then a
 //   `data-action="modal-open"` trigger naming the same modal, then the page's
-//   `main#content` (`tabindex="-1"`), so focus is never left on nothing. That
+//   `main#content` (a Tab stop), so focus is never left on nothing. That
 //   re-render can also take the OPEN dialog out of the document (a form whose
 //   target is `#content`, which holds the modal), which closes it without a
 //   `close` event; `htmx:afterSwap` notices that too.

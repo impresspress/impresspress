@@ -64,6 +64,27 @@ summary { cursor: pointer; }
 	outline: 2px solid var(--primary-color);
 	outline-offset: 2px;
 }
+/* The components that draw their ring as a `--focus-ring` box-shadow
+   instead (it follows their border-radius). Forced-colors mode (Windows High
+   Contrast) drops every box-shadow, so each also carries a transparent
+   outline: invisible normally, painted in the system colour there. One rule
+   for all of them, so no component can take the shadow without the
+   outline. `.btn` covers every button variant (`.btn--icon`,
+   `.btn--ghost-danger`, ...), which are modifiers on it. */
+.btn:focus-visible,
+.topbar__palette:focus-visible,
+.shell__drawer-toggle:focus-visible,
+.shell__palette-icon:focus-visible,
+.shell__body:focus-visible,
+.data-table__row-href a:focus-visible,
+.data-table--scroll:focus-visible,
+a.pagination__link:focus-visible,
+.account-nav__item:focus-visible,
+.chart__values summary:focus-visible {
+	outline: 2px solid transparent;
+	outline-offset: -2px;
+	box-shadow: var(--focus-ring);
+}
 
 /* Ported from origin/main (ui/assets/base.css) during the main merge --
    2026-09-02. Pixel-art images (the built-in brand mark): scale by
