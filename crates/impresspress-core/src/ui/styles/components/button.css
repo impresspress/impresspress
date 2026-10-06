@@ -49,8 +49,10 @@
    meant to express. */
 .btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
-   vertical rather than the text-button ratio. */
-.btn--icon { padding: var(--space-2); }
+   vertical rather than the text-button ratio. It has no words to make it
+   wide, so it is held at the 44px touch target on every width; it always
+   carries an `aria-label`, its only name. */
+.btn--icon { padding: var(--space-2); min-width: 44px; min-height: 44px; }
 
 /* ── Variants ──────────────────────────────────────────── */
 .btn--primary { background: var(--primary-button); color: #fff; border-color: var(--primary-button); }
@@ -71,6 +73,13 @@
    --primary-button already does double duty for --primary-color. */
 .btn--danger { background: var(--accent-danger-text); color: #fff; }
 .btn--danger:hover:not(:disabled) { filter: brightness(0.92); }
+
+/* A destructive row action (a table's delete icon): quiet until it is
+   pointed at, so a column of them does not read as a column of alarms; the
+   confirm step it keeps is the real guard. --accent-danger-text is 6.47:1 on
+   white and on --bg-hover. */
+.btn--ghost-danger { background: transparent; color: var(--accent-danger-text); }
+.btn--ghost-danger:hover:not(:disabled) { background: var(--bg-hover); }
 
 /* --accent-success (#10b981) under white text is 2.54:1 -- below AA, and
    below even the 3:1 non-text floor. --accent-success-text (7.13:1, computed)

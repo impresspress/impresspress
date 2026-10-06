@@ -13,7 +13,11 @@ use super::{
     messages_list, messages_list_contexts, record_field, repo, ContextView, DEFAULT_MODEL_VAR,
     DEFAULT_PROVIDER, DEFAULT_PROVIDER_VAR,
 };
-use crate::ui::{self, components, icons, shell::Crumb};
+use crate::ui::{
+    self, components, icons,
+    shell::Crumb,
+    templates::{self, ChatFocus, ChatPane},
+};
 
 // ---------------------------------------------------------------------------
 // Unified chat page (handles `/b/llm/` and `/b/llm/threads/{id}`)
@@ -63,12 +67,28 @@ fn render_page_body(
     let composer = render_composer(thread_id);
     let right_rail = render_right_rail(models, models_unavailable, default_model);
 
-    let chat_body =
-        crate::ui::templates::chat_page(thread_list, messages_pane, composer, Some(right_rail));
+    let focus = if thread_id.is_some() {
+        ChatFocus::Conversation
+    } else {
+        ChatFocus::Threads
+    };
+    let chat_body = templates::chat_page(
+        focus,
+        ChatPane {
+            label: "Threads",
+            body: thread_list,
+        },
+        messages_pane,
+        composer,
+        Some(ChatPane {
+            label: "Chat options",
+            body: right_rail,
+        }),
+    );
 
+    // The "Thinking..." pulse and the typing caret llm-chat.js draws are
+    // styled in components/card.css, under a reduced-motion guard.
     chat_body.append(html! {
-        // Pulse animation for thinking indicator + blinking cursor.
-        style { "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} @keyframes blink{0%,100%{opacity:1}50%{opacity:0}} .typing-cursor{display:inline-block;width:0.5em;height:1.1em;background:var(--text-primary,#333);vertical-align:text-bottom;margin-left:2px;animation:blink 0.8s step-end infinite}" }
         // DOMPurify must load before marked.js/llm-chat.js so `window.DOMPurify`
         // exists when renderMarkdown() sanitizes marked's output (P0 stored-XSS fix).
         script src=(super::assets::purify_js_url()) {}
@@ -195,14 +215,15 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         &llm_chat_js_url,
     );
 
-    // Build mobile-friendly crumbs:
+    // The crumbs:
     //  - On /b/llm/: just `[Chat]`.
-    //  - On /b/llm/threads/{id}: `[Threads] / [thread title]` so the mobile
-    //    single-pane view has a visible back-link to the thread list.
+    //  - On /b/llm/threads/{id}: `[Chat] / [thread title]` — on a phone the
+    //    open conversation replaces the thread list (`ChatFocus`), and this
+    //    crumb is the way back to it.
     let crumbs = match thread_id {
         Some(_) => vec![
             Crumb {
-                label: "Threads",
+                label: "Chat",
                 href: Some("/b/llm/"),
             },
             Crumb {
@@ -231,8 +252,11 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 // ---------------------------------------------------------------------------
 
 /// Thread-list pane for the chat_page template. Includes the section
-/// header + "+" new-thread button + the scrollable list. Pure function of
+/// header + "New thread" button + the scrollable list. Pure function of
 /// the loaded threads and the (optional) active thread id.
+///
+/// The button says "New thread" in words, which is its accessible name and
+/// what the empty states call it.
 fn render_thread_list_pane(threads: &[ContextView], active_id: Option<&str>) -> Markup {
     html! {
         div .thread-pane {
@@ -241,7 +265,7 @@ fn render_thread_list_pane(threads: &[ContextView], active_id: Option<&str>) -> 
                     "Threads"
                 }
                 button .btn.btn--sm.btn--primary type="button" data-action="llm-new-thread" {
-                    (icons::plus())
+                    (icons::plus()) "New thread"
                 }
             }
             div #thread-list .thread-pane__scroll {
@@ -254,8 +278,8 @@ fn render_thread_list_pane(threads: &[ContextView], active_id: Option<&str>) -> 
 fn thread_list_items(threads: &[ContextView], active_id: Option<&str>) -> Markup {
     html! {
         @if threads.is_empty() {
-            div .text-center .text-muted .thread-pane__empty {
-                "No threads yet."
+            p .text-muted .thread-pane__empty {
+                "No threads yet. Start one with New thread."
             }
         } @else {
             @for thread in threads {
@@ -302,7 +326,7 @@ fn render_messages_pane(_entries: &[serde_json::Value], thread_id: Option<&str>)
                 div #no-thread-prompt .chat-empty-state {
                     div .chat-empty-state__icon { (ui::icons::message_square()) }
                     p .text-lg .mb-2 { "Start a new conversation" }
-                    p .text-muted .mb-6 { "Click the " strong { "+" } " button to create a thread, then type your message." }
+                    p .text-muted .mb-6 { "Choose a thread, or start one with " strong { "New thread" } "." }
                 }
             }
             // When thread_id is Some, the JS bootstrap fills #messages-area
@@ -331,6 +355,9 @@ fn render_composer(thread_id: Option<&str>) -> Markup {
             input type="hidden" name="thread_id" id="active-thread-id" value=(thread_value);
             div .flex .gap-2 .items-end {
                 div .flex-1 .relative {
+                    // The placeholder is a hint, not a name: it disappears as
+                    // soon as anything is typed.
+                    label .sr-only for="chat-input" { "Message" }
                     textarea
                         .form-input .resize-none .w-full
                         #chat-input
@@ -355,17 +382,17 @@ fn render_composer(thread_id: Option<&str>) -> Markup {
 
 /// Right-rail pane for the chat_page template. Holds the model picker,
 /// model loading progress container, and a link to the LLM settings
-/// page. Replaces the inline above-messages model strip from the old
-/// chat_page handler.
+/// page. On a phone it is a one-row toolbar above the conversation
+/// (`.chat-options` in components/card.css).
 fn render_right_rail(
     models: &[ModelInfo],
     models_unavailable: bool,
     default_model: &str,
 ) -> Markup {
     html! {
-        div .flex .flex-col .gap-4 .p-2 {
-            div {
-                label .form-label .d-block .text-sm { "Model" }
+        div .chat-options {
+            div .chat-options__model {
+                label .form-label for="model-picker" { "Model" }
                 select
                     #model-picker
                     .form-input .w-full
@@ -378,16 +405,16 @@ fn render_right_rail(
                     }
                     optgroup #local-models-group label="Local (WebLLM)" {}
                 }
-                // Rendered only when the list could not be read, so a healthy
-                // page is byte-identical. `#model-status` beside it is owned
-                // by llm-chat.js and is overwritten at runtime.
-                @if models_unavailable {
-                    span .text-muted .d-block .mt-1 .text-xs { (MODELS_UNAVAILABLE) }
-                }
-                span #model-status .text-muted .d-block .mt-1 .text-xs {}
             }
+            // Rendered only when the list could not be read, so a healthy
+            // page is byte-identical. `#model-status` beside it is owned
+            // by llm-chat.js and is overwritten at runtime.
+            @if models_unavailable {
+                span .text-muted .text-xs .chat-options__status { (MODELS_UNAVAILABLE) }
+            }
+            span #model-status .text-muted .text-xs .chat-options__status {}
 
-            div #model-progress-container .hidden {
+            div #model-progress-container .hidden .chat-options__progress {
                 div .card .p-3 {
                     div .flex .items-center .gap-2 .mb-2 {
                         span .text-sm .font-medium { "Loading model..." }
@@ -396,19 +423,18 @@ fn render_right_rail(
                         }
                     }
                     div .model-progress-track {
-                        // NB: the token is `--primary-color` — the old
-                        // `var(--primary, #3b82f6)` referenced a nonexistent
-                        // var, so the blue fallback ALWAYS won. `.model-progress-fill`'s
-                        // width starts at 0% and is updated at runtime by
-                        // `bar.style.width = pct + '%'` in blocks/llm/assets/llm-chat.js.
+                        // `.model-progress-fill`'s width starts at 0% and is
+                        // updated at runtime by `bar.style.width = pct + '%'`
+                        // in blocks/llm/assets/llm-chat.js.
                         div #model-progress-bar .model-progress-fill {}
                     }
                     div #model-progress-text .text-muted .text-xs .mt-1 { "" }
                 }
             }
 
-            a .btn.btn--ghost.btn--sm .justify-start href="/b/llm/settings" {
-                (ui::icons::settings()) " Settings"
+            a .btn.btn--ghost.btn--sm .chat-options__settings href="/b/llm/settings" {
+                (ui::icons::settings())
+                span .chat-options__settings-text { "Settings" }
             }
         }
     }
@@ -468,128 +494,122 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let content = html! {
-        (components::page_header(
-            "LLM Settings",
-            Some("Configure default provider and model"),
-            None,
+        // The two defaults are block variables, kept in the variables table
+        // with every other one and edited there; this page shows what they
+        // are, not a second place to set them.
+        (components::section_header(
+            "Defaults",
+            Some(html! {
+                a .btn.btn--secondary.btn--sm href=(VARIABLES_PAGE) { "Edit in Variables" }
+            }),
         ))
-
-        // Global defaults — read-only display; set via env vars
-        div .card .mb-6 {
-            h3 .card-title .mb-4 { "Global Defaults" }
-            p .text-muted .text-sm .mb-4 {
-                "Global defaults are configured via environment variables."
+        p .text-muted .text-sm .mb-4 {
+            "The provider and model a thread uses when it pins neither. Both are variables, set in Settings › Variables."
+        }
+        div .form-row .mb-6 {
+            div .form-group {
+                label .form-label for="llm-default-provider" { "Default provider" }
+                input #llm-default-provider
+                    .form-input .form-input--readonly
+                    type="text"
+                    value=(default_provider)
+                    readonly
+                    aria-describedby="llm-default-provider-hint"
+                ;
+                p .form-hint #llm-default-provider-hint { code { (DEFAULT_PROVIDER_VAR) } }
             }
-            div .form-row {
-                div .form-group {
-                    // `for`/`id` pair: both fields showed a visible
-                    // `.form-label` but never associated it, so the accessible
-                    // name was empty and a screen reader announced only the
-                    // value.
-                    label .form-label for="llm-default-provider" { "Default Provider" }
-                    input #llm-default-provider
-                        .form-input .form-input--readonly
-                        type="text"
-                        value=(default_provider)
-                        readonly
-                    ;
-                    p .form-hint {
-                        "Set via " code { (DEFAULT_PROVIDER_VAR) }
-                    }
-                }
-                div .form-group {
-                    label .form-label for="llm-default-model" { "Default Model" }
-                    input #llm-default-model
-                        .form-input .form-input--readonly
-                        type="text"
-                        value=(default_model)
-                        placeholder="(provider default)"
-                        readonly
-                    ;
-                    p .form-hint {
-                        "Set via " code { (DEFAULT_MODEL_VAR) }
-                    }
-                }
+            div .form-group {
+                label .form-label for="llm-default-model" { "Default model" }
+                input #llm-default-model
+                    .form-input .form-input--readonly
+                    type="text"
+                    value=(default_model)
+                    placeholder="(provider default)"
+                    readonly
+                    aria-describedby="llm-default-model-hint"
+                ;
+                p .form-hint #llm-default-model-hint { code { (DEFAULT_MODEL_VAR) } }
             }
         }
 
-        // Per-thread overrides
-        div .card {
-            h3 .card-title .mb-4 { "Per-Thread Overrides" }
-            @if overrides.truncated {
-                p .form-hint { "Showing the first " (overrides.rows.len()) " overrides." }
-            }
-            @if overrides.rows.is_empty() {
-                div .empty-state {
-                    "No thread overrides configured."
-                }
-            } @else {
-                div .table-container {
-                    table .table {
-                        thead {
-                            tr {
-                                th { "Thread ID" }
-                                th { "Provider Block" }
-                                th { "Model" }
-                                th { "Updated" }
-                                th { "Actions" }
-                            }
-                        }
-                        tbody {
-                            @for ov in &overrides.rows {
-                                @let tid = ov.thread_id.as_str();
-                                @let pb = ov.provider_block.as_str();
-                                @let model = ov.model.as_str();
-                                @let updated = ov.updated_at.as_str();
-                                @let date = updated.get(..10).unwrap_or(updated);
-                                tr {
-                                    td {
-                                        a .font-mono .text-xs href={"/b/llm/threads/" (tid)} {
-                                            (tid)
-                                        }
-                                    }
-                                    td {
-                                        @if pb.is_empty() {
-                                            span .text-muted { "(default)" }
-                                        } @else {
-                                            code .text-xs { (pb) }
-                                        }
-                                    }
-                                    td {
-                                        @if model.is_empty() {
-                                            span .text-muted { "(default)" }
-                                        } @else {
-                                            code .text-xs { (model) }
-                                        }
-                                    }
-                                    td .text-muted .text-xs { (date) }
-                                    td {
-                                        button
-                                            .btn.btn--sm.btn--danger
-                                            hx-delete={"/b/llm/api/config/" (ov.id)}
-                                            hx-confirm={"Remove override for thread " (tid) "?"}
-                                            hx-target="closest tr"
-                                            hx-swap="outerHTML"
-                                        {
-                                            (icons::trash())
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        (components::section_header("Per-thread overrides", None))
+        @if overrides.truncated {
+            p .form-hint { "Showing the first " (overrides.rows.len()) " overrides." }
         }
+        (render_overrides_table(&overrides.rows))
     };
 
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("LLM Settings", "Settings").subtitle("LLM defaults and provider routing"),
+        ui::Shell::admin("LLM Settings", "Settings")
+            .subtitle("Default provider and model, and the threads that override them"),
         ui::PageBody::from(content).with_subnav(sections(Section::Settings)),
     )
     .await
+}
+
+/// Where the block's variables — the two defaults among them — are edited.
+const VARIABLES_PAGE: &str = "/b/admin/settings/variables";
+
+/// The overrides table's columns.
+const OVERRIDE_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Thread").primary(),
+    components::TableCol::new("Provider"),
+    components::TableCol::new("Model"),
+    components::TableCol::new("Updated"),
+    components::TableCol::new("Actions").actions(),
+];
+
+/// The per-thread overrides, one row each, with a labelled delete per row.
+fn render_overrides_table(rows: &[repo::settings::ThreadSettingRow]) -> Markup {
+    let default = || html! { span .text-muted { "(default)" } };
+    let table_rows = rows
+        .iter()
+        .map(|ov| {
+            let tid = ov.thread_id.as_str();
+            components::TableRow::new(vec![
+                html! {
+                    a .font-mono .text-xs href={"/b/llm/threads/" (tid)} {
+                        (components::breakable_id(tid))
+                    }
+                },
+                if ov.provider_block.is_empty() {
+                    default()
+                } else {
+                    html! { code .text-xs { (ov.provider_block) } }
+                },
+                if ov.model.is_empty() {
+                    default()
+                } else {
+                    html! { code .text-xs { (ov.model) } }
+                },
+                components::timestamp(&ov.updated_at),
+                html! {
+                    button
+                        .btn.btn--sm.btn--icon.btn--ghost-danger
+                        type="button"
+                        hx-delete={"/b/llm/api/config/" (ov.id)}
+                        hx-confirm={"Remove override for thread " (tid) "?"}
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        aria-label={"Remove override for thread " (tid)}
+                        title="Remove override"
+                    {
+                        (icons::trash())
+                    }
+                },
+            ])
+        })
+        .collect();
+    components::DataTable::new(&OVERRIDE_COLUMNS)
+        .rows(table_rows)
+        .empty_state(
+            "No thread overrides",
+            "Every thread uses the defaults above.",
+            None,
+        )
+        .render()
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1158,122 @@ mod tests {
         assert!(
             html.contains(r#"class="chat-rail""#),
             "right rail expected (LLM enables it)"
+        );
+    }
+
+    // ----- Accessible names and the phone layout -----
+
+    /// The new-thread control is named in words, and the empty state names
+    /// it the same way rather than describing an icon.
+    #[test]
+    fn the_new_thread_button_is_named_and_the_empty_state_names_it() {
+        let pane = render_thread_list_pane(&[], None).into_string();
+        assert!(
+            pane.contains(r#"data-action="llm-new-thread">"#)
+                && pane.contains("New thread</button>"),
+            "the button's text is its name: {pane}"
+        );
+        let prompt = render_messages_pane(&[], None).into_string();
+        assert!(prompt.contains("New thread"), "{prompt}");
+        assert!(!prompt.contains("Click the"), "{prompt}");
+    }
+
+    /// The picker's visible "Model" label is associated with it, and the
+    /// composer has a name that does not vanish when typing starts.
+    #[test]
+    fn the_model_picker_and_the_composer_are_labelled() {
+        let rail = render_right_rail(&[], false, "").into_string();
+        assert!(
+            rail.contains(r#"<label class="form-label" for="model-picker">Model</label>"#),
+            "{rail}"
+        );
+        let composer = render_composer(Some("t1")).into_string();
+        assert!(
+            composer.contains(r#"<label class="sr-only" for="chat-input">Message</label>"#),
+            "{composer}"
+        );
+    }
+
+    /// The rail's settings link keeps its words for a screen reader when a
+    /// phone shows only its icon.
+    #[test]
+    fn the_rail_settings_link_keeps_its_name() {
+        let rail = render_right_rail(&[], false, "").into_string();
+        assert!(
+            rail.contains(r#"<span class="chat-options__settings-text">Settings</span>"#),
+            "{rail}"
+        );
+    }
+
+    /// The animation the chat draws lives in the stylesheet, under a
+    /// reduced-motion guard — not in a `<style>` element of the page.
+    #[test]
+    fn the_chat_page_carries_no_style_element() {
+        let html = render_page_body(&[], &[], &[], false, "", Some("t1"), "/x.js")
+            .into_markup()
+            .into_string();
+        assert!(!html.contains("<style"), "{html}");
+        assert!(!html.contains("@keyframes"), "{html}");
+    }
+
+    /// A phone shows the list at the root and the conversation on a thread
+    /// page; both side panes are named landmarks.
+    #[test]
+    fn the_page_says_which_pane_a_phone_leads_with() {
+        let root = render_page_body(&[], &[], &[], false, "", None, "/x.js")
+            .into_markup()
+            .into_string();
+        assert!(root.contains(r#"data-chat-focus="threads""#), "{root}");
+        assert!(
+            root.contains(r#"<aside class="chat-threads" aria-label="Threads">"#),
+            "{root}"
+        );
+        assert!(
+            root.contains(r#"<aside class="chat-rail" aria-label="Chat options">"#),
+            "{root}"
+        );
+        let thread = render_page_body(&[], &[], &[], false, "", Some("t1"), "/x.js")
+            .into_markup()
+            .into_string();
+        assert!(
+            thread.contains(r#"data-chat-focus="conversation""#),
+            "{thread}"
+        );
+    }
+
+    fn override_row(id: &str, thread_id: &str) -> repo::settings::ThreadSettingRow {
+        repo::settings::ThreadSettingRow {
+            id: id.to_string(),
+            thread_id: thread_id.to_string(),
+            provider_block: "openai-main".to_string(),
+            model: String::new(),
+            created_at: "2026-10-01T09:00:00Z".to_string(),
+            updated_at: "2026-10-02T10:30:00Z".to_string(),
+        }
+    }
+
+    /// Each override's remove control is an icon with a name of its own.
+    #[test]
+    fn the_overrides_table_names_each_remove_button() {
+        let m = render_overrides_table(&[override_row("ov-1", "thread-9")]).into_string();
+        assert!(m.contains(r#"<div class="data-table">"#), "{m}");
+        assert!(m.contains(r#"hx-delete="/b/llm/api/config/ov-1""#), "{m}");
+        assert!(
+            m.contains(r#"aria-label="Remove override for thread thread-9""#),
+            "{m}"
+        );
+        assert!(
+            m.contains(r#"<time class="datetime""#),
+            "dates through the shared helper: {m}"
+        );
+    }
+
+    #[test]
+    fn no_overrides_is_the_shared_empty_state() {
+        let m = render_overrides_table(&[]).into_string();
+        assert!(
+            m.contains(r#"<h2 class="empty__title">No thread overrides</h2>"#),
+            "{m}"
         );
     }
 }

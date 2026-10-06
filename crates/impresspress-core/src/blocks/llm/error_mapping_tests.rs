@@ -57,6 +57,7 @@ fn block() -> LlmBlock {
 async fn api(ctx: &dyn Context, msg: Message, body: &str) -> OutputStream {
     let mut msg = msg;
     msg.set_meta("http.header.accept", "application/json");
+    msg.set_meta("http.header.content-type", "application/json");
     block()
         .handle(ctx, msg, InputStream::from_bytes(body.as_bytes().to_vec()))
         .await
@@ -630,6 +631,10 @@ async fn the_add_provider_form_is_told_which_name_is_taken() {
     let mut msg = admin_msg("create", "/b/llm/api/providers");
     msg.set_meta("http.header.accept", "text/html");
     msg.set_meta("http.header.hx-request", "true");
+    msg.set_meta(
+        "http.header.content-type",
+        "application/x-www-form-urlencoded",
+    );
     let out = block()
         .handle(
             &ctx,
