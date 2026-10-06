@@ -7,9 +7,10 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *
  * The document never scrolls: `.shell` is `100vh` and the page scrolls inside
  * `main.shell__body`. So `main` is a Tab stop — a page with nothing focusable
- * in its body (the legal pages' Endpoints reference is a static table) would
- * otherwise be unscrollable from the keyboard once focus is anywhere but
- * `<body>`. The topbar is the one banner at every width; the phone's mobile
+ * in its body would otherwise be unscrollable from the keyboard once focus is
+ * anywhere but `<body>`. The page used here is the legal pages' Endpoints
+ * reference, which is long enough to overflow; its tables are focusable
+ * scroll regions of their own, so the click test aims at plain text. The topbar is the one banner at every width; the phone's mobile
  * header is a labelled `nav`, not a second `header`. The ring is a box-shadow
  * plus a transparent outline, which is what forced-colors mode paints.
  *
@@ -29,8 +30,7 @@ test.describe('shell landmarks and keyboard scrolling', () => {
     await loginAsAdmin(page);
     await page.goto(STATIC_PAGE, { waitUntil: 'networkidle' });
     const main = page.locator('main#content');
-    // The page must overflow for this to prove anything, and its body must
-    // hold nothing focusable — the case `main` being a Tab stop exists for.
+    // The page must overflow for this to prove anything.
     expect(await main.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
 
     // The skip link is the first Tab stop and moves focus to `main`.
@@ -73,10 +73,12 @@ test.describe('shell landmarks and keyboard scrolling', () => {
     await page.keyboard.press('ArrowDown');
     await expect.poll(() => scrollTop(page)).toBeGreaterThan(0);
 
-    // A click into the card focuses it too (so arrow keys scroll), but a
-    // pointer focus draws no ring.
+    // A click on plain content in the card focuses it too (so arrow keys
+    // scroll), but a pointer focus draws no ring. A section's description
+    // paragraph, not a table: each table is its own focusable scroll region,
+    // which a click on it rightly focuses instead.
     await page.goto(STATIC_PAGE, { waitUntil: 'networkidle' });
-    await main.locator('table').first().click();
+    await main.locator('p').first().click();
     await expect(main).toBeFocused();
     expect(await main.evaluate((el) => getComputedStyle(el).boxShadow)).toBe('none');
   });
