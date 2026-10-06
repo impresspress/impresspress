@@ -3,6 +3,7 @@
 pub mod abuse;
 pub mod config;
 pub mod contracts;
+pub mod forms;
 pub mod maintenance;
 pub mod migrations;
 pub mod models;
@@ -29,7 +30,12 @@ pub(crate) enum Route {
     AdminRoot,
     AdminTickets,
     AdminTicket,
+    AdminCreateTicket,
+    AdminUpdateTicket,
+    AdminAddNote,
     AdminTypes,
+    AdminCreateType,
+    AdminUpdateType,
     AdminSettings,
     AdminEndpoints,
     ApiTickets,
@@ -54,9 +60,9 @@ pub(crate) enum Route {
 ///
 /// Three rows are `Public`: the report form, its success page and the
 /// protected submission endpoint. Everything else is `Admin`, enforced by
-/// the central router from the declaration. Every SSR page (or redirect)
-/// carries no schema and never becomes a tool; the twelve admin JSON
-/// endpoints carry theirs.
+/// the central router from the declaration. Every SSR page (or redirect), and
+/// every htmx form action those pages post to, carries no schema and never
+/// becomes a tool; the twelve admin JSON endpoints carry theirs.
 pub(crate) const ROUTES: &[EndpointRoute<Route>] = &[
     // Public reporting
     EndpointRoute::public(HttpMethod::Get, "/b/tickets/submit", Route::PublicSubmit)
@@ -95,8 +101,39 @@ pub(crate) const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminTicket,
     )
     .summary("Ticket detail"),
+    // The admin pages' htmx form actions (sub-resources before `{id}`).
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/tickets/admin/tickets",
+        Route::AdminCreateTicket,
+    )
+    .summary("Create an internal ticket from the inbox"),
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/tickets/admin/tickets/{id}/notes",
+        Route::AdminAddNote,
+    )
+    .summary("Add an internal note from the ticket page"),
+    EndpointRoute::admin(
+        HttpMethod::Patch,
+        "/b/tickets/admin/tickets/{id}",
+        Route::AdminUpdateTicket,
+    )
+    .summary("Update a ticket's workflow from the ticket page"),
     EndpointRoute::admin(HttpMethod::Get, "/b/tickets/admin/types", Route::AdminTypes)
         .summary("Ticket type management"),
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/tickets/admin/types",
+        Route::AdminCreateType,
+    )
+    .summary("Create a ticket type from the types page"),
+    EndpointRoute::admin(
+        HttpMethod::Patch,
+        "/b/tickets/admin/types/{id}",
+        Route::AdminUpdateType,
+    )
+    .summary("Update a ticket type from the types page"),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/tickets/admin/settings",
@@ -212,56 +249,6 @@ pub(crate) const ROUTES: &[EndpointRoute<Route>] = &[
     .output(response_schema_of::<maintenance::MaintenanceResult>),
 ];
 
-pub const ENDPOINT_REFERENCE: &[(&str, &str, &str)] = &[
-    ("GET", "/b/tickets/submit", "Public report form"),
-    (
-        "POST",
-        "/b/tickets/api/submissions",
-        "Protected public submission",
-    ),
-    ("GET", "/b/tickets/admin/tickets", "Admin ticket inbox"),
-    (
-        "GET",
-        "/b/tickets/admin/tickets/{id}",
-        "Admin ticket detail",
-    ),
-    (
-        "GET/POST",
-        "/b/tickets/api/admin/tickets",
-        "List or create tickets",
-    ),
-    (
-        "GET/PATCH",
-        "/b/tickets/api/admin/tickets/{id}",
-        "Read or update workflow",
-    ),
-    (
-        "POST",
-        "/b/tickets/api/admin/tickets/{id}/notes",
-        "Append internal note",
-    ),
-    (
-        "GET/POST",
-        "/b/tickets/api/admin/tickets/{id}/analyses",
-        "Structured analyses",
-    ),
-    (
-        "GET/POST",
-        "/b/tickets/api/admin/types",
-        "Manage ticket types",
-    ),
-    (
-        "GET",
-        "/b/tickets/api/admin/status",
-        "Operational readiness",
-    ),
-    (
-        "POST",
-        "/b/tickets/api/admin/retention/prune",
-        "Run bounded retention",
-    ),
-];
-
 /// Path-parameter schema for the `{id}` routes.
 ///
 /// Hand-written rather than derived: every handler reads the id with
@@ -300,6 +287,9 @@ crate::impresspress_feature_block! {
             "wafer-run/database".into(),
             "wafer-run/config".into(),
             "wafer-run/network".into(),
+            // The Settings page reads its own settings, masked, through the
+            // admin block (`admin::masked_config`).
+            crate::blocks::admin::ADMIN_BLOCK_ID.into(),
         ])
         .collections(vec![
             CollectionSchema::new(repo::TYPES),
@@ -335,7 +325,12 @@ crate::impresspress_feature_block! {
             Route::AdminRoot => redirect(302, "/b/tickets/admin/tickets"),
             Route::AdminTickets => pages::inbox(ctx, &msg).await,
             Route::AdminTicket => pages::detail(ctx, &msg).await,
+            Route::AdminCreateTicket => forms::create_ticket(ctx, &msg, input).await,
+            Route::AdminUpdateTicket => forms::update_ticket(ctx, &msg, input).await,
+            Route::AdminAddNote => forms::add_note(ctx, &msg, input).await,
             Route::AdminTypes => pages::types(ctx, &msg).await,
+            Route::AdminCreateType => forms::create_type(ctx, input).await,
+            Route::AdminUpdateType => forms::update_type(ctx, &msg, input).await,
             Route::AdminSettings => pages::settings(ctx, &msg).await,
             Route::AdminEndpoints => pages::endpoints(ctx, &msg).await,
             Route::ApiTickets => rest::list_tickets(ctx, &msg).await,
@@ -348,7 +343,7 @@ crate::impresspress_feature_block! {
             Route::ApiTypes => rest::list_types(ctx, &msg).await,
             Route::ApiCreateType => rest::create_type(ctx, input).await,
             Route::ApiUpdateType => rest::update_type(ctx, &msg, input).await,
-            Route::ApiStatus => rest::status(ctx).await,
+            Route::ApiStatus => rest::status(ctx, &msg).await,
             Route::ApiPrune => rest::prune(ctx).await,
         }
     },

@@ -73,6 +73,29 @@ badge_variants! {
 }
 
 impl BadgeVariant {
+    /// The colour of an HTTP method's badge. Shares its colour set with
+    /// [`BadgeVariant::for_auth`] — `Post`/`Public` and
+    /// `Patch`/`Authenticated` render identically, so the tones live once in
+    /// `styles/components/badge.css` rather than being declared per enum.
+    pub fn for_method(method: wafer_run::HttpMethod) -> Self {
+        match method {
+            wafer_run::HttpMethod::Get => BadgeVariant::ToneBrand,
+            wafer_run::HttpMethod::Post => BadgeVariant::ToneGreen,
+            wafer_run::HttpMethod::Patch => BadgeVariant::ToneAmber,
+            wafer_run::HttpMethod::Delete => BadgeVariant::ToneRed,
+        }
+    }
+
+    /// The colour of an endpoint access level's badge. See
+    /// [`BadgeVariant::for_method`].
+    pub fn for_auth(auth: wafer_run::AuthLevel) -> Self {
+        match auth {
+            wafer_run::AuthLevel::Public => BadgeVariant::ToneGreen,
+            wafer_run::AuthLevel::Admin => BadgeVariant::ToneRed,
+            wafer_run::AuthLevel::Authenticated => BadgeVariant::ToneAmber,
+        }
+    }
+
     /// Map a free-form status string to a variant. Centralizes the
     /// status→color policy in one place (the only implicit mapping, and it's
     /// presentation, not data translation).
@@ -251,7 +274,6 @@ mod tests {
         ("blocks/legalpages/pages.rs", 12),
         ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 6),
-        ("blocks/tickets/pages.rs", 4),
         ("blocks/vector/pages_ui.rs", 4),
         // A unit-test fixture: the `DetailHero::badges` slot of
         // `templates::detail_page`, exercised by

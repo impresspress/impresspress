@@ -9,6 +9,7 @@ mod callout;
 mod card;
 mod chart;
 mod empty;
+mod endpoints;
 mod form;
 mod modal;
 mod pagination;
@@ -25,6 +26,7 @@ pub use callout::{callout, CalloutTone};
 pub use card::page_header;
 pub use chart::{bar_chart_card, line_chart_card, sparkline, ChartHistory};
 pub use empty::empty_state;
+pub use endpoints::endpoint_table;
 pub use form::{
     password_field, reveal_toggle, search_input, search_input_with_value, PasswordPurpose,
 };

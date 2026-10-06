@@ -998,9 +998,9 @@ mod tests {
     /// test. Migrating one is not free: `.data-table` is a different chrome
     /// (rounded, bordered, sticky `thead`, dashed row rules, a `data-label`
     /// per cell that collapses to cards below 720px), so each entry is a
-    /// rendered change. Six of the seven sit on pages with no visual baseline
-    /// at all — `blocks/legalpages` and `blocks/tickets` have none — so the
-    /// gate there is a Rust render test, not a screenshot.
+    /// rendered change. Some sit on pages with no visual baseline at all —
+    /// `blocks/legalpages` has none — so the gate there is a Rust render
+    /// test, not a screenshot.
     ///
     /// The scope is maud's bare `.table` class shorthand, the form every one is
     /// written in; the counter is `test_support::count_bare_class_shorthand`,
@@ -1008,7 +1008,6 @@ mod tests {
     /// boundary maud accepts, unspaced ones included.
     const HAND_WRITTEN_TABLES: &[(&str, usize)] = &[
         ("blocks/legalpages/pages.rs", 3),
-        ("blocks/tickets/pages.rs", 3),
         ("blocks/userportal/pages/admin_buttons.rs", 1),
     ];
 
