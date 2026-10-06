@@ -875,6 +875,8 @@ pub async fn active_count_and_created_since(
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let rows = db::aggregate(ctx, req)
         .await

@@ -146,6 +146,45 @@ const SQL_006_SQLITE: &str = include_str!("006_storage_access_logs_duration.sqli
 #[cfg(feature = "postgres")]
 const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.postgres.sql");
 
+// 007 names every logged request by its HTTP method.
+//
+// Rows used to store the router action (`retrieve`, `create`, `update`,
+// `delete`); the pipeline now stores the method from the request head
+// (`GET`, `POST`, …). Left as they were, the network page listed `RETRIEVE
+// /x` beside `GET /x` as two routes, and a route's detail, matched on the
+// method, found only one of them. `retrieve`, `create` and `delete` each
+// stand for exactly one method and are rewritten; `update` stood for both
+// `PUT` and `PATCH`, so those rows — diagnostics, on deployments with no
+// production users yet — are deleted rather than guessed at.
+//
+// Re-runnable: once no row holds an action name, every statement matches
+// nothing.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_007_SQLITE: &str = include_str!("007_request_logs_http_method.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_007_POSTGRES: &str = include_str!("007_request_logs_http_method.postgres.sql");
+
+// 008 stores the block each logged request was addressed to.
+//
+// The network page groups and totals routes by block, and pages them, in
+// SQL; that needs the block as a column rather than a prefix of `path`. New
+// rows get it from `request_logs::NewRequestLog::to_data`
+// (`request_logs::owning_block`); the `UPDATE` gives existing rows the same
+// value — the segment after `/b/`, up to the next `/` — and leaves every other
+// path (`/`, the unmatched-route label) at `''`.
+//
+// Re-runnable: a second `ADD COLUMN` is swallowed as a duplicate column by
+// both migration runners, the `UPDATE` only touches rows still at `''`, and
+// the index is `IF NOT EXISTS`.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_008_SQLITE: &str = include_str!("008_request_logs_block.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_008_POSTGRES: &str = include_str!("008_request_logs_block.postgres.sql");
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 /// Order here is the apply order.
@@ -156,7 +195,17 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     (USER_ROLES_UNIQUE, SQL_004_SQLITE),
     (WRAP_GRANTS_APPEND_COLUMN, SQL_005_SQLITE),
     ("006_storage_access_logs_duration", SQL_006_SQLITE),
+    (REQUEST_LOGS_HTTP_METHOD, SQL_007_SQLITE),
+    (REQUEST_LOGS_BLOCK, SQL_008_SQLITE),
 ];
+
+/// Basename of the request-log method rewrite, named once so the migration
+/// list and the test that re-applies it cannot drift apart.
+pub(crate) const REQUEST_LOGS_HTTP_METHOD: &str = "007_request_logs_http_method";
+
+/// Basename of the request-log `block` column, named once for the same
+/// reason.
+pub(crate) const REQUEST_LOGS_BLOCK: &str = "008_request_logs_block";
 
 /// Basename of the `variables.block` column + backfill, named once so the
 /// migration list and the test that slices it cannot drift apart.
@@ -183,6 +232,8 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
     SQL_004_POSTGRES,
     SQL_005_POSTGRES,
     SQL_006_POSTGRES,
+    SQL_007_POSTGRES,
+    SQL_008_POSTGRES,
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
@@ -227,6 +278,9 @@ pub fn ddl_files(db_type: &str) -> &'static [&'static str] {
             SQL_003_SQLITE,
             SQL_004_SQLITE,
             SQL_005_SQLITE,
+            SQL_006_SQLITE,
+            SQL_007_SQLITE,
+            SQL_008_SQLITE,
         ]
     }
 }
@@ -238,6 +292,18 @@ mod tests {
         SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES, SQL_004_POSTGRES, SQL_005_POSTGRES,
     };
     use super::{SQL_001_SQLITE, SQL_002_SQLITE, SQL_003_SQLITE, SQL_004_SQLITE, SQL_005_SQLITE};
+
+    /// The pre-wafer DDL list the native CLI applies is the gated runner's
+    /// list, file for file: a migration wired into one and not the other
+    /// would exist on some boots and not others.
+    #[test]
+    fn the_cli_ddl_list_is_the_migration_list() {
+        let gated: Vec<&str> = super::SQLITE_MIGRATIONS
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect();
+        assert_eq!(super::ddl_files("sqlite"), gated.as_slice());
+    }
 
     #[test]
     fn sqlite_migrations_contain_expected_ddl() {

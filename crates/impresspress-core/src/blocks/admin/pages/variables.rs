@@ -81,7 +81,7 @@ pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, 
 /// groups that still have one, so a key named in a boot warning is found
 /// whichever block owns it; clearing it puts every group back the way the
 /// page drew it (`data-default-open`). `#var-filter-empty` says when nothing
-/// matches.
+/// matches. The query survives a row control's redraw of `#content`.
 const VAR_FILTER_JS: &str = r#"
 (function () {
   if (window.__varFilterInit) return;
@@ -105,6 +105,20 @@ const VAR_FILTER_JS: &str = r#"
     });
     var empty = document.getElementById('var-filter-empty');
     if (empty) empty.hidden = !query || matched !== 0;
+  });
+  // A row control's answer (Delete, an edit's Save) redraws `#content`,
+  // search box and all; the query carries over the swap and is applied to
+  // the redrawn groups.
+  var kept = '';
+  document.addEventListener('htmx:beforeSwap', function () {
+    var field = document.querySelector('[data-action="var-filter"]');
+    kept = field ? field.value : '';
+  });
+  document.addEventListener('htmx:afterSettle', function () {
+    var field = document.querySelector('[data-action="var-filter"]');
+    if (!field || !kept || field.value) return;
+    field.value = kept;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
   });
 })();
 "#;
@@ -282,6 +296,9 @@ struct VarRow<'a> {
     /// `ops::delete_variable` refuses them, so a button there would only ever
     /// produce an error.
     deletable: bool,
+    /// Whether a block or the shared set declares the key, so its row stays
+    /// at its default when the stored value is deleted.
+    declared: bool,
     /// Why this row outranks the process environment, when it does.
     ///
     /// Rendered as a badge whatever the target, because a pin is a real
@@ -359,7 +376,7 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
                     (reset_to_environment_button(row.key))
                 }
                 @if row.deletable {
-                    (delete_button(row.key))
+                    (delete_button(row.key, row.declared))
                 }
             }
         },
@@ -455,6 +472,7 @@ fn config_var_row(
         // because a block DECLARES the key, and the page re-rendered after
         // the delete shows it at its default.
         deletable: stored.is_some() && key_is_deletable(&var.key, declared_shared),
+        declared: true,
     })
 }
 
@@ -474,17 +492,43 @@ const VAR_COLUMNS: [components::TableCol<'static>; 3] = [
 /// The answer is the whole settings body for `#content`
 /// ([`handle_delete_variable`]), not an empty swap of the row: a declared
 /// key's row stays after its stored override is deleted, showing its default.
-fn delete_button(key: &str) -> Markup {
+///
+/// A declared key is not deleted: its stored value is, and the key reads its
+/// default again — so the confirm says that, rather than "cannot be undone"
+/// about a row that stays.
+fn delete_button(key: &str, declared: bool) -> Markup {
+    let confirm = if declared {
+        format!("Remove the stored value of {key}? It goes back to its default.")
+    } else {
+        format!("Delete {key}? This cannot be undone.")
+    };
+    let label = if declared {
+        format!("Remove the stored value of {key}")
+    } else {
+        format!("Delete {key}")
+    };
     html! {
         button .btn .btn--ghost-danger .btn--icon
             type="button"
             hx-delete={"/b/admin/variables/" (url_path_encode(key))}
             hx-target="#content"
-            hx-confirm={"Delete " (key) "? This cannot be undone."}
-            title="Delete"
-            aria-label=(format!("Delete {key}"))
+            hx-confirm=(confirm)
+            title=(if declared { "Remove stored value" } else { "Delete" })
+            aria-label=(label)
         { (icons::trash()) }
     }
+}
+
+/// Whether a block or the shared set declares `key` — the keys whose row
+/// outlives a delete of its stored value.
+fn is_declared(ctx: &dyn Context, key: &str) -> bool {
+    crate::config_vars::shared_config_vars()
+        .iter()
+        .any(|var| var.key == key)
+        || ctx
+            .registered_blocks()
+            .iter()
+            .any(|block| block.config_keys.iter().any(|var| var.key == key))
 }
 
 /// The control that hands one key back to the process environment, shared by
@@ -837,6 +881,7 @@ fn variable_groups(
                         // `WAFER_RUN_SHARED__*` row here is stale and
                         // removable; only the JWT secret is kept.
                         deletable: key != crate::blocks::auth::JWT_SECRET_KEY,
+                        declared: false,
                         pin: variables::pin_of(row),
                         offer_reset,
                     })
@@ -1262,20 +1307,27 @@ pub async fn handle_delete_variable(ctx: &dyn Context, msg: &Message) -> OutputS
     if let Err(out) = ops::delete_variable(ctx, msg, key).await {
         return out;
     }
+    let boot_provided = ctx.config_get(key).is_some();
     // The row is gone — but an env-provided or auto-generated key is ALSO in
     // the boot map, which `blocks::config`'s read order falls back to when the
     // table holds no row. For those the value keeps being served and the row
     // is written again on the next boot, so reporting a flat "deleted" would
     // be untrue in exactly the case an operator is most likely to be trying to
     // turn something off.
-    let toast = if ctx.config_get(key).is_some() {
-        "Variable deleted — a boot-provided value is still in effect"
-    } else {
-        "Variable deleted"
+    //
+    // A declared key's row stays, so what went is its stored value, and the
+    // toast says what the key reads now.
+    let toast = match (is_declared(ctx, key), boot_provided) {
+        (true, true) => {
+            format!("Stored value of {key} removed — a boot-provided value is in effect")
+        }
+        (true, false) => format!("Stored value of {key} removed — it is back to its default"),
+        (false, true) => "Variable deleted — a boot-provided value is still in effect".to_string(),
+        (false, false) => "Variable deleted".to_string(),
     };
     // The whole settings body, for the control's `hx-target="#content"`: a
     // declared key's row stays, now at its default, and an unowned one goes.
-    super::settings::settings_page_with_toast(ctx, msg, "variables", toast).await
+    super::settings::settings_page_with_toast(ctx, msg, "variables", &toast).await
 }
 
 #[cfg(test)]
@@ -1726,6 +1778,7 @@ mod tests {
             warning: "",
             show_default: false,
             deletable: false,
+            declared: false,
             pin: None,
             offer_reset: false,
         });
@@ -1749,6 +1802,7 @@ mod tests {
             warning: "",
             show_default: false,
             deletable,
+            declared: false,
             pin: None,
             offer_reset: false,
         });
@@ -1770,6 +1824,31 @@ mod tests {
             s.contains(r#"aria-label="Delete WAFER_RUN_SHARED__LEGACY_THING""#),
             "icon-only delete button must expose an aria-label: {s}"
         );
+    }
+
+    /// Deleting a declared key's stored value leaves the key at its default,
+    /// and the confirm says so; an undeclared row is deleted outright.
+    #[tokio::test]
+    async fn the_delete_confirm_says_what_a_declared_key_keeps() {
+        let declared = delete_button("ACME__WIDGET__COLOR", true).into_string();
+        assert!(
+            declared.contains(
+                "Remove the stored value of ACME__WIDGET__COLOR? It goes back to its default."
+            ),
+            "{declared}"
+        );
+        assert!(!declared.contains("cannot be undone"), "{declared}");
+        let undeclared = delete_button("ACME__WIDGET__COLOR", false).into_string();
+        assert!(
+            undeclared.contains("Delete ACME__WIDGET__COLOR? This cannot be undone."),
+            "{undeclared}"
+        );
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        assert!(is_declared(&ctx, APP_NAME_KEY));
+        assert!(!is_declared(&ctx, "ACME__NOBODY__DECLARES_THIS"));
     }
 
     /// A row stored under a malformed key before the key rule existed is

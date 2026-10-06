@@ -1058,6 +1058,8 @@ pub async fn count_by_bucket(
         group_by: vec![wire::GroupByDef::Column("bucket".into())],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let rows = db::aggregate(ctx, req).await?;
     Ok(rows

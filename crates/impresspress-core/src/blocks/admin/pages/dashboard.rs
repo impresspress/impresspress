@@ -267,8 +267,13 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         })
     };
     let new_users_spark = spark(&new_users_daily, "var(--primary-color)");
-    let requests_spark = spark(&requests_daily, "var(--accent-warning)");
-    let server_errors_spark = spark(&server_errors_daily, "var(--accent-danger)");
+    // Neutral ink for traffic, which is not a warning; the danger red only on
+    // a server-error series that has a server error in it.
+    let requests_spark = spark(&requests_daily, NEUTRAL_SERIES);
+    let server_errors_colour = server_errors_daily
+        .as_deref()
+        .map_or(QUIET_SERIES, server_error_colour);
+    let server_errors_spark = spark(&server_errors_daily, server_errors_colour);
 
     let stats = vec![
         // A running total has no daily series of its own; the signup
@@ -395,7 +400,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             "Last 30 days",
             series,
             requests_history,
-            "var(--accent-warning)",
+            NEUTRAL_SERIES,
             "/b/admin/logs",
         ),
         None => chart_unavailable_card("Requests", "Last 30 days", "/b/admin/logs"),
@@ -406,7 +411,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             "Last 30 days",
             series,
             requests_history,
-            "var(--text-secondary)",
+            QUIET_SERIES,
             CLIENT_ERRORS_LOGS_HREF,
         ),
         None => chart_unavailable_card("Client errors", "Last 30 days", CLIENT_ERRORS_LOGS_HREF),
@@ -417,7 +422,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             "Last 30 days",
             series,
             requests_history,
-            "var(--accent-danger)",
+            server_errors_colour,
             SERVER_ERRORS_LOGS_HREF,
         ),
         None => chart_unavailable_card("Server errors", "Last 30 days", SERVER_ERRORS_LOGS_HREF),
@@ -453,6 +458,22 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         body,
     )
     .await
+}
+
+/// The colour of a series that is a count of traffic: neutral ink.
+const NEUTRAL_SERIES: &str = "var(--text-primary)";
+
+/// The colour of a secondary or all-quiet series.
+const QUIET_SERIES: &str = "var(--text-secondary)";
+
+/// The server-error series' colour: the danger red only when the window holds
+/// a server error, so a flat zero line does not read as an alarm.
+fn server_error_colour(series: &[(String, i64)]) -> &'static str {
+    if series.iter().any(|(_, n)| *n > 0) {
+        "var(--accent-danger)"
+    } else {
+        QUIET_SERIES
+    }
 }
 
 /// Where the dashboard's server-error tile, card and chart send an operator:
@@ -746,6 +767,15 @@ mod outage_tests {
             server.contains(r#"<div class="stat-value">1</div>"#),
             "{server}"
         );
+        assert!(
+            server.contains("--chart-color: var(--accent-danger)"),
+            "{server}"
+        );
+        assert!(
+            html.contains("--chart-color: var(--text-primary)")
+                && !html.contains("--chart-color: var(--accent-warning)"),
+            "traffic is drawn in neutral ink, not the warning amber: {html}"
+        );
 
         let requests = tile(&html, "Requests Today");
         assert!(!requests.contains("stat-card--alert"), "{requests}");
@@ -784,6 +814,10 @@ mod outage_tests {
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
         let server = tile(&html, "Server Errors Today");
         assert!(server.starts_with(r#"<div class="stat-card">"#), "{server}");
+        assert!(
+            !html.contains("--chart-color: var(--accent-danger)"),
+            "no server error in the window: neither its sparkline nor its chart is red: {html}"
+        );
         assert!(
             server.contains(r#"<div class="stat-value">0</div>"#),
             "{server}"

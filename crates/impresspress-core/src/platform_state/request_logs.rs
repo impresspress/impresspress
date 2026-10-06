@@ -162,6 +162,7 @@ impl NewRequestLog<'_> {
         let mut data = HashMap::new();
         data.insert("method".to_string(), json!(self.method));
         data.insert("path".to_string(), json!(self.path));
+        data.insert("block".to_string(), json!(owning_block(self.path)));
         data.insert("status".to_string(), json!(status_label(self.status_code)));
         data.insert("status_code".to_string(), json!(self.status_code));
         data.insert("duration_ms".to_string(), json!(self.duration_ms));
@@ -173,6 +174,18 @@ impl NewRequestLog<'_> {
     }
 }
 
+/// The block a request path was addressed to: the `{block}` of
+/// `/b/{block}/…` (or of a bare `/b/{block}`), which is how the router hands
+/// a request to a block; `""` for any other path — `/`, a static asset, the
+/// unmatched-route label. Derived here, where a row is encoded, so the
+/// `block` column cannot disagree with the path beside it; admin migration
+/// 008 gave the rows written before the column the same value.
+pub fn owning_block(path: &str) -> &str {
+    path.strip_prefix("/b/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
+}
+
 /// One stored row. Every column defaults when absent: the readers project
 /// only the columns a page renders, so a decoded row may carry empty
 /// strings and zeros for the rest.
@@ -182,6 +195,7 @@ pub struct RequestLogRow {
     pub flow_id: String,
     pub method: String,
     pub path: String,
+    pub block: String,
     pub status: String,
     pub status_code: i64,
     pub duration_ms: i64,
@@ -199,6 +213,7 @@ impl RequestLogRow {
             flow_id: data.str_field("flow_id").to_string(),
             method: data.str_field("method").to_string(),
             path: data.str_field("path").to_string(),
+            block: data.str_field("block").to_string(),
             status: data.str_field("status").to_string(),
             status_code: data.i64_field("status_code"),
             duration_ms: data.i64_field("duration_ms"),
@@ -211,9 +226,10 @@ impl RequestLogRow {
     }
 }
 
-/// One `(method, path)` group of the network page's inbound summary.
+/// One `(block, method, path)` group of the network page's route listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathSummary {
+    pub block: String,
     pub method: String,
     pub path: String,
     pub count: i64,
@@ -225,7 +241,8 @@ pub struct PathSummary {
     pub last_seen: String,
 }
 
-/// What the network page orders its route summary by, each descending.
+/// How the network page orders the routes within each block, each
+/// descending (ties by path, then method).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathSort {
     /// Busiest first.
@@ -237,7 +254,7 @@ pub enum PathSort {
 }
 
 impl PathSort {
-    /// The aggregate alias [`summarise_by_path`] sorts on.
+    /// The aggregate alias [`route_page`] sorts on.
     fn alias(self) -> &'static str {
         match self {
             Self::Requests => "cnt",
@@ -247,14 +264,39 @@ impl PathSort {
     }
 }
 
-/// The route summary as read, and whether the read stopped at its cap.
+/// Which routes the network page lists, and which page of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteQuery<'a> {
+    /// Narrow to paths containing this; empty for every path.
+    pub search: &'a str,
+    pub sort: PathSort,
+    /// Only routes that answered at least one error (of either class).
+    pub errors_only: bool,
+    /// Routes per page, at least 1.
+    pub limit: u32,
+    /// Routes to skip before this page.
+    pub offset: i64,
+}
+
+/// One page of routes, and how many routes the query matched in all.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathSummaries {
-    /// In the order the read asked for, at most the cap.
+pub struct RoutePage {
+    /// Ordered by block, then by the query's sort.
     pub rows: Vec<PathSummary>,
-    /// More routes matched than the cap: `rows` is the first `cap` of them in
-    /// that order, not the whole set.
-    pub capped: bool,
+    /// Every route the query matched, across all pages. `0` when the page is
+    /// empty: a page past the last route carries no count.
+    pub total: i64,
+}
+
+/// One block's totals over every route of it the query's search matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockTotals {
+    /// `""` for the paths no block owns.
+    pub block: String,
+    pub requests: i64,
+    pub server_errors: i64,
+    pub client_errors: i64,
+    pub last_seen: String,
 }
 
 /// The dashboard's header tiles for the current day.
@@ -450,88 +492,102 @@ pub async fn list_for_path(
         .collect())
 }
 
-/// The `(method, path)` groups, optionally narrowed to paths containing
-/// `path_search`, ordered by `sort` (descending, ties broken by path), and at
-/// most `cap` of them: request count, mean duration, server- and client-error
-/// counts and the newest timestamp of each. The network page's inbound
-/// summary, in one grouped statement.
+/// The `path LIKE %search%` filter, or nothing for an empty search.
+fn path_search(search: &str) -> Vec<wire::FilterNode> {
+    if search.is_empty() {
+        return vec![];
+    }
+    to_wire_filters(&[Filter {
+        field: "path".into(),
+        operator: FilterOp::Like,
+        value: json!(format!("%{search}%")),
+    }])
+}
+
+/// The per-route counts both route reads select.
+fn route_counts() -> Vec<wire::AggregateColumnDef> {
+    vec![
+        wire::AggregateColumnDef::Count {
+            alias: "cnt".into(),
+        },
+        count_of(StatusClass::ServerError, "server_errors"),
+        count_of(StatusClass::ClientError, "client_errors"),
+        wire::AggregateColumnDef::CaseWhenSum {
+            when: to_wire_filters(
+                &ErrorFilter {
+                    server: true,
+                    client: true,
+                }
+                .filters(),
+            ),
+            alias: "errors".into(),
+        },
+        wire::AggregateColumnDef::Max {
+            field: "created_at".into(),
+            alias: "last_seen".into(),
+        },
+    ]
+}
+
+/// One page of `(block, method, path)` groups — request count, mean
+/// duration, server- and client-error counts and the newest timestamp of
+/// each — ordered by block and then by `query.sort`, with the number of
+/// groups the query matched, in one grouped statement. The network page's
+/// route listing.
 ///
-/// The read asks for one more group than `cap` to learn whether it was cut
-/// short, and says so in [`PathSummaries::capped`] rather than presenting the
-/// first `cap` as the whole set.
-pub async fn summarise_by_path(
-    ctx: &dyn Context,
-    path_search: &str,
-    sort: PathSort,
-    cap: usize,
-) -> Result<PathSummaries, WaferError> {
-    let filters = if path_search.is_empty() {
-        vec![]
+/// Grouping, ordering, "errors only" (a `HAVING` on the error count) and the
+/// page cut all happen in SQL, so a failing route is found however far down
+/// a busy deployment's routes it ranks.
+pub async fn route_page(ctx: &dyn Context, query: RouteQuery<'_>) -> Result<RoutePage, WaferError> {
+    let mut aggregates = route_counts();
+    aggregates.push(wire::AggregateColumnDef::Avg {
+        field: "duration_ms".into(),
+        alias: "avg_ms".into(),
+        cast_as: None,
+    });
+    aggregates.push(wire::AggregateColumnDef::CountGroups {
+        alias: "total".into(),
+    });
+    let having = if query.errors_only {
+        to_wire_filters(&[Filter {
+            field: "errors".into(),
+            operator: FilterOp::GreaterThan,
+            value: json!(0),
+        }])
     } else {
-        vec![wire::FilterNode::Leaf(wire::FilterDef {
-            field: "path".into(),
-            operator: "like".into(),
-            value: json!(format!("%{path_search}%")),
-            column: None,
-        })]
+        vec![]
+    };
+    let sort = |field: &str, desc: bool| wire::SortFieldDef {
+        field: field.into(),
+        desc,
     };
     let req = wire::AggregateRequest {
         collection: TABLE.to_string(),
-        select_columns: vec!["method".into(), "path".into()],
-        aggregates: vec![
-            wire::AggregateColumnDef::Count {
-                alias: "cnt".into(),
-            },
-            wire::AggregateColumnDef::Avg {
-                field: "duration_ms".into(),
-                alias: "avg_ms".into(),
-                cast_as: None,
-            },
-            count_of(StatusClass::ServerError, "server_errors"),
-            count_of(StatusClass::ClientError, "client_errors"),
-            wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(
-                    &ErrorFilter {
-                        server: true,
-                        client: true,
-                    }
-                    .filters(),
-                ),
-                alias: "errors".into(),
-            },
-            wire::AggregateColumnDef::Max {
-                field: "created_at".into(),
-                alias: "last_seen".into(),
-            },
-        ],
-        filters,
+        select_columns: vec!["block".into(), "method".into(), "path".into()],
+        aggregates,
+        filters: path_search(query.search),
         group_by: vec![
+            wire::GroupByDef::Column("block".into()),
             wire::GroupByDef::Column("method".into()),
             wire::GroupByDef::Column("path".into()),
         ],
         sort: vec![
-            wire::SortFieldDef {
-                field: sort.alias().into(),
-                desc: true,
-            },
-            wire::SortFieldDef {
-                field: "path".into(),
-                desc: false,
-            },
-            wire::SortFieldDef {
-                field: "method".into(),
-                desc: false,
-            },
+            sort("block", false),
+            sort(query.sort.alias(), true),
+            sort("path", false),
+            sort("method", false),
         ],
-        limit: i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1),
+        limit: i64::from(query.limit.max(1)),
+        having,
+        offset: query.offset.max(0),
     };
     let rows = db::aggregate(ctx, req).await?;
-    let capped = rows.len() > cap;
-    Ok(PathSummaries {
+    Ok(RoutePage {
+        total: rows.first().map_or(0, |r| r.data.i64_field("total")),
         rows: rows
             .iter()
-            .take(cap)
             .map(|r| PathSummary {
+                block: r.data.str_field("block").to_string(),
                 method: r.data.str_field("method").to_string(),
                 path: r.data.str_field("path").to_string(),
                 count: r.data.i64_field("cnt"),
@@ -553,8 +609,39 @@ pub async fn summarise_by_path(
                 last_seen: r.data.str_field("last_seen").to_string(),
             })
             .collect(),
-        capped,
     })
+}
+
+/// Each block's totals over its rows whose path contains `search`: requests,
+/// server and client errors, and the newest timestamp. The network page's
+/// group headings, in one grouped statement (one row per block, so bounded
+/// by the blocks a deployment runs).
+pub async fn block_totals(ctx: &dyn Context, search: &str) -> Result<Vec<BlockTotals>, WaferError> {
+    let req = wire::AggregateRequest {
+        collection: TABLE.to_string(),
+        select_columns: vec!["block".into()],
+        aggregates: route_counts(),
+        filters: path_search(search),
+        group_by: vec![wire::GroupByDef::Column("block".into())],
+        sort: vec![wire::SortFieldDef {
+            field: "block".into(),
+            desc: false,
+        }],
+        limit: 0,
+        having: vec![],
+        offset: 0,
+    };
+    let rows = db::aggregate(ctx, req).await?;
+    Ok(rows
+        .iter()
+        .map(|r| BlockTotals {
+            block: r.data.str_field("block").to_string(),
+            requests: r.data.i64_field("cnt"),
+            server_errors: r.data.i64_field("server_errors"),
+            client_errors: r.data.i64_field("client_errors"),
+            last_seen: r.data.str_field("last_seen").to_string(),
+        })
+        .collect())
 }
 
 /// Requests, server errors, client errors (and of those the rate-limited
@@ -584,6 +671,8 @@ pub async fn today_counts(ctx: &dyn Context, since_iso: &str) -> Result<TodayCou
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let rows = db::aggregate(ctx, req).await?;
     let row = rows.first();
@@ -972,10 +1061,10 @@ mod tests {
         );
 
         // --- the per-path summary (every row shares one method+path) ---
-        let summary = summarise_by_path(&ctx, "", PathSort::Requests, 50)
+        let summary = route_page(&ctx, every_route(PathSort::Requests))
             .await
             .expect("summary");
-        assert!(!summary.capped);
+        assert_eq!(summary.total, 1);
         assert_eq!(summary.rows.len(), 1);
         let s = &summary.rows[0];
         assert_eq!((s.method.as_str(), s.path.as_str()), ("GET", "/probe"));
@@ -985,11 +1074,17 @@ mod tests {
         // CAST(AVG(duration_ms) AS INTEGER) parity: the thirteen durations
         // sum to 6145, a mean of 472.69…, truncated toward zero.
         assert_eq!(s.avg_ms, 472);
-        assert!(summarise_by_path(&ctx, "nope", PathSort::Requests, 50)
-            .await
-            .expect("filtered summary")
-            .rows
-            .is_empty());
+        assert!(route_page(
+            &ctx,
+            RouteQuery {
+                search: "nope",
+                ..every_route(PathSort::Requests)
+            }
+        )
+        .await
+        .expect("filtered summary")
+        .rows
+        .is_empty());
 
         // --- recent server errors: the 500 row and nothing else ---
         let recent = list_recent_server_errors(&ctx, 5)
@@ -1001,10 +1096,42 @@ mod tests {
         );
     }
 
-    /// The route summary orders by the key asked for, and reports a read cut
-    /// short at its cap instead of passing the prefix off as everything.
+    /// Every route, first page of 50, no search, no error filter.
+    fn every_route(sort: PathSort) -> RouteQuery<'static> {
+        RouteQuery {
+            search: "",
+            sort,
+            errors_only: false,
+            limit: 50,
+            offset: 0,
+        }
+    }
+
+    /// The block a path was addressed to, as the row stores it.
+    #[test]
+    fn the_block_is_the_first_segment_after_b() {
+        for (path, block) in [
+            ("/b/admin/users", "admin"),
+            ("/b/admin", "admin"),
+            ("/b/", ""),
+            ("/", ""),
+            ("<unmatched>", ""),
+            ("/static/x.css", ""),
+        ] {
+            assert_eq!(owning_block(path), block, "{path}");
+            let row = NewRequestLog {
+                path,
+                ..probe(200, 1)
+            };
+            assert_eq!(row.to_data().get("block"), Some(&json!(block)), "{path}");
+        }
+    }
+
+    /// Routes come back ordered by block, then by the key asked for within
+    /// it; the page is cut by limit and offset, and every page carries the
+    /// number of routes in all.
     #[tokio::test]
-    async fn the_route_summary_sorts_by_the_key_and_reports_its_cap() {
+    async fn the_route_page_orders_within_blocks_and_pages_in_sql() {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
@@ -1012,8 +1139,8 @@ mod tests {
             path,
             ..probe(code, 1)
         };
-        // /busy: 3 requests, no errors, oldest. /failing: 2, both errors.
-        // /recent: 1, newest.
+        // admin: /busy 3 requests (oldest), /failing 2 (both errors),
+        // /recent 1 (newest). auth: /login 5.
         for (i, at) in [
             "2026-01-01T00:00:00Z",
             "2026-01-01T00:00:01Z",
@@ -1022,46 +1149,198 @@ mod tests {
         .iter()
         .enumerate()
         {
-            seed_at(&ctx, &format!("busy{i}"), row("/busy", 200), at).await;
+            seed_at(&ctx, &format!("busy{i}"), row("/b/admin/busy", 200), at).await;
         }
-        seed_at(&ctx, "fail0", row("/failing", 500), "2026-01-02T00:00:00Z").await;
-        seed_at(&ctx, "fail1", row("/failing", 404), "2026-01-02T00:00:01Z").await;
-        seed_at(&ctx, "recent", row("/recent", 200), "2026-01-03T00:00:00Z").await;
+        seed_at(
+            &ctx,
+            "fail0",
+            row("/b/admin/failing", 500),
+            "2026-01-02T00:00:00Z",
+        )
+        .await;
+        seed_at(
+            &ctx,
+            "fail1",
+            row("/b/admin/failing", 404),
+            "2026-01-02T00:00:01Z",
+        )
+        .await;
+        seed_at(
+            &ctx,
+            "recent",
+            row("/b/admin/recent", 200),
+            "2026-01-03T00:00:00Z",
+        )
+        .await;
+        for i in 0..5 {
+            seed_at(
+                &ctx,
+                &format!("login{i}"),
+                row("/b/auth/login", 200),
+                "2026-01-01T00:00:00Z",
+            )
+            .await;
+        }
 
-        let order = |sort: PathSort| {
+        let order = |query: RouteQuery<'static>| {
             let ctx = &ctx;
             async move {
-                summarise_by_path(ctx, "", sort, 50)
-                    .await
-                    .expect("summary")
-                    .rows
-                    .into_iter()
-                    .map(|r| r.path)
-                    .collect::<Vec<_>>()
+                let page = route_page(ctx, query).await.expect("route page");
+                (
+                    page.rows.into_iter().map(|r| r.path).collect::<Vec<_>>(),
+                    page.total,
+                )
             }
         };
         assert_eq!(
-            order(PathSort::Requests).await,
-            ["/busy", "/failing", "/recent"]
+            order(every_route(PathSort::Requests)).await,
+            (
+                vec![
+                    "/b/admin/busy".to_string(),
+                    "/b/admin/failing".into(),
+                    "/b/admin/recent".into(),
+                    "/b/auth/login".into()
+                ],
+                4
+            ),
+            "admin before auth, busiest first within admin"
         );
-        assert_eq!(order(PathSort::Errors).await[0], "/failing");
         assert_eq!(
-            order(PathSort::Recent).await,
-            ["/recent", "/failing", "/busy"]
+            order(every_route(PathSort::Errors)).await.0[0],
+            "/b/admin/failing"
+        );
+        assert_eq!(
+            order(every_route(PathSort::Recent)).await.0[0],
+            "/b/admin/recent"
         );
 
-        let capped = summarise_by_path(&ctx, "", PathSort::Requests, 2)
-            .await
-            .expect("capped summary");
-        assert!(capped.capped, "three routes do not fit a cap of two");
-        assert_eq!(capped.rows.len(), 2);
-        assert!(
-            !summarise_by_path(&ctx, "", PathSort::Requests, 3)
-                .await
-                .expect("exact summary")
-                .capped,
-            "three routes fit a cap of three exactly"
+        let second = RouteQuery {
+            limit: 2,
+            offset: 2,
+            ..every_route(PathSort::Requests)
+        };
+        assert_eq!(
+            order(second).await,
+            (
+                vec!["/b/admin/recent".to_string(), "/b/auth/login".into()],
+                4
+            ),
+            "the second page of two, with the count of all four"
         );
+
+        let failing = RouteQuery {
+            errors_only: true,
+            ..every_route(PathSort::Requests)
+        };
+        assert_eq!(
+            order(failing).await,
+            (vec!["/b/admin/failing".to_string()], 1),
+            "errors only is a HAVING: the count is of the failing routes"
+        );
+
+        let past = RouteQuery {
+            offset: 50,
+            ..every_route(PathSort::Requests)
+        };
+        assert_eq!(order(past).await, (vec![], 0), "a page past the end");
+
+        let totals = block_totals(&ctx, "").await.expect("block totals");
+        let summed = |block: &str| {
+            totals
+                .iter()
+                .find(|t| t.block == block)
+                .map(|t| (t.requests, t.server_errors, t.client_errors))
+        };
+        assert_eq!(summed("admin"), Some((6, 1, 1)));
+        assert_eq!(summed("auth"), Some((5, 0, 0)));
+        assert_eq!(
+            block_totals(&ctx, "login")
+                .await
+                .expect("searched totals")
+                .len(),
+            1,
+            "the totals follow the search"
+        );
+    }
+
+    /// Migrations 007 and 008 over rows written before them: an action name
+    /// becomes its HTTP method, an `update` row (PUT or PATCH, nobody can
+    /// say) is dropped, and every row gets the block its path names. Both
+    /// re-run without changing anything.
+    #[tokio::test]
+    async fn migrations_007_and_008_bring_old_rows_onto_the_new_shape() {
+        use crate::blocks::admin::migrations::{
+            ddl_files, REQUEST_LOGS_BLOCK, REQUEST_LOGS_HTTP_METHOD, SQLITE_MIGRATIONS,
+        };
+        let db: std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            std::sync::Arc::new(
+                wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                    .expect("open in-memory sqlite"),
+            );
+        let all = ddl_files("sqlite");
+        let at = |name: &str| {
+            SQLITE_MIGRATIONS
+                .iter()
+                .position(|(n, _)| *n == name)
+                .expect("wired into SQLITE_MIGRATIONS")
+        };
+        let (method_at, block_at) = (at(REQUEST_LOGS_HTTP_METHOD), at(REQUEST_LOGS_BLOCK));
+        crate::migration_helper::apply_ddl_via_service(&db, &all[..method_at])
+            .await
+            .expect("the migrations before 007");
+
+        for (id, method, path) in [
+            ("r", "retrieve", "/b/admin/users"),
+            ("c", "create", "/b/auth/api/login"),
+            ("d", "delete", "/b/admin/x"),
+            ("u", "update", "/b/admin/variables/K"),
+            ("g", "GET", "/"),
+            ("n", "retrieve", "<unmatched>"),
+        ] {
+            let mut data = HashMap::new();
+            for (column, value) in [
+                ("id", json!(id)),
+                ("method", json!(method)),
+                ("path", json!(path)),
+                ("created_at", json!("2026-01-01T00:00:00Z")),
+                ("updated_at", json!("2026-01-01T00:00:00Z")),
+            ] {
+                data.insert(column.to_string(), value);
+            }
+            db.create(TABLE, data).await.expect("seed a pre-007 row");
+        }
+
+        for run in ["first", "second"] {
+            crate::migration_helper::apply_ddl_via_service(&db, &all[..=block_at])
+                .await
+                .unwrap_or_else(|e| panic!("{run} run of 001-008: {e}"));
+            let mut rows: Vec<(String, String, String)> = db
+                .list(TABLE, &ListOptions::default())
+                .await
+                .expect("list")
+                .records
+                .into_iter()
+                .map(|r| {
+                    (
+                        r.id.clone(),
+                        r.data.str_field("method").to_string(),
+                        r.data.str_field("block").to_string(),
+                    )
+                })
+                .collect();
+            rows.sort();
+            let expected: Vec<(String, String, String)> = [
+                ("c", "POST", "auth"),
+                ("d", "DELETE", "admin"),
+                ("g", "GET", ""),
+                ("n", "GET", ""),
+                ("r", "GET", "admin"),
+            ]
+            .iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+            .collect();
+            assert_eq!(rows, expected, "{run} run");
+        }
     }
 
     /// Every reader counts a row by its `status_code`, whatever its stored
@@ -1106,7 +1385,7 @@ mod tests {
             "daily_counts",
         );
 
-        let summary = summarise_by_path(&ctx, "", PathSort::Requests, 50)
+        let summary = route_page(&ctx, every_route(PathSort::Requests))
             .await
             .expect("summary");
         assert_eq!(
@@ -1116,7 +1395,7 @@ mod tests {
                 .map(|s| (s.count, s.server_errors, s.client_errors))
                 .collect::<Vec<_>>(),
             vec![(3, 1, 1)],
-            "summarise_by_path",
+            "route_page",
         );
 
         let recent: Vec<String> = list_recent_server_errors(&ctx, 5)

@@ -6,7 +6,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use super::{request_path_cell, status_code_badge_variant, user_cell};
 use crate::{
     blocks::auth::repo::users,
-    platform_state::request_logs::{self, PathSort, PathSummary},
+    platform_state::request_logs::{self, PathSort, PathSummary, RouteQuery},
     ui::{
         components::{self, Badge},
         icons,
@@ -15,13 +15,7 @@ use crate::{
 };
 
 /// Routes per page.
-const PAGE_SIZE: usize = 50;
-
-/// The most routes one render reads. Every route is read so the page can
-/// group, total, sort and page them; a deployment with more distinct
-/// `(method, path)` pairs than this is shown the first `ROUTE_CAP` in the
-/// chosen order, and told so ([`request_logs::PathSummaries::capped`]).
-const ROUTE_CAP: usize = 1000;
+const PAGE_SIZE: u32 = 50;
 
 /// Where this page lives; every control on it links back here.
 const NETWORK_HREF: &str = "/b/admin/settings/network";
@@ -32,7 +26,7 @@ struct Query {
     search: String,
     sort: PathSort,
     errors_only: bool,
-    page: usize,
+    page: u32,
 }
 
 impl Query {
@@ -87,14 +81,31 @@ pub async fn settings_body(
     msg: &Message,
 ) -> Result<Markup, wafer_run::WaferError> {
     let query = Query::from_msg(msg);
-    let summary =
-        request_logs::summarise_by_path(ctx, &query.search, query.sort, ROUTE_CAP).await?;
-    let routes: Vec<PathSummary> = summary
-        .rows
-        .into_iter()
-        .filter(|r| !query.errors_only || r.server_errors + r.client_errors > 0)
-        .collect();
-    let listing = Listing::build(routes, query.sort, query.page);
+    let read = |page: u32| {
+        request_logs::route_page(
+            ctx,
+            RouteQuery {
+                search: &query.search,
+                sort: query.sort,
+                errors_only: query.errors_only,
+                limit: PAGE_SIZE,
+                offset: i64::from(page - 1) * i64::from(PAGE_SIZE),
+            },
+        )
+    };
+    // A page past the last route (a stale link, a filter that shrank the
+    // list) comes back empty and so without a count; the first page is
+    // what to show then.
+    let (mut page, mut routes) = (query.page, read(query.page).await?);
+    if routes.rows.is_empty() && page > 1 {
+        page = 1;
+        routes = read(1).await?;
+    }
+    let totals = request_logs::block_totals(ctx, &query.search).await?;
+    let groups = group_by_block(routes.rows);
+    let total = usize::try_from(routes.total).unwrap_or(0);
+    let first = (page as usize - 1) * PAGE_SIZE as usize + 1;
+    let last = first + groups.iter().map(|g| g.rows.len()).sum::<usize>() - 1;
 
     let sort_href = |sort: PathSort| {
         Query {
@@ -102,6 +113,22 @@ pub async fn settings_body(
             ..query.clone()
         }
         .href(true)
+    };
+    let sort_option = |label: &str, sort: PathSort| {
+        let href = sort_href(sort);
+        let current = query.sort == sort;
+        html! {
+            a .btn .btn--secondary .btn--sm .filter-toggle
+                href=(href)
+                hx-get=(href)
+                hx-target="#content"
+                hx-push-url="true"
+                aria-current=[current.then_some("true")]
+            {
+                span .filter-toggle__check aria-hidden="true" { (icons::check()) }
+                (label)
+            }
+        }
     };
     let errors_href = Query {
         errors_only: !query.errors_only,
@@ -114,11 +141,14 @@ pub async fn settings_body(
         div .filter-bar {
             (components::search_input_with_value("search", "Search by path...", &query.href(false), "#content", &query.search))
             div .network-controls {
-                div .filter-toggles role="group" aria-labelledby="network-sort-label" {
+                // One of three orders, so links to the three orderings with
+                // the current one `aria-current` — not three toggles, which
+                // would read as three independent switches.
+                nav .filter-toggles aria-labelledby="network-sort-label" {
                     span #network-sort-label .text-sm .text-muted { "Sort by" }
-                    (components::filter_toggle("Requests", query.sort == PathSort::Requests, &sort_href(PathSort::Requests)))
-                    (components::filter_toggle("Errors", query.sort == PathSort::Errors, &sort_href(PathSort::Errors)))
-                    (components::filter_toggle("Recent", query.sort == PathSort::Recent, &sort_href(PathSort::Recent)))
+                    (sort_option("Requests", PathSort::Requests))
+                    (sort_option("Errors", PathSort::Errors))
+                    (sort_option("Recent", PathSort::Recent))
                 }
                 (components::filter_toggle("Errors only", query.errors_only, &errors_href))
                 button .btn .btn--secondary .btn--sm
@@ -129,7 +159,7 @@ pub async fn settings_body(
             }
         }
 
-        @if listing.total == 0 {
+        @if groups.is_empty() {
             (components::empty_state(
                 icons::inbox(),
                 if query.errors_only { "No failing routes" } else { "No inbound requests yet" },
@@ -142,17 +172,14 @@ pub async fn settings_body(
             ))
         } @else {
             p .network-summary {
-                "Showing " (listing.first) "\u{2013}" (listing.last) " of " (listing.total)
-                @if listing.total == 1 { " route" } @else { " routes" }
-                @if summary.capped {
-                    " \u{2014} the first " (ROUTE_CAP) " in this order; search to narrow"
-                }
+                "Showing " (first) "\u{2013}" (last) " of " (total)
+                @if total == 1 { " route" } @else { " routes" }
             }
-            @for group in &listing.groups {
-                (group_section(group))
+            @for group in &groups {
+                (group_section(group, totals.iter().find(|t| t.block == group.block)))
             }
-            @if let Some(per_page) = std::num::NonZeroU32::new(PAGE_SIZE as u32) {
-                (components::pagination(listing.page as u32, per_page, listing.total as u32, &page_href))
+            @if let Some(per_page) = std::num::NonZeroU32::new(PAGE_SIZE) {
+                (components::pagination(page, per_page, u32::try_from(total).unwrap_or(u32::MAX), &page_href))
             }
         }
 
@@ -160,118 +187,27 @@ pub async fn settings_body(
     })
 }
 
-/// The routes, grouped by the block that serves them and cut to one page.
-struct Listing {
-    /// The groups with a route on this page, in order, each holding only its
-    /// routes on this page (and its totals over all of them).
-    groups: Vec<Group>,
-    /// Routes in the whole (filtered) set.
-    total: usize,
-    /// 1-based positions of the first and last route on this page.
-    first: usize,
-    last: usize,
-    /// The page shown, clamped to the last one.
-    page: usize,
-}
-
-/// One block's routes.
+/// The routes of one block on this page, in the order the read returned them.
 struct Group {
-    /// The `{block}` of the routes' `/b/{block}/` prefix, or `None` for the
-    /// routes no block prefix names (`/`, the unmatched-route collapse).
-    block: Option<String>,
-    /// Totals over every route of this block in the set, not just this page.
-    routes: usize,
-    requests: i64,
-    server_errors: i64,
-    client_errors: i64,
-    last_seen: String,
-    /// This block's routes on this page.
+    /// `""` for the paths no block owns ([`request_logs::owning_block`]).
+    block: String,
     rows: Vec<PathSummary>,
 }
 
-impl Listing {
-    /// Group `routes` (in the order the read returned them) by owning block,
-    /// order the groups by `sort` over their totals, and cut the flattened
-    /// result to page `page`.
-    fn build(routes: Vec<PathSummary>, sort: PathSort, page: usize) -> Self {
-        let mut groups: Vec<Group> = Vec::new();
-        let mut index: HashMap<Option<String>, usize> = HashMap::new();
-        for route in routes {
-            let block = owning_block(&route.path).map(str::to_string);
-            let at = *index.entry(block.clone()).or_insert_with(|| {
-                groups.push(Group {
-                    block,
-                    routes: 0,
-                    requests: 0,
-                    server_errors: 0,
-                    client_errors: 0,
-                    last_seen: String::new(),
-                    rows: Vec::new(),
-                });
-                groups.len() - 1
-            });
-            let group = &mut groups[at];
-            group.routes += 1;
-            group.requests += route.count;
-            group.server_errors += route.server_errors;
-            group.client_errors += route.client_errors;
-            if route.last_seen > group.last_seen {
-                group.last_seen.clone_from(&route.last_seen);
-            }
-            group.rows.push(route);
-        }
-        // Descending on the key, then by name so equal groups keep one order;
-        // the unprefixed group sorts after every block on a tie.
-        groups.sort_by(|a, b| {
-            let key = match sort {
-                PathSort::Requests => b.requests.cmp(&a.requests),
-                PathSort::Errors => {
-                    (b.server_errors + b.client_errors).cmp(&(a.server_errors + a.client_errors))
-                }
-                PathSort::Recent => b.last_seen.cmp(&a.last_seen),
-            };
-            key.then_with(|| match (&a.block, &b.block) {
-                (Some(a), Some(b)) => a.cmp(b),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            })
-        });
-
-        let total: usize = groups.iter().map(|g| g.rows.len()).sum();
-        let pages = total.div_ceil(PAGE_SIZE).max(1);
-        let page = page.min(pages);
-        let skip = (page - 1) * PAGE_SIZE;
-        let mut seen = 0usize;
-        let mut shown = Vec::new();
-        for mut group in groups {
-            let len = group.rows.len();
-            let from = skip.saturating_sub(seen).min(len);
-            let to = (skip + PAGE_SIZE).saturating_sub(seen).min(len);
-            seen += len;
-            if from < to {
-                group.rows = group.rows.drain(from..to).collect();
-                shown.push(group);
-            }
-        }
-        let last = (skip + PAGE_SIZE).min(total);
-        Listing {
-            groups: shown,
-            total,
-            first: if total == 0 { 0 } else { skip + 1 },
-            last,
-            page,
+/// Cut a page of routes, which the read ordered by block, into one group per
+/// block.
+fn group_by_block(rows: Vec<PathSummary>) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for row in rows {
+        match groups.last_mut() {
+            Some(group) if group.block == row.block => group.rows.push(row),
+            _ => groups.push(Group {
+                block: row.block.clone(),
+                rows: vec![row],
+            }),
         }
     }
-}
-
-/// The block a request path belongs to: the `{block}` of `/b/{block}/…`,
-/// which is how the router hands a request to a block. `None` for a path
-/// outside that space.
-fn owning_block(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("/b/")?;
-    let block = rest.split('/').next().unwrap_or("");
-    (!block.is_empty()).then_some(block)
+    groups
 }
 
 /// `"1 request"` / `"3 requests"`.
@@ -283,14 +219,11 @@ fn count_of(n: i64, one: &str, many: &str) -> String {
     }
 }
 
-/// One block's routes: a heading whose button collapses them, the block's
-/// totals, and the table.
-fn group_section(group: &Group) -> Markup {
-    let name = group.block.as_deref().unwrap_or("Other");
-    let body_id = format!(
-        "network-group-{:08x}",
-        components::fnv1a(group.block.as_deref().unwrap_or(""))
-    );
+/// One block's routes on this page: a heading whose button collapses them,
+/// the block's totals over every route the search matches (`totals`, from
+/// [`request_logs::block_totals`]), and the table.
+fn group_section(group: &Group, totals: Option<&request_logs::BlockTotals>) -> Markup {
+    let body_id = format!("network-group-{:08x}", components::fnv1a(&group.block));
     let rows: Vec<components::TableRow> = group.rows.iter().map(inbound_row).collect();
     html! {
         section .network-group {
@@ -302,23 +235,21 @@ fn group_section(group: &Group) -> Markup {
                     data-action="network-group-toggle"
                 {
                     span .network-group__chevron aria-hidden="true" { (icons::chevron_down()) }
-                    @if group.block.is_some() {
-                        span .network-group__name { "/b/" (name) "/" }
-                    } @else {
+                    @if group.block.is_empty() {
                         span .network-group__name { "Other paths" }
+                    } @else {
+                        span .network-group__name { "/b/" (group.block) "/" }
                     }
                 }
             }
-            p .network-group__totals {
-                (count_of(group.routes as i64, "route", "routes"))
-                " \u{b7} " (count_of(group.requests, "request", "requests"))
-                " \u{b7} " (count_of(group.server_errors, "server error", "server errors"))
-                " \u{b7} " (count_of(group.client_errors, "client error", "client errors"))
-                @if !group.last_seen.is_empty() {
-                    " \u{b7} last " (components::timestamp(&group.last_seen))
-                }
-                @if group.rows.len() < group.routes {
-                    span .text-muted { " (" (group.rows.len()) " on this page)" }
+            @if let Some(t) = totals {
+                p .network-group__totals {
+                    (count_of(t.requests, "request", "requests"))
+                    " \u{b7} " (count_of(t.server_errors, "server error", "server errors"))
+                    " \u{b7} " (count_of(t.client_errors, "client error", "client errors"))
+                    @if !t.last_seen.is_empty() {
+                        " \u{b7} last " (components::timestamp(&t.last_seen))
+                    }
                 }
             }
             div id=(body_id) {
@@ -557,6 +488,7 @@ mod tests {
         last: &str,
     ) -> PathSummary {
         PathSummary {
+            block: request_logs::owning_block(path).into(),
             method: method.into(),
             path: path.into(),
             count,
@@ -681,91 +613,6 @@ mod tests {
         }
     }
 
-    /// Routes group under the block their `/b/{block}/` prefix names, with
-    /// totals over the block's every route; the rest go to one "Other" group
-    /// listed after the blocks on a tie.
-    #[test]
-    fn routes_group_by_owning_block_with_totals() {
-        let listing = Listing::build(
-            vec![
-                route("GET", "/b/admin/users", 10, 1, 0, "2026-01-02T00:00:00Z"),
-                route("GET", "/b/auth/login", 6, 0, 2, "2026-01-03T00:00:00Z"),
-                route("POST", "/b/admin/users", 5, 0, 1, "2026-01-01T00:00:00Z"),
-                route("GET", "<unmatched>", 4, 0, 4, "2026-01-01T00:00:00Z"),
-                route("GET", "/", 1, 0, 0, "2026-01-01T00:00:00Z"),
-            ],
-            PathSort::Requests,
-            1,
-        );
-        let names: Vec<Option<&str>> = listing.groups.iter().map(|g| g.block.as_deref()).collect();
-        assert_eq!(names, [Some("admin"), Some("auth"), None]);
-        let admin = &listing.groups[0];
-        assert_eq!(
-            (
-                admin.routes,
-                admin.requests,
-                admin.server_errors,
-                admin.client_errors
-            ),
-            (2, 15, 1, 1)
-        );
-        assert_eq!(admin.last_seen, "2026-01-02T00:00:00Z");
-        assert_eq!(
-            listing.groups[2].rows.len(),
-            2,
-            "/ and the unmatched collapse"
-        );
-        assert_eq!((listing.total, listing.first, listing.last), (5, 1, 5));
-
-        let by_recent = Listing::build(
-            vec![
-                route("GET", "/b/admin/users", 10, 0, 0, "2026-01-02T00:00:00Z"),
-                route("GET", "/b/auth/login", 6, 0, 0, "2026-01-03T00:00:00Z"),
-            ],
-            PathSort::Recent,
-            1,
-        );
-        assert_eq!(by_recent.groups[0].block.as_deref(), Some("auth"));
-    }
-
-    /// The page shows 50 routes and says which of how many; a later page
-    /// picks up where it left off, totals still over the whole group.
-    #[test]
-    fn the_listing_pages_by_fifty_and_counts_the_whole_set() {
-        let routes: Vec<PathSummary> = (0..120)
-            .map(|i| {
-                route(
-                    "GET",
-                    &format!("/b/admin/r{i:03}"),
-                    200 - i,
-                    0,
-                    0,
-                    "2026-01-01T00:00:00Z",
-                )
-            })
-            .collect();
-        let first = Listing::build(routes.clone(), PathSort::Requests, 1);
-        assert_eq!(
-            (first.total, first.first, first.last, first.page),
-            (120, 1, 50, 1)
-        );
-        assert_eq!(first.groups[0].rows.len(), 50);
-        assert_eq!(
-            first.groups[0].routes, 120,
-            "totals are over the whole group"
-        );
-
-        let third = Listing::build(routes.clone(), PathSort::Requests, 3);
-        assert_eq!((third.first, third.last), (101, 120));
-        assert_eq!(third.groups[0].rows[0].path, "/b/admin/r100");
-
-        let past_the_end = Listing::build(routes, PathSort::Requests, 9);
-        assert_eq!(
-            past_the_end.page, 3,
-            "a page past the end clamps to the last"
-        );
-    }
-
     async fn seed(ctx: &TestContext, method: &str, path: &str, status_code: i64) {
         request_logs::insert(
             ctx,
@@ -844,6 +691,99 @@ mod tests {
         );
     }
 
+    /// The page is cut in SQL: 50 routes, "Showing 51–60 of 60" on page 2,
+    /// grouped under each block's heading with that block's totals over all
+    /// its routes; a page past the end shows the first page.
+    #[tokio::test]
+    async fn routes_page_by_fifty_grouped_by_block_with_block_totals() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for i in 0..55 {
+            seed(&ctx, "GET", &format!("/b/admin/r{i:02}"), 200).await;
+        }
+        for i in 0..5 {
+            seed(&ctx, "GET", &format!("/b/auth/a{i}"), 404).await;
+        }
+
+        let first = page(&ctx, &[]).await;
+        assert!(
+            first.contains("Showing 1\u{2013}50 of 60 routes"),
+            "{first}"
+        );
+        assert!(
+            first.contains("55 requests \u{b7} 0 server errors \u{b7} 0 client errors"),
+            "the admin heading totals all 55 of its routes, not the 50 on this page: {first}"
+        );
+        let second = page(&ctx, &[("page", "2")]).await;
+        assert!(
+            second.contains("Showing 51\u{2013}60 of 60 routes"),
+            "{second}"
+        );
+        assert!(
+            second.contains(r#"<span class="network-group__name">/b/admin/</span>"#)
+                && second.contains(r#"<span class="network-group__name">/b/auth/</span>"#),
+            "the page that crosses blocks heads both: {second}"
+        );
+        assert!(
+            second.contains("5 requests \u{b7} 0 server errors \u{b7} 5 client errors"),
+            "{second}"
+        );
+        let past = page(&ctx, &[("page", "9")]).await;
+        assert!(past.contains("Showing 1\u{2013}50 of 60 routes"), "{past}");
+    }
+
+    /// "Errors only" is a `HAVING` in the read, not a filter over a capped
+    /// prefix: a failing route that ranks below 60 busier ones by requests
+    /// is the one route listed.
+    #[tokio::test]
+    async fn errors_only_finds_a_failing_route_beyond_the_first_page() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for i in 0..60 {
+            for _ in 0..2 {
+                seed(&ctx, "GET", &format!("/b/admin/busy{i:02}"), 200).await;
+            }
+        }
+        seed(&ctx, "GET", "/b/admin/zz-quiet-failure", 500).await;
+
+        let unfiltered = page(&ctx, &[]).await;
+        assert!(
+            !unfiltered.contains("zz-quiet-failure"),
+            "by requests it ranks last, past the first page: {unfiltered}"
+        );
+        let failing = page(&ctx, &[("errors", "1")]).await;
+        assert!(
+            failing.contains("Showing 1\u{2013}1 of 1 route"),
+            "{failing}"
+        );
+        assert!(failing.contains("zz-quiet-failure"), "{failing}");
+    }
+
+    /// The sort is a set of links, the current one `aria-current`, not three
+    /// independent toggles.
+    #[tokio::test]
+    async fn the_sort_is_links_with_the_current_one_marked() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        seed(&ctx, "GET", "/b/admin/x", 200).await;
+        let html = page(&ctx, &[("sort", "recent")]).await;
+        assert_eq!(html.matches(r#"aria-current="true""#).count(), 1, "{html}");
+        assert!(
+            html.contains(
+                r##"href="/b/admin/settings/network?sort=recent" hx-get="/b/admin/settings/network?sort=recent" hx-target="#content" hx-push-url="true" aria-current="true""##
+            ),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("aria-pressed").count(),
+            1,
+            "only Errors only is a toggle: {html}"
+        );
+    }
+
     /// Methods read as HTTP verbs, as the pipeline stores them.
     #[tokio::test]
     async fn the_route_names_the_http_verb() {
@@ -880,6 +820,7 @@ mod tests {
             flow_id: String::new(),
             method: "GET".into(),
             path: "/".into(),
+            block: String::new(),
             status: "OK".into(),
             status_code: 200,
             duration_ms: 12,

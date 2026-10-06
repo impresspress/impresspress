@@ -4,10 +4,7 @@ use wafer_core::clients::database as db;
 use wafer_run::{context::Context, Message};
 
 use crate::{
-    blocks::{
-        admin::STORAGE_ACCESS_LOGS_TABLE as STORAGE_ACCESS_LOGS,
-        files::{repo::objects::object_key_of_blob, FILES_BLOCK_ID},
-    },
+    blocks::admin::STORAGE_ACCESS_LOGS_TABLE as STORAGE_ACCESS_LOGS,
     ui::components::{self, badge, BadgeVariant},
     util::RecordExt,
 };
@@ -23,11 +20,27 @@ fn display_path(source_block: &str, path: &str) -> String {
         .and_then(|rest| rest.strip_prefix('/'))
         .filter(|rest| !rest.is_empty())
         .unwrap_or(path);
+    object_key(source_block, own)
+}
+
+/// The object a block-relative storage key holds: for the files block, the
+/// object key its per-upload blob key stores the bytes of; for any other
+/// block, the key as written.
+#[cfg(feature = "block-files")]
+fn object_key(source_block: &str, key: &str) -> String {
+    use crate::blocks::files::{repo::objects::object_key_of_blob, FILES_BLOCK_ID};
     if source_block == FILES_BLOCK_ID {
-        object_key_of_blob(own)
+        object_key_of_blob(key)
     } else {
-        own.to_string()
+        key.to_string()
     }
+}
+
+/// [`object_key`] in a build without the files block: no blob keys are
+/// written, so every key is shown as written.
+#[cfg(not(feature = "block-files"))]
+fn object_key(_source_block: &str, key: &str) -> String {
+    key.to_string()
 }
 
 /// The storage access log: the Logs page's "Storage access" tab
@@ -142,10 +155,10 @@ const STORAGE_LOG_COLUMNS: [components::TableCol<'static>; 6] = [
 mod tests {
     use super::display_path;
 
-    /// A path reads under its block's own namespace, and a files blob key as
-    /// the object it stores; anything else stands as written.
+    /// A files blob key reads as the object it stores.
+    #[cfg(feature = "block-files")]
     #[test]
-    fn a_storage_path_reads_as_the_object_it_names() {
+    fn a_files_blob_key_reads_as_the_object_it_stores() {
         assert_eq!(
             display_path(
                 "impresspress/files",
@@ -153,6 +166,12 @@ mod tests {
             ),
             "photos/a.png"
         );
+    }
+
+    /// A path reads under its block's own namespace; another namespace
+    /// stands as written.
+    #[test]
+    fn a_storage_path_reads_under_its_block() {
         assert_eq!(
             display_path("wafer-run/web", "wafer-run/web/site/index.html"),
             "site/index.html"

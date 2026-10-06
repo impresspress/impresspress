@@ -91,6 +91,37 @@ test.describe('core admin pages', () => {
     await expect(page.locator('#var-filter-empty')).toBeHidden();
   });
 
+  test('deleting a variable confirms, toasts, and keeps the search the row was found by', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/settings/variables', { waitUntil: 'networkidle' });
+    const key = `E2E__CORE__DELETE_${Date.now()}`;
+    await page.locator('[data-action="modal-open"][data-modal-target="create-var"]').click();
+    await page.locator('#var-key').fill(key);
+    await page.locator('#var-value').fill('to be deleted');
+    await page.locator('#create-var').getByRole('button', { name: 'Create' }).click();
+    await expect(page.locator('#create-var')).toBeHidden();
+
+    const search = page.getByRole('searchbox', { name: 'Search variables by key, name or description' });
+    await search.fill(key);
+    const remove = page.getByRole('button', { name: `Delete ${key}` });
+    await expect(remove).toBeVisible();
+
+    let confirmText = '';
+    page.once('dialog', (dialog) => {
+      confirmText = dialog.message();
+      void dialog.accept();
+    });
+    await remove.click();
+    await expect(page.locator('#toast-container .toast', { hasText: 'Variable deleted' })).toBeVisible();
+    expect(confirmText).toBe(`Delete ${key}? This cannot be undone.`);
+    await expect(page.getByRole('button', { name: `Delete ${key}` })).toHaveCount(0);
+    // The page was redrawn under the search box, which kept its query.
+    await expect(page.getByRole('searchbox', { name: 'Search variables by key, name or description' })).toHaveValue(key);
+    await expect(page.locator('#var-filter-empty')).toBeVisible();
+  });
+
   test('the logs page filters server and client errors through two pressed toggles', async ({
     page,
   }) => {
