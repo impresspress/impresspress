@@ -233,7 +233,7 @@ mod tests {
                     .config_keys(
                         self.keys
                             .iter()
-                            .map(|key| wafer_run::ConfigVar::new(*key, "A setting", "").optional())
+                            .map(|key| wafer_run::ConfigVar::new(key, "A setting", "").optional())
                             .collect(),
                     )
             }
