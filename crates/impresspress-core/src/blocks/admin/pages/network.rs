@@ -169,10 +169,18 @@ pub async fn settings_body(
     }
     .href(true);
     let page_href = query.href(true);
+    let search_href = query.href(false);
+    let search_box = components::SearchInput {
+        id: "network-search",
+        name: "search",
+        label: "Search by path...",
+        href: &search_href,
+        value: &query.search,
+    };
 
     Ok(NetworkBody::Page(html! {
         div .filter-bar {
-            (components::search_input_with_value("search", "Search by path...", &query.href(false), "#content", &query.search))
+            (search_box.render())
             div .network-controls {
                 (sort_links)
                 (components::filter_toggle("Errors only", query.errors_only, &errors_href))

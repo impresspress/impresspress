@@ -12,8 +12,9 @@
 //   3. toasts           (was emitted by `ui::layout::page`)
 //   4. modals           (was emitted by `ui::layout::page`)
 //   5. htmx after-success effects (never inline; appended after section 4)
+//   6. stale search responses (never inline; appended after section 5)
 //
-// Sections 1, 2, 4 and 5 are IIFEs with their own idempotence guards. Section 3's
+// Sections 1, 2, 4 and 5 are IIFEs (section 6 is one listener and declares nothing) with their own idempotence guards. Section 3's
 // `showToast` listener is deliberately NOT wrapped: it binds `document.body`
 // directly and declares nothing. The htmx error listeners that follow it ARE
 // wrapped, because the three of them share one `toast()` helper and a shared
@@ -1006,3 +1007,22 @@ document.addEventListener("input", function (e) {
         }
     });
 })();
+
+// --- 6. stale search responses ---
+// A list's search box (`ui::components::SearchInput`, marked
+// `data-search-input`) searches as the operator types and its response
+// re-renders the page body, the box included. When the operator types on while
+// a request is in flight, that response is for a term the box no longer holds:
+// swapping it in would put the shorter term back in the box (eating what was
+// typed since) and push a URL the operator has already moved past. So it is
+// dropped — no swap, no history entry — and the box's own pending trigger
+// searches the term it holds now. A response whose box is no longer on the
+// page (a later response already replaced it) is dropped for the same reason.
+document.body.addEventListener("htmx:beforeSwap", function (e) {
+    var d = e.detail || {};
+    var cfg = d.requestConfig;
+    var box = cfg && cfg.elt;
+    if (!(box instanceof Element) || !box.hasAttribute("data-search-input")) return;
+    var sent = cfg.formData ? cfg.formData.get(box.getAttribute("name")) : null;
+    if (!box.isConnected || box.value !== sent) d.shouldSwap = false;
+});

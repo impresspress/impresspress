@@ -9,7 +9,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 use super::{assets, SiteConfig};
 
 /// The `htmx-config` every page carries. See the comment where it is emitted.
-const HTMX_CONFIG: &str = r#"{"allowEval":false}"#;
+const HTMX_CONFIG: &str = r#"{"allowEval":false,"refreshOnHistoryMiss":true}"#;
 
 /// Render a full HTML page with head (CSS + htmx) and body.
 /// Whether a response body is a whole document — what [`page`] renders —
@@ -55,6 +55,13 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
                 // `'unsafe-eval'`, so each of those would be refused by the
                 // browser anyway; with this off htmx refuses them first, with
                 // an `htmx:evalDisallowedError`, and never reaches the eval.
+                //
+                // `refreshOnHistoryMiss`: Back to an URL htmx pushed but no
+                // longer holds a snapshot of (its cache keeps ten) loads that
+                // URL as a page. Otherwise htmx re-requests it as an htmx
+                // request, which answers the body without the chrome, and
+                // swaps that into `body` — the sidebar and topbar vanish.
+                //
                 // Read at htmx's init, which waits for the document to be
                 // ready, so this tag only has to be in the head.
                 meta name="htmx-config" content=(HTMX_CONFIG);
@@ -113,7 +120,7 @@ mod tests {
 
     /// Every page turns htmx's eval off, and does so before htmx loads.
     #[test]
-    fn every_page_disables_htmx_eval() {
+    fn every_page_carries_the_htmx_config() {
         let config = SiteConfig {
             app_name: "Test".into(),
             logo_url: String::new(),
@@ -125,10 +132,10 @@ mod tests {
             auth_tagline: String::new(),
         };
         let rendered = page("Title", &config, maud::html! { p { "body" } }).into_string();
-        let meta = r#"<meta name="htmx-config" content="{&quot;allowEval&quot;:false}">"#;
-        let at = rendered
-            .find(meta)
-            .unwrap_or_else(|| panic!("no allowEval=false htmx-config: {rendered}"));
+        let meta = r#"<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;refreshOnHistoryMiss&quot;:true}">"#;
+        let at = rendered.find(meta).unwrap_or_else(|| {
+            panic!("no allowEval=false, refreshOnHistoryMiss=true htmx-config: {rendered}")
+        });
         let htmx = rendered
             .find(&assets::htmx_js_url())
             .expect("htmx is loaded");

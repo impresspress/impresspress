@@ -51,17 +51,20 @@ async fn admin_pages_carry_section_links_and_one_title() {
     for (path, section) in ADMIN_PAGES {
         let html = admin_page(&ctx, path).await;
         assert_eq!(html.matches("<h1").count(), 1, "{path}: one h1\n{html}");
-        assert!(
-            html.contains(r#"<nav class="subnav" aria-label="Products sections">"#),
-            "{path}: section links\n{html}"
-        );
+        let subnav = html
+            .split_once(r#"<nav class="subnav" aria-label="Products sections">"#)
+            .and_then(|(_, rest)| rest.split_once("</nav>"))
+            .map(|(links, _)| links);
+        let Some(subnav) = subnav else {
+            panic!("{path}: section links\n{html}");
+        };
         assert!(
             html.contains(&format!(r#"aria-current="page">{section}</a>"#)),
             "{path}: {section} is the current section\n{html}"
         );
         assert!(
-            !html.contains(r##"hx-target="#content" hx-push-url="true""##),
-            "{path}: no section link swaps only the body\n{html}"
+            !subnav.contains("hx-get"),
+            "{path}: no section link swaps only the body\n{subnav}"
         );
         assert!(
             !body(&html).contains("page-title"),

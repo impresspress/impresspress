@@ -18,8 +18,8 @@
 // the elements they look for are absent, which is exactly what a stub with no
 // `#cmdk` gives them — so loading the whole real file costs nothing and keeps
 // the tests honest about the file as shipped, rather than about an extract of
-// it. What the tests drive is section 3 (toasts and the htmx error listeners)
-// and section 5 (htmx after-success effects).
+// it. What the tests drive is section 3 (toasts and the htmx error listeners),
+// section 5 (htmx after-success effects) and section 6 (stale search responses).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

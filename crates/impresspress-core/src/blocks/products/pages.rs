@@ -596,10 +596,17 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
+    let search_box = components::SearchInput {
+        id: "products-search",
+        name: "search",
+        label: "Search by product name",
+        href: base_href,
+        value: &search,
+    };
     let content = html! {
         div .filter-bar {
             (product_views("/b/products/admin/manage", deleted_view))
-            (components::search_input_with_value("search", "Search by product name", base_href, "#content", &search))
+            (search_box.render())
         }
 
         @if deleted_view {
@@ -672,7 +679,7 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 (product_list_empty(&search, false, "/b/products/admin/new"))
             }))
         }
-        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &with_search(base_href, &search))) }
+        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &search_box.results_href())) }
     };
 
     let mut shell = ui::Shell::admin("All products", "All products").subtitle(if deleted_view {
@@ -695,16 +702,6 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         content,
     )
     .await
-}
-
-/// `href` with the list's `search` term carried along, so paging a search
-/// result does not silently drop the search.
-fn with_search(href: &str, search: &str) -> String {
-    if search.is_empty() {
-        return href.to_string();
-    }
-    let join = if href.contains('?') { '&' } else { '?' };
-    format!("{href}{join}search={}", crate::util::urlencode(search))
 }
 
 /// The Active / Deleted views of a product list (`base` is the list's own

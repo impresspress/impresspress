@@ -164,6 +164,13 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
         },
     );
     let page_href = system_logs_href(&search, errors);
+    let search_box = components::SearchInput {
+        id: "system-logs-search",
+        name: "search",
+        label: "Search by path...",
+        href: &search_href,
+        value: &search,
+    };
     let empty = match (errors.server, errors.client) {
         (true, true) => "No server or client errors logged",
         (true, false) => "No server errors logged",
@@ -173,7 +180,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
 
     Ok(html! {
         div .filter-bar {
-            (components::search_input_with_value("search", "Search by path...", &search_href, "#content", &search))
+            (search_box.render())
             div .filter-toggles role="group" aria-label="Show only" {
                 (components::filter_toggle("Server errors", errors.server, &server_toggle_href))
                 (components::filter_toggle("Client errors", errors.client, &client_toggle_href))
@@ -239,10 +246,17 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
         .map(|record| record.str_field("user_id"))
         .collect();
     let emails = users::emails_by_id(ctx, &user_ids).await?;
+    let search_box = components::SearchInput {
+        id: "audit-logs-search",
+        name: "search",
+        label: "Search by resource...",
+        href: "/b/admin/logs?tab=audit",
+        value: &search,
+    };
 
     Ok(html! {
         div .filter-bar {
-            (components::search_input_with_value("search", "Search by resource...", "/b/admin/logs?tab=audit", "#content", &search))
+            (search_box.render())
         }
 
         @let rows: Vec<Vec<Markup>> = list.records.iter().map(|record| {
@@ -264,7 +278,7 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
         ))
 
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) {
-            (pagination(list.page as u32, per_page, list.total_count as u32, "/b/admin/logs?tab=audit"))
+            (pagination(list.page as u32, per_page, list.total_count as u32, &search_box.results_href()))
         }
     })
 }
