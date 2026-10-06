@@ -270,15 +270,8 @@ mod tests {
     /// `blocks/admin/` is absent because this pull request migrated its 39.
     /// The rest are phase 5 §8 candidates and out of scope here.
     const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
-        ("blocks/files/pages_user/buckets.rs", 2),
         ("blocks/legalpages/pages.rs", 12),
-        ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 2),
-        ("blocks/vector/pages_ui.rs", 4),
-        // A unit-test fixture: the `DetailHero::badges` slot of
-        // `templates::detail_page`, exercised by
-        // `detail_page_renders_hero_sections_and_meta`. Not a page.
-        ("ui/templates.rs", 1),
     ];
 
     #[test]

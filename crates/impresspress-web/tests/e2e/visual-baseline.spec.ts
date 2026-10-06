@@ -166,9 +166,9 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   Masking the spans let a baseline captured with a two-digit first day
 //   fail from the 1st to the 9th of the next month (seen 2026-09-30).
 // - The storage-admin buckets table's Owner cell: the first 8 hex digits of
-//   the bootstrap admin's freshly generated UUIDv7. It is reached through the
-//   `tr[data-bucket]` rows `blocks/files/pages_admin.rs` renders, and the cell
-//   is monospaced there, so a new value does not change the column's width
+//   the bootstrap admin's freshly generated UUIDv7. `blocks/files/pages_admin.rs`
+//   marks the value `data-volatile-id`; the mask covers the owning `<td>`, and
+//   the value is monospaced, so a new one does not change the column's width
 //   and the mask box stays put.
 // - Latencies the run measured itself. `data-volatile-metric` wraps the
 //   duration figures on the admin network page (`blocks/admin/pages/network.rs`).
@@ -208,7 +208,7 @@ function volatileMasks(page: Page) {
       )
       .filter({ visible: true }),
     page.locator('.chart__range'),
-    page.locator('tr[data-bucket] td[data-label="Owner"]'),
+    page.locator('td:has([data-volatile-id])'),
     page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
     page.locator('.stat-card:has-text("Requests Today") .stat-value'),
     page.locator('li[data-db-table$="__request_logs"], li[data-db-table$="__storage_access_logs"]'),

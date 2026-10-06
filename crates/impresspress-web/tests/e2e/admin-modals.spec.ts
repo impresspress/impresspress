@@ -256,7 +256,8 @@ test.describe('admin modals', () => {
     await loginAsAdmin(page);
     for (const path of ['/b/storage/', '/b/storage/admin/buckets']) {
       await page.goto(path, { waitUntil: 'networkidle' });
-      const trigger = page.locator('[data-action="modal-open"][data-modal-target="new-bucket"]');
+      // The topbar's trigger: an empty bucket list offers a second one.
+      const trigger = page.locator('.topbar__actions [data-action="modal-open"][data-modal-target="new-bucket"]');
       const dialog = await openVia(page, trigger, 'new-bucket');
       await expectModal(dialog);
       await expect(page.locator('#new-bucket-name')).toBeFocused();

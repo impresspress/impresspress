@@ -5,66 +5,60 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{models::QuotaConfig, repo};
 use crate::{
-    ui::{self, components, icons},
+    ui::{
+        self,
+        components::{self, DataTable, TableCol, TableRow},
+        icons,
+    },
     util::format_bytes,
 };
 
-/// Tabs navigation across the storage-admin sub-pages
-/// (Overview / Buckets / Shares / Quotas). `active` matches the
-/// crumb label so the active tab can be highlighted.
-///
-/// Designed to slot into `list_page`'s `filters` arg (the same slot the
-/// Users tabs use), so the tab strip lives inside `.page--list` and picks
-/// up the page padding consistently.
-pub(crate) fn admin_tabs(active: &str) -> Markup {
-    let items: &[(&str, &str)] = &[
+/// The storage-admin sections (Overview / Buckets / Shares / Quotas) as the
+/// shared sub-nav the shell draws above the content card, the current one
+/// marked `aria-current="page"`. `active` is the section's label.
+pub(crate) fn admin_sections(active: &str) -> Markup {
+    let items: [(&str, &str); 4] = [
         ("Overview", "/b/storage/admin/"),
         ("Buckets", "/b/storage/admin/buckets"),
         ("Shares", "/b/storage/admin/shares"),
         ("Quotas", "/b/storage/admin/quotas"),
     ];
-    html! {
-        div .tabs {
-            @for (label, href) in items {
-                a class={ "tab" @if *label == active { " active" } } href=(href) { (label) }
-            }
-        }
-    }
+    components::subnav(
+        "Storage sections",
+        items
+            .iter()
+            .map(|(label, href)| components::Tab {
+                active: *label == active,
+                href,
+                label,
+                icon: None,
+            })
+            .collect(),
+    )
 }
 
-async fn files_page<'a>(
+/// Admin storage shell: the admin nav, the page's one crumb, its subtitle and
+/// actions, and the storage sections above the body.
+async fn files_page(
     ctx: &dyn Context,
-    title: &'a str,
-    crumb_label: &'a str,
-    subtitle: Option<&'a str>,
-    content: Markup,
     msg: &Message,
-) -> OutputStream {
-    files_page_with_action(ctx, title, crumb_label, subtitle, Vec::new(), content, msg).await
-}
-
-/// Admin storage shell. Thin wrapper over [`ui::shell_page`] that fixes the
-/// nav to Admin and keeps the storage pages' single-crumb shape; tabs ride in
-/// each caller's `list_page` `filters` slot (matching `/b/admin/users`).
-async fn files_page_with_action<'a>(
-    ctx: &dyn Context,
-    title: &'a str,
-    crumb_label: &'a str,
-    subtitle: Option<&'a str>,
+    section: &str,
+    subtitle: &str,
     actions: Vec<Markup>,
     content: Markup,
-    msg: &Message,
 ) -> OutputStream {
+    let title = if section == "Overview" {
+        "Storage"
+    } else {
+        section
+    };
     ui::shell_page(
         ctx,
         msg,
-        match subtitle {
-            Some(subtitle) => ui::Shell::admin(title, crumb_label)
-                .subtitle(subtitle)
-                .actions(actions),
-            None => ui::Shell::admin(title, crumb_label).actions(actions),
-        },
-        content,
+        ui::Shell::admin(title, title)
+            .subtitle(subtitle)
+            .actions(actions),
+        ui::PageBody::from(content).with_subnav(admin_sections(section)),
     )
     .await
 }
@@ -127,8 +121,8 @@ pub fn render_admin_overview_empty_cta(bucket_count: i64) -> Markup {
     }
     components::empty_state(
         icons::folder(),
-        "Create your first bucket",
-        "Buckets hold the files uploaded through Storage. Create one to get started.",
+        "No buckets yet",
+        "Buckets hold uploaded files. Create one to start uploading.",
         Some(html! {
             a .btn .btn--primary .btn--md href="/b/storage/admin/buckets" { "+ New bucket" }
         }),
@@ -142,43 +136,35 @@ pub fn render_admin_overview_quotas_hint(quotas_count: i64) -> Markup {
         return html! {};
     }
     html! {
-        div .card .p-4 {
-            p .text-muted .text-sm {
-                (quotas_count) " user(s) with custom quotas configured."
+        p .text-muted .text-sm {
+            a href="/b/storage/admin/quotas" {
+                (crate::util::format_count(quotas_count))
+                @if quotas_count == 1 { " user has" } @else { " users have" }
+                " a custom quota."
             }
         }
     }
 }
 
 pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    use crate::ui::templates::list_page;
-
     let stats = match load_admin_stats(ctx).await {
         Ok(stats) => stats,
         Err(e) => return error_page(ctx, msg, e, "storage admin overview: stats read").await,
     };
 
-    // Tabs go in the `filters` slot (their padding gutter matches
-    // /b/admin/users); stats live in the body. Keeping them in separate
-    // slots prevents `.page-filters` (display:flex) from putting tabs
-    // and the stats-grid side-by-side at wide viewports.
-    let body = list_page(
-        Some(admin_tabs("Overview")),
-        html! {
-            (render_admin_overview_stats(&stats))
-            (render_admin_overview_empty_cta(stats.buckets))
-            (render_admin_overview_quotas_hint(stats.quotas_count))
-        },
-        None,
-    );
+    let body = html! {
+        (render_admin_overview_stats(&stats))
+        (render_admin_overview_empty_cta(stats.buckets))
+        (render_admin_overview_quotas_hint(stats.quotas_count))
+    };
 
     files_page(
         ctx,
-        "Storage",
-        "Overview",
-        Some("File storage statistics"),
-        body,
         msg,
+        "Overview",
+        "File storage statistics",
+        Vec::new(),
+        body,
     )
     .await
 }
@@ -210,11 +196,10 @@ async fn load_admin_stats(ctx: &dyn Context) -> Result<AdminStats, wafer_run::Wa
 // ---------------------------------------------------------------------------
 // Column shaping
 //
-// The admin tables are narrow, so ids and timestamps are cut to a prefix.
-// These are the exact `get(..n).unwrap_or(..)` calls the row decoders used
-// to make inline, kept bit-for-bit: a value SHORTER than the cut renders the
-// fallback rather than the value, because `str::get` returns `None` for an
-// out-of-range (or non-char-boundary) index.
+// The admin tables are narrow, so ids are cut to a prefix: a value SHORTER
+// than the cut renders the fallback rather than the value, because `str::get`
+// returns `None` for an out-of-range (or non-char-boundary) index. Dates are
+// carried whole and drawn by `components::timestamp`.
 // ---------------------------------------------------------------------------
 
 /// A user id cut to its first 8 bytes; an em dash when it is shorter.
@@ -222,24 +207,19 @@ fn short_id(id: &str) -> String {
     id.get(..8).unwrap_or("—").to_string()
 }
 
-/// An RFC 3339 timestamp cut to its `YYYY-MM-DD` prefix; empty when shorter.
-fn short_date(ts: &str) -> String {
-    ts.get(..10).unwrap_or("").to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Buckets
 // ---------------------------------------------------------------------------
 
 /// A render-side projection of [`repo::buckets::BucketRow`]: the owner id
-/// and the timestamp truncated for the table's narrow columns. It holds no
-/// decoding — `public` is the row's `bool`, decoded once in the repo (B13).
+/// truncated for the table's narrow column. It holds no decoding — `public`
+/// is the row's `bool`, decoded once in the repo (B13).
 #[derive(Clone, Debug)]
 pub struct AdminBucketRow {
     pub name: String,
     pub owner_short: String,
     pub public: bool,
-    pub created_at_short: String,
+    pub created_at: String,
 }
 
 impl From<&repo::buckets::BucketRow> for AdminBucketRow {
@@ -248,55 +228,44 @@ impl From<&repo::buckets::BucketRow> for AdminBucketRow {
             name: row.name.clone(),
             owner_short: short_id(&row.created_by),
             public: row.public,
-            created_at_short: short_date(&row.created_at),
+            created_at: row.created_at.clone(),
         }
     }
 }
+
+const ADMIN_BUCKET_COLUMNS: [TableCol<'static>; 4] = [
+    TableCol::new("Name").primary(),
+    TableCol::new("Owner"),
+    TableCol::new("Visibility"),
+    TableCol::new("Created"),
+];
 
 /// Render the admin Buckets table (or empty state).
 ///
-/// The owner-id and date cells are monospaced (as are the shares table's
-/// "Created By" and the quotas table's "User" id cells), so a fixed-length
-/// value has a fixed width and the columns do not re-flow as it changes.
-/// That matters to the visual-baseline suite, which captures this table and
-/// masks its two per-run values: the date as a `<time>` (the suite masks
-/// every `<time>`) and the owner id by its cell inside a `tr[data-bucket]`
-/// row. With a proportional font a different id moved every column to its
-/// right. The suite captures neither the shares nor the quotas table with
-/// rows, and masks nothing in them.
+/// The owner id is monospaced, so a fixed-length value has a fixed width and
+/// the columns do not re-flow as it changes, and it carries
+/// `data-volatile-id`: the visual-baseline suite captures this table and masks
+/// the cell holding it (the bootstrap admin's id differs on every run), as it
+/// masks the `<time>` the Created date is.
 pub fn render_admin_buckets_table(rows: &[AdminBucketRow]) -> Markup {
-    if rows.is_empty() {
-        return html! {
-            div .empty-state { p { "No buckets" } }
-        };
-    }
-    html! {
-        table .data-table {
-            thead { tr {
-                th { "Name" }
-                th { "Owner" }
-                th { "Public" }
-                th { "Created" }
-            } }
-            tbody {
-                @for r in rows {
-                    tr data-bucket=(r.name) {
-                        td data-label="Name" .font-medium { (r.name) }
-                        td data-label="Owner" .text-muted .text-sm .font-mono { (r.owner_short) }
-                        td data-label="Public" {
-                            (components::status_badge(if r.public { "public" } else { "private" }))
-                        }
-                        td data-label="Created" .text-muted .text-sm .font-mono { time datetime=(r.created_at_short) { (r.created_at_short) } }
-                    }
-                }
-            }
-        }
-    }
+    DataTable::new(&ADMIN_BUCKET_COLUMNS)
+        .rows(
+            rows.iter()
+                .map(|r| {
+                    TableRow::new(vec![
+                        html! { (r.name) },
+                        html! { span .font-mono .text-sm data-volatile-id { (r.owner_short) } },
+                        super::pages_user::buckets::visibility_badge(r.public),
+                        components::timestamp(&r.created_at),
+                    ])
+                })
+                .collect(),
+        )
+        .empty(super::pages_user::buckets::no_buckets_empty_state())
+        .render()
 }
 
 pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    use crate::ui::templates::list_page;
-
     let rows: Vec<AdminBucketRow> = match repo::buckets::list_recent(ctx, 100).await {
         Ok(page) => page.rows.iter().map(AdminBucketRow::from).collect(),
         Err(e) => return error_page(ctx, msg, e, "storage admin buckets").await,
@@ -306,29 +275,19 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // the same `files-browser.js` handler for its form. No bootstrap carrier:
     // that names a bucket to drop uploads into, and this list has none.
     let js_url = crate::blocks::files::assets::files_browser_js_url();
-    let body = list_page(
-        Some(admin_tabs("Buckets")),
-        html! {
-            (render_admin_buckets_table(&rows))
-            (super::pages_user::buckets::render_new_bucket_modal())
-            script src=(js_url) defer {}
-        },
-        None,
-    );
+    let body = html! {
+        (render_admin_buckets_table(&rows))
+        (super::pages_user::buckets::render_new_bucket_modal())
+        script src=(js_url) defer {}
+    };
 
-    files_page_with_action(
+    files_page(
         ctx,
-        "Buckets",
-        "Buckets",
-        Some("All storage buckets"),
-        vec![crate::ui::components::button(
-            crate::ui::components::BtnVariant::Primary,
-            crate::ui::components::CtrlSize::Sm,
-            "+ New bucket",
-            super::pages_user::buckets::new_bucket_trigger_attrs(),
-        )],
-        body,
         msg,
+        "Buckets",
+        "All storage buckets",
+        vec![super::pages_user::buckets::new_bucket_button()],
+        body,
     )
     .await
 }
@@ -338,8 +297,8 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
 // ---------------------------------------------------------------------------
 
 /// A render-side projection of [`repo::shares::ShareRow`]: the token and the
-/// timestamps cut for the admin table's narrow columns. It holds no
-/// decoding — `max_access_count` is the row's already-normalised `Option`.
+/// owner id cut for the admin table's narrow columns. It holds no decoding —
+/// `max_access_count` is the row's already-normalised `Option`.
 #[derive(Clone, Debug)]
 pub struct AdminShareRow {
     pub token_short: String,
@@ -347,7 +306,7 @@ pub struct AdminShareRow {
     pub key: String,
     pub access_count: i64,
     pub max_access_count: Option<i64>,
-    pub expires_short: Option<String>,
+    pub expires_at: Option<String>,
     pub owner_short: String,
 }
 
@@ -359,81 +318,67 @@ impl From<&repo::shares::ShareRow> for AdminShareRow {
             key: row.key.clone(),
             access_count: row.access_count,
             max_access_count: row.max_access_count,
-            expires_short: row
-                .expires_at
-                .as_deref()
-                // The expiry column keeps the value when it is shorter than
-                // the cut, unlike the id and date columns above — the shape
-                // the inline decoder had.
-                .map(|exp| exp.get(..10).unwrap_or(exp).to_string()),
+            expires_at: row.expires_at.clone(),
             owner_short: short_id(&row.created_by),
         }
     }
 }
 
-/// Render the admin Shares table (or empty state). Token displayed as
-/// short prefix in a `<code>` block; access count includes optional
-/// "/ N" divisor when a max is set; "Never" renders for unset expires.
+const ADMIN_SHARE_COLUMNS: [TableCol<'static>; 5] = [
+    TableCol::new("File").primary(),
+    TableCol::new("Token"),
+    TableCol::new("Accesses"),
+    TableCol::new("Expires"),
+    TableCol::new("Created by"),
+];
+
+/// Render the admin Shares table (or empty state). The token is a short
+/// prefix in a `<code>`; the access count carries its cap ("4 / 10") when one
+/// is set; a share with no expiry says "Never".
 pub fn render_admin_shares_table(rows: &[AdminShareRow]) -> Markup {
-    if rows.is_empty() {
-        return html! {
-            div .empty-state { p { "No active shares" } }
-        };
-    }
-    html! {
-        table .data-table {
-            thead { tr {
-                th { "Token" }
-                th { "Bucket" }
-                th { "File" }
-                th { "Access Count" }
-                th { "Expires" }
-                th { "Created By" }
-            } }
-            tbody {
-                @for r in rows {
-                    tr {
-                        td data-label="Token" .text-sm { code { (r.token_short) "..." } }
-                        td data-label="Bucket" .font-medium { (r.bucket) }
-                        td data-label="File" .text-sm { (r.key) }
-                        td data-label="Access Count" .text-sm {
+    DataTable::new(&ADMIN_SHARE_COLUMNS)
+        .rows(
+            rows.iter()
+                .map(|r| {
+                    TableRow::new(vec![
+                        html! { (components::breakable_id(&format!("{}/{}", r.bucket, r.key))) },
+                        html! { code { (r.token_short) "…" } },
+                        html! {
                             (r.access_count)
-                            @if let Some(max) = r.max_access_count {
-                                @if max > 0 { " / " (max) }
+                            @if let Some(max) = r.max_access_count.filter(|m| *m > 0) {
+                                " / " (max)
                             }
-                        }
-                        td data-label="Expires" .text-muted .text-sm {
-                            @if let Some(exp) = &r.expires_short { (exp) } @else { "Never" }
-                        }
-                        td data-label="Created By" .text-muted .text-sm .font-mono { (r.owner_short) }
-                    }
-                }
-            }
-        }
-    }
+                        },
+                        match &r.expires_at {
+                            Some(exp) => components::timestamp(exp),
+                            None => html! { "Never" },
+                        },
+                        html! { span .font-mono .text-sm { (r.owner_short) } },
+                    ])
+                })
+                .collect(),
+        )
+        .empty_state(
+            "No share links",
+            "Links people create to share a file appear here.",
+            None,
+        )
+        .render()
 }
 
 pub async fn shares(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    use crate::ui::templates::list_page;
-
     let rows: Vec<AdminShareRow> = match repo::shares::list_recent(ctx, 100, 0).await {
         Ok(page) => page.rows.iter().map(AdminShareRow::from).collect(),
         Err(e) => return error_page(ctx, msg, e, "storage admin shares").await,
     };
 
-    let body = list_page(
-        Some(admin_tabs("Shares")),
-        render_admin_shares_table(&rows),
-        None,
-    );
-
     files_page(
         ctx,
-        "Shares",
-        "Shares",
-        Some("Public file share links"),
-        body,
         msg,
+        "Shares",
+        "Public file share links",
+        Vec::new(),
+        render_admin_shares_table(&rows),
     )
     .await
 }
@@ -488,69 +433,60 @@ fn transport_cap_note() -> Markup {
     }
 }
 
+const ADMIN_QUOTA_COLUMNS: [TableCol<'static>; 4] = [
+    TableCol::new("User").primary(),
+    TableCol::new("Max storage"),
+    TableCol::new("Max file size"),
+    TableCol::new("Max files per bucket"),
+];
+
 /// Render the admin Storage Quotas table (or empty state). Bytes
 /// columns humanize via `format_bytes`; user_id is truncated to the
 /// first 8 chars in the loader. Pure helper.
 pub fn render_admin_quotas_table(rows: &[AdminQuotaRow]) -> Markup {
-    if rows.is_empty() {
-        // Rendered from the defaults rather than written out, and from the
-        // *effective* ones: a hand-typed "100 MB file size" is how this line
-        // came to advertise a per-file cap no upload could reach.
-        let defaults = QuotaConfig::effective_default();
-        let storage = format_bytes(defaults.max_storage_bytes);
-        let file_size = format_bytes(defaults.max_file_size_bytes);
-        let files = crate::util::format_count(defaults.max_files_per_bucket);
-        return html! {
-            div .empty-state {
-                p { "No custom quotas. Default: " (storage) " storage, " (file_size) " file size, " (files) " files per bucket." }
-                (transport_cap_note())
-            }
-        };
-    }
+    // Rendered from the defaults rather than written out, and from the
+    // *effective* ones: a hand-typed "100 MB file size" is how this line
+    // came to advertise a per-file cap no upload could reach.
+    let defaults = QuotaConfig::effective_default();
+    let empty_body = format!(
+        "Every user gets the defaults: {} storage, {} per file, {} files per bucket.",
+        format_bytes(defaults.max_storage_bytes),
+        format_bytes(defaults.max_file_size_bytes),
+        crate::util::format_count(defaults.max_files_per_bucket),
+    );
     html! {
+        (DataTable::new(&ADMIN_QUOTA_COLUMNS)
+            .rows(
+                rows.iter()
+                    .map(|r| {
+                        TableRow::new(vec![
+                            html! { span .font-mono { (r.user_short) } },
+                            html! { (format_bytes(r.max_storage_bytes)) },
+                            html! { (format_bytes(r.max_file_size_bytes)) },
+                            html! { (crate::util::format_count(r.max_files_per_bucket)) },
+                        ])
+                    })
+                    .collect(),
+            )
+            .empty_state("No custom quotas", &empty_body, None)
+            .render())
         (transport_cap_note())
-        table .data-table {
-            thead { tr {
-                th { "User" }
-                th { "Max Storage" }
-                th { "Max File Size" }
-                th { "Max Files/Bucket" }
-            } }
-            tbody {
-                @for r in rows {
-                    tr {
-                        td data-label="User" .text-sm .font-mono { (r.user_short) }
-                        td data-label="Max Storage" .text-sm { (format_bytes(r.max_storage_bytes)) }
-                        td data-label="Max File Size" .text-sm { (format_bytes(r.max_file_size_bytes)) }
-                        td data-label="Max Files/Bucket" .text-sm { (r.max_files_per_bucket) }
-                    }
-                }
-            }
-        }
     }
 }
 
 pub async fn quotas(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    use crate::ui::templates::list_page;
-
     let rows: Vec<AdminQuotaRow> = match repo::quota::list_recent(ctx, 100).await {
         Ok(page) => page.rows.iter().map(AdminQuotaRow::from).collect(),
         Err(e) => return error_page(ctx, msg, e, "storage admin quotas").await,
     };
 
-    let body = list_page(
-        Some(admin_tabs("Quotas")),
-        render_admin_quotas_table(&rows),
-        None,
-    );
-
     files_page(
         ctx,
-        "Quotas",
-        "Quotas",
-        Some("Per-user storage limits"),
-        body,
         msg,
+        "Quotas",
+        "Per-user storage limits",
+        Vec::new(),
+        render_admin_quotas_table(&rows),
     )
     .await
 }
@@ -579,10 +515,7 @@ mod tests {
     #[test]
     fn render_admin_overview_empty_cta_shown_when_zero_buckets() {
         let html = render_admin_overview_empty_cta(0).into_string();
-        assert!(
-            html.contains("Create your first bucket"),
-            "cta title missing: {html}"
-        );
+        assert!(html.contains("No buckets yet"), "cta title missing: {html}");
         assert!(
             html.contains(r#"href="/b/storage/admin/buckets""#),
             "cta should link to the Buckets tab (the real create trigger): {html}"
@@ -608,7 +541,7 @@ mod tests {
         let html = output_html(overview(&ctx, &msg).await).await;
 
         assert!(
-            html.contains("Create your first bucket"),
+            html.contains("No buckets yet"),
             "empty-state CTA missing from the live overview render: {html}"
         );
         assert!(
@@ -632,7 +565,7 @@ mod tests {
         let html = output_html(overview(&ctx, &msg).await).await;
 
         assert!(
-            !html.contains("Create your first bucket"),
+            !html.contains("No buckets yet"),
             "CTA should be gone once a bucket exists: {html}"
         );
     }
@@ -641,7 +574,7 @@ mod tests {
     fn render_admin_overview_quotas_hint_when_present() {
         let html = render_admin_overview_quotas_hint(3).into_string();
         assert!(
-            html.contains("3 user(s) with custom quotas"),
+            html.contains("3 users have a custom quota."),
             "quotas hint missing: {html}"
         );
     }
@@ -649,9 +582,9 @@ mod tests {
     #[test]
     fn render_admin_overview_quotas_hint_empty_when_zero() {
         let html = render_admin_overview_quotas_hint(0).into_string();
-        // Empty markup or no visible "with custom quotas" copy.
+        // Empty markup: no "custom quota" copy.
         assert!(
-            !html.contains("with custom quotas"),
+            !html.contains("custom quota"),
             "should be empty when zero: {html}"
         );
     }
@@ -669,51 +602,66 @@ mod tests {
                 name: "photos".into(),
                 owner_short: "admin_1".into(),
                 public: true,
-                created_at_short: "2026-05-06".into(),
+                created_at: "2026-05-06T10:00:00Z".into(),
             },
             AdminBucketRow {
                 name: "docs".into(),
                 owner_short: "user_42".into(),
                 public: false,
-                created_at_short: "2026-05-05".into(),
+                created_at: "2026-05-05T10:00:00Z".into(),
             },
         ];
         let html = render_admin_buckets_table(&rows).into_string();
         assert!(html.contains(">photos<"), "name missing: {html}");
         assert!(html.contains(">docs<"));
         assert!(html.contains("admin_1"));
-        // status_badge renders class names containing "public" / "private".
-        assert!(html.contains("public"));
-        assert!(html.contains("private"));
-        assert!(html.contains("2026-05-06"));
+        // One visibility badge, the same as the user's bucket list draws.
+        assert!(html.contains(r#"<span class="badge badge-warning">Public</span>"#));
+        assert!(html.contains(r#"<span class="badge badge-secondary">Private</span>"#));
+        assert!(html.contains("2026-05-06 10:00 UTC"));
     }
 
     #[test]
-    fn render_admin_buckets_table_monospaces_the_id_and_date_cells() {
+    fn render_admin_buckets_table_marks_the_volatile_cells() {
         let rows = vec![AdminBucketRow {
             name: "photos".into(),
             owner_short: "019a2b3c".into(),
             public: false,
-            created_at_short: "2026-09-25".into(),
+            created_at: "2026-09-25T10:00:00Z".into(),
         }];
         let html = render_admin_buckets_table(&rows).into_string();
-        for label in ["Owner", "Created"] {
-            let attr = format!(r#"data-label="{label}""#);
-            let tag = html
-                .split("<td")
-                .map(|t| t.split('>').next().unwrap_or(""))
-                .find(|t| t.contains(&attr))
-                .unwrap_or_else(|| panic!("no {label} cell: {html}"));
-            assert!(
-                tag.contains("font-mono"),
-                "{label} cell is not monospaced: {tag}"
-            );
-        }
-        // The visual-baseline suite masks dates by the `<time>` element alone.
+        // The visual-baseline suite masks the cell holding the owner id by
+        // `data-volatile-id`, and it is monospaced so its width is fixed.
         assert!(
-            html.contains(r#"<time datetime="2026-09-25">2026-09-25</time>"#),
+            html.contains(r#"<td data-label="Owner"><span class="font-mono text-sm" data-volatile-id>019a2b3c</span></td>"#),
+            "the Owner cell must carry the volatile-id marker: {html}"
+        );
+        // ...and dates by the `<time>` element.
+        assert!(
+            html.contains(r#"<time class="datetime" datetime="2026-09-25T10:00:00.000Z""#),
             "the Created date must be a <time>: {html}"
         );
+    }
+
+    #[test]
+    fn the_buckets_table_names_its_rows_and_offers_a_new_bucket_when_empty() {
+        let html = render_admin_buckets_table(&[AdminBucketRow {
+            name: "photos".into(),
+            owner_short: "u".into(),
+            public: true,
+            created_at: "2026-09-25T10:00:00Z".into(),
+        }])
+        .into_string();
+        assert!(
+            html.contains(r#"<td class="data-table__cell--primary" data-label="Name">photos</td>"#),
+            "the bucket name is the card title: {html}"
+        );
+        let empty = render_admin_buckets_table(&[]).into_string();
+        assert!(
+            empty.contains(r#"data-modal-target="new-bucket""#),
+            "the empty list opens the new-bucket modal: {empty}"
+        );
+        assert!(empty.contains(r#"<h2 class="empty__title">No buckets yet</h2>"#));
     }
 
     /// One capped, expiring share row, as the repo decodes it.
@@ -736,8 +684,8 @@ mod tests {
         })
     }
 
-    /// The admin share projection cuts the token to 12 and the expiry to 10
-    /// and reads nothing else. `max_access_count` comes straight off the row:
+    /// The admin share projection cuts the token to 12, keeps the expiry
+    /// whole for `components::timestamp`, and reads nothing else. `max_access_count` comes straight off the row:
     /// the inline decoder it replaces read it with `str_field(..).parse()`,
     /// which is empty for the JSON number SQLite's `INTEGER` column returns,
     /// so a capped share rendered as uncapped.
@@ -750,14 +698,20 @@ mod tests {
         assert_eq!(projected.key, "a.png");
         assert_eq!(projected.access_count, 4);
         assert_eq!(projected.max_access_count, Some(10));
-        assert_eq!(projected.expires_short.as_deref(), Some("2026-06-06"));
+        assert_eq!(
+            projected.expires_at.as_deref(),
+            Some("2026-06-06T10:00:00Z")
+        );
         assert_eq!(projected.owner_short, "alice-12");
     }
 
     #[test]
     fn render_admin_shares_table_empty_state() {
         let html = render_admin_shares_table(&[]).into_string();
-        assert!(html.contains("No active shares"), "missing empty: {html}");
+        assert!(
+            html.contains(r#"<h2 class="empty__title">No share links</h2>"#),
+            "missing empty: {html}"
+        );
     }
 
     #[test]
@@ -768,13 +722,15 @@ mod tests {
             key: "a.png".into(),
             access_count: 4,
             max_access_count: Some(10),
-            expires_short: Some("2026-06-06".into()),
+            expires_at: Some("2026-06-06T10:00:00Z".into()),
             owner_short: "admin_1".into(),
         }];
         let html = render_admin_shares_table(&rows).into_string();
         assert!(html.contains("tok12345abc1"));
-        assert!(html.contains(">photos<"));
-        assert!(html.contains(">a.png<"));
+        assert!(
+            html.contains("photos/<wbr>a<wbr>.png"),
+            "file missing: {html}"
+        );
         // access_count and max rendered together as "4 / 10"
         assert!(
             html.contains("4 / 10"),
@@ -782,7 +738,7 @@ mod tests {
         );
         // max_access_count rendered as "/ 10"
         assert!(html.contains("/ 10"));
-        assert!(html.contains("2026-06-06"));
+        assert!(html.contains("2026-06-06 10:00 UTC"));
         assert!(html.contains("admin_1"));
     }
 
@@ -794,7 +750,7 @@ mod tests {
             key: "k".into(),
             access_count: 0,
             max_access_count: None,
-            expires_short: None,
+            expires_at: None,
             owner_short: "u".into(),
         }];
         let html = render_admin_shares_table(&rows).into_string();
@@ -916,7 +872,7 @@ mod tests {
         assert!(html.contains("MB"), "MB unit missing: {html}");
         // max_files_per_bucket as integer in its own cell.
         assert!(
-            html.contains(">1000<"),
+            html.contains(">1,000<"),
             "files-per-bucket count missing: {html}"
         );
     }
@@ -975,7 +931,7 @@ mod b13_visibility_tests {
 
     /// The projections shape their columns and read nothing else: the user
     /// table keeps the full timestamp and carries the object count from the
-    /// second query, the admin table cuts the owner to 8 and the date to 10.
+    /// second query, the admin table cuts the owner to 8 and keeps the date.
     #[test]
     fn the_bucket_projections_shape_only_what_the_table_renders() {
         let row = row_with_public(json!(1));
@@ -987,29 +943,27 @@ mod b13_visibility_tests {
         let admin = AdminBucketRow::from(&row);
         assert_eq!(admin.name, "photos");
         assert_eq!(admin.owner_short, "alice-12");
-        assert_eq!(admin.created_at_short, "2026-05-06");
+        assert_eq!(admin.created_at, "2026-05-06T10:00:00Z");
     }
 
     /// Does the user-facing bucket table say this bucket is public?
-    /// `pages_user::buckets::render_buckets_table` renders `badge-success`/"Public"
-    /// for a public bucket and a bare `badge`/"Private" otherwise.
+    /// Both tables draw `pages_user::buckets::visibility_badge`: "Public" in
+    /// `badge-warning`, "Private" in the neutral `badge-secondary`.
     fn user_page_says_public(html: &str) -> bool {
         assert!(
             html.contains(">photos<"),
             "the bucket is missing from the user page entirely: {html}"
         );
-        html.contains("badge-success")
+        html.contains("badge-warning")
     }
 
     /// Does the admin bucket table say this bucket is public?
-    /// `render_admin_buckets_table` renders `status_badge("public")` /
-    /// `status_badge("private")`, i.e. the literal word as the badge label.
     fn admin_page_says_public(html: &str) -> bool {
         assert!(
             html.contains(">photos<"),
             "the bucket is missing from the admin page entirely: {html}"
         );
-        html.contains(">public</span>")
+        html.contains(">Public</span>")
     }
 
     /// B13. `public` is written as a JSON bool by every writer
