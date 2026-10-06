@@ -9,6 +9,8 @@ import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
  *   whose "more actions" button opens a menu the keyboard drives; a bulk
  *   delete asks through the shared dialog, and its outcome — including a
  *   file that could not be deleted — is announced, not wiped by a reload.
+ * - Share links: revoking confirms in the same dialog and updates the list in
+ *   place.
  * - Messages at 390px: a context is created from the list, and its
  *   conversation is one pane with a usable composer, no sideways scroll.
  *
@@ -108,6 +110,7 @@ test('a bucket created from the modal takes an upload with labelled row controls
 /** A bucket holding `keys` (tiny text files), made through the API. */
 async function seedBucket(baseURL: string | undefined, keys: string[]): Promise<{
   bucket: string;
+  share: (key: string) => Promise<void>;
   remove: (key: string) => Promise<void>;
 }> {
   const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
@@ -127,6 +130,13 @@ async function seedBucket(baseURL: string | undefined, keys: string[]): Promise<
   }
   return {
     bucket,
+    share: async (key) => {
+      const made = await api.post('/b/cloudstorage/shares', {
+        headers: { Authorization, 'Content-Type': 'application/json' },
+        data: { bucket, key, expires_in_hours: 24 },
+      });
+      expect(made.status(), await made.text()).toBe(200);
+    },
     remove: async (key) => {
       const gone = await api.delete(`/b/storage/api/buckets/${bucket}/objects/${encodeURIComponent(key)}`, {
         headers: { Authorization },
@@ -184,6 +194,32 @@ test('a file that could not be deleted is reported, not passed over', async ({ p
   await expect(page.getByRole('checkbox', { name: 'Select done.txt' })).toHaveCount(0);
   await expect(page.getByRole('checkbox', { name: 'Select gone.txt' })).toHaveCount(0);
   await expect(page.getByRole('checkbox', { name: 'Select stay.txt' })).toBeVisible();
+});
+
+test('revoking a share link confirms in the dialog and updates the list in place', async ({ page, baseURL }) => {
+  const { bucket, share } = await seedBucket(baseURL, ['report.txt']);
+  await share('report.txt');
+  await loginAsAdmin(page);
+  await page.goto('/b/cloudstorage/', { waitUntil: 'networkidle' });
+  // Set on this document only: a reload would drop it.
+  await page.evaluate(() => ((window as unknown as { __noReload: boolean }).__noReload = true));
+
+  const revoke = page.getByRole('button', { name: `Revoke the share link for ${bucket}/report.txt` });
+  await revoke.click();
+  const dialog = page.getByRole('dialog', { name: 'Revoke share link' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(`Revoke the link to ${bucket}/report.txt? Anyone who has it loses access.`);
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(revoke).toBeFocused();
+
+  await revoke.click();
+  await dialog.getByRole('button', { name: 'Revoke', exact: true }).click();
+  await expect(page.locator('#toast-container')).toContainText('Share link revoked');
+  await expect(revoke).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 2, name: 'Share links', exact: true })).toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { __noReload?: boolean }).__noReload)).toBe(true);
 });
 
 test.describe('at 390px', () => {

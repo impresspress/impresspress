@@ -19,6 +19,28 @@ pub(crate) mod objects;
 
 use maud::{html, Markup, PreEscaped};
 
+use crate::ui::components;
+
+/// The block's one way to confirm a destructive action: the shared
+/// `components::modal` dialog with an empty question (`#{id}-question`,
+/// which `files-browser.js` fills in for the thing at hand), Cancel and a
+/// danger button marked `data-confirm`. Cancel carries `autofocus`, so it —
+/// not the destructive button — is what `showModal()` focuses: a stray Enter
+/// cancels.
+fn render_confirm_modal(id: &str, title: &str, confirm: &str) -> Markup {
+    components::modal(
+        id,
+        title,
+        html! {
+            p id=(format!("{id}-question")) {}
+            (components::modal_footer(html! {
+                button .btn .btn--secondary .btn--block type="button" data-action="modal-close" autofocus { "Cancel" }
+                button .btn .btn--danger .btn--block type="button" data-confirm { (confirm) }
+            }))
+        },
+    )
+}
+
 /// Render the bootstrap JSON in a script tag, escaping `<` through
 /// [`crate::ui::script_json`] so a `</script>` sequence cannot terminate the
 /// JSON-typed script element early. That helper is where the reasoning lives;

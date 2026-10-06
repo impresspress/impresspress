@@ -138,6 +138,7 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
                                 type="button"
                                 data-action="revoke-share"
                                 data-share-id=(r.id)
+                                data-file=(file)
                                 aria-label={"Revoke the share link for " (file)}
                             { (icons::trash()) }
                         },
@@ -152,6 +153,13 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
             Some(html! { a .btn .btn--secondary .btn--md href="/b/storage/" { "Go to Files" } }),
         ))
         .render()
+}
+
+/// The dialog that confirms revoking a share link: "Revoke the link to
+/// photos/a.png? Anyone who has it loses access." (`files-browser.js` asks
+/// the question).
+fn render_revoke_confirm_modal() -> Markup {
+    super::render_confirm_modal("revoke-confirm", "Revoke share link", "Revoke")
 }
 
 /// The user's share links, or the failure that stopped us reading them.
@@ -207,7 +215,10 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     let body = html! {
         div .page-sections {
             (render_quota_card(&quota))
-            section {
+            // `#share-listing` is what `files-browser.js` re-fetches and swaps
+            // after a revoke, so the page shows the links that remain without
+            // a reload wiping the outcome it reports.
+            section #share-listing {
                 (components::section_header("Share links", None))
                 @if shares.truncated {
                     p .text-muted .text-sm { "Showing the first " (shares.rows.len()) " share links." }
@@ -215,6 +226,7 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                 (render_shares_table(&shares.rows))
             }
         }
+        (render_revoke_confirm_modal())
         (super::render_bootstrap_script("", ""))
     };
 
@@ -308,6 +320,25 @@ mod tests {
             html.contains(r#"<h2 class="section-header__title">Storage</h2>"#),
             "the section is headed by the shared h2: {html}"
         );
+    }
+
+    /// Revoking asks through the block's one confirm dialog, Cancel focused.
+    #[test]
+    fn revoking_confirms_in_the_shared_dialog() {
+        let html = render_revoke_confirm_modal().into_string();
+        assert!(
+            html.contains(r#"<dialog class="modal" id="revoke-confirm""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<p id="revoke-confirm-question"></p>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-confirm>Revoke</button>"#), "{html}");
     }
 
     #[test]

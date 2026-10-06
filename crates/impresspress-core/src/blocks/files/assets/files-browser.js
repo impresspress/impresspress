@@ -72,30 +72,66 @@
     if (count) count.textContent = message;
   }
 
-  // Re-fetch this folder's page and swap its `#object-listing` (the bulk bar
-  // and the table, `objects::render_objects_table`) for the fresh one, then
-  // re-select `keepSelected` — the files an action could not finish with —
-  // where they are still listed. The handlers below are delegated, so the
-  // swapped-in markup needs no binding.
-  async function refreshListing(keepSelected) {
-    const current = document.getElementById('object-listing');
-    if (!current) return;
+  // Re-fetch this page and swap its region `id` for the fresh one — the
+  // block's one way to show the result of a change without a reload, which
+  // would wipe the outcome it reports. `what` names the region in the error
+  // if the refresh fails. Every handler here is delegated, so swapped-in
+  // markup needs no binding. Resolves to whether the swap happened.
+  async function refreshRegion(id, what) {
+    const current = document.getElementById(id);
+    if (!current) return false;
     try {
       const resp = await fetch(window.location.href, { headers: { Accept: 'text/html' } });
       if (!resp.ok) throw new Error('status ' + resp.status);
       const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
-      const fresh = doc.getElementById('object-listing');
-      if (!fresh) throw new Error('no listing in the page');
+      const fresh = doc.getElementById(id);
+      if (!fresh) throw new Error('no #' + id + ' in the page');
       current.replaceWith(document.importNode(fresh, true));
+      return true;
     } catch (e) {
-      showToast("The file list couldn't be refreshed; reload the page to see it.", 'error');
-      return;
+      showToast('The ' + what + " couldn't be refreshed; reload the page to see it.", 'error');
+      return false;
     }
+  }
+
+  // Refresh the folder's `#object-listing` (the bulk bar and the table,
+  // `objects::render_objects_table`), then re-select `keepSelected` — the
+  // files an action could not finish with — where they are still listed.
+  async function refreshListing(keepSelected) {
+    if (!(await refreshRegion('object-listing', 'file list'))) return;
     const keep = new Set(keepSelected);
     document.querySelectorAll('.bulk-select').forEach((box) => {
       box.checked = keep.has(box.dataset.key);
     });
     updateBulkBar();
+  }
+
+  // Every destructive action asks first, through the block's one confirm
+  // dialog (`pages_user::render_confirm_modal`): `question` in it, Cancel
+  // focused, and `action` run when its `data-confirm` button is pressed.
+  // `opener` is where focus goes back if it is cancelled.
+  let pendingConfirm = null;
+
+  function askToConfirm(dialogId, question, opener, action) {
+    const dlg = document.getElementById(dialogId);
+    if (!dlg) return;
+    pendingConfirm = { dialog: dlg, action: action };
+    // textContent, never innerHTML: file names are user-chosen.
+    dlg.querySelector('#' + dialogId + '-question').textContent = question;
+    document.body.dispatchEvent(
+      new CustomEvent('openModal', { detail: { id: dialogId, opener: opener } })
+    );
+  }
+
+  function confirmButtons() {
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-confirm]');
+      if (!btn || !pendingConfirm || !pendingConfirm.dialog.contains(btn)) return;
+      const job = pendingConfirm;
+      pendingConfirm = null;
+      job.dialog.close();
+      job.action();
+    });
   }
 
   function dragDropHandler(boot) {
@@ -176,36 +212,20 @@
     if (count) count.textContent = n === 0 ? '' : plural(n, 'file') + ' selected';
   }
 
-  // Deleting goes through the shared confirm dialog
-  // (`objects::render_delete_confirm_modal`): "Delete 40 files? This can't
-  // be undone.", Cancel focused. `pendingDelete` is what its Delete button
-  // acts on; `opener` is the control that asked, which is disabled and busy
-  // while the deletes run so a second click cannot start them twice.
-  let pendingDelete = null;
+  // A delete — a selection, or one file from its menu — asks first: "Delete
+  // 40 files? This can't be undone." While the deletes run, "Delete
+  // selected" is disabled and busy, so a second click cannot start them
+  // twice.
   let deleting = false;
 
   function askToDelete(keys, opener) {
     const boot = readBootstrap() || {};
-    const dlg = document.getElementById('delete-confirm');
-    if (!boot.bucket || !keys.length || !dlg || deleting) return;
-    pendingDelete = { bucket: boot.bucket, keys: keys, opener: opener };
+    if (!boot.bucket || !keys.length || deleting) return;
+    const bucket = boot.bucket;
     const name = keys.length === 1 ? keys[0].split('/').pop() : plural(keys.length, 'file');
-    // textContent, never innerHTML: file names are user-chosen.
-    dlg.querySelector('#delete-confirm-question').textContent =
-      'Delete ' + name + "? This can't be undone.";
-    document.body.dispatchEvent(
-      new CustomEvent('openModal', { detail: { id: 'delete-confirm', opener: opener } })
+    askToConfirm('delete-confirm', 'Delete ' + name + "? This can't be undone.", opener, () =>
+      deleteKeys(bucket, keys, opener)
     );
-  }
-
-  function deleteConfirm() {
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('[data-delete-confirm]') || !pendingDelete) return;
-      const job = pendingDelete;
-      pendingDelete = null;
-      document.getElementById('delete-confirm').close();
-      deleteKeys(job.bucket, job.keys, job.opener);
-    });
   }
 
   async function deleteKeys(bucket, keys, opener) {
@@ -363,31 +383,46 @@
     items[focusIndex < 0 ? items.length - 1 : focusIndex].focus();
   }
 
-  // A share link's revoke button (`cloudstorage::render_shares_table`).
+  // A share link's revoke button (`cloudstorage::render_shares_table`): it
+  // asks first ("Revoke the link to photos/a.png? Anyone who has it loses
+  // access."), then revokes.
   function revokeButtons() {
     document.addEventListener('click', (e) => {
       const trigger = e.target.closest('[data-action="revoke-share"]');
-      if (trigger) revokeShare(trigger.dataset.shareId);
+      if (!trigger) return;
+      askToConfirm(
+        'revoke-confirm',
+        'Revoke the link to ' + trigger.dataset.file + '? Anyone who has it loses access.',
+        trigger,
+        () => revokeShare(trigger.dataset.shareId)
+      );
     });
   }
 
   // `shareId` is the share row's id (rendered as `data-share-id`), which is
   // what DELETE /b/cloudstorage/shares/{id} is keyed on — not the public
-  // token in the link.
+  // token in the link. The share list is then refreshed in place and the
+  // outcome toasted; focus lands on the list's heading, since the row it was
+  // on is gone.
   async function revokeShare(shareId) {
-    if (!window.confirm('Revoke this share link?')) return;
+    let revoked = false;
     try {
       const resp = await fetch('/b/cloudstorage/shares/' + encodeURIComponent(shareId), {
         method: 'DELETE',
       });
-      if (resp.ok) {
-        showToast('Share revoked', 'success');
-        window.location.reload();
-      } else {
-        showToast('Revoke failed', 'error');
-      }
+      revoked = resp.ok;
     } catch (e) {
-      showToast('Revoke failed', 'error');
+      revoked = false;
+    }
+    if (revoked) await refreshRegion('share-listing', 'share list');
+    showToast(
+      revoked ? 'Share link revoked' : "The share link couldn't be revoked. Try again.",
+      revoked ? 'success' : 'error'
+    );
+    const heading = document.querySelector('#share-listing h2');
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus();
     }
   }
 
@@ -537,6 +572,7 @@
       // The row menus and revoke buttons need no bootstrap (the shares page
       // has none).
       rowMenus();
+      confirmButtons();
       revokeButtons();
       // The share modal lives on the object list; the bucket-create modal on
       // the bucket lists (no boot bucket). Each binds only where it is.
@@ -545,7 +581,7 @@
       if (!boot) return;
       dragDropHandler(boot);
       bulkSelect();
-      deleteConfirm();
+
     },
   };
 

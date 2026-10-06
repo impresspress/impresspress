@@ -154,25 +154,10 @@ fn render_bulk_bar() -> Markup {
     }
 }
 
-/// The id of the dialog that confirms a delete (`files-browser.js` fills in
-/// the question and opens it).
-pub(crate) const DELETE_CONFIRM_MODAL_ID: &str = "delete-confirm";
-
 /// The dialog that confirms deleting one file or a selection: "Delete 40
-/// files? This can't be undone." Cancel carries `autofocus`, so it — not the
-/// destructive button — is what `showModal()` focuses: a stray Enter cancels.
+/// files? This can't be undone." (`files-browser.js` asks the question).
 pub(crate) fn render_delete_confirm_modal() -> Markup {
-    components::modal(
-        DELETE_CONFIRM_MODAL_ID,
-        "Delete files",
-        html! {
-            p #delete-confirm-question {}
-            (components::modal_footer(html! {
-                button .btn .btn--secondary .btn--block type="button" data-action="modal-close" autofocus { "Cancel" }
-                button .btn .btn--danger .btn--block type="button" data-delete-confirm { "Delete" }
-            }))
-        },
-    )
+    super::render_confirm_modal("delete-confirm", "Delete files", "Delete")
 }
 
 /// Folder/file table for `/b/storage/{bucket}/...` views.
@@ -761,13 +746,14 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
+            html.contains(r#"<p id="delete-confirm-question"></p>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"data-delete-confirm>Delete</button>"#),
+            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
             "{html}"
         );
+        assert!(html.contains(r#"data-confirm>Delete</button>"#), "{html}");
     }
 
     /// An empty folder offers the upload it is waiting for, and no
