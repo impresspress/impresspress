@@ -1622,10 +1622,7 @@ mod tests {
             "{s}"
         );
         assert!(s.contains(r#"data-action="legalpages-start">Write the privacy policy</button>"#));
-        assert!(
-            s.contains(r#"class="legal-editor" id="legal-editor" hidden"#),
-            "{s}"
-        );
+        assert!(s.contains(r#"id="legal-editor" hidden"#), "{s}");
         assert!(s.contains("Not published yet"));
         for id in ["btn-save", "btn-publish"] {
             let at = actions
@@ -1646,7 +1643,10 @@ mod tests {
         let actions = actions_html(&view);
         let s = view.body.into_string();
         assert!(!s.contains(r#"id="legal-editor-empty""#));
-        assert!(s.contains(r#"class="legal-editor" id="legal-editor" data-doc-type="terms" data-doc-id="doc-123""#), "{s}");
+        assert!(
+            s.contains(r#"id="legal-editor" data-doc-type="terms" data-doc-id="doc-123""#),
+            "{s}"
+        );
         assert!(!actions.contains(" hidden"), "{actions}");
     }
 

@@ -219,7 +219,7 @@ pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> Editor
             }
         }
 
-        div #legal-editor .legal-editor
+        div #legal-editor
             hidden[!started]
             data-doc-type=(wire_str(&doc_type))
             data-doc-id=(doc.map(|d| d.id.as_str()).unwrap_or(""))
