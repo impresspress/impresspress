@@ -49,6 +49,12 @@ export default defineConfig({
     // does — but it is a trade, not a free option, and `on-first-retry` is the
     // cheaper setting if the recording ever shows up in the baseline.
     trace: 'retain-on-failure',
+    // Chromium's own WebMCP implementation (navigator.modelContext) plus the
+    // testing surface (navigator.modelContextTesting) the helpers read. The
+    // suite tests against the real registry; nothing stands in for it.
+    // Chromium only exposes navigator.modelContext in a secure context, which
+    // every baseURL here (127.0.0.1, https) is.
+    launchOptions: { args: ['--enable-features=WebMCPTesting'] },
   },
   projects: [
     { name: 'desktop-chrome', use: { ...devices['Desktop Chrome'] } },

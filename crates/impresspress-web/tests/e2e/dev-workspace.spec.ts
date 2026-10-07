@@ -14,7 +14,6 @@ import {
   WELCOME_PHRASE,
   WORKSPACE_EXPORT_PORT,
 } from './fixtures/dev-sandbox';
-import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 import {
   holdLoader,
   killRuntime,
@@ -24,7 +23,7 @@ import {
   tellShell,
 } from './fixtures/stopped-runtime';
 import { SHOP_HEADING, SHOP_OFFER, SHOP_PRODUCT, shopPage } from './fixtures/shop-fixture';
-import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
+import { execute, registeredTools, structured, toolNames, waitForTool } from './fixtures/webmcp-helpers';
 
 /**
  * Plan 2 checkpoint for the browser development sandbox: **an agent builds
@@ -39,9 +38,11 @@ import { execute, registeredTools, structured, waitForTool } from './fixtures/we
  * the claim under test and a `fetch` would prove only that the endpoint
  * works.
  *
- * The polyfill (`model-context-polyfill.ts`) stands in for a WebMCP-capable
- * browser — Chromium has no `document.modelContext` — and it is the ONLY
- * substitution. `/b/dev/api/tools.json`, `dev.js`'s registration, the request
+ * The browser is Chromium's real WebMCP (`--enable-features=WebMCPTesting`,
+ * set suite-wide in `playwright.config.ts`), with no substitution anywhere:
+ * the tools are registered into `navigator.modelContext` and listed and
+ * invoked through `navigator.modelContextTesting`. `/b/dev/api/tools.json`,
+ * `dev.js`'s registration, the browser's registry, the request
  * `webmcp-core.js` builds from each tool's `invocation`, the handlers that
  * answer it, the generation the write publishes and the page the shopper is
  * served are all the real things, running inside a service worker.
@@ -119,11 +120,6 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // budget, not a test budget.
   test.setTimeout(300_000);
 
-  // Install the WebMCP shim before ANY navigation: `dev.js` and `webmcp.js`
-  // both check `document.modelContext` as they run, and a polyfill added
-  // afterwards would be a page with no agent on it.
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
-
   const bootStart = Date.now();
   await bootServiceWorker(page);
   console.log(`cold boot (seed import, no blocks): ${Date.now() - bootStart} ms`);
@@ -132,7 +128,7 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
 
   // --- 1. The page registers its own tools, and only its own -------------
   //
-  // Two registrars share `document.modelContext` here: `dev.js` adds the
+  // Two registrars share `navigator.modelContext` here: `dev.js` adds the
   // page-scoped allowlist, `webmcp.js` adds the deployment-wide manifest for
   // the caller's tier, and they finish in whichever order their two fetches
   // complete. So both are waited for before anything is read, each by a name
@@ -143,11 +139,29 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // what keeps this from pinning the *other* file's contract — the admin
   // manifest's size is `webmcp.spec.ts`'s subject, not this one's — and from
   // going silently racy if that manifest ever grows to `PAGE_TOOLS.length`
-  // tools at the admin tier, at which point `waitForFunction`'s count could
-  // be satisfied by `webmcp.js` alone, before `dev.js` had registered
-  // anything.
+  // tools at the admin tier, at which point a count could be satisfied by
+  // `webmcp.js` alone, before `dev.js` had registered anything.
   await waitForTool(page, 'list_products');
   await waitForTool(page, 'dev_export');
+  // Chrome throws on a duplicate name instead of replacing, so a name both
+  // registrars published would lose one registration. They publish disjoint
+  // names (`no_dev_or_shop_tool_leaks_into_the_global_manifest` pins the
+  // server half); this pins what the browser ends up holding, before and
+  // after webmcp.js swaps its own set out.
+  const names = await toolNames(page);
+  expect(new Set(names).size, `duplicate registrations: ${names}`).toBe(names.length);
+  const generation = await page.evaluate(() =>
+    (window as unknown as { __impresspressWebmcp: { generation(): number } }).__impresspressWebmcp.generation(),
+  );
+  await page.evaluate(() =>
+    (window as unknown as { __impresspressWebmcp: { refresh(): Promise<void> } }).__impresspressWebmcp.refresh(),
+  );
+  await page.waitForFunction(
+    (before) =>
+      (window as unknown as { __impresspressWebmcp: { generation(): number } }).__impresspressWebmcp.generation() > before,
+    generation,
+  );
+  expect(await toolNames(page)).toEqual(names);
   const tools = (await registeredTools(page, 1)).map((t) => t.name);
 
   expect(tools.filter((n) => n.startsWith('dev_') || n.startsWith('shop_')).sort()).toEqual(
@@ -588,7 +602,6 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   const shopperStart = Date.now();
   await page.context().clearCookies();
   const shop = await page.context().newPage();
-  await shop.addInitScript(MODEL_CONTEXT_POLYFILL);
   await bootServiceWorker(shop);
 
   // Anonymous for real: `/b/dev` is registered as an `Admin` extra route, and
@@ -626,11 +639,32 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   await shop.close();
 });
 
+test('an expired session removes the workspace tools from the registry', async ({ page }) => {
+  test.setTimeout(300_000);
+  await bootServiceWorker(page);
+  await openWorkspace(page);
+  await waitForTool(page, 'dev_export');
+  const pageScoped = (names: string[]) =>
+    names.filter((n) => n.startsWith('dev_') || n.startsWith('shop_'));
+  expect(pageScoped(await toolNames(page))).not.toEqual([]);
+
+  // The session goes; the next tool call is the 401 that tells dev.js so.
+  await page.context().clearCookies();
+  const refused = await execute(page, 'dev_status', {});
+  expect(refused.isError).toBe(true);
+
+  // Chrome ignores the registration signal, so what this observes is
+  // `unregisterPageTools` removing each name.
+  await expect.poll(async () => pageScoped(await toolNames(page))).toEqual([]);
+  await expect(page.locator('#dev-webmcp-status')).toHaveText(
+    'The session expired and the tools were removed. Sign in again.',
+  );
+});
+
 test('the workspace is cross-origin isolated and its preview frames the live site', async ({
   page,
 }) => {
   test.setTimeout(300_000);
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
   await bootServiceWorker(page);
   await openWorkspace(page);
 
@@ -764,7 +798,6 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
     return dialog.dismiss();
   });
 
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
   await bootServiceWorker(page);
   await openWorkspace(page);
   // `dev_export` is the last tool `dev.js` registers (see the wait above) —
@@ -894,7 +927,6 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
  */
 test('a site file the service worker would shadow is refused', async ({ page }) => {
   test.setTimeout(300_000);
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
   await bootServiceWorker(page);
   await openWorkspace(page);
   await waitForTool(page, 'dev_export');

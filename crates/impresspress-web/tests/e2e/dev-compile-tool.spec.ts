@@ -14,7 +14,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loginToWorkspace } from './fixtures/dev-sandbox';
-import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 import { pinnedToolchainEnv } from './fixtures/rust-toolchain';
 import { execute, waitForTool, type ToolResult } from './fixtures/webmcp-helpers';
 
@@ -288,7 +287,6 @@ test('dev_compile_block compiles a scaffolded block, stages it and puts it live;
   // rebuild the wasmi runtime. The default 60 s is a boot budget.
   test.setTimeout(900_000);
 
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
   await loginToWorkspace(page);
   await waitForTool(page, 'dev_create_block');
   await waitForTool(page, 'dev_compile_block');

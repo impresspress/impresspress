@@ -6,13 +6,14 @@
 // script's only job is translating that into registerTool calls.
 
 // Browsers without WebMCP get nothing. This ships on every page, so it
-// must never throw on an unsupported browser.
-if (!('modelContext' in document) || typeof document.modelContext.registerTool !== 'function') {
+// must never throw on an unsupported browser — or on an insecure page,
+// where Chrome leaves `navigator.modelContext` undefined.
+if (!('modelContext' in navigator) || typeof navigator.modelContext.registerTool !== 'function') {
   return;
 }
 
 function register(tool) {
-  document.modelContext.registerTool(toolOptions(tool));
+  navigator.modelContext.registerTool(toolOptions(tool));
 }
 
 // Names this script itself registered, so `refresh()` can drop exactly what
@@ -23,10 +24,10 @@ var registered = [];
 var generation = 0;
 
 function unregisterAll() {
-  if (typeof document.modelContext.unregisterTool === 'function') {
+  if (typeof navigator.modelContext.unregisterTool === 'function') {
     registered.forEach(function (name) {
       try {
-        document.modelContext.unregisterTool(name);
+        navigator.modelContext.unregisterTool(name);
       } catch (e) {
         // already gone
       }

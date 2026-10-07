@@ -29,7 +29,7 @@ const core = fs.readFileSync(
 // (in particular `outstanding`/`polling`) into one another.
 /**
  * @param {object} [options]
- * @param {boolean} [options.hasModelContext]  give the stub document a WebMCP
+ * @param {boolean} [options.hasModelContext]  give the stub navigator a WebMCP
  *   registrar, as a browser that supports it would.
  * @param {object|null} [options.compilerManifest]  what
  *   `/__impresspress_dev/compiler/manifest.json` answers with: an object for a
@@ -278,7 +278,7 @@ export function instantiate({
     return elements.get(id);
   };
 
-  // Everything the stub `document.modelContext` was handed, by name. The
+  // Everything the stub `navigator.modelContext` was handed, by name. The
   // shipped file registers `dev_compile_block` and `dev_export` itself
   // (`registerPageLocal`), and their `execute` is the only way to reach the
   // tool's own error handling — the split between a compiler failure, which
@@ -313,7 +313,17 @@ export function instantiate({
         return element;
       },
       body: { appendChild: (child) => child },
-      addEventListener() {},
+      addEventListener() {}
+    },
+    window: {
+      addEventListener(type, listener) {
+        windowListeners.push({ type, listener });
+      },
+      confirm,
+      prompt
+    },
+    navigator: {
+      serviceWorker,
       ...(hasModelContext
         ? {
             modelContext: {
@@ -327,14 +337,6 @@ export function instantiate({
           }
         : {})
     },
-    window: {
-      addEventListener(type, listener) {
-        windowListeners.push({ type, listener });
-      },
-      confirm,
-      prompt
-    },
-    navigator: { serviceWorker },
     fetch(...args) {
       fetchCalls.push(args);
       // The tail makes two kinds of request on load and they cannot share one

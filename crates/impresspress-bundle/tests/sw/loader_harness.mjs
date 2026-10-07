@@ -133,6 +133,9 @@ function element() {
 ///                 never activates (as Chromium has been seen to leave one);
 ///                 the wait for it runs out at once. `'late'`: one that
 ///                 activates a moment after that wait has run out
+/// - `secure`    — whether the page is a secure context (`window
+///                 .isSecureContext`); `false` is the same shell served over
+///                 plain http at a LAN address
 export function loadShell({
   session = {},
   stop,
@@ -156,7 +159,8 @@ export function loadShell({
   heldElsewhere = [],
   opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
-  documentTitle = title
+  documentTitle = title,
+  secure = true
 } = {}) {
   const sessionStorage = storage(session);
   const localStorage = storage();
@@ -231,7 +235,7 @@ export function loadShell({
       this.replaced.push(url);
     }
   };
-  const window = { location };
+  const window = { location, isSecureContext: secure };
 
   const messageListeners = [];
   let registered = 0;

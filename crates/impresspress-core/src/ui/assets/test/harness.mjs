@@ -71,7 +71,10 @@ export function instantiate({ serviceWorker = undefined, respond } = {}) {
   });
 
   const sandbox = {
-    document: {
+    document: {},
+    window: {},
+    navigator: {
+      serviceWorker,
       modelContext: {
         registerTool(options) {
           registerCalls.push(options.name);
@@ -81,8 +84,6 @@ export function instantiate({ serviceWorker = undefined, respond } = {}) {
         }
       }
     },
-    window: {},
-    navigator: { serviceWorker },
     fetch(...args) {
       fetchCalls.push(args);
       // A `respond` that throws stands for a network failure, and the real

@@ -227,7 +227,7 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // `sandbox` is NOT a prompt-injection boundary, and cannot
                 // be one while this frame carries `allow-same-origin` on
                 // same-origin content: the framed page can read and write
-                // `parent.document.modelContext` (including `registerTool`)
+                // `parent.navigator.modelContext` (including `registerTool`)
                 // and `parent.__impresspressWebmcp` (set by `webmcp.js`,
                 // which every SSR page — this one included — loads), and
                 // per the HTML spec a same-origin frame with both
@@ -587,7 +587,7 @@ mod tests {
             "the console's list must be filled in exactly one place"
         );
         assert_eq!(
-            js.matches("document.modelContext.registerTool(").count(),
+            js.matches("navigator.modelContext.registerTool(").count(),
             1,
             "and WebMCP must be handed tools from that same place"
         );

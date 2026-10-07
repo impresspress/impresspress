@@ -575,16 +575,17 @@ var MUTATING =
   /^(?:(?:dev_write_file|dev_write_files|dev_delete_file|dev_create_block|dev_rollback|dev_remove_block)$|shop_(?!list_))/;
 
 // Whether this browser has WebMCP. Asked once: it is a property of the
-// browser, and everything below that differs by it — whether a tool is handed
-// to `document.modelContext`, what the guide says — must agree.
+// browser (and of this page being a secure context), and everything below
+// that differs by it — whether a tool is handed to `navigator.modelContext`,
+// what the guide says — must agree.
 var hasWebmcp =
-  'modelContext' in document && typeof document.modelContext.registerTool === 'function';
+  'modelContext' in navigator && typeof navigator.modelContext.registerTool === 'function';
 
 // Every tool this page publishes, in publication order — the options objects
 // themselves, `execute` and all.
 //
 // This is the ONE list. A WebMCP browser's agent is handed these objects
-// through `document.modelContext.registerTool`; the Tool console (below)
+// through `navigator.modelContext.registerTool`; the Tool console (below)
 // lists the same objects and calls the same `execute`. So a tool run from the
 // console builds the same request, gets the same session check and — for a
 // mutating tool — the same progress panel and catch-up as one an agent
@@ -592,10 +593,10 @@ var hasWebmcp =
 var pageTools = [];
 
 // Every name this page registered with WebMCP. `registerTool`'s options bag
-// takes an `AbortSignal`, but a browser (or a polyfill) that ignores it would
-// leave this page's tools live on the agent after the page is gone — with the
-// document's session cookie no longer riding along, so every call is a 401. The
-// list is the fallback: on abort, unregister exactly these by name.
+// takes an `AbortSignal`, and the proposal says aborting it unregisters the
+// tool — but Chrome (146/147) ignores the signal, so this list is the path
+// that actually runs: on abort, unregister exactly these by name. The signal
+// is still passed, because a browser that honours it is also correct.
 var registered = [];
 
 // Publish one tool, whichever registrar it came from: onto `pageTools`
@@ -617,29 +618,32 @@ function registerPageTool(options) {
   // rejects is still a tool this page can run from the console.
   pageTools.push(options);
   if (hasWebmcp) {
-    document.modelContext.registerTool(options, { signal: abort.signal });
-    registered.push(options.name);
+    try {
+      navigator.modelContext.registerTool(options, { signal: abort.signal });
+      registered.push(options.name);
+    } catch (error) {
+      // One tool the browser rejected (a duplicate name, a schema it will
+      // not take) is not a reason to lose the ones after it — the same
+      // per-tool guard `webmcp.js` applies.
+      logError(error);
+    }
   }
 }
 
 function unregisterPageTools() {
-  // `unregisterPageTools` runs on every `pagehide` and on every 401/403,
-  // regardless of whether registration ever happened — a browser with no
-  // WebMCP support at all has no `document.modelContext` (`registered` is
-  // already `[]` in that case, from the guard below), so `document
-  // .modelContext` must be checked for existence before its own methods
-  // are, or this throws on unload in exactly the browsers `hasWebmcp` is
-  // false for.
-  if (!document.modelContext || typeof document.modelContext.unregisterTool !== 'function') {
+  // Runs on every `pagehide` and every 401/403, whether or not registration
+  // ever happened. `registered` is only ever filled when `hasWebmcp`, so a
+  // browser without WebMCP has nothing to remove.
+  if (!hasWebmcp) {
     registered = [];
     return;
   }
   registered.forEach(function (name) {
     try {
-      document.modelContext.unregisterTool(name);
+      navigator.modelContext.unregisterTool(name);
     } catch (error) {
-      // Already gone — the browser honoured the signal. Both paths are
-      // correct; only one of them runs on any given browser.
+      // Already gone: a browser that honours the signal removed it on abort.
+      // Chrome does not, so on Chrome this call is the one that removes it.
     }
   });
   registered = [];
@@ -682,8 +686,9 @@ function registerFromManifest(manifest) {
       options.execute = withSessionCheck(options.execute);
       registerPageTool(options);
     } catch (error) {
-      // One tool the browser rejected is not a reason to lose the rest —
-      // the same per-tool guard `webmcp.js` applies.
+      // One manifest entry `toolOptions` cannot turn into a tool is not a
+      // reason to lose the rest. (A tool the browser's registrar rejects is
+      // caught inside `registerPageTool`, which every page tool goes through.)
       logError(error);
     }
   });
@@ -969,7 +974,8 @@ api
 // but a manual reload would bring it back. A frozen document's tools are not
 // reachable by an agent on whatever page replaced it, so there is nothing to
 // tear down while it sits there; if it is evicted instead of restored, the
-// document is discarded and `document.modelContext` goes with it.
+// document is discarded and its `navigator.modelContext` registrations go
+// with it.
 window.addEventListener('pagehide', function (event) {
   if (event.persisted) {
     return;

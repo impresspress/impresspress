@@ -1,21 +1,21 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer } from './fixtures/auth';
-import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
-import { execute, registeredTools } from './fixtures/webmcp-helpers';
+import { execute, registeredTools, toolNames, waitForTool } from './fixtures/webmcp-helpers';
 
 /**
  * WebMCP end-to-end against the real native server (visual-baseline config,
  * admin session via globalSetup). It seeds a product, so it is part of
  * `e2e:writes` (its own fresh server in CI, port 8094), not `e2e:visual`.
  *
- * `MODEL_CONTEXT_POLYFILL` (shared with `smoke.spec.ts`) is the smallest
- * `document.modelContext` shim `ui/assets/webmcp.js` and `webmcp-core.js`
- * need. Everything on the other side of that boundary is real: the served
- * manifest, the registration script, the request `execute` builds, and the
- * endpoint that answers it. What this cannot test is whether an agent
- * *chooses* the right tool from its description; that needs a WebMCP-capable
- * browser and a human (plan 3, task 5).
+ * The browser is Chromium with `--enable-features=WebMCPTesting`
+ * (`playwright.config.ts`), so the page registers into Chromium's own
+ * `navigator.modelContext` and the helpers read and invoke tools through
+ * `navigator.modelContextTesting`. Everything on both sides of the API is
+ * real: the served manifest, the registration script, the browser's
+ * registry, the request `execute` builds, and the endpoint that answers it.
+ * What this cannot test is whether an agent *chooses* the right tool from its
+ * description; that needs an agent and a human (plan 3, task 5).
  */
 
 const PUBLIC_TOOLS = [
@@ -30,58 +30,60 @@ const PUBLIC_TOOLS = [
 /** Admin-tier read tools. Must never appear below the Admin tier. */
 const ADMIN_TOOLS = ['list_users', 'list_roles', 'get_site_settings', 'list_audit_log'];
 
-test('refresh() re-registers the manifest without disturbing a tool it does not own', async ({ page }) => {
-  // `refresh()` tracks and re-registers exactly the names webmcp.js itself
-  // added from the manifest (see `registered` in `webmcp.js`) — not
-  // everything `document.modelContext` currently knows about. That is
-  // deliberate: `dev.js` (plan 2, task 3) registers its own page-scoped
-  // tools directly against `document.modelContext` on `/b/dev`, and
-  // webmcp.js's `refresh()` runs independently on manifest-generation
-  // changes. If `refresh()` cleared every registered tool it would fight
-  // `dev.js` for ownership of tools it never registered. `stale_tool` here
-  // stands in for exactly that: something else's tool, registered directly
-  // — it must survive a webmcp.js refresh untouched.
-  //
-  // The manifest is identical across both loads, so "unregister then
-  // re-register the same set" and "do nothing" leave the polyfill's
-  // name-keyed Map in the same end state — `after === before` alone can't
-  // tell them apart. Two more assertions make it discriminating: (a)
-  // `generation()` must actually increment (proving a fresh `load()` ran,
-  // not a no-op), and (b) the polyfill's `__unregistered()` call log must
-  // show every manifest tool name dropped exactly once — proving the
-  // unregister half really fired — while `stale_tool` is never in it.
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
+test('a real WebMCP browser gets the public tools with no polyfill', async ({ page }) => {
   await page.goto('/b/auth/login');
-  await registeredTools(page, 1);
-  const before = await page.evaluate(() => document.modelContext.__tools().map((t) => t.name).sort());
+  await waitForTool(page, 'list_products');
+  const names = await toolNames(page);
+  expect(names).toContain('get_storefront_config');
+  // Anonymous: nothing above Public is published (live twin of
+  // webmcp_manifest_for_anonymous_caller_contains_no_privileged_tools).
+  for (const forbidden of ['list_users', 'list_audit_log', 'get_site_settings', 'list_roles']) {
+    expect(names).not.toContain(forbidden);
+  }
+});
+
+test('refresh() re-registers the manifest without disturbing a tool it does not own', async ({ page }) => {
+  // `refresh()` drops exactly the names webmcp.js itself registered (see
+  // `registered` in `webmcp.js`) and registers what the manifest says now.
+  // A tool something else registered — `dev.js` on `/b/dev`; `stale_tool`
+  // here — must survive it.
+  //
+  // The second manifest fetch answers the first one minus one tool, so the
+  // unregister half is observable: a refresh that unregistered nothing would
+  // leave that tool registered. (Chrome ignores `registerTool`'s signal, so
+  // whether a signal or a by-name call removed it is not observable and is
+  // not asserted.)
+  let fetches = 0;
+  let dropped = '';
+  await page.route('**/b/webmcp/manifest.json', async (route) => {
+    fetches += 1;
+    const response = await route.fetch();
+    const body = (await response.json()) as { tools: Array<{ name: string }> };
+    if (fetches > 1) {
+      dropped = body.tools[0].name;
+      body.tools = body.tools.slice(1);
+    }
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto('/b/auth/login');
+  await registeredTools(page, PUBLIC_TOOLS.length);
+  const before = await toolNames(page);
   const generationBefore = await page.evaluate(() => window.__impresspressWebmcp.generation());
   await page.evaluate(() =>
-    document.modelContext.registerTool({
+    (navigator as unknown as { modelContext: { registerTool(options: unknown): void } }).modelContext.registerTool({
       name: 'stale_tool',
-      description: 'x',
+      description: 'A tool webmcp.js did not register.',
       inputSchema: { type: 'object' },
       execute: async () => ({ content: [] }),
     }),
   );
   await page.evaluate(() => window.__impresspressWebmcp.refresh());
-  const after = await page.evaluate(() => document.modelContext.__tools().map((t) => t.name).sort());
-  const generationAfter = await page.evaluate(() => window.__impresspressWebmcp.generation());
-  const unregistered = await page.evaluate(() => document.modelContext.__unregistered());
 
-  // (a) A real refresh happened, not a no-op that coincidentally left the
-  // same set behind.
-  expect(generationAfter).toBeGreaterThan(generationBefore);
-
-  // (b) Every manifest tool was actually dropped — exactly once each — and
-  // `stale_tool` was never touched by `unregisterTool` at all.
-  for (const name of before) {
-    expect(unregistered.filter((n: string) => n === name), name).toHaveLength(1);
-  }
-  expect(unregistered).not.toContain('stale_tool');
-
-  // End state: the manifest tools are back (re-registered) and the foreign
-  // tool survived untouched.
-  expect(after).toEqual([...before, 'stale_tool'].sort());
+  expect(await page.evaluate(() => window.__impresspressWebmcp.generation())).toBeGreaterThan(generationBefore);
+  expect(dropped).not.toBe('');
+  const after = await toolNames(page);
+  expect(after).not.toContain(dropped);
+  expect(after).toEqual([...before.filter((n) => n !== dropped), 'stale_tool'].sort());
 });
 
 /**
@@ -127,11 +129,7 @@ async function seedProductWithOffer(
 }
 
 test.describe('WebMCP registration on an anonymous page', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(MODEL_CONTEXT_POLYFILL);
-  });
-
-  test('registers exactly the five Public storefront tools, each with both schemas', async ({ page }) => {
+  test('registers exactly the Public storefront tools; the manifest gives each both schemas', async ({ page }) => {
     await page.goto('/b/auth/login');
     const tools = await registeredTools(page, PUBLIC_TOOLS.length);
 
@@ -139,6 +137,14 @@ test.describe('WebMCP registration on an anonymous page', () => {
     for (const tool of tools) {
       expect(tool.description.length, tool.name).toBeGreaterThan(20);
       expect(tool.inputSchema?.type, `${tool.name} inputSchema`).toBe('object');
+    }
+    // The registry does not report output schemas; the manifest the page
+    // registered from does, and `webmcp-core.js` hands it to `registerTool`.
+    const manifest = (await (await page.request.get('/b/webmcp/manifest.json')).json()) as {
+      tools: Array<{ name: string; outputSchema?: { type?: string } }>;
+    };
+    expect(manifest.tools.map((t) => t.name).sort()).toEqual([...PUBLIC_TOOLS].sort());
+    for (const tool of manifest.tools) {
       expect(tool.outputSchema?.type, `${tool.name} outputSchema`).toBe('object');
     }
   });
@@ -177,7 +183,6 @@ test.describe('WebMCP tools against a seeded product', () => {
   });
 
   test.beforeEach(async ({ page }) => {
-    await page.addInitScript(MODEL_CONTEXT_POLYFILL);
     await page.goto('/b/auth/login');
     await registeredTools(page, PUBLIC_TOOLS.length);
   });
@@ -233,10 +238,6 @@ test.describe('WebMCP tools against a seeded product', () => {
 
 test.describe('WebMCP registration for a signed-in admin', () => {
   test.use({ storageState: ADMIN_STATE_PATH });
-
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(MODEL_CONTEXT_POLYFILL);
-  });
 
   test('adds the Authenticated tool on top of the Public set', async ({ page }) => {
     await page.goto('/b/admin/');
