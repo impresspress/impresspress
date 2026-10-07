@@ -31,10 +31,10 @@
 # The one exemption: `.sql` files under a `migrations/` directory. Not a
 # convenience — it is forced by an invariant of the migration system itself.
 # `crate::migration_helper`'s "A shipped .sql file is immutable, comments
-# included" records it: `apply_if_blessed` hashes a migration's WHOLE text, so
+# included" records it: `apply_pending` hashes a migration's WHOLE text, so
 # editing a `--` comment changes its hash exactly as much as editing a
-# statement does, and every deployment that already applied it then logs
-# `schema drift` on each boot until someone redeploys with `--run-migrations`.
+# statement does, and every deployment that already applied it then re-runs
+# that block's whole migration list on its next deploy or boot.
 # A guard that demanded that edit would be asking for something the runtime
 # punishes, so it does not ask. That rule also says where the explanation goes
 # instead: the block's `migrations/mod.rs`, beside the constant, where it is

@@ -1703,7 +1703,7 @@ zero-key blocks and record configured-block count, KV hits, D1 fallbacks, and in
 **Observed path**
 
 `apply_migrations` joins every ordered script, hashes the aggregate, and passes the complete SQL
-string to `apply_if_blessed`:
+string to `apply_pending`:
 
 - `crates/impresspress-core/src/migration_helper.rs:95-104`
 - `crates/impresspress-core/src/migration_helper.rs:153-227`

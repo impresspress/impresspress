@@ -285,14 +285,10 @@ async fn a_refused_thread_override_is_403() {
 /// context and the thread id.
 async fn chat_fixture(service: StubLlmServiceBlock) -> (TestContext, String) {
     let mut ctx = TestContext::with_llm().await;
-    let sqlite: Vec<&str> = crate::blocks::messages::migrations::SQLITE_MIGRATIONS
-        .iter()
-        .map(|(_, sql)| *sql)
-        .collect();
     crate::migration_helper::apply_migrations(
         &ctx,
         "impresspress/messages",
-        &sqlite,
+        crate::blocks::messages::migrations::SQLITE_MIGRATIONS,
         crate::blocks::messages::migrations::POSTGRES_MIGRATIONS,
     )
     .await

@@ -24,6 +24,8 @@ wafer-block = { workspace = true }
 async-trait = { workspace = true }
 
 tracing = { workspace = true }
+# `select!` between the boot and the migration lock's loss.
+tokio = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true
@@ -32,3 +34,4 @@ workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
 reqwest = { workspace = true }
+serde_json = { workspace = true }

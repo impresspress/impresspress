@@ -176,7 +176,7 @@ pub(super) async fn create_index(
     //
     // The registry table itself is owned by the block's
     // `migrations/001_vector_schema.*.sql` script (run at block Init via
-    // `apply_if_blessed`), so no inline CREATE TABLE is required here.
+    // `apply_pending`), so no inline CREATE TABLE is required here.
     if let Err(e) = db::upsert(
         ctx,
         REGISTRY_TABLE,

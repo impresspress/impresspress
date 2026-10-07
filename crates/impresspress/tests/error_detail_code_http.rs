@@ -57,7 +57,6 @@ async fn a_refused_login_is_answered_with_its_detail_code() {
         database,
         &HashMap::new(),
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await

@@ -1,29 +1,67 @@
 //! Shared migration helper.
 //!
-//! Each block's `migrations::apply()` calls [`apply_if_blessed`], which:
+//! A block's migrations are an ordered list of `.sql` files, each a
+//! [`MigrationFile`] `(basename, sql)` pair. Every block applies its list from
+//! `lifecycle(Init)` through [`lifecycle_init`] (auth's service `init` calls
+//! [`apply_migrations`] directly), which picks the list for the active SQL
+//! dialect and hands it to [`apply_pending`]:
 //!
 //! 1. Reads the block's `MigrationState` from the cached `BlockSettings`.
-//! 2. Computes the SQL's SHA-256.
-//! 3. If `current_hash` matches the code's hash → already applied, return.
-//! 4. If `blessed_hash` matches OR the `IMPRESSPRESS_RUN_MIGRATIONS` env var is
-//!    set to `"1"` → apply all statements via `db::ddl`, then upsert the
-//!    block's row in `impresspress__admin__block_settings` with the new hash.
-//! 5. Otherwise → log warning and return (operator must redeploy with
-//!    `--run-migrations` to bless this schema).
+//! 2. Hashes the list ([`migration_set_hash`]: SHA-256 of the files' SQL
+//!    joined with `\n`).
+//! 3. If `current_hash` matches → already applied, return.
+//! 4. If this runtime build applies migrations (`IMPRESSPRESS_RUN_MIGRATIONS`
+//!    is `"1"`) or the block has never applied any → run every file's
+//!    statements in order through `db::ddl`, then record the list's hash as
+//!    the block's `current_hash` in `impresspress__admin__block_settings`.
+//! 5. Otherwise → log `schema drift` and return.
 //!
-//! The statement splitter handles `;` outside `--` comments. Block comments
+//! # Which builds apply migrations
+//!
+//! Every build that is a deploy or a boot sets `IMPRESSPRESS_RUN_MIGRATIONS`:
+//!
+//! - **native**: every boot (`impresspress_server::build_native_runtime`).
+//!   The admin block's list runs before the runtime is built, through
+//!   [`apply_pending_via_service`], because the server seeds its variables
+//!   from admin's tables pre-build; every other block's list runs at its
+//!   `Init`. The server refuses to start if any of it fails, and a
+//!   database-level lock keeps two processes booting against one database
+//!   from applying the same list twice (`impresspress_native::migration_lock`).
+//! - **Cloudflare**: the `/_deploy/prepare` / `/_deploy/init` funnel, before
+//!   the new version is promoted. A failure fails the deploy.
+//! - **browser**: every runtime build, because loading a bundle is its
+//!   deploy (`impresspress-web`'s `RuntimeFactory::build`).
+//!
+//! Cloudflare's request-path builds are the only ones that do not, so step 5
+//! is reached only there, by a version serving before its deploy funnel ran.
+//!
+//! # A failure names the block and the file
+//!
+//! A statement the database refuses stops the list. The error names the
+//! block, the file's basename and the statement, and the list is not
+//! recorded as applied, so the next migrating build runs it again. The
+//! statement splitter handles `;` outside `--` comments. Block comments
 //! `/* ... */` and `;` inside string literals are not supported — the
 //! canonical .sql files don't use either.
+//!
+//! # Adding a file re-runs the whole list
+//!
+//! Step 2 hashes the whole list, so a new file makes every earlier file of
+//! that block run again too. Every file therefore has to be re-runnable over
+//! the schema it already built (`CREATE … IF NOT EXISTS`, a duplicate
+//! `ADD COLUMN` is tolerated, repairs that only touch rows still needing
+//! them). Auth's list is the costly case: its `004` drops the refresh-token
+//! table and `012` the session table, so ANY change to the auth list signs
+//! every user out on the deploy or boot that applies it.
 //!
 //! # A shipped .sql file is immutable, comments included
 //!
 //! Step 2 hashes the file's **whole text**, so editing a `--` comment in a
 //! migration that has already shipped changes its hash exactly as much as
-//! editing a statement does. On every deployment that already applied it,
-//! `current_hash` and `blessed_hash` then both differ from the code hash,
-//! step 5 logs `schema drift` on every boot, and clearing that requires a
-//! redeploy with `--run-migrations` — which re-runs that block's migrations
-//! from 001.
+//! editing a statement does: the next deploy or boot of every deployment
+//! that already applied it re-runs that block's whole list from 001 — for
+//! auth, signing everyone out — and a Cloudflare version serving before its
+//! deploy funnel logs `schema drift` until it runs.
 //!
 //! So do not tidy prose in a shipped migration, even to fix a comment that
 //! names a since-renamed Rust item. Put the explanation in the block's
@@ -31,7 +69,12 @@
 //! not hash-addressed and a reader is more likely to find it. Products'
 //! `slug_collision_cannot_fail_020` is the worked example.
 
-use wafer_core::clients::{config, database as db};
+use std::sync::Arc;
+
+use wafer_core::{
+    clients::{config, database as db},
+    interfaces::database::service::DatabaseService,
+};
 use wafer_run::{context::Context, ErrorCode, LifecycleEvent, LifecycleType, WaferError};
 use wafer_sql_utils::Backend;
 
@@ -41,11 +84,20 @@ use crate::{
 };
 // NOTE: `BlockSettings::state_for` parses only the requested block's entry
 // out of the JSON map, avoiding the full-map materialization that
-// `from_config_json` would do on every `apply_if_blessed` call.
+// `from_config_json` would do on every `apply_pending` call.
 
-/// Env-var name set by `impresspress --run-migrations` (native) or
-/// `deploy-cloudflare.sh deploy --run-migrations` (CF).
+/// Config key a runtime build carries, as `"1"`, when it applies pending
+/// migrations: every native boot, Cloudflare's deploy funnel and every
+/// browser build (see the module docs). An infrastructure key: it is set on
+/// the config snapshot by the target's boot code, never read from the
+/// process environment or the variables table.
 pub const RUN_MIGRATIONS_KEY: &str = "IMPRESSPRESS_RUN_MIGRATIONS";
+
+/// One migration file: its basename (`"003_block_settings_seed_hash"`, the
+/// file name without the dialect suffix) and its SQL. A block's list of them,
+/// in apply order, is its `migrations::SQLITE_MIGRATIONS` /
+/// `migrations::POSTGRES_MIGRATIONS`.
+pub type MigrationFile<'a> = (&'a str, &'a str);
 
 /// Shared config var that selects the SQL dialect. `"postgres"`
 /// (case-insensitive) picks the PostgreSQL dialect; anything else (including
@@ -85,35 +137,30 @@ pub async fn db_backend(ctx: &dyn Context) -> Result<Backend, WaferError> {
     })
 }
 
-/// Read `WAFER_RUN_SHARED__DATABASE__BACKEND` from the config snapshot,
-/// concatenate the matching per-backend SQL files, and forward to
-/// [`apply_if_blessed`].
-///
-/// Consolidates the backend dispatch + concatenation boilerplate that
-/// every block's `migrations/mod.rs::apply` previously open-coded:
+/// Pick the block's migration list for the active SQL dialect
+/// (`WAFER_RUN_SHARED__DATABASE__BACKEND`, read through [`db_backend`]) and
+/// forward it to [`apply_pending`].
 ///
 /// ```ignore
 /// pub async fn apply(ctx: &dyn Context) -> Result<(), String> {
 ///     migration_helper::apply_migrations(
 ///         ctx,
 ///         "impresspress/messages",
-///         &[SQL_001_SQLITE],
-///         &[SQL_001_POSTGRES],
+///         migrations::SQLITE_MIGRATIONS,
+///         migrations::POSTGRES_MIGRATIONS,
 ///     )
 ///     .await
 /// }
 /// ```
 ///
-/// `sqlite_files` and `postgres_files` are joined with `\n` separators —
-/// the same shape `apply_if_blessed`'s statement splitter expects.
-/// Backends other than `"postgres"` (case-insensitive) fall back to
-/// `sqlite_files`, matching the `config::get_default(..., "sqlite")`
-/// behavior every consumer used to spell out.
+/// Backends other than `"postgres"` (case-insensitive) take `sqlite_files`,
+/// matching the `config::get_default(..., "sqlite")` default every consumer
+/// reads.
 pub async fn apply_migrations(
     ctx: &dyn Context,
     block_name: &str,
-    sqlite_files: &[&str],
-    postgres_files: &[&str],
+    sqlite_files: &[MigrationFile<'_>],
+    postgres_files: &[MigrationFile<'_>],
 ) -> Result<(), String> {
     let backend = db_backend(ctx)
         .await
@@ -122,30 +169,18 @@ pub async fn apply_migrations(
         Backend::Postgres => postgres_files,
         Backend::Sqlite => sqlite_files,
     };
-    let sql = files.join("\n");
-    apply_if_blessed(ctx, block_name, &sql).await
+    apply_pending(ctx, block_name, files).await
 }
 
 /// `lifecycle(Init)` body shared by every impresspress feature block: on the
-/// [`Init`](LifecycleType::Init) event, apply the block's migrations and wrap
-/// any failure in a [`WaferError`] tagged with the block name. Non-`Init`
-/// events are a no-op.
+/// [`Init`](LifecycleType::Init) event, apply the block's migrations and turn
+/// a failure into a [`WaferError`]. Non-`Init` events are a no-op.
 ///
-/// Folds the three things every block's `lifecycle` open-coded around its
-/// migrations:
-///
-/// 1. `if matches!(event.event_type, LifecycleType::Init) { … }`,
-/// 2. deriving the SQLite `&[&str]` from the block's `SQLITE_MIGRATIONS`
-///    `(basename, content)` pairs — the S3-S single schema source that also
-///    feeds the Cloudflare D1 registry,
-/// 3. mapping the `apply_migrations` `Err(String)` onto
-///    `WaferError::new(ErrorCode::Internal, "<block> migrations: …")`.
-///
-/// `sqlite_migrations` is the block's `migrations::SQLITE_MIGRATIONS`
-/// (`(basename, content)`); only the content half is executed (the basename is
-/// for the D1 filename). `postgres_files` is the matching ordered list of
-/// PostgreSQL-dialect scripts. The active dialect is selected inside
-/// [`apply_migrations`] from `WAFER_RUN_SHARED__DATABASE__BACKEND`.
+/// `sqlite_migrations` / `postgres_migrations` are the block's
+/// `migrations::SQLITE_MIGRATIONS` / `migrations::POSTGRES_MIGRATIONS`; the
+/// active dialect is selected inside [`apply_migrations`]. The error already
+/// names the block (and, for a refused statement, the file), so it is passed
+/// through as the message.
 ///
 /// Blocks with extra `Init` work (admin's seed steps, llm's legacy-provider
 /// copy + reload) call this first, then run their extra steps; blocks with no
@@ -154,112 +189,133 @@ pub async fn lifecycle_init(
     ctx: &dyn Context,
     event: &LifecycleEvent,
     block_name: &str,
-    sqlite_migrations: &[(&str, &str)],
-    postgres_files: &[&str],
+    sqlite_migrations: &[MigrationFile<'_>],
+    postgres_migrations: &[MigrationFile<'_>],
 ) -> Result<(), WaferError> {
     if !matches!(event.event_type, LifecycleType::Init) {
         return Ok(());
     }
-    let sqlite: Vec<&str> = sqlite_migrations.iter().map(|(_, sql)| *sql).collect();
-    apply_migrations(ctx, block_name, &sqlite, postgres_files)
+    apply_migrations(ctx, block_name, sqlite_migrations, postgres_migrations)
         .await
-        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("{block_name} migrations: {e}")))
+        .map_err(|e| WaferError::new(ErrorCode::Internal, e))
 }
 
-/// Apply `sql` against `db::ddl` iff the operator has blessed it or
-/// `IMPRESSPRESS_RUN_MIGRATIONS=1`. Idempotent across calls: returns early
-/// once `current_hash` in the cached `BlockSettings` matches the SQL's hash.
+/// Apply `files` against `db::ddl` when they are pending and this build may
+/// apply them (module docs, steps 1-5). Idempotent across calls: returns
+/// early once `current_hash` in the cached `BlockSettings` matches the list's
+/// hash.
 ///
-/// `block_name` is the full block name (e.g. `"impresspress/files"`).
-/// `sql` is the embedded migration SQL (usually `include_str!(...)`).
-pub async fn apply_if_blessed(
+/// `block_name` is the full block name (e.g. `"impresspress/files"`); every
+/// error names it.
+pub async fn apply_pending(
     ctx: &dyn Context,
     block_name: &str,
-    sql: &str,
+    files: &[MigrationFile<'_>],
 ) -> Result<(), String> {
-    let code_hash = sha256_hex(sql);
+    let code_hash = migration_set_hash(files);
     let state = read_state(ctx, block_name);
-    // Read directly from the config snapshot (env-var sourced key). The
-    // config block service is not involved — `IMPRESSPRESS_RUN_MIGRATIONS` is
-    // an infra env var that populates the wafer config snapshot at boot,
-    // never written to the DB. Tests populate it via `ctx.set_config(...)`.
-    let run_requested = ctx.config_get(RUN_MIGRATIONS_KEY) == Some("1");
-
     if state.current_hash == code_hash {
         return Ok(());
     }
 
-    // Fresh install (no previous apply) bootstraps without operator consent —
-    // there's no prior schema to protect, and dev/test modes can't pass
-    // `--run-migrations`. Operator gating still applies to SCHEMA CHANGES
-    // (current_hash non-empty + different code_hash below); the browser gives
-    // that consent on every boot, because loading its bundle is its deploy
-    // (`impresspress-web`'s `RuntimeFactory::build`).
+    // Read directly from the config snapshot: `IMPRESSPRESS_RUN_MIGRATIONS`
+    // is an infrastructure key each target's boot code sets on the snapshot,
+    // never a variables-table row. Tests set it via `ctx.set_config(...)`.
+    let run_requested = ctx.config_get(RUN_MIGRATIONS_KEY) == Some("1");
+    // A block that never applied anything has no prior schema to protect, so
+    // even a build that does not migrate (Cloudflare's request path) creates
+    // it.
     let is_fresh = state.current_hash.is_empty();
-    let should_apply = is_fresh || run_requested || state.blessed_hash == code_hash;
-    if !should_apply {
+    if !(is_fresh || run_requested) {
         tracing::warn!(
             block = %block_name,
             current = %state.current_hash,
-            blessed = %state.blessed_hash,
             code = %code_hash,
-            "schema drift; redeploy with --run-migrations to apply"
+            "schema drift; this build does not apply migrations, the next deploy does"
         );
         return Ok(());
     }
 
-    run_statements(sql, |stmt| db::ddl(ctx, stmt))
+    run_files(block_name, files, |stmt| db::ddl(ctx, stmt))
         .await
         .map_err(|failed| {
-            tracing::warn!(
-                block = %block_name,
-                stmt = %failed.statement,
-                err = %failed.error,
-                "ddl failed",
-            );
-            format!("ddl failed on `{}`: {}", failed.statement, failed.error)
+            tracing::warn!(error = %failed, "migration failed");
+            failed.to_string()
         })?;
-
-    let new_state = MigrationState {
-        current_hash: code_hash.clone(),
-        blessed_hash: code_hash,
-    };
-    write_state(ctx, block_name, &new_state).await?;
-
-    Ok(())
+    record_applied(ctx, block_name, &code_hash).await
 }
 
-/// Apply migration DDL directly against a [`DatabaseService`], outside the
-/// runtime/`Context` gate.
+/// Apply `block_name`'s pending migrations straight through a
+/// [`DatabaseService`], before the runtime exists.
 ///
-/// This is the **pre-wafer** counterpart of [`apply_if_blessed`]: the native
-/// CLI must create the admin variables / block_settings tables *before* the
-/// wafer exists (so it can seed the JWT secret and construct its immutable
-/// crypto service), and it has no `Context` yet. It runs the migration-file SQL
-/// through `db.exec_raw` — the migration-file-runner exception to the no-raw-SQL
-/// rule (CLAUDE.md) — reusing the exact embedded `.sql` constants admin's
-/// gated `Init` runs later, so there's a single schema source.
+/// The native server's counterpart of [`apply_pending`], for the one list
+/// it must apply pre-build: admin's, whose tables hold the variables and
+/// block settings the server reads to build its runtime. It keeps the same
+/// tracking — reads the block's `block_settings` row, returns when its
+/// `current_hash` matches [`migration_set_hash`], otherwise runs every file
+/// and stamps the row — so the block's own `Init` then finds the list applied
+/// and skips it. A native boot always applies migrations, so there is no
+/// `IMPRESSPRESS_RUN_MIGRATIONS` gate to consult.
 ///
-/// Idempotent like the gated path: `CREATE TABLE IF NOT EXISTS` no-ops on
-/// re-run, and a duplicate `ALTER TABLE ADD COLUMN` (no `IF NOT EXISTS` for
-/// columns on SQLite) is swallowed as a benign re-run. Every other DDL error
-/// propagates. Admin's later gated `Init` re-asserts the same SQL (a no-op once
-/// the rows are stamped), so the migration-state bookkeeping is unaffected.
+/// The statements go through `db.exec_raw` — the migration-file-runner
+/// exception to the no-raw-SQL rule (CLAUDE.md).
+pub async fn apply_pending_via_service(
+    db: &Arc<dyn DatabaseService>,
+    block_name: &str,
+    files: &[MigrationFile<'_>],
+) -> Result<(), String> {
+    let code_hash = migration_set_hash(files);
+    let applied = block_settings::load(db)
+        .await
+        .map_err(|e| format!("{block_name}: read the applied migrations: {e}"))?
+        .state(block_name)
+        .migration
+        .current_hash;
+    if applied == code_hash {
+        return Ok(());
+    }
+    run_files(block_name, files, |stmt| db.exec_raw(stmt, &[]))
+        .await
+        .map_err(|failed| failed.to_string())?;
+    let patch = BlockSettingsPatch {
+        current_hash: Some(code_hash),
+        ..Default::default()
+    };
+    block_settings::upsert_fields_via_service(db, block_name, patch)
+        .await
+        .map_err(|e| format!("{block_name}: record the applied migrations: {e}"))
+}
+
+/// Run migration SQL straight through a [`DatabaseService`], with no
+/// tracking at all: every statement of every file, every time.
+///
+/// For test fixtures and replay tests that build a schema up to a chosen
+/// point, or replay a list over the schema it already built — the runner
+/// shares its statement loop (and its duplicate-`ADD COLUMN` tolerance) with
+/// the tracked ones, so what a replay test proves here holds for them. A
+/// deployment never calls it: it applies migrations through
+/// [`apply_pending`] / [`apply_pending_via_service`].
 pub async fn apply_ddl_via_service(
-    db: &std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+    db: &Arc<dyn DatabaseService>,
     sql_files: &[&str],
 ) -> Result<(), String> {
     for sql in sql_files {
         run_statements(sql, |stmt| db.exec_raw(stmt, &[]))
             .await
-            .map_err(|failed| {
-                format!(
-                    "pre-wafer ddl failed on `{}`: {}",
-                    failed.statement, failed.error
-                )
-            })?;
+            .map_err(|failed| format!("ddl failed on `{}`: {}", failed.statement, failed.error))?;
     }
     Ok(())
+}
+
+/// The hash that identifies a block's migration list: SHA-256 hex of the
+/// files' SQL joined with `\n`, in order. The basenames take no part in it.
+pub fn migration_set_hash(files: &[MigrationFile<'_>]) -> String {
+    let joined = files
+        .iter()
+        .map(|(_, sql)| *sql)
+        .collect::<Vec<_>>()
+        .join("\n");
+    sha256_hex(&joined)
 }
 
 /// A migration statement the database refused, and why.
@@ -268,16 +324,62 @@ struct FailedStatement<'a> {
     error: String,
 }
 
+/// A block's migration that failed: which block, which file, which
+/// statement, and the database's error. Its `Display` is the error every
+/// runner returns, so a boot that refuses to start says exactly this.
+struct MigrationFailure<'a> {
+    block: &'a str,
+    file: &'a str,
+    statement: &'a str,
+    error: String,
+}
+
+impl std::fmt::Display for MigrationFailure<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: migration `{}` failed on `{}`: {}",
+            self.block, self.file, self.statement, self.error
+        )
+    }
+}
+
+/// Run every file of `files` in order through `exec`, stopping at the first
+/// refused statement and naming its file.
+async fn run_files<'a, F, Fut, T, E>(
+    block: &'a str,
+    files: &[MigrationFile<'a>],
+    mut exec: F,
+) -> Result<(), MigrationFailure<'a>>
+where
+    F: FnMut(&'a str) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    for &(file, sql) in files {
+        run_statements(sql, &mut exec)
+            .await
+            .map_err(|failed| MigrationFailure {
+                block,
+                file,
+                statement: failed.statement,
+                error: failed.error,
+            })?;
+    }
+    Ok(())
+}
+
 /// Run each statement of a migration batch through `exec`, in order, stopping
 /// at the first failure.
 ///
-/// The one statement loop behind both [`apply_if_blessed`] and
-/// [`apply_ddl_via_service`], so what a replay test proves through the
-/// pre-wafer runner holds for the gated one. `ALTER TABLE ... ADD COLUMN` is
-/// non-idempotent on SQLite/D1, which have no `IF NOT EXISTS` for columns:
-/// when an earlier run already added the column the re-run raises "duplicate
-/// column", and that — only for an `ADD COLUMN` statement — is a benign no-op
-/// so the rest of the batch still runs. Every other failure is returned.
+/// The one statement loop behind every runner — [`apply_pending`],
+/// [`apply_pending_via_service`] and the untracked [`apply_ddl_via_service`]
+/// — so what a replay test proves through the untracked one holds for the
+/// tracked ones. `ALTER TABLE ... ADD COLUMN` is non-idempotent on SQLite/D1,
+/// which have no `IF NOT EXISTS` for columns: when an earlier run already
+/// added the column the re-run raises "duplicate column", and that — only for
+/// an `ADD COLUMN` statement — is a benign no-op so the rest of the batch
+/// still runs. Every other failure is returned.
 async fn run_statements<'a, F, Fut, T, E>(
     sql: &'a str,
     mut exec: F,
@@ -320,30 +422,27 @@ fn read_state(ctx: &dyn Context, block_name: &str) -> MigrationState {
     BlockSettings::state_for(json, block_name).migration
 }
 
-/// Upsert the block's row in `impresspress__admin__block_settings` with the
-/// new migration state. Preserves the `enabled` flag if the row already exists.
-async fn write_state(
+/// Record `code_hash` as the list applied for `block_name`: its row's
+/// `current_hash` in `impresspress__admin__block_settings`, creating the row
+/// when it has none and preserving its `enabled` flag otherwise.
+async fn record_applied(
     ctx: &dyn Context,
     block_name: &str,
-    state: &MigrationState,
+    code_hash: &str,
 ) -> Result<(), String> {
-    block_settings::upsert_fields(
-        ctx,
-        block_name,
-        BlockSettingsPatch {
-            current_hash: Some(state.current_hash.clone()),
-            blessed_hash: Some(state.blessed_hash.clone()),
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(|e| format!("block_settings upsert: {e}"))
+    let patch = BlockSettingsPatch {
+        current_hash: Some(code_hash.to_string()),
+        ..Default::default()
+    };
+    block_settings::upsert_fields(ctx, block_name, patch)
+        .await
+        .map_err(|e| format!("{block_name}: record the applied migrations: {e}"))
 }
 
 /// Compute a SHA-256 hex digest. Re-exported for callers (e.g.
 /// `admin::settings::seed_defaults`) that hash-gate against a payload other
 /// than SQL bytes but want to share the same digest algorithm with
-/// `apply_if_blessed`.
+/// [`migration_set_hash`].
 ///
 /// Delegates to the single canonical [`crate::util::sha256_hex`]
 /// (`wafer_block::hash`) — there is one SHA-256-hex implementation in
@@ -398,22 +497,29 @@ fn has_executable_content(stmt: &str) -> bool {
     })
 }
 
-/// `true` when `stmt`'s first executable token sequence is
-/// `ALTER TABLE … ADD COLUMN`. Case-insensitive, comment-tolerant.
-///
-/// Used to gate the duplicate-column-error tolerance in
-/// `apply_if_blessed` — we only swallow the benign duplicate on this
-/// specific statement shape, not on every DDL.
-fn is_alter_add_column(stmt: &str) -> bool {
-    let upper: String = stmt
-        .lines()
+/// `stmt`'s executable text, upper-cased with its whitespace collapsed:
+/// comment lines dropped, so a leading `--` header does not hide its shape.
+fn executable_shape(stmt: &str) -> String {
+    stmt.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("--"))
         .collect::<Vec<_>>()
         .join(" ")
-        .to_ascii_uppercase();
-    let collapsed = upper.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.starts_with("ALTER TABLE ") && collapsed.contains(" ADD COLUMN ")
+        .to_ascii_uppercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `true` when `stmt`'s first executable token sequence is
+/// `ALTER TABLE … ADD COLUMN`. Case-insensitive, comment-tolerant.
+///
+/// Used to gate the duplicate-column-error tolerance in
+/// `apply_pending` — we only swallow the benign duplicate on this
+/// specific statement shape, not on every DDL.
+fn is_alter_add_column(stmt: &str) -> bool {
+    let shape = executable_shape(stmt);
+    shape.starts_with("ALTER TABLE ") && shape.contains(" ADD COLUMN ")
 }
 
 /// `true` when an error message looks like a "column already exists"
@@ -692,15 +798,15 @@ mod tests {
     /// Reproduces the prod failure mode this commit fixes: a block's
     /// migration SQL runs once, the column gets added. A later cold start
     /// loses the `block_settings` row (e.g. fresh D1, or schema drift that
-    /// dropped the row), the snapshot has no entry, so `apply_if_blessed`
+    /// dropped the row), the snapshot has no entry, so `apply_pending`
     /// can't early-return — it re-runs every statement, and `ALTER TABLE …
     /// ADD COLUMN` blows up with "duplicate column name".
     ///
     /// Before this fix, the entire migration batch aborted and
-    /// `write_state` never stamped the row, leaving the block stuck in
+    /// `record` never stamped the row, leaving the block stuck in
     /// the same broken state on every subsequent cold start.
     #[tokio::test]
-    async fn apply_if_blessed_tolerates_duplicate_add_column_re_run() {
+    async fn apply_pending_tolerates_duplicate_add_column_re_run() {
         let ctx = crate::test_support::TestContext::with_admin().await;
 
         // Pre-create the target table and the column the migration "wants"
@@ -726,29 +832,100 @@ mod tests {
             ALTER TABLE dup_col_test ADD COLUMN name TEXT;\n\
         ";
 
-        apply_if_blessed(
+        apply_pending(
             &ctx.clone().running_as("test/dup-add-column"),
             "test/dup-add-column",
-            migration_sql,
+            &[("001_dup_column", migration_sql)],
         )
         .await
         .expect("benign duplicate ALTER must not abort the batch");
     }
 
     /// Regression guard: only ALTER TABLE ADD COLUMN gets the duplicate
-    /// tolerance. A real DDL failure (e.g. syntax error) still propagates.
+    /// tolerance. A real DDL failure (e.g. syntax error) still propagates,
+    /// naming the block, the file and the statement, and leaves the list
+    /// unrecorded so the next migrating build runs it again.
     #[tokio::test]
-    async fn apply_if_blessed_still_fails_on_non_duplicate_ddl_error() {
+    async fn apply_pending_still_fails_on_non_duplicate_ddl_error() {
         let ctx = crate::test_support::TestContext::with_admin().await;
 
         // Garbled DDL — sqlite reports "syntax error". Must NOT be swallowed.
-        let bad_sql = "CREATE NONSENSE foo (id TEXT);";
-        let err = apply_if_blessed(&ctx, "test/bad-ddl", bad_sql)
+        let files = [
+            (
+                "001_good",
+                "CREATE TABLE IF NOT EXISTS bad_ddl_test (id TEXT);",
+            ),
+            ("002_bad", "CREATE NONSENSE foo (id TEXT);"),
+        ];
+        let ctx = ctx.running_as("test/bad-ddl");
+        let err = apply_pending(&ctx, "test/bad-ddl", &files)
             .await
             .expect_err("syntax error must propagate");
         assert!(
-            err.contains("ddl failed"),
-            "expected `ddl failed` in error string, got: {err}"
+            err.starts_with("test/bad-ddl: migration `002_bad` failed on `CREATE NONSENSE foo"),
+            "the error names the block, the file and the statement: {err}"
+        );
+        let rows = block_settings::list_all(&ctx)
+            .await
+            .expect("list block settings");
+        assert!(
+            rows.iter().all(|row| row.block_name != "test/bad-ddl"),
+            "a failed list is not recorded as applied: {rows:?}"
+        );
+    }
+
+    /// The pre-build runner keeps the same tracking as the in-runtime one: it
+    /// applies a pending list once, stamps the hash the block's `Init` will
+    /// compute, and does nothing on the next boot.
+    #[tokio::test]
+    async fn apply_pending_via_service_applies_once_and_stamps_the_lists_hash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db: Arc<dyn DatabaseService> = Arc::new(
+            wafer_block_sqlite::service::SQLiteDatabaseService::open(
+                tmp.path()
+                    .join("pending.sqlite3")
+                    .to_str()
+                    .expect("utf-8 path"),
+            )
+            .expect("open sqlite"),
+        );
+        let admin = crate::blocks::admin::migrations::SQLITE_MIGRATIONS;
+        apply_pending_via_service(&db, crate::blocks::admin::ADMIN_BLOCK_ID, admin)
+            .await
+            .expect("admin's list applies to an empty database");
+        // A row only the first apply can have written: a re-run would insert
+        // a second one.
+        let files = [(
+            "001_counted",
+            "CREATE TABLE IF NOT EXISTS pending_runs (id TEXT);\n\
+             INSERT INTO pending_runs (id) VALUES ('run');",
+        )];
+        for _ in 0..2 {
+            apply_pending_via_service(&db, "test/pending", &files)
+                .await
+                .expect("apply the counted list");
+        }
+        let runs = db.count("pending_runs", &[]).await.expect("count runs");
+        assert_eq!(runs, 1, "an applied list is not run again");
+        let state = block_settings::load(&db)
+            .await
+            .expect("load block settings")
+            .state("test/pending")
+            .migration;
+        assert_eq!(state.current_hash, migration_set_hash(&files));
+    }
+
+    /// The list's hash covers its SQL alone: the SHA-256 of the files' SQL
+    /// joined with `\n`, whatever the files are called.
+    #[test]
+    fn the_list_hash_is_the_joined_sql_hash() {
+        let files = [
+            ("001_a", "CREATE TABLE a (id TEXT);"),
+            ("002_b", "SELECT 1;"),
+        ];
+        assert_eq!(
+            migration_set_hash(&files),
+            sha256_hex("CREATE TABLE a (id TEXT);\nSELECT 1;")
         );
     }
 

@@ -23,7 +23,7 @@
 //! `004_user_roles_unique` (one `user_roles` row per `(user_id, role)`) and
 //! `005_wrap_grants_append_column` (`wrap_grants.append`) —
 //! applied as one hash-gated unit by admin's `Init`. Moving the DDL would
-//! change the concatenated migration bytes every deployment has blessed, so
+//! change the concatenated migration bytes every deployment has applied, so
 //! the schema keeps living there (spec decision 5.4); `blocks/admin` also
 //! keeps `ADMIN_BLOCK_ID` and the `collections(..)`/`grants(..)`
 //! declarations, because the `impresspress__admin__` prefix makes it the

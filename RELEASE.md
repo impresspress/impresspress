@@ -10,15 +10,34 @@ Impresspress uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH
 
 ## Upgrade Notes
 
-Notes for operators upgrading an **existing** deployment. On native,
-migrations are gated: they run on a fresh install, or when the operator opts
-in with `impresspress serve --run-migrations`. A Cloudflare deploy
-(`impresspress deploy`, which has no such flag) always runs them: its
-`/_deploy/prepare` funnel applies every block's migrations before the new
-version is promoted. A browser install applies them on the first boot of a
-bundle that changes them. So whenever a release's code half assumes a data
-repair the migration half performs, it has to be called out here — on native
-the two ship together but only one of them runs by default.
+Notes for operators upgrading an **existing** deployment. Every target
+applies a release's pending block migrations before it serves it: a native
+server at every boot, a Cloudflare deploy (`impresspress deploy`) before the
+new version is promoted, a browser install on the first boot of a bundle that
+changes them. Before 1.0, an upgrade may require wiping local data.
+
+Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
+what it did happens on every native boot.
+
+### Native: pending migrations apply at every boot; `--run-migrations` is gone
+
+**What changes.** `impresspress serve` (and any server built on
+`impresspress_server::run`) applies every block's pending migrations before
+it binds its socket, and refuses to start if any block fails to initialize —
+a failed migration names the block, the file and the statement. A list whose
+hash is recorded in `impresspress__admin__block_settings` is not run again.
+Two processes booting against one database take turns (a PostgreSQL advisory
+lock; on SQLite an OS file lock on `<database>.migrate.lock`). A
+native PostgreSQL server migrates in the PostgreSQL dialect, chosen by
+`IMPRESSPRESS_DB_TYPE`. Drop `--run-migrations` from scripts: it is now an
+unknown-argument error.
+
+**Recovery.** Fix the cause and start again: the failed list re-runs from its
+first file. To roll back instead, start the previous binary; it re-runs its
+own list.
+
+**Auth caveat.** Any change to auth's migration list re-runs it on the first
+boot that applies it, which signs every user out.
 
 ### Browser builds: request log defaults to errors only
 
@@ -1895,9 +1914,9 @@ Before tagging a release, verify:
   ./target/release/impresspress
   ```
 - [ ] If this release changes config variables or CLI flags, update the docs
-- [ ] If this release ships a migration that repairs existing data, add an entry
-      to [Upgrade Notes](#upgrade-notes) so operators know to pass
-      `--run-migrations`
+- [ ] If this release ships a migration that repairs existing data or changes
+      what users see (any auth migration signs everyone out), add an entry to
+      [Upgrade Notes](#upgrade-notes): every target applies it on upgrade
 
 ## Dry run — the pre-flight step
 

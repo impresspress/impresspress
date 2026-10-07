@@ -4,7 +4,7 @@
 //! `vector/migrations/mod.rs`: read `WAFER_RUN_SHARED__DATABASE__BACKEND`
 //! from the config snapshot, fall back to `sqlite` when the config block is
 //! not registered. The actual apply + gating + statement splitting lives in
-//! [`crate::migration_helper::apply_if_blessed`].
+//! [`crate::migration_helper::apply_pending`].
 
 const SQL_001_SQLITE: &str = include_str!("001_signal_rooms.sqlite.sql");
 #[cfg(feature = "postgres")]
@@ -18,9 +18,9 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_signal_rooms", SQL
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[("001_signal_rooms", SQL_001_POSTGRES)];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {

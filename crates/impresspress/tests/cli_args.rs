@@ -75,13 +75,11 @@ fn bare_impresspress_uses_serve_native_default() {
         target,
         release,
         port,
-        run_migrations,
     } = cli.command
     {
         assert_eq!(target, None);
         assert!(!release);
         assert_eq!(port, None);
-        assert!(!run_migrations);
     } else {
         panic!("expected Serve");
     }

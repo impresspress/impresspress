@@ -2408,7 +2408,7 @@ mod boot_tests {
     };
 
     /// A `DatabaseService` with the admin schema applied through the
-    /// pre-wafer DDL runner (`migration_helper::apply_ddl_via_service` +
+    /// untracked migration runner (`migration_helper::apply_ddl_via_service` +
     /// `blocks::admin::migrations::ddl_files`), the migration-file-runner
     /// exception to the no-raw-SQL rule, so the row shape under test is the
     /// one production writes.
@@ -2419,7 +2419,7 @@ mod boot_tests {
         );
         crate::migration_helper::apply_ddl_via_service(
             &db,
-            crate::blocks::admin::migrations::ddl_files("sqlite"),
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
         )
         .await
         .expect("apply admin migrations");

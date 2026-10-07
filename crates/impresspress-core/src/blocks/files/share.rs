@@ -343,8 +343,8 @@ mod tests {
     /// opaque string it now is would make every such link permanently live,
     /// so the block's `003_legacy_share_token_expiry` migration writes the
     /// expiry the JWT used to impose. This drives the shipped migration —
-    /// through `apply_migrations`, as an operator upgrading with
-    /// `--run-migrations` does — and then the real handler.
+    /// through `apply_migrations`, as an upgrading deployment's first
+    /// migrating boot or deploy does — and then the real handler.
     #[tokio::test]
     async fn a_legacy_jwt_share_link_stays_dead_after_its_thirty_days() {
         let mut ctx = share_ctx("photos", "alice").await;
@@ -381,10 +381,10 @@ mod tests {
             "precondition: a legacy UI-created share carries no expiry"
         );
 
-        let repair: Vec<&str> = super::super::migrations::SQLITE_MIGRATIONS
+        let repair: Vec<(&str, &str)> = super::super::migrations::SQLITE_MIGRATIONS
             .iter()
             .skip_while(|(name, _)| *name != super::super::migrations::LEGACY_SHARE_TOKEN_EXPIRY)
-            .map(|(_, sql)| *sql)
+            .copied()
             .collect();
         assert!(!repair.is_empty(), "the repair must be a shipped migration");
         crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &repair, &[])

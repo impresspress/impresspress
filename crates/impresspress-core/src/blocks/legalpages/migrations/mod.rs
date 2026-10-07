@@ -19,9 +19,12 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_legalpages_schema", SQL_001_POSTGRES),
+    ("002_legalpages_version_numbers", SQL_002_POSTGRES),
+];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -41,7 +44,7 @@ mod tests {
             .await
             .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
         let block = "impresspress/legalpages";
-        crate::migration_helper::apply_migrations(&ctx, block, &[SQL_001_SQLITE], &[])
+        crate::migration_helper::apply_migrations(&ctx, block, &SQLITE_MIGRATIONS[..1], &[])
             .await
             .expect("apply 001");
 
@@ -62,14 +65,9 @@ mod tests {
         }
 
         ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
-        crate::migration_helper::apply_migrations(
-            &ctx,
-            block,
-            &[SQL_001_SQLITE, SQL_002_SQLITE],
-            &[],
-        )
-        .await
-        .expect("apply 002");
+        crate::migration_helper::apply_migrations(&ctx, block, SQLITE_MIGRATIONS, &[])
+            .await
+            .expect("apply 002");
 
         let mut versions = Vec::new();
         for id in &ids {
@@ -113,7 +111,7 @@ mod tests {
         crate::migration_helper::apply_migrations(
             &ctx,
             "impresspress/legalpages",
-            &[SQL_001_SQLITE],
+            &SQLITE_MIGRATIONS[..1],
             &[],
         )
         .await

@@ -104,7 +104,7 @@ impl impresspress_core::builder::BootHooks for CfDeployBootHooks {
 ///
 /// `build_runtime` reads `block_settings` before `build()`, but that read
 /// happens before `init_block(admin)`, and on a database that has never seen
-/// `/_deploy/init` admin's `Init` is a *fresh install* — `apply_if_blessed`
+/// `/_deploy/init` admin's `Init` is a *fresh install* — `apply_pending`
 /// bootstraps a fresh install without operator consent, so the table can come
 /// into existence, and gain rows, between the pre-build read and this hook.
 /// Re-reading here and republishing onto both surfaces is what makes the

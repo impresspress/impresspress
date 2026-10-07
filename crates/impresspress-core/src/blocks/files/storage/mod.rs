@@ -260,8 +260,8 @@ mod test_helpers {
     }
 
     /// [`ctx_with_storage_handle`] on a database that has migration 001 but
-    /// NOT 002 — a deployment that took this code without `--run-migrations`,
-    /// which `RELEASE.md` explicitly anticipates.
+    /// NOT 002 — code running before its migration has been applied, which
+    /// `RELEASE.md` explicitly anticipates.
     ///
     /// `TestContext::with_files` applies every migration the block declares,
     /// so no other fixture can reach this state, and the handler behaviour
@@ -275,28 +275,27 @@ mod test_helpers {
         // "001" only for as long as 001 stays first, and a fixture that
         // silently started applying 002 as well would be the INDEXED case
         // while still claiming to be the un-migrated one.
-        let sql = crate::blocks::files::migrations::SQLITE_MIGRATIONS
+        let initial = *crate::blocks::files::migrations::SQLITE_MIGRATIONS
             .iter()
             .find(|(basename, _)| *basename == "001_initial_schema")
-            .map(|(_, sql)| *sql)
             .expect("the files block still has its initial-schema migration");
-        crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &[sql], &[])
+        crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &[initial], &[])
             .await
             .expect("001 applies");
         with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
     }
 
     /// [`ctx_with_storage_handle`] on a database with every files migration
-    /// but `004_object_claim_id` — a deployment that took this code without
-    /// `--run-migrations`, so its objects table has no `claim_id` column.
+    /// but `004_object_claim_id` — code running before 004 has been applied,
+    /// so its objects table has no `claim_id` column.
     pub(super) async fn ctx_with_storage_before_004() -> (TestContext, Arc<MemStorage>) {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        let sql: Vec<&str> = crate::blocks::files::migrations::SQLITE_MIGRATIONS
+        let sql: Vec<(&str, &str)> = crate::blocks::files::migrations::SQLITE_MIGRATIONS
             .iter()
             .filter(|(basename, _)| *basename != "004_object_claim_id")
-            .map(|(_, sql)| *sql)
+            .copied()
             .collect();
         assert_eq!(
             sql.len() + 1,
@@ -310,16 +309,16 @@ mod test_helpers {
     }
 
     /// [`ctx_with_storage_handle`] on a database with every files migration
-    /// but `005_object_blob_key` — a deployment that took this code without
-    /// `--run-migrations`, so its objects table has no `blob_key` column.
+    /// but `005_object_blob_key` — code running before 005 has been applied,
+    /// so its objects table has no `blob_key` column.
     pub(super) async fn ctx_with_storage_before_005() -> (TestContext, Arc<MemStorage>) {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        let sql: Vec<&str> = crate::blocks::files::migrations::SQLITE_MIGRATIONS
+        let sql: Vec<(&str, &str)> = crate::blocks::files::migrations::SQLITE_MIGRATIONS
             .iter()
             .filter(|(basename, _)| *basename != "005_object_blob_key")
-            .map(|(_, sql)| *sql)
+            .copied()
             .collect();
         assert_eq!(
             sql.len() + 1,

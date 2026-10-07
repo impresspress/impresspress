@@ -481,14 +481,13 @@ impl TestContext {
         &self,
         block_name: &str,
         sqlite: &[(&str, &str)],
-        postgres: &[&str],
+        postgres: &[(&str, &str)],
     ) {
-        let sqlite_sql: Vec<&str> = sqlite.iter().map(|(_, sql)| *sql).collect();
         // In the block's own frame, as its `lifecycle(Init)` runs them.
         crate::migration_helper::apply_migrations(
             &self.fixture().running_as(block_name),
             block_name,
-            &sqlite_sql,
+            sqlite,
             postgres,
         )
         .await
@@ -503,7 +502,7 @@ impl TestContext {
     ///
     /// Admin migrations run first so that the
     /// `impresspress__admin__block_settings` tracking table exists before
-    /// auth's `apply_if_blessed` upserts its `current_hash` row. In
+    /// auth's `apply_pending` upserts its `current_hash` row. In
     /// production that ordering comes from `builder::boot`, which calls
     /// `init_block` on admin explicitly before iterating the rest; here we
     /// enforce it explicitly.
@@ -599,7 +598,7 @@ impl TestContext {
     ///
     /// Use this for tests that exercise a block's own `init()` / migration
     /// application directly — the prerequisite is that
-    /// `impresspress__admin__block_settings` exists so `apply_if_blessed` can
+    /// `impresspress__admin__block_settings` exists so `apply_pending` can
     /// upsert its tracking row.
     pub async fn with_admin() -> Self {
         Self::new().await.with_admin_added().await
@@ -730,7 +729,7 @@ impl TestContext {
     /// through [`Self::fixture`].
     ///
     /// Admin first so the `impresspress__admin__block_settings` tracking
-    /// table exists before llm's `apply_if_blessed` upserts its row (the
+    /// table exists before llm's `apply_pending` upserts its row (the
     /// production ordering). llm's schema does not depend on auth, so auth
     /// migrations are skipped.
     #[cfg(feature = "block-llm")]
@@ -750,7 +749,7 @@ impl TestContext {
     /// and assert through [`Self::fixture`].
     ///
     /// Admin migrations run first so the `impresspress__admin__block_settings`
-    /// tracking table exists before products' `apply_if_blessed` upserts its
+    /// tracking table exists before products' `apply_pending` upserts its
     /// `current_hash` row (the production ordering, enforced explicitly here).
     /// Products' schema does not depend on auth, so auth migrations are
     /// skipped.
@@ -824,7 +823,7 @@ impl TestContext {
     /// block's WRAP enforcement switches on.
     ///
     /// Migrations, not registration order, are what production guarantees
-    /// (admin's `block_settings` table before any block's `apply_if_blessed`
+    /// (admin's `block_settings` table before any block's `apply_pending`
     /// upsert) — adding dev's migrations after another block's have already
     /// run is exactly what a deployment that enables the sandbox alongside an
     /// existing block set does, so this is not a fixture-only shortcut.

@@ -7,7 +7,7 @@ description = "Native platform services + bootstrap helpers for WAFER-based serv
 
 [features]
 default = []
-postgres = ["dep:wafer-block-postgres"]
+postgres = ["dep:wafer-block-postgres", "dep:sqlx"]
 s3 = ["dep:wafer-block-s3"]
 otel = [
     "dep:opentelemetry",
@@ -32,6 +32,9 @@ wafer-block-crypto = { workspace = true }
 wafer-block-http-listener = { workspace = true }
 
 wafer-block-postgres = { workspace = true, optional = true }
+# The migration lock's own PostgreSQL session (`migration_lock::postgres`):
+# a session-level advisory lock needs one connection, not a pool.
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"], optional = true }
 wafer-block-s3 = { workspace = true, optional = true }
 
 tokio = { workspace = true, features = ["full"] }

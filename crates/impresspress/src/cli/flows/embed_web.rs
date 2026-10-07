@@ -47,15 +47,9 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(
-    repo_root: &Path,
-    release: bool,
-    port: Option<u16>,
-    _run_migrations: bool,
-) -> Result<()> {
-    // Web serve runs a static-file server over the wasm bundle; the
-    // wasm itself owns its own runtime-side migration state. The flag is
-    // accepted for CLI-symmetry but has nothing to do at this layer.
+pub async fn serve(repo_root: &Path, release: bool, port: Option<u16>) -> Result<()> {
+    // Web serve runs a static-file server over the wasm bundle; the wasm
+    // runtime applies its own pending migrations when the bundle loads.
     build(repo_root, release).await?;
     let port = port.unwrap_or(8080);
     let cfg = config::find_and_load_required(repo_root)?.0;

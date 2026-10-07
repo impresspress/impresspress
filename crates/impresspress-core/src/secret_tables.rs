@@ -63,7 +63,7 @@
 //! readable, and `tests/admin/sql_explorer_secrets.rs` records why for each:
 //! `sessions` (see below), `jwt_blocklist` (revoked `jti`s, which are
 //! identifiers of tokens rather than tokens), `block_settings`
-//! (`current_hash`/`blessed_hash`/`seed_defaults_hash` are migration-state
+//! (`current_hash`/`seed_defaults_hash` are migration-state
 //! digests), `orgs`, `rate_limits`.
 //!
 //! `wafer_run__auth__sessions` is the one worth spelling out, because its name

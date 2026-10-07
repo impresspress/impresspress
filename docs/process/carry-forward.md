@@ -315,7 +315,7 @@ load-bearing for access decisions, guarded upstream by an exhaustive
   wasm tests never run on a merge to `main` — only on PRs, and only when the path
   filter fires. Same shape for the browser lane. Worth a small CI PR.
 - **The request path is write-free in its BOOT HOOK, not in its whole boot.** On a
-  database that has never seen `/_deploy/init`, `migration_helper::apply_if_blessed`
+  database that has never seen `/_deploy/init`, `migration_helper::apply_pending`
   treats every block as a fresh install and bootstraps its migrations without operator
   consent, and `write_state` then writes a `block_settings` row per block — with
   `bump_on_write: true` on both request paths. That is pre-existing and unchanged, but
@@ -323,10 +323,10 @@ load-bearing for access decisions, guarded upstream by an exhaustive
   the hook, not the whole lifecycle. (Migration-state rows are created with `enabled`
   defaulting to `true`, so a post-admin-init republish can never disable a block.)
 - **Editing a migration file's COMMENTS changes the migration hash.** `apply_migrations`
-  joins the ordered SQL into one string and `apply_if_blessed` hashes that, so a prose
+  joins the ordered SQL into one string and `apply_pending` hashes that, so a prose
   fix in `020_normalize_blank_deleted_at.*.sql` makes every request-path boot log
-  `schema drift; redeploy with --run-migrations` until the next `/_deploy/init`, which
-  then re-runs products' migrations from 001. Done deliberately here; budget for it,
+  `schema drift` until the next `/_deploy/init`, which then re-runs products'
+  migrations from 001. Done deliberately here; budget for it,
   or leave migration comments alone.
 - **`RuntimeConfig::install` changed shape.** It is now
   `install<T>(builder, FnOnce(map) -> (Arc<dyn ConfigService>, T)) -> (ImpresspressBuilder, T)`.
@@ -352,12 +352,13 @@ load-bearing for access decisions, guarded upstream by an exhaustive
 
 ## Shipped migration .sql files are hash-immutable (2026-09-08, PR #38)
 
-`migration_helper::apply_if_blessed` computes `sha256_hex(sql)` over the file's
+`migration_helper::apply_pending` computes `sha256_hex(sql)` over the file's
 **whole text**, so editing a `--` comment in a migration that has already
 shipped moves the hash exactly as far as editing a statement does. On every
 deployment that already applied it, `current_hash` and `blessed_hash` then both
-differ, every boot logs `schema drift`, and clearing that needs a redeploy with
-`--run-migrations`, which re-runs that block's migrations from 001.
+differ, and the next deploy or boot re-runs that block's migrations from 001
+(native boots apply pending migrations since `--run-migrations` was removed;
+before that, every boot logged `schema drift` until a redeploy with the flag).
 
 PR #38's review finding 5 walked into this: it asked for stale prose naming the
 deleted `init_all_blocks` / `strict_init_all_blocks` to be fixed everywhere, and

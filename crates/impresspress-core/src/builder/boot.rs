@@ -727,7 +727,7 @@ mod tests {
         let db = bare_db().await;
         crate::migration_helper::apply_ddl_via_service(
             &db,
-            crate::blocks::admin::migrations::ddl_files("sqlite"),
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
         )
         .await
         .expect("apply admin migrations");
@@ -785,7 +785,7 @@ mod tests {
         let db = bare_db().await;
         crate::migration_helper::apply_ddl_via_service(
             &db,
-            crate::blocks::admin::migrations::ddl_files("sqlite"),
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
         )
         .await
         .expect("apply admin migrations");

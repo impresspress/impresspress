@@ -345,14 +345,10 @@ pub(crate) mod test_support {
         let mut ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::messages::MessagesBlock::BLOCK_NAME);
-        let sqlite: Vec<&str> = super::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
         crate::migration_helper::apply_migrations(
             &ctx,
             "impresspress/messages",
-            &sqlite,
+            super::migrations::SQLITE_MIGRATIONS,
             super::migrations::POSTGRES_MIGRATIONS,
         )
         .await

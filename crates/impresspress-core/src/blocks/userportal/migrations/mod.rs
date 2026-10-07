@@ -2,7 +2,7 @@
 //! via [`crate::migration_helper::lifecycle_init`].
 //!
 //! SQL files are embedded with `include_str!`. Backend dispatch + the
-//! `current_hash` / `blessed_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate live
+//! `current_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate live
 //! in [`crate::migration_helper::apply_migrations`].
 
 const SQL_001_SQLITE: &str = include_str!("001_userportal_schema.sqlite.sql");
@@ -17,9 +17,10 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_userportal_schema"
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] =
+    &[("001_userportal_schema", SQL_001_POSTGRES)];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {

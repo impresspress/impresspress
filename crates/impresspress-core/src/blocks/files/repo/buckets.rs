@@ -189,8 +189,8 @@ pub async fn insert(
 /// The rollback [`super::super::storage::handle_create_bucket`] runs when the
 /// storage folder for a row it just inserted could not be created. By id, not
 /// by name: [`delete_by_name`] is only safe while the unique index exists, and
-/// a deployment that takes the code half without `--run-migrations` has the
-/// row but not the index. There, a second user's create on a taken name still
+/// code running before migration 002 has been applied has the row but not
+/// the index. There, a second user's create on a taken name still
 /// inserts, and a name-scoped rollback would delete the first owner's row
 /// along with it.
 pub async fn delete(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {

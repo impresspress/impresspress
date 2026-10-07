@@ -1,10 +1,9 @@
 //! A native server whose HTTP listener cannot start does not boot.
 //!
-//! Native boots tolerantly: a feature block whose `Init` fails is logged and
-//! the rest serve. The listener is the block that binds the socket, and its
-//! `Init` is where an `IMPRESSPRESS_*` listener setting is validated. Tolerated
-//! like any other block, a bad setting would leave a process that reports
-//! itself started and serves nothing. This drives the binary's own boot
+//! A native boot refuses to start when any block's `Init` fails. The listener
+//! is the block that binds the socket, and its `Init` is where an
+//! `IMPRESSPRESS_*` listener setting is validated: a process that went on
+//! would report itself started and serve nothing. This drives the binary's own boot
 //! (`build_native_runtime`, `register_http_listener`, `boot_native`) with a
 //! listener setting the listener refuses.
 
@@ -46,7 +45,6 @@ async fn boot_with(listener: ListenerEnv) -> anyhow::Result<()> {
         database,
         &HashMap::new(),
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await
@@ -64,7 +62,8 @@ async fn a_listener_setting_the_listener_refuses_fails_the_boot() {
     .await
     .expect_err("a listener that cannot start must fail the boot");
     let message = format!("{error:#}");
-    assert!(message.contains("HTTP listener"), "{message}");
+    assert!(message.contains("refusing to start"), "{message}");
+    assert!(message.contains("`wafer-run/http-listener`"), "{message}");
     assert!(message.contains("max_connections"), "{message}");
 }
 

@@ -17,10 +17,12 @@ Start Impresspress with a first-run administrator account:
 WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
 WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD=admin123 \
 IMPRESSPRESS_LISTEN=127.0.0.1:8090 \
-./target/debug/impresspress serve --target native --run-migrations
+./target/debug/impresspress serve --target native
 ```
 
 Open <http://127.0.0.1:8090/b/auth/login> and sign in with `admin@example.com` and `admin123`. Local data is stored under `data/` by default.
+
+Every start applies the database's pending block migrations before the server takes a request, and refuses to start if a block fails to initialize. Before 1.0 an upgrade may require wiping `data/`; a change to auth's migrations signs every user out.
 
 To pepper password hashes with a key kept outside the database, export
 `IMPRESSPRESS_PASSWORD_PEPPER_KEY` (generate one with `openssl rand -base64 32`

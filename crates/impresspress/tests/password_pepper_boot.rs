@@ -126,7 +126,6 @@ async fn start(
         database.clone(),
         &app_env(),
         peppers,
-        false,
         AppHooks::none(),
     )
     .await
@@ -251,7 +250,7 @@ impl wafer_run::Block for ConfigProbe {
 async fn seed_probe_grants(database: &Arc<dyn DatabaseService>, keys: &[&str]) {
     impresspress_core::migration_helper::apply_ddl_via_service(
         database,
-        impresspress_core::blocks::admin::migrations::ddl_files("sqlite"),
+        &impresspress_core::blocks::admin::migrations::ddl_files("sqlite"),
     )
     .await
     .expect("apply admin tables");

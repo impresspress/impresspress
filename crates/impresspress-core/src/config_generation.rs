@@ -117,7 +117,7 @@ pub(crate) fn writes_noted_on_this_thread() -> u64 {
 /// version stamp. The snapshot is built from the VARIABLES table alone, so
 /// bumping it for the other two would discard a perfectly good snapshot:
 /// every block writes its migration state to `block_settings` during its own
-/// `Init` (`migration_helper::write_state`), so on a first boot after a code
+/// `Init` (`migration_helper::record_applied`), so on a first boot after a code
 /// change that is one discarded snapshot and one re-query per block — the
 /// per-block read amplification this whole mechanism exists to remove,
 /// reintroduced in the pass that can least afford it.

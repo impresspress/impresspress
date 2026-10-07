@@ -277,7 +277,7 @@ mod tests {
         );
         crate::migration_helper::apply_ddl_via_service(
             &sqlite,
-            crate::blocks::admin::migrations::ddl_files("sqlite"),
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
         )
         .await
         .expect("apply admin migrations");

@@ -67,7 +67,7 @@ for example in "${EXAMPLES[@]}"; do
   # landing page (copied into storage above), so declare it via
   # WAFER_RUN_SHARED__HAS_LANDING_PAGE so routing serves it at `/`.
   cd "$EXAMPLE_DIR"
-  WAFER_RUN__AUTH__JWT_SECRET="$WAFER_RUN__AUTH__JWT_SECRET" IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET="test-webhook-secret" WAFER_RUN_SHARED__HAS_LANDING_PAGE=true "$BINARY" serve --run-migrations &
+  WAFER_RUN__AUTH__JWT_SECRET="$WAFER_RUN__AUTH__JWT_SECRET" IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET="test-webhook-secret" WAFER_RUN_SHARED__HAS_LANDING_PAGE=true "$BINARY" serve &
   SERVER_PID=$!
 
   # Wait for server to be ready

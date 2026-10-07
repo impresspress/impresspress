@@ -70,7 +70,6 @@ async fn the_admin_email_settings_page_renders_its_form_on_the_real_runtime() {
         database,
         &HashMap::new(),
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await

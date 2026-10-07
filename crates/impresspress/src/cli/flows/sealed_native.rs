@@ -38,16 +38,10 @@ pub async fn build(repo_root: &Path, _release: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(
-    repo_root: &Path,
-    release: bool,
-    _port: Option<u16>,
-    run_migrations: bool,
-) -> Result<()> {
+pub async fn serve(repo_root: &Path, release: bool, _port: Option<u16>) -> Result<()> {
     build(repo_root, release).await?;
     impresspress_server::run(
         repo_root,
-        run_migrations,
         impresspress_server::IMPRESSPRESS_LISTENER_FLOW,
         impresspress_server::AppHooks::none(),
     )

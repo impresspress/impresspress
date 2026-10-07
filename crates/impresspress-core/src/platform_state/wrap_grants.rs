@@ -648,15 +648,12 @@ mod migration_005_tests {
 
     /// The migrations before 005, sliced out of the shipped list by name so
     /// an unwired 005 cannot pass as applied.
-    fn before_005() -> Vec<&'static str> {
+    fn before_005() -> &'static [(&'static str, &'static str)] {
         let at = SQLITE_MIGRATIONS
             .iter()
             .position(|(name, _)| *name == WRAP_GRANTS_APPEND_COLUMN)
             .expect("005 is wired into SQLITE_MIGRATIONS");
-        SQLITE_MIGRATIONS[..at]
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect()
+        &SQLITE_MIGRATIONS[..at]
     }
 
     /// A row as the table held it before 005: access in `write` alone.
@@ -681,7 +678,7 @@ mod migration_005_tests {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, &before_005(), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, before_005(), &[])
             .await
             .expect("001-004 apply");
         for (id, write) in [("wg_read", 0), ("wg_full", 1), ("wg_append", 2)] {
@@ -693,8 +690,7 @@ mod migration_005_tests {
         }
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        migration_helper::apply_migrations(&ctx, ADMIN, &all, &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("005 applies to a database holding grants");
 
@@ -780,12 +776,12 @@ mod boot_tests {
         assert!(load(&db).await.is_empty());
 
         // Apply admin migrations (creates the wrap_grants table among the
-        // other admin tables) through the same pre-wafer DDL runner native's
-        // `impresspress_server::build_native_runtime` uses — the migration-file-runner exception to the
-        // no-raw-SQL rule (CLAUDE.md), reusing the real embedded schema.
+        // other admin tables) through the untracked migration runner — the
+        // migration-file-runner exception to the no-raw-SQL rule (CLAUDE.md),
+        // reusing the real embedded schema.
         crate::migration_helper::apply_ddl_via_service(
             &db,
-            crate::blocks::admin::migrations::ddl_files("sqlite"),
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
         )
         .await
         .expect("apply admin migrations");
@@ -856,11 +852,10 @@ mod boot_tests {
         assert_eq!(g4.resource_type, None);
     }
 
-    /// The native CLI applies admin's DDL ungated on every boot
-    /// (`migration_helper::apply_ddl_via_service`). On a table 001-004
-    /// created, a row that spelled append-only `write = 2` comes out of 005 as
-    /// `write = 0, append = 1` and still loads as an append grant; running
-    /// the whole list again (the next boot) changes nothing.
+    /// On a table 001-004 created, a row that spelled append-only `write = 2`
+    /// comes out of 005 as `write = 0, append = 1` and still loads as an
+    /// append grant; running the whole list again (as any later admin
+    /// migration makes a deploy or boot do) changes nothing.
     #[tokio::test]
     async fn migration_005_moves_a_write_2_row_onto_the_append_column() {
         use crate::blocks::admin::migrations::{
@@ -905,7 +900,7 @@ mod boot_tests {
         );
 
         for boot in ["first", "second"] {
-            crate::migration_helper::apply_ddl_via_service(&db, all)
+            crate::migration_helper::apply_ddl_via_service(&db, &all)
                 .await
                 .unwrap_or_else(|e| panic!("{boot} run of 001-005: {e}"));
             let stored = db.get(TABLE, "wg_legacy").await.expect("read the row");

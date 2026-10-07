@@ -7,9 +7,9 @@
 //! (`sqlite` | `postgres`). Falls back to `sqlite` when the config block
 //! is not registered.
 //!
-//! Application is gated by [`crate::migration_helper::apply_if_blessed`]:
+//! Application is gated by [`crate::migration_helper::apply_pending`]:
 //! the helper handles statement splitting + the `current_hash` /
-//! `blessed_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate, and stamps a row in
+//! `IMPRESSPRESS_RUN_MIGRATIONS` gate, and stamps a row in
 //! `impresspress__admin__block_settings` once applied.
 
 const SQL_001_SQLITE: &str = include_str!("001_products_schema.sqlite.sql");
@@ -117,38 +117,38 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 /// is an alias for it, so the only list a postgres deployment can run is the
 /// one the test checks.
 #[cfg(any(feature = "postgres", test))]
-const POSTGRES_MIGRATION_FILES: &[&str] = &[
-    SQL_001_POSTGRES,
-    SQL_002_POSTGRES,
-    SQL_003_POSTGRES,
-    SQL_004_POSTGRES,
-    SQL_005_POSTGRES,
-    SQL_006_POSTGRES,
-    SQL_007_POSTGRES,
-    SQL_008_POSTGRES,
-    SQL_009_POSTGRES,
-    SQL_010_POSTGRES,
-    SQL_011_POSTGRES,
-    SQL_012_POSTGRES,
-    SQL_013_POSTGRES,
-    SQL_014_POSTGRES,
-    SQL_015_POSTGRES,
-    SQL_016_POSTGRES,
-    SQL_017_POSTGRES,
-    SQL_018_POSTGRES,
-    SQL_019_POSTGRES,
-    SQL_020_POSTGRES,
-    SQL_021_POSTGRES,
-    SQL_022_POSTGRES,
+const POSTGRES_MIGRATION_FILES: &[(&str, &str)] = &[
+    ("001_products_schema", SQL_001_POSTGRES),
+    ("002_default_templates", SQL_002_POSTGRES),
+    ("003_stripe_events", SQL_003_POSTGRES),
+    ("004_strict_schema_columns", SQL_004_POSTGRES),
+    ("005_commerce_v2", SQL_005_POSTGRES),
+    ("006_payment_link_snapshots", SQL_006_POSTGRES),
+    ("007_provider_workflows", SQL_007_POSTGRES),
+    ("008_refund_ledger", SQL_008_POSTGRES),
+    ("009_commerce_subscription_state", SQL_009_POSTGRES),
+    ("010_guest_receipts", SQL_010_POSTGRES),
+    ("011_webhook_leases", SQL_011_POSTGRES),
+    ("012_payment_link_mode", SQL_012_POSTGRES),
+    ("013_order_shipping", SQL_013_POSTGRES),
+    ("014_subscription_event_order", SQL_014_POSTGRES),
+    ("015_dispute_ledger", SQL_015_POSTGRES),
+    ("016_payment_intent_state", SQL_016_POSTGRES),
+    ("017_refund_connect_event_order", SQL_017_POSTGRES),
+    ("018_provider_operation_leases", SQL_018_POSTGRES),
+    ("019_offer_draft_revision", SQL_019_POSTGRES),
+    ("020_normalize_blank_deleted_at", SQL_020_POSTGRES),
+    ("021_payment_link_request", SQL_021_POSTGRES),
+    ("022_canonical_subscription_status", SQL_022_POSTGRES),
 ];
 
 /// The PostgreSQL scripts a deployment actually applies. Empty when the
 /// `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = POSTGRES_MIGRATION_FILES;
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = POSTGRES_MIGRATION_FILES;
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod strict_upgrade_tests {
@@ -483,7 +483,7 @@ mod strict_upgrade_tests {
     ///
     /// An unguarded `UPDATE … SET deleted_at = NULL` raises `UNIQUE
     /// constraint failed` there, and that is fatal rather than tolerated:
-    /// `migration_helper::apply_if_blessed` forgives only a duplicate
+    /// `migration_helper::apply_pending` forgives only a duplicate
     /// `ALTER … ADD COLUMN`, so the error propagates, `write_state` never
     /// stamps the hash, and every later boot re-runs and re-fails. On
     /// Cloudflare `builder::InitPolicy::Strict` turns a block Init failure

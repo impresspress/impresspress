@@ -350,13 +350,14 @@ jobs:
   # which dials a closed port (1, not the service's) and needs the connect to
   # fail.
   #
-  # The service container is for the replay step below, which needs a real
-  # server and this job's postgres-feature build of the migration runner.
+  # The service container is for the replay and native-boot steps below,
+  # which need a real server and this job's postgres-feature build.
   #
   # impresspress-native is built alongside impresspress-core because it holds
   # the only non-test postgres-gated Rust (`make_postgres_database_service`),
-  # which nothing else in CI compiles. Neither crate has a build.rs, so this
-  # job needs no `build-wasm` artifact and does not depend on that job.
+  # which nothing else in CI compiles. Neither crate, nor impresspress-server
+  # (the native-boot step), has a build.rs, so this job needs no `build-wasm`
+  # artifact and does not depend on that job.
   test-postgres:
     name: Tests (postgres feature)
     runs-on: ubuntu-latest
@@ -401,6 +402,26 @@ jobs:
         env:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
         run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test postgres_migration_replay -- --ignored --nocapture
+
+      # A native boot over PostgreSQL applies a pending migration once and
+      # serves, refuses to start when one fails, and lets only one of two
+      # processes booting together apply a list — `start_native`, the boot
+      # `impresspress serve` runs, end to end. The test creates a database of
+      # its own per scenario from this server, so it leaves the replay
+      # step's database alone; the SQLite half of the same file runs in the
+      # main test job.
+      - name: A native boot over PostgreSQL applies pending migrations
+        env:
+          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
+        run: cargo test --locked -p impresspress-server --features impresspress-core/postgres,impresspress-native/postgres --test boot_migrations -- --ignored --nocapture
+
+      # The native migration lock on PostgreSQL is a session-level advisory
+      # lock: a second process waits, and a holder whose session ends learns
+      # the lock is lost while the server hands it to the waiter.
+      - name: The native migration lock holds on PostgreSQL
+        env:
+          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
+        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test migration_lock -- --ignored --nocapture
 
   cloudflare:
     name: Cloudflare wasm32 check

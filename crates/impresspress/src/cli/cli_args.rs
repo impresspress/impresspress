@@ -34,18 +34,13 @@ pub enum Command {
         release: bool,
 
         /// Override the listen port. Native: from .env. Web: defaults to 8080.
+        ///
+        /// Every target applies pending block migrations before it serves:
+        /// a native server at every boot (refusing to start if one fails),
+        /// `--target cloudflare` through the `/_deploy/init` funnel once
+        /// `wrangler dev` is reachable, `--target web` when the bundle loads.
         #[arg(long)]
         port: Option<u16>,
-
-        /// Apply pending block migrations on startup. Applies to `--target
-        /// native` only: blocks whose SQL hash has changed will be applied
-        /// and their blessed_hash updated. Safe to run on every deploy but
-        /// slower; omit once schema is stable.
-        /// `--target cloudflare` ignores this flag — local `wrangler dev`
-        /// always runs the `/_deploy/init` funnel (migrations + seeds) once
-        /// the dev server is reachable, same as a production deploy.
-        #[arg(long)]
-        run_migrations: bool,
     },
     /// Build the app and deploy it to the target's hosting environment.
     /// (v1: only `--target cloudflare` is supported.)
@@ -54,9 +49,9 @@ pub enum Command {
     /// authenticated `/_deploy/prepare` mutation funnel, then its strict plan
     /// is packaged with the exact same Wasm into a second candidate. Only the
     /// second version is promoted after mutation-free plan/asset/health
-    /// verification. There is no `--run-migrations` flag here (unlike
-    /// `serve`) — every deploy always runs the prepare funnel. A site's first
-    /// deploy also creates its Worker and sets its deploy secrets.
+    /// verification. Every deploy runs the prepare funnel, which applies
+    /// pending block migrations. A site's first deploy also creates its
+    /// Worker and sets its deploy secrets.
     Deploy {
         #[arg(long)]
         target: Option<Target>,

@@ -26,7 +26,7 @@
 -- product shares one key space. Repairing such a row to NULL pulls it back
 -- INTO the index, against a slug that may since have been taken.
 --
--- That failure is not survivable. `migration_helper::apply_if_blessed`
+-- That failure is not survivable. `migration_helper::apply_pending`
 -- tolerates only a duplicate `ALTER ... ADD COLUMN`, so a unique violation
 -- propagates, the migration hash is never stamped, and every later boot
 -- re-runs and re-fails. On Cloudflare `builder::strict_init_all_blocks`
@@ -60,11 +60,10 @@
 --
 -- Rename whichever product should not hold the slug, then Restore. Re-running
 -- this migration is not the remedy: once applied its hash is stamped and
--- `apply_if_blessed` short-circuits for good.
+-- `apply_pending` short-circuits for good.
 --
 -- RELEASE.md's "Upgrade Notes" carries the operator-facing version of all of
--- this, including the reason an existing deployment must be upgraded with
--- `--run-migrations` rather than without.
+-- this.
 --
 -- This is a ONE-TIME repair of historical rows, not a standing enforcement of
 -- the invariant. No new `''` can be written: `soft_delete` writes

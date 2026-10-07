@@ -417,19 +417,15 @@ impl AuthService for AuthServiceImpl {
         // service `init` needs an `AuthError` return shape, not the
         // `WaferError` that `migration_helper::lifecycle_init` produces — so
         // this calls the shared `apply_migrations` directly with the block's
-        // single-source migration consts.
-        let sqlite: Vec<&str> = super::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
+        // single-source migration consts. Its error already names the block.
         crate::migration_helper::apply_migrations(
             ctx,
             "wafer-run/auth",
-            &sqlite,
+            super::migrations::SQLITE_MIGRATIONS,
             super::migrations::POSTGRES_MIGRATIONS,
         )
         .await
-        .map_err(|e| AuthError::Internal(format!("auth migrations: {e}")))?;
+        .map_err(AuthError::Internal)?;
         let cfg = super::config::AuthConfig::from_ctx(ctx)
             .await
             .map_err(|e| backend_error(e, "auth init: config"))?;
@@ -609,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn init_applies_migrations_and_runs_bootstrap_on_fresh_ctx() {
         // Admin migrations are pre-applied so the `block_settings` tracking
-        // table exists — `apply_if_blessed` requires it to upsert the
+        // table exists — `apply_pending` requires it to upsert the
         // `current_hash` row. In production `register_all_static_blocks`
         // registers admin first, so its Init runs before auth's.
         let ctx = Arc::new(

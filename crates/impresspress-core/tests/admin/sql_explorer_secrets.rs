@@ -467,11 +467,6 @@ const CLEARED_COLUMNS: &[(&str, &str, &str)] = &[
     ),
     (
         "impresspress__admin__block_settings",
-        "blessed_hash",
-        "the migration digest an operator accepted",
-    ),
-    (
-        "impresspress__admin__block_settings",
         "seed_defaults_hash",
         "digest of the seed defaults already applied",
     ),

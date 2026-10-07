@@ -791,14 +791,10 @@ pub(super) async fn test_ctx() -> crate::test_support::TestContext {
     let ctx = crate::test_support::TestContext::with_admin()
         .await
         .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
-    let sqlite: Vec<&str> = migrations::SQLITE_MIGRATIONS
-        .iter()
-        .map(|(_, sql)| *sql)
-        .collect();
     crate::migration_helper::apply_migrations(
         &ctx,
         "impresspress/legalpages",
-        &sqlite,
+        migrations::SQLITE_MIGRATIONS,
         migrations::POSTGRES_MIGRATIONS,
     )
     .await

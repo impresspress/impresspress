@@ -99,8 +99,8 @@ pub(in crate::blocks::files) async fn handle_create_bucket(
     // warn-and-continue.
     //
     // By ROW ID, not by name. A name-scoped delete is only safe while the
-    // unique index exists, and a deployment that takes this code without
-    // `--run-migrations` has the handler but not the index: there a second
+    // unique index exists, and code running before migration 002 has been
+    // applied has the handler but not the index: there a second
     // user's create on a taken name still inserts, and rolling back by name
     // would delete the first owner's row too — trading the folder this
     // ordering protects for the row that lists it.
@@ -340,8 +340,8 @@ mod integration_tests {
 
     /// The rollback deletes the row it inserted, not every row with that name.
     ///
-    /// `RELEASE.md` anticipates a deployment that takes this code without
-    /// `--run-migrations`: the handler is there, the unique index is not, and
+    /// `RELEASE.md` anticipates code running before migration 002 has been
+    /// applied: the handler is there, the unique index is not, and
     /// a second user's create on a taken name still inserts. If the folder
     /// then fails, a name-scoped rollback would delete the FIRST owner's row
     /// too — their bucket disappears from every listing while their objects
