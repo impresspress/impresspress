@@ -126,7 +126,7 @@ async fn boot_first_run_ok_and_second_run_idempotent() {
         report.blocks
     );
 
-    // --- Stamp format: block_settings rows carry 64-hex current_hash == blessed_hash. ---
+    // --- Stamp format: block_settings rows carry a 64-hex current_hash, and no blessed_hash. ---
     let opts = wafer_block::db::ListOptions {
         limit: Some(10_000),
         skip_count: true,
@@ -155,9 +155,10 @@ async fn boot_first_run_ok_and_second_run_idempotent() {
         cur.chars().all(|c| c.is_ascii_hexdigit()),
         "current_hash must be hex: {cur}"
     );
-    assert_eq!(
-        admin_row.data["current_hash"],
-        admin_row.data["blessed_hash"]
+    assert!(
+        !admin_row.data.contains_key("blessed_hash"),
+        "the schema has no blessed_hash column: {:?}",
+        admin_row.data
     );
 
     // --- Idempotency: second run over the same DB, via a REBUILT runtime, is all-ok. ---

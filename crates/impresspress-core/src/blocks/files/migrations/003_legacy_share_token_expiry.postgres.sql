@@ -61,7 +61,7 @@
 --
 -- The column is TEXT in both dialects, so each cast to `timestamptz` is
 -- guarded by a shape check on `created_at`: an unparseable value would
--- abort the whole migration, and `apply_if_blessed` never stamps a
+-- abort the whole migration, and `apply_pending` never stamps a
 -- migration that failed, so every later boot would re-run and re-fail.
 
 -- Arm 1: minted while the JWT was signed for a year.

@@ -1,5 +1,5 @@
 -- Adds owner_id to messages contexts + entries (P0 #1 IDOR fix).
--- ALTER ADD COLUMN is idempotent under apply_if_blessed (tolerates the
+-- ALTER ADD COLUMN is idempotent under apply_pending (tolerates the
 -- duplicate-column error on re-run). Backfill existing rows: contexts from
 -- their historical sender_id; entries from their parent context's owner.
 ALTER TABLE impresspress__messages__contexts ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';

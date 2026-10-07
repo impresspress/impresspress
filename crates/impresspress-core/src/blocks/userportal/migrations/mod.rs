@@ -2,7 +2,7 @@
 //! via [`crate::migration_helper::lifecycle_init`].
 //!
 //! SQL files are embedded with `include_str!`. Backend dispatch + the
-//! `current_hash` / `blessed_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate live
+//! `current_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate live
 //! in [`crate::migration_helper::apply_migrations`].
 
 const SQL_001_SQLITE: &str = include_str!("001_userportal_schema.sqlite.sql");

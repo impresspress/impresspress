@@ -2,7 +2,7 @@
 //! then replayed over the result, through the runner a deployment uses.
 //!
 //! A block re-runs its WHOLE migration set whenever the hash of its joined
-//! SQL moves (`migration_helper::apply_if_blessed`), so every `.postgres.sql`
+//! SQL moves (`migration_helper::apply_pending`), so every `.postgres.sql`
 //! file has to succeed a second time over the schema it already built. A file
 //! that does not aborts the batch, the hash is never stamped, and every later
 //! boot re-runs and re-fails. Each migration's own tests cover what it does to

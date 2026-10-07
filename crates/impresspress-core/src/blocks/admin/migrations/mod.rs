@@ -2,7 +2,7 @@
 //! [`crate::migration_helper::lifecycle_init`].
 //!
 //! SQL files are embedded with `include_str!`. Backend dispatch + concat +
-//! the `current_hash` / `blessed_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate
+//! the `current_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate
 //! all live in [`crate::migration_helper::apply_migrations`]. Earlier
 //! versions of this module called `db::ddl` directly in a loop, bypassing
 //! the gate and re-running every DDL on every cold isolate (~2,800 D1
@@ -38,7 +38,7 @@ const SQL_002_POSTGRES: &str = include_str!("002_variables_block_column.postgres
 // 003 adds `block_settings.seed_defaults_hash`, which lets
 // `crate::blocks::admin::settings::seed_defaults` skip its bulk `variables`
 // read when the declared shared config has not changed since the last seed.
-// The gate is the same shape `crate::migration_helper::apply_if_blessed` uses
+// The gate is the same shape `crate::migration_helper::apply_pending` uses
 // for DDL: hash the payload, compare against the stored digest, return early
 // on a match. `seed_defaults` computes its side through `seed_payload_hash`
 // over `crate::config_vars::shared_config_vars()` and stamps the column on a

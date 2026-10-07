@@ -142,20 +142,24 @@ async fn boot(
     boot_block(
         database,
         storage_root,
-        Migrating {
+        Arc::new(Migrating {
             files,
             then_fail: None,
-        },
+        }),
     )
     .await
 }
 
 /// Start a server over `database` with `block` as its consumer block.
-async fn boot_block(database: &Database, storage_root: &str, block: Migrating) -> Boot {
+async fn boot_block(
+    database: &Database,
+    storage_root: &str,
+    block: Arc<dyn wafer_run::Block>,
+) -> Boot {
     let port = free_port();
     let infra = database.infra(port, storage_root);
     let hooks = AppHooks {
-        register_blocks: Box::new(move |builder| Ok(builder.extra_block(BLOCK, Arc::new(block)))),
+        register_blocks: Box::new(move |builder| Ok(builder.extra_block(BLOCK, block))),
         register_post_build: Box::new(|wafer, _storage| {
             wafer.add_flow_json(&format!(
                 r#"{{ "id": "{FLOW}", "name": "Test", "version": "0.1.0",
@@ -254,10 +258,7 @@ async fn failure_refuses_the_boot(database: &Database, storage_root: &str) {
         "{:#}",
         result.err().expect("a failed migration refuses the boot")
     );
-    assert!(
-        error.contains("refusing to start: migrations failed"),
-        "{error}"
-    );
+    assert!(error.contains("refusing to start"), "{error}");
     assert!(error.contains(&format!("`{BLOCK}`")), "{error}");
     assert!(
         error.contains("migration `002_broken` failed on"),
@@ -269,8 +270,8 @@ async fn failure_refuses_the_boot(database: &Database, storage_root: &str) {
     );
     assert_eq!(
         applied(database, BLOCK).await,
-        migration_helper::APPLYING,
-        "a failed list is recorded as still being applied, not as applied"
+        migration_helper::migration_set_hash(V1),
+        "a failed list is not recorded as applied"
     );
 
     let fixed = boot_and_serve(database, storage_root, V2).await;
@@ -281,37 +282,90 @@ async fn failure_refuses_the_boot(database: &Database, storage_root: &str) {
     );
 }
 
-/// Any other `Init` failure is tolerated, as it always was on native: the
-/// block's migrations applied, so the server starts and serves the rest.
+/// Any other `Init` failure refuses the boot too, after the block's
+/// migrations applied: a block whose `Init` failed stays failed until the
+/// process restarts.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_init_failure_after_the_migrations_is_tolerated() {
+async fn any_init_failure_refuses_the_boot() {
     let db = sqlite();
     let Boot { port, result } = boot_block(
         &db.database,
         &db.storage_root,
-        Migrating {
+        Arc::new(Migrating {
             files: V2,
             then_fail: Some("a setting this block cannot use"),
-        },
+        }),
     )
     .await;
-    let wafer = result.expect("a non-migration Init failure does not refuse the boot");
-    let mut listening = false;
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            listening = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(listening, "the server is listening");
-    wafer.shutdown().await;
+    let error = format!(
+        "{:#}",
+        result.err().expect("a failed Init refuses the boot")
+    );
+    assert!(error.contains("refusing to start"), "{error}");
+    assert!(error.contains("a setting this block cannot use"), "{error}");
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "a refused boot binds nothing"
+    );
     assert_eq!(
         applied(&db.database, BLOCK).await,
         migration_helper::migration_set_hash(V2)
+    );
+}
+
+/// A consumer block whose `Init` takes the boot's SQLite migration lease away
+/// from it — what a waiter that wrongly judged the holder dead does — and
+/// then keeps the boot busy past the next heartbeat.
+struct StealsTheLock {
+    database: Database,
+}
+
+#[wafer_block::wafer_async_trait]
+impl wafer_run::Block for StealsTheLock {
+    fn info(&self) -> wafer_run::BlockInfo {
+        wafer_run::BlockInfo::new(BLOCK, "0.0.1", "http-handler@v1", "steals the lock")
+    }
+
+    async fn lifecycle(&self, _ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
+        if event.event_type == wafer_run::LifecycleType::Init {
+            self.database
+                .open()
+                .await
+                .delete_where_count(impresspress_native::migration_lock::LEASE_TABLE, &[])
+                .await
+                .expect("take the lease away");
+            let lease = impresspress_native::migration_lock::Lease::DEFAULT;
+            tokio::time::sleep(lease.heartbeat * 2).await;
+        }
+        Ok(())
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(ANSWER.as_bytes().to_vec())
+    }
+}
+
+/// A boot whose lease is taken while it applies migrations stops: past that
+/// point another process may be applying the same lists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_boot_that_loses_the_lock_stops() {
+    let db = sqlite();
+    let Boot { port, result } = boot_block(
+        &db.database,
+        &db.storage_root,
+        Arc::new(StealsTheLock {
+            database: db.database.clone(),
+        }),
+    )
+    .await;
+    let error = format!("{:#}", result.err().expect("a lost lock stops the boot"));
+    assert!(
+        error.contains("lost the database's migration lock"),
+        "{error}"
+    );
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "a stopped boot binds nothing"
     );
 }
 
@@ -495,7 +549,18 @@ async fn the_same_holds_on_postgres() {
         let (base, _) = url.rsplit_once('/').expect("a database URL");
         let database = Database::Postgres(format!("{base}/{name}"));
         match scenario {
-            "upgrade" => upgrade_applies_once(&database, &storage_root).await,
+            "upgrade" => {
+                upgrade_applies_once(&database, &storage_root).await;
+                // Every block migrates in the PostgreSQL dialect, admin's
+                // `Init` included: it agrees with the list the server applied
+                // before the build, so it recorded that list's hash.
+                assert_eq!(
+                    applied(&database, impresspress_core::blocks::admin::ADMIN_BLOCK_ID).await,
+                    migration_helper::migration_set_hash(
+                        impresspress_core::blocks::admin::migrations::migration_files("postgres")
+                    ),
+                );
+            }
             "failure" => {
                 boot_and_serve(&database, &storage_root, V1)
                     .await

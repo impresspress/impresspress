@@ -26,7 +26,7 @@ pub const TEST_MASTER_SECRET: &str = "test-jwt-secret-padded-to-min-32-bytes-aaa
 pub const TEST_ISSUER: &str = "http://localhost:5173";
 
 /// A fixture with admin's migrations applied — the tracking table every
-/// other block's `apply_if_blessed` upserts into, which production creates
+/// other block's `apply_pending` upserts into, which production creates
 /// first — a real crypto block over [`TEST_MASTER_SECRET`], and that secret
 /// as the JWT master, running as `block`.
 ///

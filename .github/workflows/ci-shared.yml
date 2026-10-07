@@ -415,6 +415,14 @@ jobs:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
         run: cargo test --locked -p impresspress-server --features impresspress-core/postgres,impresspress-native/postgres --test boot_migrations -- --ignored --nocapture
 
+      # The native migration lock on PostgreSQL is a session-level advisory
+      # lock: a second process waits, and a holder whose session ends learns
+      # the lock is lost while the server hands it to the waiter.
+      - name: The native migration lock holds on PostgreSQL
+        env:
+          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
+        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test migration_lock -- --ignored --nocapture
+
   cloudflare:
     name: Cloudflare wasm32 check
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`

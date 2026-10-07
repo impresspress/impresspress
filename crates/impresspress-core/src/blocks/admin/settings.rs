@@ -368,7 +368,7 @@ pub async fn seed_defaults(ctx: &dyn Context) {
     // the admin block already matches the current declared-vars hash, every
     // shared var was seeded against the same metadata last time — there is
     // no outcome change possible and we can skip the entire seed (zero D1
-    // queries). Mirrors `migration_helper::apply_if_blessed`'s gate; reads
+    // queries). Mirrors `migration_helper::apply_pending`'s gate; reads
     // the same in-memory snapshot the migration helper does, so warm cold
     // starts cost zero round-trips. See 2026-05-14 config-snapshot spec
     // § "Hash-gate seed_defaults like migrations" (PR 3).

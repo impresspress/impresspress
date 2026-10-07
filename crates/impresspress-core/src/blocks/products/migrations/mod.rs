@@ -7,9 +7,9 @@
 //! (`sqlite` | `postgres`). Falls back to `sqlite` when the config block
 //! is not registered.
 //!
-//! Application is gated by [`crate::migration_helper::apply_if_blessed`]:
+//! Application is gated by [`crate::migration_helper::apply_pending`]:
 //! the helper handles statement splitting + the `current_hash` /
-//! `blessed_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate, and stamps a row in
+//! `IMPRESSPRESS_RUN_MIGRATIONS` gate, and stamps a row in
 //! `impresspress__admin__block_settings` once applied.
 
 const SQL_001_SQLITE: &str = include_str!("001_products_schema.sqlite.sql");
@@ -69,12 +69,6 @@ const SQL_018_POSTGRES: &str = include_str!("018_provider_operation_leases.postg
 const SQL_019_SQLITE: &str = include_str!("019_offer_draft_revision.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_019_POSTGRES: &str = include_str!("019_offer_draft_revision.postgres.sql");
-// 020's header (both dialects) ends by pointing at RELEASE.md for "the reason
-// an existing deployment must be upgraded with `--run-migrations`". That flag
-// is gone: a native server applies pending migrations at every boot, as a
-// Cloudflare deploy always has, so no upgrade can skip 020. The header is left
-// as shipped — see `crate::migration_helper`'s "A shipped .sql file is
-// immutable, comments included".
 const SQL_020_SQLITE: &str = include_str!("020_normalize_blank_deleted_at.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_020_POSTGRES: &str = include_str!("020_normalize_blank_deleted_at.postgres.sql");
@@ -489,7 +483,7 @@ mod strict_upgrade_tests {
     ///
     /// An unguarded `UPDATE … SET deleted_at = NULL` raises `UNIQUE
     /// constraint failed` there, and that is fatal rather than tolerated:
-    /// `migration_helper::apply_if_blessed` forgives only a duplicate
+    /// `migration_helper::apply_pending` forgives only a duplicate
     /// `ALTER … ADD COLUMN`, so the error propagates, `write_state` never
     /// stamps the hash, and every later boot re-runs and re-fails. On
     /// Cloudflare `builder::InitPolicy::Strict` turns a block Init failure

@@ -1,7 +1,7 @@
 //! LLM block migrations. Applied from the block's `Init` lifecycle.
 //!
 //! SQL files are embedded with `include_str!`. Backend dispatch + the
-//! `current_hash` / `blessed_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate live
+//! `current_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate live
 //! in [`crate::migration_helper::apply_migrations`]. Replaces the implicit
 //! `ensure_table` materialisation that previously created these tables on
 //! first insert (TEXT-only columns, no indexes — see impresspress
@@ -35,7 +35,7 @@ const SQL_002_POSTGRES: &str = include_str!("002_provider_max_tokens_field.postg
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 ///
 /// Application is gated by the shared migration-state gate
-/// ([`crate::migration_helper::apply_if_blessed`]): idempotent across cold
+/// ([`crate::migration_helper::apply_pending`]): idempotent across cold
 /// starts, and a changed list is applied by the next deploy or boot (native:
 /// every boot; Cloudflare: the `/_deploy/init` funnel on every deploy).
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
@@ -120,7 +120,7 @@ mod tests {
     /// 002 adds the budget-field column and nothing else, on both dialects.
     ///
     /// One statement each: the postgres file spells `IF NOT EXISTS` (which
-    /// that dialect supports), SQLite relies on `apply_if_blessed`'s
+    /// that dialect supports), SQLite relies on `apply_pending`'s
     /// duplicate-column tolerance, which only covers `ALTER TABLE … ADD
     /// COLUMN`.
     #[test]

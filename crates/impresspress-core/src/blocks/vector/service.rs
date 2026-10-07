@@ -41,7 +41,7 @@ pub const TABLE_PREFIX: &str = "impresspress__vector__";
 /// without spelunking through DDL on every query.
 ///
 /// Schema lives in `migrations/001_vector_schema.{sqlite,postgres}.sql` and
-/// is applied at block Init via `apply_if_blessed`. The column layout is:
+/// is applied at block Init via `apply_pending`. The column layout is:
 /// `(prefixed_name TEXT PK, model TEXT, dimensions INTEGER,
 /// keyword_search INTEGER)`.
 pub(crate) const REGISTRY_TABLE: &str = "impresspress__vector__registry";

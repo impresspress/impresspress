@@ -20,8 +20,8 @@ use std::{collections::HashMap, error::Error, path::Path, sync::Arc};
 use anyhow::{anyhow, Context};
 use impresspress_core::builder::{self, ImpresspressBuilder};
 use impresspress_native::{
-    collect_app_env_vars, init_tracing, load_dotenv, register_http_listener,
-    register_observability_hooks, serve_until_shutdown, InfraConfig,
+    collect_app_env_vars, init_tracing, load_dotenv, migration_lock::MigrationLock,
+    register_http_listener, register_observability_hooks, serve_until_shutdown, InfraConfig,
 };
 use impresspress_password::pepper::{self as password_pepper, PasswordPeppers};
 use wafer_core::interfaces::{
@@ -68,8 +68,6 @@ pub const IMPRESSPRESS_LISTENER_FLOW: &str = "site-main";
 
 mod declared_keys;
 pub use declared_keys::filter_to_declared_keys;
-
-pub mod migration_lock;
 
 /// Boot the native server end-to-end and serve until shutdown.
 ///
@@ -153,9 +151,10 @@ pub async fn run(repo_root: &Path, listener_flow: &str, hooks: AppHooks) -> anyh
 ///
 /// Building and booting is where the database's pending migrations are
 /// applied — admin's pre-build, every other block's at its `Init` — so this
-/// process holds the database's [`migration_lock::MigrationLock`] from
-/// before the first of them until the boot has run, and a second process
-/// booting against the same database waits for it. Nothing binds the socket
+/// process holds the database's [`MigrationLock`] from before the first of
+/// them until the boot has run, and a second process booting against the
+/// same database waits for it. A boot that loses the lock part-way stops
+/// there and refuses to start. Nothing binds the socket
 /// until [`boot_native`] has succeeded: a failed migration is a refused
 /// start, never a server answering requests on a half-migrated schema.
 pub async fn start_native(
@@ -166,18 +165,23 @@ pub async fn start_native(
     listener_flow: &str,
     hooks: AppHooks,
 ) -> anyhow::Result<Arc<Wafer>> {
-    let lock = migration_lock::MigrationLock::acquire(&database)
+    let lock = MigrationLock::acquire(infra, &database)
         .await
         .context("take the database's migration lock")?;
-    let booted = build_and_boot(
-        infra,
-        database,
-        app_env,
-        password_peppers,
-        listener_flow,
-        hooks,
-    )
-    .await;
+    let booted = tokio::select! {
+        booted = build_and_boot(
+            infra,
+            database,
+            app_env,
+            password_peppers,
+            listener_flow,
+            hooks,
+        ) => booted,
+        () = lock.lost() => Err(anyhow!(
+            "refusing to start: this process lost the database's migration lock while \
+             applying migrations, so another process may be applying them too"
+        )),
+    };
     // Released whether or not the boot succeeded; a boot that failed reports
     // its own error first.
     let released = lock.release().await;
@@ -226,7 +230,7 @@ async fn build_and_boot(
     //     socket — the steps `boot` deliberately omits because the stateless
     //     targets dispatch per-request instead of binding (wafer-run #239
     //     exposed them as `run_start_lifecycle` + `bind_all`).
-    boot_native(&mut wafer, &database).await?;
+    boot_native(&mut wafer).await?;
     Ok(wafer)
 }
 
@@ -327,7 +331,7 @@ pub async fn build_native_runtime(
     // 7. Assemble both config surfaces once. `EnvConfigService` is the async
     // (`wafer-run/config`) read surface; the snapshot the builder installs is
     // the synchronous `ctx.config_get` surface. They must carry the same data
-    // so `migration_helper::apply_if_blessed` (which reads
+    // so `migration_helper::apply_pending` (which reads
     // `BLOCK_SETTINGS_CONFIG_KEY` + `IMPRESSPRESS_RUN_MIGRATIONS` via
     // `config_get`) sees the boot values without a per-call DB hop.
     // Native has no divergence: every key below is `both`.
@@ -502,41 +506,25 @@ pub fn password_peppers_from_env(
     .map_err(|e| anyhow!("{e}"))
 }
 
-/// The block a native server cannot run without: it binds the socket every
-/// request arrives on.
-const LISTENER_BLOCK: &str = "wafer-run/http-listener";
-
-/// Boot the native runtime through the shared funnel, tolerantly, and refuse
-/// a boot whose HTTP listener did not initialize or in which a block's
-/// migrations failed.
+/// Boot the native runtime through the shared funnel, and refuse a boot in
+/// which any block failed to initialize.
 ///
-/// Tolerant, because a long-lived server can be inspected and fixed in place,
-/// so one broken feature block must not wedge the whole process. Two failures
-/// are the exception:
-///
-/// - **The listener.** Its `Init` validates its settings (the
-///   `IMPRESSPRESS_*` listener variables among them), and a listener that
-///   failed it binds nothing — a process that went on would report itself
-///   started and serve no request.
-/// - **A migration.** Every block applies its pending migrations at `Init`;
-///   one whose list failed has a half-applied schema, and a server that went
-///   on would answer requests against tables that do not match its code — the
-///   rule a Cloudflare deploy applies when its `/_deploy/prepare` report is
-///   not all-ok. Such a block is told from any other `Init` failure by its
-///   `block_settings` row, which still holds
-///   [`migration_helper::APPLYING`](impresspress_core::migration_helper::APPLYING)
-///   (read from `database`, after the boot). The error names each such block
-///   with its own error, which names the file and the statement the database
-///   refused; the next boot re-runs the list.
+/// The rule a Cloudflare deploy applies to its `/_deploy/prepare` report:
+/// every block's `Init` — where it applies its pending migrations — has to
+/// succeed before the server takes a request. A failed migration leaves its
+/// block's schema half-applied and unrecorded, so a server that went on would
+/// answer requests against tables that do not match its code; a listener that
+/// failed its `Init` binds nothing; any other block that failed is unusable
+/// until the process restarts, because a failed `Init` stays failed. The error
+/// lists every block that failed with its own error, which for a migration
+/// names the file and the statement the database refused; the next boot
+/// re-runs that block's list.
 ///
 /// `build_native_runtime` reads the admin-created grants from the platform
 /// database and hands them to `ImpresspressBuilder::wrap_grants` before
 /// `build()`, because native seeds and reads everything pre-wafer: the grants
 /// are `PreInstalled`.
-pub async fn boot_native(
-    wafer: &mut Wafer,
-    database: &Arc<dyn DatabaseService>,
-) -> anyhow::Result<builder::BootReport> {
+pub async fn boot_native(wafer: &mut Wafer) -> anyhow::Result<builder::BootReport> {
     let report = builder::boot(
         wafer,
         &NativeBootHooks,
@@ -544,34 +532,17 @@ pub async fn boot_native(
             "build_native_runtime loads them from the platform database into \
              ImpresspressBuilder::wrap_grants before build()",
         ),
-        builder::InitPolicy::Tolerant,
+        builder::InitPolicy::Reported,
     )
     .await
     .context("boot WAFER runtime")?;
-    if let Some(listener) = report
-        .blocks
-        .iter()
-        .find(|outcome| outcome.block == LISTENER_BLOCK && !outcome.ok)
-    {
-        return Err(anyhow!(
-            "the HTTP listener did not start, so the server would serve nothing: {}",
-            listener.error.as_deref().unwrap_or("its Init failed")
-        ));
-    }
     if report.ok {
         return Ok(report);
     }
-    let settings = impresspress_core::platform_state::block_settings::load(database)
-        .await
-        .map_err(|e| anyhow!("read which blocks' migrations failed: {e}"))?;
-    let failed_migrations: Vec<String> = report
+    let mut failures: Vec<String> = report
         .blocks
         .iter()
-        .filter(|outcome| {
-            !outcome.ok
-                && settings.state(&outcome.block).migration.current_hash
-                    == impresspress_core::migration_helper::APPLYING
-        })
+        .filter(|outcome| !outcome.ok)
         .map(|outcome| {
             format!(
                 "`{}`: {}",
@@ -580,13 +551,13 @@ pub async fn boot_native(
             )
         })
         .collect();
-    if failed_migrations.is_empty() {
-        return Ok(report);
+    if let Some(error) = report.seed.error.as_deref() {
+        failures.push(format!("seed: {error}"));
     }
     Err(anyhow!(
-        "refusing to start: migrations failed, and the server would serve on a schema that \
-         does not match its code:\n  {}",
-        failed_migrations.join("\n  ")
+        "refusing to start: the server would serve blocks that did not initialize. \
+         Failed:\n  {}",
+        failures.join("\n  ")
     ))
 }
 

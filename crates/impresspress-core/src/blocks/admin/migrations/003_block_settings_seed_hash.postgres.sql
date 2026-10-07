@@ -2,7 +2,7 @@
 --
 -- Adds a `seed_defaults_hash` column to impresspress__admin__block_settings
 -- so `admin::settings::seed_defaults` can hash-gate itself the same way
--- `migration_helper::apply_if_blessed` gates DDL.
+-- `migration_helper::apply_pending` gates DDL.
 --
 -- Spec: docs/superpowers/specs/2026-05-14-config-snapshot-and-migration-gate-design.md
 --       § "Hash-gate seed_defaults like migrations" (PR 3)

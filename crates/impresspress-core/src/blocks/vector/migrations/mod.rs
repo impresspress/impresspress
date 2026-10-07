@@ -4,7 +4,7 @@
 //! `WAFER_RUN_SHARED__DATABASE__BACKEND` from the config snapshot, fall back
 //! to `sqlite` when the config block is not registered. The actual apply +
 //! gating + statement splitting lives in
-//! [`crate::migration_helper::apply_if_blessed`].
+//! [`crate::migration_helper::apply_pending`].
 //!
 //! Scope: only the static `impresspress__vector__registry` catalog. Per-index
 //! storage tables (`{prefixed}_meta`, `{prefixed}_fts`, vec0 virtual) are

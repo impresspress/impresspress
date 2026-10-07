@@ -1,5 +1,5 @@
 //! `impresspress__admin__block_settings`: one row per block — its `enabled`
-//! flag, the migration hashes that gate `migration_helper::apply_if_blessed`,
+//! flag, the migration hashes that gate `migration_helper::apply_pending`,
 //! and the `seed_defaults_hash` that gates both the boot-time enablement
 //! seed ([`crate::features::plan_seed_decisions`]) and admin's shared-variable
 //! seed.
@@ -43,8 +43,6 @@ pub struct BlockSettingsRow {
     pub enabled: bool,
     /// SHA-256 hex of the migration SQL that has been applied; empty = never.
     pub current_hash: String,
-    /// SHA-256 hex of the migration SQL the operator has blessed; empty = never.
-    pub blessed_hash: String,
     /// `"seed:<hex>"` for a seed-managed row, [`USER_EDITED_SENTINEL`] for an
     /// admin-UI toggle, the shared-vars payload hash on admin's own row, empty
     /// for a legacy row (migration 003).
@@ -69,7 +67,6 @@ impl BlockSettingsRow {
             block_name: block_name.to_string(),
             enabled: data.bool_field("enabled"),
             current_hash: data.str_field("current_hash").to_string(),
-            blessed_hash: data.str_field("blessed_hash").to_string(),
             seed_defaults_hash: data.str_field("seed_defaults_hash").to_string(),
             created_at: data.str_field("created_at").to_string(),
             updated_at: data.str_field("updated_at").to_string(),
@@ -83,7 +80,6 @@ impl BlockSettingsRow {
         data.insert("block_name".to_string(), json!(self.block_name));
         data.insert("enabled".to_string(), json!(i64::from(self.enabled)));
         data.insert("current_hash".to_string(), json!(self.current_hash));
-        data.insert("blessed_hash".to_string(), json!(self.blessed_hash));
         data.insert(
             "seed_defaults_hash".to_string(),
             json!(self.seed_defaults_hash),
@@ -99,7 +95,6 @@ impl BlockSettingsRow {
             enabled: self.enabled,
             migration: MigrationState {
                 current_hash: self.current_hash.clone(),
-                blessed_hash: self.blessed_hash.clone(),
             },
             seed_defaults_hash: self.seed_defaults_hash.clone(),
         }
@@ -112,7 +107,6 @@ impl BlockSettingsRow {
 pub struct BlockSettingsPatch {
     pub enabled: Option<bool>,
     pub current_hash: Option<String>,
-    pub blessed_hash: Option<String>,
     pub seed_defaults_hash: Option<String>,
 }
 
@@ -125,9 +119,6 @@ impl BlockSettingsPatch {
         }
         if let Some(current_hash) = &self.current_hash {
             data.insert("current_hash".to_string(), json!(current_hash));
-        }
-        if let Some(blessed_hash) = &self.blessed_hash {
-            data.insert("blessed_hash".to_string(), json!(blessed_hash));
         }
         if let Some(seed_defaults_hash) = &self.seed_defaults_hash {
             data.insert("seed_defaults_hash".to_string(), json!(seed_defaults_hash));
@@ -147,7 +138,6 @@ impl BlockSettingsPatch {
             block_name: block_name.to_string(),
             enabled: self.enabled.unwrap_or(true),
             current_hash: self.current_hash.unwrap_or_default(),
-            blessed_hash: self.blessed_hash.unwrap_or_default(),
             seed_defaults_hash: self.seed_defaults_hash.unwrap_or_default(),
             created_at: now.clone(),
             updated_at: now,
@@ -470,7 +460,7 @@ pub async fn set_enabled(
 /// (`enabled = true`) when absent and preserving every column the patch
 /// leaves unset otherwise.
 ///
-/// Shared by `migration_helper::record` (the migration hash columns),
+/// Shared by `migration_helper::record_applied` (the migration hash column),
 /// `admin::settings::seed_defaults` (`seed_defaults_hash`) and
 /// [`set_enabled`], so every writer goes through the same
 /// single-row-per-block primitive.
@@ -518,7 +508,6 @@ mod tests {
             BlockSettingsPatch {
                 enabled: Some(false),
                 current_hash: Some("cur".to_string()),
-                blessed_hash: Some("bless".to_string()),
                 seed_defaults_hash: Some("seed:abc".to_string()),
             },
         )
@@ -538,7 +527,6 @@ mod tests {
         assert_eq!(row.block_name, "impresspress/probe");
         assert!(!row.enabled);
         assert_eq!(row.current_hash, "cur");
-        assert_eq!(row.blessed_hash, "bless");
         assert_eq!(row.seed_defaults_hash, "seed:abc");
         assert!(!row.created_at.is_empty());
         assert_eq!(row.created_at, row.updated_at);
@@ -550,7 +538,6 @@ mod tests {
         let state = row.state();
         assert!(!state.enabled);
         assert_eq!(state.migration.current_hash, "cur");
-        assert_eq!(state.migration.blessed_hash, "bless");
         assert_eq!(state.seed_defaults_hash, "seed:abc");
     }
 

@@ -605,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn init_applies_migrations_and_runs_bootstrap_on_fresh_ctx() {
         // Admin migrations are pre-applied so the `block_settings` tracking
-        // table exists — `apply_if_blessed` requires it to upsert the
+        // table exists — `apply_pending` requires it to upsert the
         // `current_hash` row. In production `register_all_static_blocks`
         // registers admin first, so its Init runs before auth's.
         let ctx = Arc::new(

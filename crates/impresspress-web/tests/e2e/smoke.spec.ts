@@ -357,8 +357,8 @@ test('a changed migration applies once, and a restart re-runs nothing', async ({
 
   await stopWorkers(page);
   const fresh = await onStoredDatabase(page, [
-    `UPDATE impresspress__admin__block_settings SET current_hash = 'older-bundle', ` +
-      `blessed_hash = 'older-bundle' WHERE block_name = '${ADMIN}'`,
+    `UPDATE impresspress__admin__block_settings SET current_hash = 'older-bundle' ` +
+      `WHERE block_name = '${ADMIN}'`,
     `DROP INDEX ${MARKER_INDEX}`,
   ]);
   expect(fresh).toEqual({ hash: 'older-bundle', markerIndex: false });

@@ -109,7 +109,6 @@ CREATE TABLE IF NOT EXISTS impresspress__admin__block_settings (
     block_name    TEXT NOT NULL UNIQUE,
     enabled       INTEGER NOT NULL DEFAULT 1,
     current_hash  TEXT NOT NULL DEFAULT '',
-    blessed_hash  TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );

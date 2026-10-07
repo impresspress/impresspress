@@ -14,6 +14,7 @@ pub mod env;
 pub mod hooks;
 pub mod log_init;
 pub mod logger;
+pub mod migration_lock;
 pub mod network;
 pub mod serve;
 pub mod storage;

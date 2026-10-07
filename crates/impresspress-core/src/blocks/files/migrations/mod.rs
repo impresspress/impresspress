@@ -62,7 +62,7 @@ const SQL_003_POSTGRES: &str = include_str!("003_legacy_share_token_expiry.postg
 // value.
 //
 // Re-running is harmless on every backend: `ADD COLUMN IF NOT EXISTS` on
-// PostgreSQL, and on SQLite/D1 the duplicate-column error `apply_if_blessed`
+// PostgreSQL, and on SQLite/D1 the duplicate-column error `apply_pending`
 // tolerates for an `ALTER TABLE … ADD COLUMN`. What shipping it re-runs — the
 // whole set, 001 onwards, over live rows — is pinned by `replay_tests` below.
 //
@@ -97,7 +97,7 @@ const SQL_004_POSTGRES: &str = include_str!("004_object_claim_id.postgres.sql");
 //
 // Re-running is harmless on every backend, for the reason 004's is: `ADD
 // COLUMN IF NOT EXISTS` on PostgreSQL, and on SQLite/D1 the duplicate-column
-// error `apply_if_blessed` tolerates for an `ALTER TABLE … ADD COLUMN`. The
+// error `apply_pending` tolerates for an `ALTER TABLE … ADD COLUMN`. The
 // replay of the whole set is pinned by `replay_tests` below. A native
 // deployment that has not run it still uploads while strict schema is off,
 // through the same lazy column-add `uploads_work_before_migration_005_has_run`
@@ -112,7 +112,7 @@ const SQL_005_POSTGRES: &str = include_str!("005_object_blob_key.postgres.sql");
 // period, so `QuotaConfig`, the admin quota PATCH whitelist
 // (`cloud::handle_update_quota`) and the published contract do not carry it.
 // The column stays because `DROP COLUMN` is unsafe under this block's runner:
-// `apply_if_blessed` re-runs the whole joined migration SQL whenever its hash
+// `apply_pending` re-runs the whole joined migration SQL whenever its hash
 // changes and tolerates only a duplicate `ADD COLUMN`, so a `DROP COLUMN`
 // would fail with "no such column" on the next re-run on SQLite/D1 and fail
 // the block's `Init`. A table rebuild (create, copy, drop, rename) can be
@@ -175,7 +175,7 @@ mod tests {
     /// table, so the `DELETE` never has a duplicate to find and a SQL error
     /// in it would go unnoticed until a real deployment tried to upgrade —
     /// where it fails the whole batch, leaves the index uncreated, and
-    /// re-fails on every later boot (`apply_if_blessed` tolerates only a
+    /// re-fails on every later boot (`apply_pending` tolerates only a
     /// duplicate `ALTER … ADD COLUMN`).
     ///
     /// So this applies 001 alone, plants the takeover the index exists to
@@ -251,7 +251,7 @@ mod tests {
 mod replay_tests {
     //! What re-running this block's migrations does to a live deployment.
     //!
-    //! `apply_if_blessed` hashes the JOINED text of every file, so shipping
+    //! `apply_pending` hashes the JOINED text of every file, so shipping
     //! any new migration — 004 included — re-runs 001 onwards on the next
     //! deploy or boot, over whatever the tables hold. For auth that
     //! re-run signs every user out (its 004 drops the refresh-token table);
@@ -656,11 +656,11 @@ mod legacy_share_expiry_tests {
 
     /// Running the repair's statements a second time moves nothing.
     ///
-    /// The second pass has to be forced: `apply_if_blessed` short-circuits
+    /// The second pass has to be forced: `apply_pending` short-circuits
     /// on an unchanged hash, so calling `apply_migrations` twice would
     /// execute the SQL once and prove nothing. Running it under a second
     /// migration-state key gives the statements a fresh state to run
-    /// against — the same thing a re-blessed redeploy does — and the rows
+    /// against — the same thing a changed list's redeploy does — and the rows
     /// are what is asserted either way.
     #[tokio::test]
     async fn the_repair_is_idempotent() {

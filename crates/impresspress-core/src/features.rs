@@ -69,15 +69,13 @@ pub struct BlockState {
     pub seed_defaults_hash: String,
 }
 
-/// Hashes that gate `migration_helper::apply_if_blessed`.
+/// The migration state `migration_helper::apply_pending` gates on.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MigrationState {
-    /// SHA-256 hex of the SQL bytes that have been applied. Empty = never.
+    /// SHA-256 hex of the migration list that has been applied. Empty =
+    /// never.
     #[serde(default)]
     pub current_hash: String,
-    /// SHA-256 hex of the SQL bytes the operator has blessed. Empty = never.
-    #[serde(default)]
-    pub blessed_hash: String,
 }
 
 fn default_true() -> bool {
@@ -190,7 +188,7 @@ impl BlockSettings {
     /// Look up a single block's [`BlockState`] from the JSON produced by
     /// [`Self::to_config_json`] without materializing every entry.
     ///
-    /// Used by `migration_helper::apply_if_blessed` — called once per block
+    /// Used by `migration_helper::apply_pending` — called once per block
     /// per startup, on a payload that grows linearly with installed blocks.
     /// Walks the JSON's top-level object until the key matches, then
     /// deserializes only that entry. Returns the default when the key is
@@ -423,7 +421,6 @@ mod block_settings_tests {
                 enabled: true,
                 migration: MigrationState {
                     current_hash: "cur".to_string(),
-                    blessed_hash: "bless".to_string(),
                 },
                 seed_defaults_hash: "seed:abc".to_string(),
             },
@@ -435,7 +432,6 @@ mod block_settings_tests {
         let state = settings.state("impresspress/files");
         assert!(!state.enabled);
         assert_eq!(state.migration.current_hash, "cur");
-        assert_eq!(state.migration.blessed_hash, "bless");
         assert_eq!(state.seed_defaults_hash, "seed:abc");
     }
 
