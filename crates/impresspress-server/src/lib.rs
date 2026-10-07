@@ -165,7 +165,7 @@ pub async fn start_native(
     listener_flow: &str,
     hooks: AppHooks,
 ) -> anyhow::Result<Arc<Wafer>> {
-    let lock = MigrationLock::acquire(infra, &database)
+    let lock = MigrationLock::acquire(infra)
         .await
         .context("take the database's migration lock")?;
     let booted = tokio::select! {

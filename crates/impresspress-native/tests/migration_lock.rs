@@ -1,134 +1,145 @@
 //! The migration lock a native boot holds while it applies migrations: a
-//! second process waits for it, a holder that died is taken over (SQLite
-//! lease) or released by the server (PostgreSQL session), and a holder that
-//! can no longer show it holds the lock is told so.
+//! second process waits for it, and a holder that dies frees it — the kernel
+//! closes a SQLite holder's lock file, the server ends a PostgreSQL holder's
+//! session — with no take-over and no time-out.
 //!
-//! The SQLite tests run everywhere, with a short [`Lease`] so a take-over
-//! takes a fraction of a second. The PostgreSQL one needs a server, so it is
+//! The SQLite tests run everywhere. The one for a killed holder kills a real
+//! process: it runs this test binary again as the holder
+//! ([`hold_the_lock_until_killed`], which does nothing unless the parent
+//! names a lock file for it). The PostgreSQL test needs a server, so it is
 //! `#[ignore]`d; CI's `test-postgres` job runs it with
 //! `IMPRESSPRESS_TEST_POSTGRES_URL` naming a database.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
-
-use impresspress_native::migration_lock::{Lease, MigrationLock, LEASE_TABLE};
-use serde_json::json;
-use wafer_core::interfaces::database::service::DatabaseService;
-
-const SHORT: Lease = Lease {
-    heartbeat: Duration::from_millis(100),
-    stale_after: Duration::from_millis(600),
-    poll: Duration::from_millis(50),
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
-fn sqlite(dir: &tempfile::TempDir) -> Arc<dyn DatabaseService> {
-    impresspress_native::make_sqlite_database_service(
+use impresspress_native::migration_lock::{sqlite_lock_path, MigrationLock};
+
+/// The env var naming the lock file the child holder takes.
+const HOLD_VAR: &str = "IMPRESSPRESS_TEST_HOLD_MIGRATION_LOCK";
+
+fn lock_path(dir: &tempfile::TempDir) -> PathBuf {
+    sqlite_lock_path(
         dir.path()
             .join("lock.sqlite3")
             .to_str()
             .expect("utf-8 path"),
     )
-    .expect("open sqlite")
 }
 
-/// A second process waits while the first holds the lease, and gets it once
+/// Whether some process holds the lock on `path` right now.
+fn is_held(path: &Path) -> bool {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .expect("open the lock file");
+    match file.try_lock() {
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(e)) => panic!("probe the lock: {e}"),
+    }
+}
+
+/// The holder process, killed when dropped — so a failing assertion never
+/// leaves it running and holding the lock.
+struct Holder(std::process::Child);
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A second process waits while the first holds the lock, and gets it once
 /// the first releases it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_process_waits_for_the_lease() {
+async fn a_second_process_waits_until_the_first_releases() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let first = MigrationLock::acquire_lease(&sqlite(&dir), SHORT)
+    let path = lock_path(&dir);
+    let first = MigrationLock::acquire_file(path.clone())
         .await
-        .expect("the first process takes the lease");
-    let second_db = sqlite(&dir);
-    let second = tokio::spawn(async move { MigrationLock::acquire_lease(&second_db, SHORT).await });
-    tokio::time::sleep(SHORT.stale_after * 2).await;
-    assert!(
-        !second.is_finished(),
-        "a holder that keeps beating keeps the lease"
-    );
+        .expect("the first process takes the lock");
+    let second_path = path.clone();
+    let second = tokio::spawn(async move { MigrationLock::acquire_file(second_path).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!second.is_finished(), "the second process waits");
     first.release().await.expect("release");
     let second = tokio::time::timeout(Duration::from_secs(5), second)
         .await
-        .expect("the second process gets the lease once it is released")
+        .expect("the second process gets the lock once it is released")
         .expect("join")
         .expect("acquire");
     second.release().await.expect("release");
 }
 
-/// A holder that died mid-boot — its row is there, its heartbeat never moves
-/// — is taken over once a waiter has watched it stand still for
-/// `stale_after`.
+/// A holder that is killed mid-boot frees the lock: the kernel closes its
+/// file, and the waiter gets it at once.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dead_holders_lease_is_taken_over() {
+async fn a_killed_holder_frees_the_lock() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = sqlite(&dir);
-    // A first process claimed the lease and died: the row is there, and its
-    // heartbeat never moves. (One acquire and release creates the table.)
-    MigrationLock::acquire_lease(&db, SHORT)
+    let path = lock_path(&dir);
+    let mut holder = Holder(
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "hold_the_lock_until_killed",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(HOLD_VAR, &path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start the holder process"),
+    );
+    let mut waited = Duration::ZERO;
+    while !is_held(&path) {
+        assert!(
+            waited < Duration::from_secs(10),
+            "the holder never took the lock"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        waited += Duration::from_millis(50);
+    }
+
+    let waiter_path = path.clone();
+    let waiter = tokio::spawn(async move { MigrationLock::acquire_file(waiter_path).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !waiter.is_finished(),
+        "the waiter waits while the holder lives"
+    );
+
+    holder.0.kill().expect("kill the holder");
+    holder.0.wait().expect("reap the holder");
+    tokio::time::timeout(Duration::from_secs(5), waiter)
         .await
-        .expect("create the lease table")
+        .expect("a killed holder frees the lock")
+        .expect("join")
+        .expect("acquire")
         .release()
         .await
         .expect("release");
-    let mut row = HashMap::new();
-    row.insert("id".to_string(), json!("boot"));
-    row.insert("owner".to_string(), json!("a-process-that-died"));
-    row.insert("heartbeat".to_string(), json!(7));
-    db.create(LEASE_TABLE, row)
-        .await
-        .expect("plant the dead holder's row");
-    let dead_owner = owner(&db).await;
-
-    let started = std::time::Instant::now();
-    let lock = tokio::time::timeout(
-        Duration::from_secs(5),
-        MigrationLock::acquire_lease(&sqlite(&dir), SHORT),
-    )
-    .await
-    .expect("the lease is taken over")
-    .expect("acquire");
-    assert!(
-        started.elapsed() >= SHORT.stale_after,
-        "not before the holder has stood still for stale_after"
-    );
-    assert_ne!(owner(&db).await, dead_owner, "the row is the new holder's");
-    lock.release().await.expect("release");
 }
 
-/// A holder whose row is taken away learns it at its next heartbeat.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_holder_whose_lease_is_taken_learns_it_is_lost() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = sqlite(&dir);
-    let lock = MigrationLock::acquire_lease(&db, SHORT)
+/// The holder [`a_killed_holder_frees_the_lock`] runs as a process of its
+/// own: takes the lock on the file it is given and holds it until killed.
+/// Does nothing when run any other way.
+#[tokio::test]
+#[ignore = "a helper process, run by a_killed_holder_frees_the_lock"]
+async fn hold_the_lock_until_killed() {
+    let Some(path) = std::env::var_os(HOLD_VAR) else {
+        return;
+    };
+    let _held = MigrationLock::acquire_file(PathBuf::from(path))
         .await
-        .expect("take the lease");
-    assert!(
-        tokio::time::timeout(SHORT.heartbeat * 3, lock.lost())
-            .await
-            .is_err(),
-        "a lease that is held is not lost"
-    );
-
-    // Another process's take-over: the row now names someone else.
-    let mut data = HashMap::new();
-    data.insert("owner".to_string(), json!("someone-else"));
-    db.update_where_count(LEASE_TABLE, &[], data)
-        .await
-        .expect("take the lease over");
-    tokio::time::timeout(SHORT.heartbeat * 3, lock.lost())
-        .await
-        .expect("the holder learns the lease is lost");
-}
-
-async fn owner(db: &Arc<dyn DatabaseService>) -> String {
-    db.get(LEASE_TABLE, "boot")
-        .await
-        .expect("the lease row")
-        .data
-        .get("owner")
-        .and_then(serde_json::Value::as_str)
-        .expect("an owner")
-        .to_string()
+        .expect("take the lock");
+    std::future::pending::<()>().await;
 }
 
 /// On PostgreSQL the lock is a session-level advisory lock: a second process
@@ -138,7 +149,10 @@ async fn owner(db: &Arc<dyn DatabaseService>) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a PostgreSQL server named by IMPRESSPRESS_TEST_POSTGRES_URL"]
 async fn the_postgres_lock_is_held_by_its_session() {
-    use impresspress_native::{migration_lock::postgres::APPLICATION_NAME, InfraConfig};
+    use impresspress_native::{
+        migration_lock::{postgres::APPLICATION_NAME, HEARTBEAT},
+        InfraConfig,
+    };
 
     let url = std::env::var("IMPRESSPRESS_TEST_POSTGRES_URL")
         .expect("IMPRESSPRESS_TEST_POSTGRES_URL must name a PostgreSQL database");
@@ -156,12 +170,11 @@ async fn the_postgres_lock_is_held_by_its_session() {
         .await
         .expect("connect to PostgreSQL");
 
-    let first = MigrationLock::acquire(&infra(), &db)
+    let first = MigrationLock::acquire(&infra())
         .await
         .expect("the first process takes the lock");
-    let (second_infra, second_db) = (infra(), db.clone());
-    let second =
-        tokio::spawn(async move { MigrationLock::acquire(&second_infra, &second_db).await });
+    let second_infra = infra();
+    let second = tokio::spawn(async move { MigrationLock::acquire(&second_infra).await });
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!second.is_finished(), "the second process waits");
 
@@ -173,12 +186,12 @@ async fn the_postgres_lock_is_held_by_its_session() {
         "SELECT pg_terminate_backend(a.pid) FROM pg_stat_activity a \
          JOIN pg_locks l ON l.pid = a.pid \
          WHERE a.application_name = $1 AND l.locktype = 'advisory' AND l.granted",
-        &[json!(APPLICATION_NAME)],
+        &[serde_json::json!(APPLICATION_NAME)],
     )
     .await
     .expect("end the holder's session");
 
-    tokio::time::timeout(Lease::DEFAULT.heartbeat * 2, first.lost())
+    tokio::time::timeout(HEARTBEAT * 2, first.lost())
         .await
         .expect("the holder learns its session, and the lock, are gone");
     let second = tokio::time::timeout(Duration::from_secs(5), second)

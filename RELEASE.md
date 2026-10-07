@@ -27,7 +27,7 @@ it binds its socket, and refuses to start if any block fails to initialize —
 a failed migration names the block, the file and the statement. A list whose
 hash is recorded in `impresspress__admin__block_settings` is not run again.
 Two processes booting against one database take turns (a PostgreSQL advisory
-lock; on SQLite a lease row in `impresspress__native__migration_lock`). A
+lock; on SQLite an OS file lock on `<database>.migrate.lock`). A
 native PostgreSQL server migrates in the PostgreSQL dialect, chosen by
 `IMPRESSPRESS_DB_TYPE`. Drop `--run-migrations` from scripts: it is now an
 unknown-argument error.

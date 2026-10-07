@@ -313,62 +313,6 @@ async fn any_init_failure_refuses_the_boot() {
     );
 }
 
-/// A consumer block whose `Init` takes the boot's SQLite migration lease away
-/// from it — what a waiter that wrongly judged the holder dead does — and
-/// then keeps the boot busy past the next heartbeat.
-struct StealsTheLock {
-    database: Database,
-}
-
-#[wafer_block::wafer_async_trait]
-impl wafer_run::Block for StealsTheLock {
-    fn info(&self) -> wafer_run::BlockInfo {
-        wafer_run::BlockInfo::new(BLOCK, "0.0.1", "http-handler@v1", "steals the lock")
-    }
-
-    async fn lifecycle(&self, _ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
-        if event.event_type == wafer_run::LifecycleType::Init {
-            self.database
-                .open()
-                .await
-                .delete_where_count(impresspress_native::migration_lock::LEASE_TABLE, &[])
-                .await
-                .expect("take the lease away");
-            let lease = impresspress_native::migration_lock::Lease::DEFAULT;
-            tokio::time::sleep(lease.heartbeat * 2).await;
-        }
-        Ok(())
-    }
-
-    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
-        OutputStream::respond(ANSWER.as_bytes().to_vec())
-    }
-}
-
-/// A boot whose lease is taken while it applies migrations stops: past that
-/// point another process may be applying the same lists.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_boot_that_loses_the_lock_stops() {
-    let db = sqlite();
-    let Boot { port, result } = boot_block(
-        &db.database,
-        &db.storage_root,
-        Arc::new(StealsTheLock {
-            database: db.database.clone(),
-        }),
-    )
-    .await;
-    let error = format!("{:#}", result.err().expect("a lost lock stops the boot"));
-    assert!(
-        error.contains("lost the database's migration lock"),
-        "{error}"
-    );
-    assert!(
-        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
-        "a stopped boot binds nothing"
-    );
-}
-
 /// Two processes boot against a fresh database at once: both start, and the
 /// list runs once.
 async fn concurrent_boots_apply_once(database: &Database, storage_root: &str) {
