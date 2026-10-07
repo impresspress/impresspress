@@ -47,22 +47,32 @@ import { execute, registeredTools, structured, toolNames, waitForTool } from './
  * answer it, the generation the write publishes and the page the shopper is
  * served are all the real things, running inside a service worker.
  *
- * Three tests, three separate claims:
+ * Six tests, six separate claims:
  *
  *  1. **The end-to-end scenario** (design §16 scenarios 1, 3, 4, 5): sign in
- *     from the welcome page, get the page-scoped tool set, rewrite the site,
- *     create → price → publish → activate a product, and have an anonymous
- *     shopper on the same origin see it.
- *  2. **Cross-origin isolation** (§20.3, spec amendment 14): `/b/dev` is
+ *     from the welcome page, get the page-scoped tool set — each name once in
+ *     the browser's registry, before and after `webmcp.js` refreshes — rewrite
+ *     the site, create → price → publish → activate a product, and have an
+ *     anonymous shopper on the same origin see it.
+ *  2. **Session expiry**: after the 401 that tells `dev.js` the session is
+ *     gone, no `dev_*`/`shop_*` tool is left in the browser's registry
+ *     (Chrome ignores the registration signal, so this is `unregisterPageTools`
+ *     removing each name) and the page says the session expired.
+ *  3. **Cross-origin isolation** (§20.3, spec amendment 14): `/b/dev` is
  *     `crossOriginIsolated` for the in-browser compiler's `SharedArrayBuffer`,
  *     and — the load-bearing half — the site carries the same COEP so a COEP
  *     document can actually frame it. A blank preview iframe is what the
  *     `require-corp` posture produced, and no header assertion alone catches
  *     it: only rendering the frame does.
- *  3. **The editor's binary guard**: the one data-loss path the editor pane
+ *  4. **Compiler discovery**: on a cross-origin-isolated deployment the
+ *     workspace finds the packaged compiler the bundle ships.
+ *  5. **The editor's binary guard**: the one data-loss path the editor pane
  *     has. `blocks/dev/page.rs` pins both halves of the guard as source
  *     assertions and says outright that the behaviour itself can only be
  *     driven from here.
+ *  6. **A shadowed site file**: a write to a path the service worker hands to
+ *     the static host (`site/manifest.json`) is refused with an error result,
+ *     and the ledger does not move.
  *
  * Every test starts from a fresh Playwright context, which is a fresh origin:
  * its own OPFS database, its own service-worker registration, its own seed

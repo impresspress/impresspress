@@ -7,7 +7,8 @@
 
 // Browsers without WebMCP get nothing. This ships on every page, so it
 // must never throw on an unsupported browser — or on an insecure page,
-// where Chrome leaves `navigator.modelContext` undefined.
+// where Chrome does not expose `navigator.modelContext` at all
+// (`'modelContext' in navigator` is false, which is what the guard reads).
 if (!('modelContext' in navigator) || typeof navigator.modelContext.registerTool !== 'function') {
   return;
 }
