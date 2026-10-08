@@ -1428,3 +1428,48 @@ async fn path_placeholders_and_path_parameters_agree() {
         );
     }
 }
+
+/// The per-block snapshots above hold only `paths`, so they cannot show where
+/// a `$ref` points. A derived schema that reaches a recursive type (products'
+/// offers reach `Condition`) carries `$ref`s, and in the published document
+/// each one must resolve against the document root: the generator hoists the
+/// type into `components/schemas`, and no `#/$defs/…` pointer — which would
+/// resolve against a root that has no `$defs` — may survive.
+#[tokio::test]
+async fn every_openapi_ref_resolves_against_the_document() {
+    let ctx = impresspress_core::test_support::TestContext::new().await;
+    let doc = impresspress_core::test_support::openapi_document(&ctx).await;
+
+    fn refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(target)) = map.get("$ref") {
+                    out.push(target);
+                }
+                map.values().for_each(|v| refs(v, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    refs(&doc, &mut found);
+
+    assert!(
+        doc["components"]["schemas"]["Condition"].is_object(),
+        "the offers' recursive `Condition` is not hoisted into components/schemas"
+    );
+    assert!(
+        found.contains(&"#/components/schemas/Condition"),
+        "no `$ref` points at the hoisted `Condition`"
+    );
+    for target in found {
+        let pointer = target
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("`$ref` {target} is not document-local"));
+        assert!(
+            doc.pointer(pointer).is_some(),
+            "`$ref` {target} resolves to nothing in the document"
+        );
+    }
+}

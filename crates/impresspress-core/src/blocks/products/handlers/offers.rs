@@ -8,7 +8,7 @@ use crate::{
     blocks::{
         crud,
         products::{
-            contracts::{OfferDefinitionRequest, PricingPreviewRequest},
+            contracts::{OfferDefinitionRequest, OfferList, PricingPreviewRequest},
             offer_pricing,
             repo::{offers, products},
             stripe,
@@ -141,7 +141,7 @@ pub(super) async fn handle_list(
         return response;
     }
     match offers::list_for_product(ctx, product_id(msg)).await {
-        Ok(offers) => ok_json(&serde_json::json!({"offers": offers})),
+        Ok(offers) => ok_json(&OfferList { offers }),
         Err(error) => domain_error(error),
     }
 }
