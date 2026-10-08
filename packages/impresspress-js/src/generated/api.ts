@@ -4672,7 +4672,10 @@ export interface paths {
                                 created_at: string;
                                 /** @description Id of the user who created the row. */
                                 created_by: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 /**
                                  * Format: int64
@@ -4785,7 +4788,8 @@ export interface paths {
                     "application/json": {
                         category?: string | null;
                         /**
-                         * @description ISO 4217 currency. A seller product defaults to the platform default
+                         * @description ISO 4217 currency, in any letter case; stored and returned
+                         *     upper-case. A seller product defaults to the platform default
                          *     currency when omitted.
                          */
                         currency?: string | null;
@@ -4853,7 +4857,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -4994,7 +5001,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -5131,7 +5141,10 @@ export interface paths {
                 content: {
                     "application/json": {
                         category?: string | null;
-                        /** @description ISO 4217 currency. */
+                        /**
+                         * @description ISO 4217 currency, in any letter case; stored and returned
+                         *     upper-case.
+                         */
                         currency?: string | null;
                         description?: string | null;
                         /** @enum {string|null} */
@@ -5190,7 +5203,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -5329,7 +5345,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -5734,7 +5753,8 @@ export interface paths {
                                         help_text: string;
                                         /**
                                          * @description Name that amount rules and conditions use to read this input, e.g.
-                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                         *     unique within the offer; an offer write with any other key is refused.
                                          */
                                         key: string;
                                         /**
@@ -5826,7 +5846,10 @@ export interface paths {
                                 created_at: string;
                                 /** @description Id of the user who created the row. */
                                 created_by: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 /**
                                  * Format: int64
@@ -5970,7 +5993,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -6116,7 +6142,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -6519,7 +6548,8 @@ export interface paths {
                                         help_text: string;
                                         /**
                                          * @description Name that amount rules and conditions use to read this input, e.g.
-                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                         *     unique within the offer; an offer write with any other key is refused.
                                          */
                                         key: string;
                                         /**
@@ -6861,7 +6891,8 @@ export interface paths {
                             sort_order?: number;
                         }[];
                         /**
-                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         * @description Three-letter ISO 4217 currency code, e.g. `"NZD"`. Accepted in any
+                         *     letter case and stored and returned upper-case. Every amount in the
                          *     offer is in this currency's minor units.
                          */
                         currency: string;
@@ -6913,7 +6944,8 @@ export interface paths {
                             help_text?: string;
                             /**
                              * @description Name that amount rules and conditions use to read this input, e.g.
-                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                             *     unique within the offer; an offer write with any other key is refused.
                              */
                             key: string;
                             /**
@@ -7241,7 +7273,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -7626,7 +7659,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -8000,7 +8034,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -8343,7 +8378,8 @@ export interface paths {
                             sort_order?: number;
                         }[];
                         /**
-                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         * @description Three-letter ISO 4217 currency code, e.g. `"NZD"`. Accepted in any
+                         *     letter case and stored and returned upper-case. Every amount in the
                          *     offer is in this currency's minor units.
                          */
                         currency: string;
@@ -8395,7 +8431,8 @@ export interface paths {
                             help_text?: string;
                             /**
                              * @description Name that amount rules and conditions use to read this input, e.g.
-                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                             *     unique within the offer; an offer write with any other key is refused.
                              */
                             key: string;
                             /**
@@ -8723,7 +8760,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -9106,7 +9144,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -9981,7 +10020,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -10368,7 +10408,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -11399,7 +11440,10 @@ export interface paths {
                                 created_at: string;
                                 /** @description Id of the user who created the row. */
                                 created_by: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 /**
                                  * Format: int64
@@ -12209,7 +12253,10 @@ export interface paths {
                                 created_at: string;
                                 /** @description Id of the user who created the row. */
                                 created_by: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 /**
                                  * Format: int64
@@ -12322,7 +12369,8 @@ export interface paths {
                     "application/json": {
                         category?: string | null;
                         /**
-                         * @description ISO 4217 currency. A seller product defaults to the platform default
+                         * @description ISO 4217 currency, in any letter case; stored and returned
+                         *     upper-case. A seller product defaults to the platform default
                          *     currency when omitted.
                          */
                         currency?: string | null;
@@ -12390,7 +12438,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -12531,7 +12582,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -12668,7 +12722,10 @@ export interface paths {
                 content: {
                     "application/json": {
                         category?: string | null;
-                        /** @description ISO 4217 currency. */
+                        /**
+                         * @description ISO 4217 currency, in any letter case; stored and returned
+                         *     upper-case.
+                         */
                         currency?: string | null;
                         description?: string | null;
                         /** @enum {string|null} */
@@ -12727,7 +12784,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -13128,7 +13188,8 @@ export interface paths {
                                         help_text: string;
                                         /**
                                          * @description Name that amount rules and conditions use to read this input, e.g.
-                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                         *     unique within the offer; an offer write with any other key is refused.
                                          */
                                         key: string;
                                         /**
@@ -13220,7 +13281,10 @@ export interface paths {
                                 created_at: string;
                                 /** @description Id of the user who created the row. */
                                 created_by: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 /**
                                  * Format: int64
@@ -13367,7 +13431,10 @@ export interface paths {
                             created_at: string;
                             /** @description Id of the user who created the row. */
                             created_by: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             /**
                              * Format: int64
@@ -13770,7 +13837,8 @@ export interface paths {
                                         help_text: string;
                                         /**
                                          * @description Name that amount rules and conditions use to read this input, e.g.
-                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                         *     unique within the offer; an offer write with any other key is refused.
                                          */
                                         key: string;
                                         /**
@@ -14112,7 +14180,8 @@ export interface paths {
                             sort_order?: number;
                         }[];
                         /**
-                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         * @description Three-letter ISO 4217 currency code, e.g. `"NZD"`. Accepted in any
+                         *     letter case and stored and returned upper-case. Every amount in the
                          *     offer is in this currency's minor units.
                          */
                         currency: string;
@@ -14164,7 +14233,8 @@ export interface paths {
                             help_text?: string;
                             /**
                              * @description Name that amount rules and conditions use to read this input, e.g.
-                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                             *     unique within the offer; an offer write with any other key is refused.
                              */
                             key: string;
                             /**
@@ -14492,7 +14562,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -14877,7 +14948,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -15251,7 +15323,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -15594,7 +15667,8 @@ export interface paths {
                             sort_order?: number;
                         }[];
                         /**
-                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         * @description Three-letter ISO 4217 currency code, e.g. `"NZD"`. Accepted in any
+                         *     letter case and stored and returned upper-case. Every amount in the
                          *     offer is in this currency's minor units.
                          */
                         currency: string;
@@ -15646,7 +15720,8 @@ export interface paths {
                             help_text?: string;
                             /**
                              * @description Name that amount rules and conditions use to read this input, e.g.
-                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                             *     unique within the offer; an offer write with any other key is refused.
                              */
                             key: string;
                             /**
@@ -15974,7 +16049,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -16357,7 +16433,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -17232,7 +17309,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -17619,7 +17697,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**
@@ -18678,7 +18757,10 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 description: string;
                                 /**
@@ -18785,7 +18867,10 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description ISO 4217 presentment currency. */
+                            /**
+                             * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                             *     every offer and order.
+                             */
                             currency: string;
                             description: string;
                             /**
@@ -19409,7 +19494,10 @@ export interface paths {
                                 created_at: string;
                                 /** @description Id of the user who created the row. */
                                 created_by: string;
-                                /** @description ISO 4217 presentment currency. */
+                                /**
+                                 * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+                                 *     every offer and order.
+                                 */
                                 currency: string;
                                 /**
                                  * Format: int64
@@ -20320,7 +20408,8 @@ export interface paths {
                                     help_text: string;
                                     /**
                                      * @description Name that amount rules and conditions use to read this input, e.g.
-                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     *     `"kilograms"`. One or more ASCII letters, digits or underscores, and
+                                     *     unique within the offer; an offer write with any other key is refused.
                                      */
                                     key: string;
                                     /**

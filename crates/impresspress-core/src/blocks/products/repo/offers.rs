@@ -128,6 +128,51 @@ fn variable_from_record(record: &Record) -> Result<VariableDefinition, WaferErro
     })
 }
 
+/// Refuse offer variable rows a data-snapshot import carries that no offer
+/// writer would store: each offer's rows, decoded exactly as an offer read
+/// decodes them, must pass
+/// [`offer_pricing::validate_variable_definitions`] — the key grammar,
+/// unique keys and non-empty select choices that `validate_offer` applies to
+/// every offer create and update.
+///
+/// Import is the one write to the variables table that does not go through
+/// [`build_offer`], so without this an offer whose key is `kilo-grams` would
+/// land, and every preview and checkout of it would then be refused.
+/// `InvalidArgument`, naming the offer, for the first violation.
+#[cfg(feature = "block-dev")]
+pub(crate) fn validate_imported_variables<'a>(
+    rows: impl IntoIterator<Item = &'a serde_json::Map<String, Value>>,
+) -> Result<(), WaferError> {
+    let refuse = |offer_id: &str, message: &dyn std::fmt::Display| {
+        WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "the data snapshot carries a variable of offer {offer_id:?} that this build                  refuses, so nothing was imported: {message}"
+            ),
+        )
+    };
+    let mut by_offer: BTreeMap<String, Vec<VariableDefinition>> = BTreeMap::new();
+    for row in rows {
+        let record = Record {
+            id: row
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            data: row.clone().into_iter().collect(),
+        };
+        let offer_id = record.str_field("offer_id").to_string();
+        let definition =
+            variable_from_record(&record).map_err(|error| refuse(&offer_id, &error.message))?;
+        by_offer.entry(offer_id).or_default().push(definition);
+    }
+    for (offer_id, definitions) in &by_offer {
+        offer_pricing::validate_variable_definitions(definitions)
+            .map_err(|error| refuse(offer_id, &error))?;
+    }
+    Ok(())
+}
+
 fn component_from_record(record: &Record) -> Result<OfferComponent, WaferError> {
     let condition = if empty_json_field(record, "condition_json") {
         Condition::Always

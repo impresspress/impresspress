@@ -61,12 +61,13 @@ use crate::{
             orgs, pats, provider_links, rate_limits, sessions, tokens, users,
         },
         products::{
-            list_live_products, product_snapshot_upsert, CHECKOUT_PRESETS_TABLE, DISPUTES_TABLE,
-            ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE, LINE_ITEMS_TABLE,
-            OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE, PRODUCT_TEMPLATES_TABLE,
-            PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE,
-            SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE,
-            SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE, VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
+            list_live_products, money, product_snapshot_upsert, validate_imported_variables,
+            CHECKOUT_PRESETS_TABLE, DISPUTES_TABLE, ENTITLEMENTS_TABLE, GROUPS_TABLE,
+            GROUP_TEMPLATES_TABLE, LINE_ITEMS_TABLE, OFFERS_TABLE, OFFER_COMPONENTS_TABLE,
+            PAYMENT_LINKS_TABLE, PRODUCT_TEMPLATES_TABLE, PRODUCT_VERSIONS_TABLE,
+            PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE, SELLER_ACCOUNTS_TABLE,
+            STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE, SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE,
+            VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
         },
     },
     // audit-allow: names the platform tables for the export allowlist/exclusion bookkeeping below — the two it reads (`variables`, `user_roles`) are granted by `dev::wrap_grants()`, which maps every `TABLE_ALLOWLIST` entry to `read_write(BLOCK_NAME, table)` and which the runtime honours from its flat grant list, and the audit attributes grants to the declaring file's block and cannot see it
@@ -907,6 +908,13 @@ pub async fn import(
         }
     }
 
+    // Fourth pre-flight pass: an offer's variables meet the rules every offer
+    // write applies (`repo::offers::validate_imported_variables`), so a
+    // bundle cannot plant an offer no preview or checkout could price.
+    if let Some(rows) = snapshot.tables.get(PRODUCTS_VARIABLES_TABLE) {
+        validate_imported_variables(rows)?;
+    }
+
     let mut report = ImportReport::default();
     let mut writes = Vec::new();
     // `Replace` tables first, in `REPLACE_ORDER` — not the snapshot's own
@@ -928,10 +936,12 @@ pub async fn import(
             filters: Vec::new(),
         });
         report.tables.insert(table.to_string(), rows.len());
-        writes.extend(rows.into_iter().map(|row| BatchWrite::Create {
-            collection: table.to_string(),
-            data: imported_row(table, row).into_iter().collect(),
-        }));
+        for row in rows {
+            writes.push(BatchWrite::Create {
+                collection: table.to_string(),
+                data: imported_row(table, row)?.into_iter().collect(),
+            });
+        }
     }
     for (table, rows) in &snapshot.tables {
         if REPLACE_ORDER.contains(&table.as_str()) {
@@ -952,7 +962,9 @@ pub async fn import(
                 format!("{table:?} passed the allowlist check but has no upsert conflict target"),
             ));
         };
-        writes.extend(rows.iter().map(|row| upsert_op(table, conflict, row)));
+        for row in rows {
+            writes.push(upsert_op(table, conflict, row)?);
+        }
         report.tables.insert(table.clone(), rows.len());
     }
     if !writes.is_empty() {
@@ -1065,26 +1077,71 @@ fn neutralise_imported_owner(row: &mut serde_json::Map<String, Value>) {
     row.insert("updated_by".to_string(), serde_json::json!(""));
 }
 
-/// `row` as it is written into `table`: unchanged, except that a variables
-/// row — the table whose columns carry a security decision, and the one
-/// import writes without passing through `NewVariable::into_row` — has its
-/// `sensitive` flag raised and its admin-ownership marker neutralised.
+/// Store an imported product or offer row's `currency` in the one spelling
+/// every API writer stores — the upper-case ISO 4217 code
+/// [`money::normalize_currency`] returns — and refuse a row whose currency
+/// is not a three-letter code (`InvalidArgument`).
+///
+/// The same rule as [`raise_imported_sensitive_flag`]: this is the one write
+/// path that accepts foreign data, so it must not trust the sender's
+/// spelling. Migration `023_canonical_currency` repairs stored rows
+/// only when the migration set replays, so an import after it would
+/// otherwise keep a lowercase code for good, and a duplicate of the product
+/// would copy it. A row with no `currency` takes the column default.
+fn canonical_imported_currency(
+    table: &str,
+    row: &mut serde_json::Map<String, Value>,
+) -> Result<(), WaferError> {
+    let Some(value) = row.get_mut("currency") else {
+        return Ok(());
+    };
+    let refuse = |message: &str| {
+        WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "the data snapshot carries a {table} row whose currency this build refuses, so                  nothing was imported: {message}"
+            ),
+        )
+    };
+    let Some(sent) = value.as_str() else {
+        return Err(refuse("currency must be a string"));
+    };
+    *value = Value::String(money::normalize_currency(sent).map_err(refuse)?);
+    Ok(())
+}
+
+/// `row` as it is written into `table`: unchanged, except that
+///
+/// - a variables row — the table whose columns carry a security decision,
+///   and the one import writes without passing through
+///   `NewVariable::into_row` — has its `sensitive` flag raised and its
+///   admin-ownership marker neutralised;
+/// - a product or offer row has its currency brought into the canonical
+///   spelling, and is refused if that currency is malformed
+///   ([`canonical_imported_currency`]).
 fn imported_row(
     table: &str,
     row: &serde_json::Map<String, Value>,
-) -> serde_json::Map<String, Value> {
+) -> Result<serde_json::Map<String, Value>, WaferError> {
     let mut row = row.clone();
     if table == variables::TABLE {
         raise_imported_sensitive_flag(&mut row);
         neutralise_imported_owner(&mut row);
     }
-    row
+    if table == PRODUCTS_COLLECTION || table == OFFERS_TABLE {
+        canonical_imported_currency(table, &mut row)?;
+    }
+    Ok(row)
 }
 
 /// The `db::batch` write that upserts one snapshot `row` into `table` on
 /// `conflict`.
-fn upsert_op(table: &str, conflict: &[&str], row: &serde_json::Map<String, Value>) -> BatchWrite {
-    let row = imported_row(table, row);
+fn upsert_op(
+    table: &str,
+    conflict: &[&str],
+    row: &serde_json::Map<String, Value>,
+) -> Result<BatchWrite, WaferError> {
+    let row = imported_row(table, row)?;
     // Neither `id` nor the conflict columns are updated on a
     // conflict. The conflict columns are equal by definition (that is
     // what conflicted), and `id` must stay the DESTINATION's: an
@@ -1113,12 +1170,12 @@ fn upsert_op(table: &str, conflict: &[&str], row: &serde_json::Map<String, Value
     // target the allowlist declared, exactly as the generic op below does,
     // so there is one statement of it.
     if table == PRODUCTS_COLLECTION {
-        return product_snapshot_upsert(data, conflict, update_columns);
+        return Ok(product_snapshot_upsert(data, conflict, update_columns));
     }
-    BatchWrite::Upsert(UpsertRequest {
+    Ok(BatchWrite::Upsert(UpsertRequest {
         collection: table.to_string(),
         data,
         conflict_columns: conflict,
         on_conflict: OnConflict::SetColumns(update_columns),
-    })
+    }))
 }

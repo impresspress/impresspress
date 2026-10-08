@@ -540,6 +540,9 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
             // query against either
             "secret_tables.rs",
             "blocks/products/repo/purchases.rs",
+            // category 2: migration 023's test seeds legacy order rows below
+            // the repo layer and asserts on the stored currency
+            "blocks/products/migrations/mod.rs",
             "blocks/products/tests/handler_tests.rs",
             "blocks/products/tests/purchase_tests.rs",
             "blocks/products/tests/repo_tests.rs",

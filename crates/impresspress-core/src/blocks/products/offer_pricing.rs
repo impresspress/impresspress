@@ -14,9 +14,9 @@ use serde_json::Value;
 
 use super::{
     contracts::{
-        AmountRule, BillingScheme, Condition, MoneyBreakdown, Offer, OfferMode, PackageRounding,
-        PricingPreview, PricingPreviewRequest, PricingTier, QuantityRule, RecurringInterval,
-        ResolvedComponent, VariableDefinition, VariableKind, VariableVisibility,
+        is_variable_key, AmountRule, BillingScheme, Condition, MoneyBreakdown, Offer, OfferMode,
+        PackageRounding, PricingPreview, PricingPreviewRequest, PricingTier, QuantityRule,
+        RecurringInterval, ResolvedComponent, VariableDefinition, VariableKind, VariableVisibility,
         COMMERCE_SCHEMA_VERSION,
     },
     money::{normalize_currency, Decimal},
@@ -432,19 +432,20 @@ pub enum InputScope {
     Management,
 }
 
-pub fn validate_inputs(
+/// The definition-level rules for an offer's variables, keyed by `key`:
+/// every key matches [`VARIABLE_KEY_PATTERN`](super::contracts::VARIABLE_KEY_PATTERN), no key repeats, and every
+/// `select` or `multi_select` variable has allowed values.
+///
+/// The one place those rules live. [`validate_offer`] applies them, so an
+/// offer write that breaks one is refused with a 400 instead of being saved
+/// and then refused by every preview and checkout; [`validate_inputs`]
+/// applies them too, because it is public and reads `definitions` by key.
+pub(crate) fn validate_variable_definitions(
     definitions: &[VariableDefinition],
-    raw: &BTreeMap<String, Value>,
-    scope: InputScope,
-) -> Result<ValidatedInputs, PricingError> {
+) -> Result<BTreeMap<&str, &VariableDefinition>, PricingError> {
     let mut by_key = BTreeMap::new();
     for definition in definitions {
-        if definition.key.is_empty()
-            || !definition
-                .key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
+        if !is_variable_key(&definition.key) {
             return Err(PricingError::new(
                 "invalid_offer",
                 Some(&definition.key),
@@ -470,6 +471,15 @@ pub fn validate_inputs(
             ));
         }
     }
+    Ok(by_key)
+}
+
+pub fn validate_inputs(
+    definitions: &[VariableDefinition],
+    raw: &BTreeMap<String, Value>,
+    scope: InputScope,
+) -> Result<ValidatedInputs, PricingError> {
+    let by_key = validate_variable_definitions(definitions)?;
     for key in raw.keys() {
         let Some(definition) = by_key.get(key.as_str()) else {
             return Err(PricingError::new(
@@ -1065,18 +1075,9 @@ pub fn validate_offer(offer: &Offer) -> Result<(), PricingError> {
         ));
     }
     validate_checkout_policy(offer)?;
-    let keys: BTreeSet<_> = offer
-        .variables
-        .iter()
-        .map(|variable| variable.key.as_str())
+    let keys: BTreeSet<_> = validate_variable_definitions(&offer.variables)?
+        .into_keys()
         .collect();
-    if keys.len() != offer.variables.len() {
-        return Err(PricingError::new(
-            "invalid_offer",
-            Some("variables"),
-            "variable keys must be unique",
-        ));
-    }
     let mut component_keys = BTreeSet::new();
     let mut has_tiered_amount = false;
     for component in &offer.components {

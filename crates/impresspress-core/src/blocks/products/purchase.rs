@@ -370,7 +370,7 @@ fn refund_result(
         amount_minor: refund.i64_field("amount_minor"),
         refunded_total_minor: purchase.i64_field("refunded_total_cents"),
         order_total_minor: purchase.i64_field("total_cents"),
-        currency: purchase.str_field("currency").to_ascii_uppercase(),
+        currency: purchase.str_field("currency").to_string(),
         livemode: refund.bool_field("livemode"),
     })
 }
@@ -388,7 +388,7 @@ fn manual_refund_result(
         amount_minor,
         refunded_total_minor: purchase.i64_field("refunded_total_cents"),
         order_total_minor: purchase.i64_field("total_cents"),
-        currency: purchase.str_field("currency").to_ascii_uppercase(),
+        currency: purchase.str_field("currency").to_string(),
         livemode: false,
     }
 }
@@ -585,7 +585,7 @@ async fn refund_purchase(
                 idempotency_key: idempotency_key.clone(),
                 amount_minor: amount,
                 target_refunded_total_minor: refunded_total + amount,
-                currency: purchase.str_field("currency").to_ascii_uppercase(),
+                currency: purchase.str_field("currency").to_string(),
                 provider_reason: String::new(),
                 note: note.clone(),
                 refunded_by: refunded_by.clone(),
@@ -693,7 +693,7 @@ async fn refund_purchase(
             idempotency_key: idempotency_key.clone(),
             amount_minor: amount,
             target_refunded_total_minor: refunded_total + amount,
-            currency: purchase.str_field("currency").to_ascii_uppercase(),
+            currency: purchase.str_field("currency").to_string(),
             provider_reason,
             note: note.clone(),
             refunded_by: refunded_by.clone(),

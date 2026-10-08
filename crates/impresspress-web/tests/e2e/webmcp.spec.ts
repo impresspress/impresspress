@@ -104,9 +104,12 @@ async function seedProductWithOffer(
     data: uniqueShopProduct(stamp),
   });
   expect(productRes.status(), await productRes.text()).toBe(200);
-  const productBody = (await productRes.json()) as { id?: string; data?: { id?: string } };
+  const productBody = (await productRes.json()) as { id?: string; currency?: string; data?: { id?: string } };
   const productId = productBody.id ?? productBody.data?.id;
   expect(productId, JSON.stringify(productBody)).toBeTruthy();
+  // The fixture sends `nzd`; the product answers the one spelling its
+  // offers and quotes answer too.
+  expect(productBody.currency).toBe('NZD');
 
   const offerRes = await request.post(`/b/products/api/admin/products/${productId}/offers`, {
     headers: auth,
@@ -218,7 +221,7 @@ test.describe('WebMCP tools against a seeded product', () => {
     expect(quote.components.map((c) => [c.key, c.total_amount_minor])).toEqual([['pages', 4500]]);
     expect(quote.amounts.subtotal_minor).toBe(4500);
     expect(quote.amounts.total_minor).toBe(4500);
-    expect(quote.amounts.currency.toLowerCase()).toBe('nzd');
+    expect(quote.amounts.currency).toBe('NZD');
   });
 
   test('start_checkout cannot complete a payment here: no provider, an error result', async ({ page }) => {
