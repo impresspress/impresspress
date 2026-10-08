@@ -115,28 +115,9 @@ async fn admin_update_product() {
 #[tokio::test]
 async fn admin_activation_sets_published_at() {
     let ctx = ctx().await;
-    let (create, input) = admin_create_msg(
-        "/b/products/api/admin/products",
-        serde_json::json!({"name": "Bag"}),
-    );
-    let id = output_to_json(dispatch(&ctx, create, input).await).await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = admin_product(&ctx, "Bag").await;
 
-    let patch = |body: serde_json::Value| {
-        let (mut msg, input) = request_msg(
-            "update",
-            &format!("/b/products/api/admin/products/{id}"),
-            "admin_1",
-            body,
-        );
-        msg.set_meta("auth.user_roles", "admin");
-        (msg, input)
-    };
-
-    let (msg, input) = patch(serde_json::json!({"status": "active"}));
-    let active = output_to_json(dispatch(&ctx, msg, input).await).await;
+    let active = admin_patch(&ctx, &id, serde_json::json!({"status": "active"})).await;
     let stamped = active["published_at"]
         .as_str()
         .unwrap_or_default()
@@ -146,9 +127,85 @@ async fn admin_activation_sets_published_at() {
         "activation must set published_at: {active}"
     );
 
-    let (msg, input) = patch(serde_json::json!({"status": "archived"}));
-    let archived = output_to_json(dispatch(&ctx, msg, input).await).await;
+    let archived = admin_patch(&ctx, &id, serde_json::json!({"status": "archived"})).await;
     assert_eq!(archived["published_at"], stamped.as_str(), "{archived}");
+}
+
+/// An admin PATCH that names no `status` is not a publishing write, so it
+/// leaves `published_at` as the activation stamped it.
+#[tokio::test]
+async fn admin_update_without_status_keeps_published_at() {
+    let ctx = ctx().await;
+    let id = admin_product(&ctx, "Bag").await;
+
+    let active = admin_patch(&ctx, &id, serde_json::json!({"status": "active"})).await;
+    let stamped = active["published_at"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !stamped.is_empty(),
+        "activation must set published_at: {active}"
+    );
+
+    let renamed = admin_patch(&ctx, &id, serde_json::json!({"name": "Tote"})).await;
+    assert_eq!(renamed["name"], "Tote", "{renamed}");
+    assert_eq!(renamed["published_at"], stamped.as_str(), "{renamed}");
+}
+
+/// Re-sending `status: "active"` to a product that is already active is a
+/// publishing write too: it re-stamps `published_at`, as the seller PATCH
+/// does. The field's doc on `ProductView` states this.
+#[tokio::test]
+async fn admin_resending_active_restamps_published_at() {
+    let ctx = ctx().await;
+    let id = admin_product(&ctx, "Bag").await;
+
+    let first = admin_patch(&ctx, &id, serde_json::json!({"status": "active"})).await;
+    let first = published_at(&first);
+    // Two stamps taken in the same instant would compare equal; wait past it.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let again = admin_patch(&ctx, &id, serde_json::json!({"status": "active"})).await;
+    assert!(
+        published_at(&again) > first,
+        "re-activation must re-stamp: {again}"
+    );
+}
+
+/// Create a platform product through the admin API and return its id.
+async fn admin_product(ctx: &crate::test_support::TestContext, name: &str) -> String {
+    let (create, input) = admin_create_msg(
+        "/b/products/api/admin/products",
+        serde_json::json!({"name": name}),
+    );
+    output_to_json(dispatch(ctx, create, input).await).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Apply an admin PATCH to product `id` and return the response body.
+async fn admin_patch(
+    ctx: &crate::test_support::TestContext,
+    id: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let (mut msg, input) = request_msg(
+        "update",
+        &format!("/b/products/api/admin/products/{id}"),
+        "admin_1",
+        body,
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    output_to_json(dispatch(ctx, msg, input).await).await
+}
+
+/// The product's `published_at` as a parsed instant; panics if it is unset.
+fn published_at(product: &serde_json::Value) -> chrono::DateTime<chrono::FixedOffset> {
+    let raw = product["published_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("published_at must be set: {product}"));
+    chrono::DateTime::parse_from_rfc3339(raw).expect("published_at is RFC 3339")
 }
 
 #[tokio::test]
