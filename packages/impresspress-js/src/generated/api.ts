@@ -5598,72 +5598,11 @@ export interface paths {
                                             units_per_package: number;
                                         };
                                         /**
-                                         * @description When a component applies, tagged by `op`. `input` names a variable's
-                                         *     `key`; a component whose condition does not hold is charged nothing.
                                          * @default {
                                          *       "op": "always"
                                          *     }
                                          */
-                                        condition: {
-                                            /** @constant */
-                                            op: "always";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "all";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "any";
-                                        } | {
-                                            condition: components["schemas"]["Condition"];
-                                            /** @constant */
-                                            op: "not";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "present";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "not_equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "in";
-                                            values: unknown[];
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "contains";
-                                            value: unknown;
-                                        };
+                                        condition: components["schemas"]["Condition"];
                                         /** @default  */
                                         description: string;
                                         id: string;
@@ -6420,72 +6359,11 @@ export interface paths {
                                             units_per_package: number;
                                         };
                                         /**
-                                         * @description When a component applies, tagged by `op`. `input` names a variable's
-                                         *     `key`; a component whose condition does not hold is charged nothing.
                                          * @default {
                                          *       "op": "always"
                                          *     }
                                          */
-                                        condition: {
-                                            /** @constant */
-                                            op: "always";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "all";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "any";
-                                        } | {
-                                            condition: components["schemas"]["Condition"];
-                                            /** @constant */
-                                            op: "not";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "present";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "not_equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "in";
-                                            values: unknown[];
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "contains";
-                                            value: unknown;
-                                        };
+                                        condition: components["schemas"]["Condition"];
                                         /** @default  */
                                         description: string;
                                         id: string;
@@ -6857,66 +6735,7 @@ export interface paths {
                              *       "op": "always"
                              *     }
                              */
-                            condition?: {
-                                /** @constant */
-                                op: "always";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "all";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "any";
-                            } | {
-                                condition: components["schemas"]["Condition"];
-                                /** @constant */
-                                op: "not";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "present";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "not_equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "in";
-                                values: unknown[];
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "contains";
-                                value: unknown;
-                            };
+                            condition?: components["schemas"]["Condition"];
                             /** @default  */
                             description?: string;
                             /**
@@ -7262,72 +7081,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -7708,72 +7466,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -8143,72 +7840,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -8581,66 +8217,7 @@ export interface paths {
                              *       "op": "always"
                              *     }
                              */
-                            condition?: {
-                                /** @constant */
-                                op: "always";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "all";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "any";
-                            } | {
-                                condition: components["schemas"]["Condition"];
-                                /** @constant */
-                                op: "not";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "present";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "not_equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "in";
-                                values: unknown[];
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "contains";
-                                value: unknown;
-                            };
+                            condition?: components["schemas"]["Condition"];
                             /** @default  */
                             description?: string;
                             /**
@@ -8986,72 +8563,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -9430,72 +8946,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -10366,72 +9821,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -10814,72 +10208,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -13595,72 +12928,11 @@ export interface paths {
                                             units_per_package: number;
                                         };
                                         /**
-                                         * @description When a component applies, tagged by `op`. `input` names a variable's
-                                         *     `key`; a component whose condition does not hold is charged nothing.
                                          * @default {
                                          *       "op": "always"
                                          *     }
                                          */
-                                        condition: {
-                                            /** @constant */
-                                            op: "always";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "all";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "any";
-                                        } | {
-                                            condition: components["schemas"]["Condition"];
-                                            /** @constant */
-                                            op: "not";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "present";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "not_equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "in";
-                                            values: unknown[];
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "contains";
-                                            value: unknown;
-                                        };
+                                        condition: components["schemas"]["Condition"];
                                         /** @default  */
                                         description: string;
                                         id: string;
@@ -14282,72 +13554,11 @@ export interface paths {
                                             units_per_package: number;
                                         };
                                         /**
-                                         * @description When a component applies, tagged by `op`. `input` names a variable's
-                                         *     `key`; a component whose condition does not hold is charged nothing.
                                          * @default {
                                          *       "op": "always"
                                          *     }
                                          */
-                                        condition: {
-                                            /** @constant */
-                                            op: "always";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "all";
-                                        } | {
-                                            conditions: components["schemas"]["Condition"][];
-                                            /** @constant */
-                                            op: "any";
-                                        } | {
-                                            condition: components["schemas"]["Condition"];
-                                            /** @constant */
-                                            op: "not";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "present";
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "not_equals";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "greater_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "less_than_or_equal";
-                                            value: unknown;
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "in";
-                                            values: unknown[];
-                                        } | {
-                                            input: string;
-                                            /** @constant */
-                                            op: "contains";
-                                            value: unknown;
-                                        };
+                                        condition: components["schemas"]["Condition"];
                                         /** @default  */
                                         description: string;
                                         id: string;
@@ -14719,66 +13930,7 @@ export interface paths {
                              *       "op": "always"
                              *     }
                              */
-                            condition?: {
-                                /** @constant */
-                                op: "always";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "all";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "any";
-                            } | {
-                                condition: components["schemas"]["Condition"];
-                                /** @constant */
-                                op: "not";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "present";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "not_equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "in";
-                                values: unknown[];
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "contains";
-                                value: unknown;
-                            };
+                            condition?: components["schemas"]["Condition"];
                             /** @default  */
                             description?: string;
                             /**
@@ -15124,72 +14276,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -15570,72 +14661,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -16005,72 +15035,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -16443,66 +15412,7 @@ export interface paths {
                              *       "op": "always"
                              *     }
                              */
-                            condition?: {
-                                /** @constant */
-                                op: "always";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "all";
-                            } | {
-                                conditions: components["schemas"]["Condition"][];
-                                /** @constant */
-                                op: "any";
-                            } | {
-                                condition: components["schemas"]["Condition"];
-                                /** @constant */
-                                op: "not";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "present";
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "not_equals";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "greater_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "less_than_or_equal";
-                                value: unknown;
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "in";
-                                values: unknown[];
-                            } | {
-                                input: string;
-                                /** @constant */
-                                op: "contains";
-                                value: unknown;
-                            };
+                            condition?: components["schemas"]["Condition"];
                             /** @default  */
                             description?: string;
                             /**
@@ -16848,72 +15758,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -17292,72 +16141,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -18228,72 +17016,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
@@ -18676,72 +17403,11 @@ export interface paths {
                                         units_per_package: number;
                                     };
                                     /**
-                                     * @description When a component applies, tagged by `op`. `input` names a variable's
-                                     *     `key`; a component whose condition does not hold is charged nothing.
                                      * @default {
                                      *       "op": "always"
                                      *     }
                                      */
-                                    condition: {
-                                        /** @constant */
-                                        op: "always";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "all";
-                                    } | {
-                                        conditions: components["schemas"]["Condition"][];
-                                        /** @constant */
-                                        op: "any";
-                                    } | {
-                                        condition: components["schemas"]["Condition"];
-                                        /** @constant */
-                                        op: "not";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "present";
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "not_equals";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "greater_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "less_than_or_equal";
-                                        value: unknown;
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "in";
-                                        values: unknown[];
-                                    } | {
-                                        input: string;
-                                        /** @constant */
-                                        op: "contains";
-                                        value: unknown;
-                                    };
+                                    condition: components["schemas"]["Condition"];
                                     /** @default  */
                                     description: string;
                                     id: string;
