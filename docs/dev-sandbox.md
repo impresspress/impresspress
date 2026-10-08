@@ -148,7 +148,9 @@ JSON (`#dev-console-args`, pre-filled with the required properties), and on
 run, so a write from the console publishes, refreshes the file tree and
 reloads the preview exactly as a tool call does. The guide pane at the top
 of the page says which case you are in: "This browser has no WebMCP: use the
-Tool console below, or the file editor", or that the tools are registered.
+Tool console below, or the file editor", or how many tools are registered for
+an agent in the tab, counting both registrars: the workspace tools this page
+registers and the site's own public tools (`webmcp.js`, on every page).
 
 ## Backend blocks
 

@@ -101,3 +101,32 @@ test('generation counts every completed load, including one that found nothing',
   await settle();
   assert.equal(rejecting.handle.generation(), 1);
 });
+
+// The `/b/dev` workspace states how many tools an agent in its tab has, and
+// half of them are this script's. `count()` is what it has registered with
+// the browser now, and every settled load — a refresh included, a degraded
+// one too — says so on `window`, so a page that shows the number can keep it
+// true whichever of the two scripts finished first.
+test('count() is what is registered now, and every settled load is announced on window', async () => {
+  let tools = ['list_products', 'get_product'];
+  const { published, windowEvents } = instantiate({
+    serviceWorker: serviceWorkerStub({ controlled: true }),
+    respond: () =>
+      tools === null
+        ? { ok: false, status: 503, json: async () => null }
+        : { ok: true, status: 200, json: async () => ({ tools: tools.map(manifestTool) }) }
+  });
+  await settle();
+  assert.equal(published.count(), 2);
+  assert.deepEqual(windowEvents, ['impresspress:webmcp-loaded']);
+
+  tools = ['list_products'];
+  await published.refresh();
+  assert.equal(published.count(), 1);
+  assert.deepEqual(windowEvents, ['impresspress:webmcp-loaded', 'impresspress:webmcp-loaded']);
+
+  tools = null;
+  await published.refresh();
+  assert.equal(published.count(), 0, 'a refused manifest leaves nothing registered');
+  assert.equal(windowEvents.length, 3, 'and is announced like any other load');
+});
