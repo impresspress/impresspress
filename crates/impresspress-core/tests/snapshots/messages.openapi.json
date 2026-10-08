@@ -1,379 +1,384 @@
 {
-  "/b/messages/api/contexts": {
-    "get": {
-      "description": "List contexts with optional filters by type, status, sender_id, parent_id",
-      "parameters": [
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "type": "integer"
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/b/messages/api/contexts": {
+      "get": {
+        "description": "List contexts with optional filters by type, status, sender_id, parent_id",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "parent_id",
+            "required": false,
+            "schema": {
+              "description": "Filter by parent context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sender_id",
+            "required": false,
+            "schema": {
+              "description": "Filter by sender",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "description": "Filter by status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "description": "Filter by context type (conversation, task, notification)",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "records": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 20,
-            "type": "integer"
+        "security": [
+          {
+            "bearerAuth": []
           }
-        },
-        {
-          "in": "query",
-          "name": "parent_id",
-          "required": false,
-          "schema": {
-            "description": "Filter by parent context",
-            "type": "string"
-          }
-        },
-        {
-          "in": "query",
-          "name": "sender_id",
-          "required": false,
-          "schema": {
-            "description": "Filter by sender",
-            "type": "string"
-          }
-        },
-        {
-          "in": "query",
-          "name": "status",
-          "required": false,
-          "schema": {
-            "description": "Filter by status",
-            "type": "string"
-          }
-        },
-        {
-          "in": "query",
-          "name": "type",
-          "required": false,
-          "schema": {
-            "description": "Filter by context type (conversation, task, notification)",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
+        ],
+        "summary": "List contexts",
+        "tags": [
+          "contexts"
+        ]
+      },
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
+                "description": "`POST /b/messages/api/contexts` request body.",
                 "properties": {
-                  "records": {
-                    "items": {
-                      "type": "object"
-                    },
-                    "type": "array"
+                  "metadata": true,
+                  "parent_id": {
+                    "description": "Parent context ID for sub-tasks/threads.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  "total_count": {
-                    "type": "integer"
+                  "recipient_id": {
+                    "default": "",
+                    "type": "string"
+                  },
+                  "sender_id": {
+                    "default": "",
+                    "type": "string"
+                  },
+                  "title": {
+                    "default": "",
+                    "type": "string"
+                  },
+                  "type": {
+                    "description": "Context type: conversation, task, notification, etc.",
+                    "type": "string"
                   }
                 },
+                "required": [
+                  "type"
+                ],
+                "title": "CreateContextRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List contexts",
-      "tags": [
-        "contexts"
-      ]
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create context",
+        "tags": [
+          "contexts"
+        ]
+      }
     },
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
+    "/b/messages/api/contexts/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
             "schema": {
-              "description": "`POST /b/messages/api/contexts` request body.",
-              "properties": {
-                "metadata": true,
-                "parent_id": {
-                  "description": "Parent context ID for sub-tasks/threads.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+              "description": "Context ID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get context",
+        "tags": [
+          "contexts"
+        ]
+      },
+      "patch": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`PATCH /b/messages/api/contexts/{id}` request body. Every field is\noptional and only the ones present are applied — see the module doc for\nwhy this replaced a `HashMap<String, Value>` plus a runtime whitelist.",
+                "properties": {
+                  "metadata": true,
+                  "status": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
                 },
-                "recipient_id": {
-                  "default": "",
-                  "type": "string"
-                },
-                "sender_id": {
-                  "default": "",
-                  "type": "string"
-                },
-                "title": {
-                  "default": "",
-                  "type": "string"
-                },
-                "type": {
-                  "description": "Context type: conversation, task, notification, etc.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type"
+                "title": "UpdateContextRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update context",
+        "tags": [
+          "contexts"
+        ]
+      }
+    },
+    "/b/messages/api/contexts/{id}/entries": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Context ID",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "description": "Filter by entry kind",
+              "enum": [
+                "message",
+                "artifact",
+                "notification",
+                "status"
               ],
-              "title": "CreateContextRequest",
-              "type": "object"
+              "type": "string"
             }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create context",
-      "tags": [
-        "contexts"
-      ]
-    }
-  },
-  "/b/messages/api/contexts/{id}": {
-    "get": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Context ID",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Get context",
-      "tags": [
-        "contexts"
-      ]
-    },
-    "patch": {
-      "requestBody": {
-        "content": {
-          "application/json": {
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
             "schema": {
-              "description": "`PATCH /b/messages/api/contexts/{id}` request body. Every field is\noptional and only the ones present are applied — see the module doc for\nwhy this replaced a `HashMap<String, Value>` plus a runtime whitelist.",
-              "properties": {
-                "metadata": true,
-                "status": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "title": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "title": "UpdateContextRequest",
-              "type": "object"
+              "default": 1,
+              "type": "integer"
             }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update context",
-      "tags": [
-        "contexts"
-      ]
-    }
-  },
-  "/b/messages/api/contexts/{id}/entries": {
-    "get": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Context ID",
-            "type": "string"
-          }
-        },
-        {
-          "in": "query",
-          "name": "kind",
-          "required": false,
-          "schema": {
-            "description": "Filter by entry kind",
-            "enum": [
-              "message",
-              "artifact",
-              "notification",
-              "status"
-            ],
-            "type": "string"
-          }
-        },
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 100,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "role",
-          "required": false,
-          "schema": {
-            "description": "Filter by sender role",
-            "enum": [
-              "user",
-              "assistant",
-              "system"
-            ],
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List entries in context",
-      "tags": [
-        "entries"
-      ]
-    },
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Context ID",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
             "schema": {
-              "description": "`POST /b/messages/api/contexts/{id}/entries` request body.",
-              "properties": {
-                "content": {
-                  "default": "",
-                  "type": "string"
-                },
-                "content_type": {
-                  "default": "text/plain",
-                  "description": "MIME type of `content`. Defaults to `text/plain` when omitted or\nexplicitly `null`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "kind": {
-                  "default": "message",
-                  "description": "What this entry is.",
-                  "enum": [
-                    "message",
-                    "artifact",
-                    "notification",
-                    "status"
-                  ],
-                  "type": "string"
-                },
-                "metadata": true,
-                "role": {
-                  "default": "user",
-                  "description": "Who produced it. `agent` is accepted as an alias of `assistant` and\nis stored as `assistant`.",
-                  "enum": [
-                    "user",
-                    "assistant",
-                    "system"
-                  ],
-                  "type": "string"
-                },
-                "sender_id": {
-                  "default": "",
-                  "type": "string"
-                }
-              },
-              "title": "AddEntryRequest",
-              "type": "object"
+              "default": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "description": "Filter by sender role",
+              "enum": [
+                "user",
+                "assistant",
+                "system"
+              ],
+              "type": "string"
             }
           }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
         },
-        "required": true
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List entries in context",
+        "tags": [
+          "entries"
+        ]
       },
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Add entry to context",
-      "tags": [
-        "entries"
-      ]
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Context ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`POST /b/messages/api/contexts/{id}/entries` request body.",
+                "properties": {
+                  "content": {
+                    "default": "",
+                    "type": "string"
+                  },
+                  "content_type": {
+                    "default": "text/plain",
+                    "description": "MIME type of `content`. Defaults to `text/plain` when omitted or\nexplicitly `null`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "default": "message",
+                    "description": "What this entry is.",
+                    "enum": [
+                      "message",
+                      "artifact",
+                      "notification",
+                      "status"
+                    ],
+                    "type": "string"
+                  },
+                  "metadata": true,
+                  "role": {
+                    "default": "user",
+                    "description": "Who produced it. `agent` is accepted as an alias of `assistant` and\nis stored as `assistant`.",
+                    "enum": [
+                      "user",
+                      "assistant",
+                      "system"
+                    ],
+                    "type": "string"
+                  },
+                  "sender_id": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "title": "AddEntryRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Add entry to context",
+        "tags": [
+          "entries"
+        ]
+      }
     }
   }
 }

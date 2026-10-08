@@ -5422,11 +5422,309 @@ export interface paths {
                         "application/json": {
                             offers: {
                                 offer: {
-                                    billing_scheme: string;
-                                    checkout: Record<string, never>;
-                                    components: Record<string, never>[];
+                                    /** @enum {string} */
+                                    billing_scheme: "per_unit" | "tiered";
+                                    /**
+                                     * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                     *     whole object out uses the defaults.
+                                     * @default {
+                                     *       "allow_promotion_codes": false,
+                                     *       "allowed_shipping_countries": [],
+                                     *       "automatic_tax": false,
+                                     *       "collect_billing_address": false,
+                                     *       "collect_shipping_address": false,
+                                     *       "create_customer": false,
+                                     *       "maximum_total_minor": null,
+                                     *       "minimum_total_minor": null,
+                                     *       "require_terms_consent": false,
+                                     *       "shipping_options": [],
+                                     *       "trial_days": 0
+                                     *     }
+                                     */
+                                    checkout: {
+                                        /** @default false */
+                                        allow_promotion_codes: boolean;
+                                        /** @default [] */
+                                        allowed_shipping_countries: string[];
+                                        /** @default false */
+                                        automatic_tax: boolean;
+                                        /** @default false */
+                                        collect_billing_address: boolean;
+                                        /** @default false */
+                                        collect_shipping_address: boolean;
+                                        /** @default false */
+                                        create_customer: boolean;
+                                        /**
+                                         * Format: int64
+                                         * @description Maximum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        maximum_total_minor: number | null;
+                                        /**
+                                         * Format: int64
+                                         * @description Minimum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        minimum_total_minor: number | null;
+                                        /** @default false */
+                                        require_terms_consent: boolean;
+                                        /** @default [] */
+                                        shipping_options: {
+                                            /** Format: int64 */
+                                            amount_minor: number;
+                                            /** @default null */
+                                            delivery_estimate: {
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                maximum: number | null;
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                minimum: number | null;
+                                                /** @enum {string} */
+                                                unit: "hour" | "day" | "business_day" | "week" | "month";
+                                            } | null;
+                                            display_name: string;
+                                            /** @default  */
+                                            stripe_shipping_rate_id: string;
+                                            /**
+                                             * @default unspecified
+                                             * @enum {string}
+                                             */
+                                            tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                        }[];
+                                        /**
+                                         * Format: uint32
+                                         * @description Free-trial length in days, at most 730. Applies only to a
+                                         *     `subscription` offer.
+                                         * @default 0
+                                         */
+                                        trial_days: number;
+                                    };
+                                    components: {
+                                        /**
+                                         * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                         *     is in integer minor units (cents) of the offer's currency and must not be
+                                         *     negative; `input` names a variable's `key`.
+                                         */
+                                        amount: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            type: "per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            /** Format: int64 */
+                                            base_amount_minor: number;
+                                            input: string;
+                                            /** @constant */
+                                            type: "flat_plus_per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            prices: {
+                                                [key: string]: number;
+                                            };
+                                            /** @constant */
+                                            type: "lookup";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "graduated";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "volume";
+                                        } | {
+                                            input: string;
+                                            /** Format: int64 */
+                                            package_amount_minor: number;
+                                            /** @default up */
+                                            rounding: "up" | "exact";
+                                            /** @constant */
+                                            type: "package";
+                                            /** Format: uint64 */
+                                            units_per_package: number;
+                                        };
+                                        /**
+                                         * @description When a component applies, tagged by `op`. `input` names a variable's
+                                         *     `key`; a component whose condition does not hold is charged nothing.
+                                         * @default {
+                                         *       "op": "always"
+                                         *     }
+                                         */
+                                        condition: {
+                                            /** @constant */
+                                            op: "always";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "all";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "any";
+                                        } | {
+                                            condition: components["schemas"]["Condition"];
+                                            /** @constant */
+                                            op: "not";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "present";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "not_equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "in";
+                                            values: unknown[];
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "contains";
+                                            value: unknown;
+                                        };
+                                        /** @default  */
+                                        description: string;
+                                        id: string;
+                                        key: string;
+                                        label: string;
+                                        /** @default {} */
+                                        metadata: {
+                                            [key: string]: unknown;
+                                        };
+                                        /**
+                                         * @default {
+                                         *       "type": "fixed",
+                                         *       "value": 1
+                                         *     }
+                                         */
+                                        quantity: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: uint64 */
+                                            value: number;
+                                        } | {
+                                            input: string;
+                                            /**
+                                             * Format: uint64
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint64
+                                             * @default 1
+                                             */
+                                            minimum: number;
+                                            /** @constant */
+                                            type: "from_input";
+                                        };
+                                        /** @default null */
+                                        recurrence: {
+                                            /** @enum {string} */
+                                            interval: "day" | "week" | "month" | "year";
+                                            /**
+                                             * Format: uint32
+                                             * @default 1
+                                             */
+                                            interval_count: number;
+                                        } | null;
+                                        /** @default false */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default  */
+                                        stripe_price_id: string;
+                                    }[];
                                     currency: string;
                                     id: string;
+                                    /**
+                                     * Format: uint32
+                                     * @default 1
+                                     */
                                     interval_count: number;
                                     /** @enum {string} */
                                     mode: "payment" | "subscription";
@@ -5434,21 +5732,119 @@ export interface paths {
                                     /** @enum {string} */
                                     pricing_model: "fixed" | "components";
                                     product_id: string;
-                                    recurring_interval?: string | null;
+                                    /**
+                                     * @default null
+                                     * @enum {string|null}
+                                     */
+                                    recurring_interval: "day" | "week" | "month" | "year" | null;
+                                    /** @default  */
                                     stripe_price_id: string;
+                                    /** @default  */
                                     stripe_product_id: string;
-                                    tax_behavior: string;
-                                    usage_type: string;
-                                    variables: Record<string, never>[];
+                                    /** @enum {string} */
+                                    tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    /** @enum {string} */
+                                    usage_type: "licensed" | "metered";
+                                    /** @default [] */
+                                    variables: {
+                                        /**
+                                         * @description The choices of a `select` or `multi_select` input; required for those
+                                         *     kinds.
+                                         * @default []
+                                         */
+                                        allowed_values: string[];
+                                        /** @default null */
+                                        default_value: unknown;
+                                        /** @default  */
+                                        help_text: string;
+                                        /**
+                                         * @description Name that amount rules and conditions use to read this input, e.g.
+                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         */
+                                        key: string;
+                                        /**
+                                         * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                         *     `graduated`, `volume` and `package` amounts need `number` or
+                                         *     `integer`; `lookup` needs `select` or `text`.
+                                         * @enum {string}
+                                         */
+                                        kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                        /** @description What the customer sees beside the input. */
+                                        label: string;
+                                        /** @default null */
+                                        maximum: string | null;
+                                        /**
+                                         * Format: uint
+                                         * @default null
+                                         */
+                                        maximum_length: number | null;
+                                        /** @default null */
+                                        minimum: string | null;
+                                        /**
+                                         * @description Whether pricing is refused when the customer leaves this input out
+                                         *     and it has no `default_value`.
+                                         * @default false
+                                         */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default null */
+                                        step: string | null;
+                                        /**
+                                         * @default public
+                                         * @enum {string}
+                                         */
+                                        visibility: "public" | "hidden" | "admin_only";
+                                    }[];
+                                    /** Format: uint32 */
                                     version: number;
                                 };
-                                /** @enum {string} */
+                                /**
+                                 * @description Lifecycle state of an offer: the `status` column of
+                                 *     `impresspress__products__offers`.
+                                 *
+                                 *     The type existed before this PR but nothing wrote it: every transition
+                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
+                                 *     back out for its compare-and-swap expectations, so the CAS guard and
+                                 *     the column could drift apart silently. Both are this type now.
+                                 *
+                                 *     - `draft` — editable; the only state whose definition may still change.
+                                 *     - `active` — published and purchasable; the definition is immutable.
+                                 *     - `archived` — withdrawn. Existing orders keep referring to it by
+                                 *       version.
+                                 * @enum {string}
+                                 */
                                 status: "draft" | "active" | "archived";
+                                /** @default  */
                                 sync_error: string;
-                                sync_status: string;
+                                /**
+                                 * @description Where an offer stands against its Stripe Product/Price: the
+                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 *
+                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Price. The two were both plain strings and both called "status" on the
+                                 *     same row.
+                                 *
+                                 *     `impresspress__products__payment_links` has a `sync_status` column with
+                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                                 *     note `error`, not `failed`). It is deliberately not typed with this
+                                 *     enum; giving it one means either changing a stored literal or carrying a
+                                 *     fourth spelling, and that is its own decision.
+                                 *
+                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `syncing` — a synchronization is in flight.
+                                 *     - `synced` — Stripe holds a Product and Price matching this offer
+                                 *       version.
+                                 *     - `failed` — the last synchronization failed; `sync_error` says why.
+                                 * @enum {string}
+                                 */
+                                sync_status: "not_synced" | "syncing" | "synced" | "failed";
                             }[];
                             /**
-                             * ProductView
                              * @description A product row as published to its owner and to administrators: every
                              *     column of the products table.
                              */
@@ -5862,11 +6258,309 @@ export interface paths {
                         "application/json": {
                             offers: {
                                 offer: {
-                                    billing_scheme: string;
-                                    checkout: Record<string, never>;
-                                    components: Record<string, never>[];
+                                    /** @enum {string} */
+                                    billing_scheme: "per_unit" | "tiered";
+                                    /**
+                                     * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                     *     whole object out uses the defaults.
+                                     * @default {
+                                     *       "allow_promotion_codes": false,
+                                     *       "allowed_shipping_countries": [],
+                                     *       "automatic_tax": false,
+                                     *       "collect_billing_address": false,
+                                     *       "collect_shipping_address": false,
+                                     *       "create_customer": false,
+                                     *       "maximum_total_minor": null,
+                                     *       "minimum_total_minor": null,
+                                     *       "require_terms_consent": false,
+                                     *       "shipping_options": [],
+                                     *       "trial_days": 0
+                                     *     }
+                                     */
+                                    checkout: {
+                                        /** @default false */
+                                        allow_promotion_codes: boolean;
+                                        /** @default [] */
+                                        allowed_shipping_countries: string[];
+                                        /** @default false */
+                                        automatic_tax: boolean;
+                                        /** @default false */
+                                        collect_billing_address: boolean;
+                                        /** @default false */
+                                        collect_shipping_address: boolean;
+                                        /** @default false */
+                                        create_customer: boolean;
+                                        /**
+                                         * Format: int64
+                                         * @description Maximum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        maximum_total_minor: number | null;
+                                        /**
+                                         * Format: int64
+                                         * @description Minimum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        minimum_total_minor: number | null;
+                                        /** @default false */
+                                        require_terms_consent: boolean;
+                                        /** @default [] */
+                                        shipping_options: {
+                                            /** Format: int64 */
+                                            amount_minor: number;
+                                            /** @default null */
+                                            delivery_estimate: {
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                maximum: number | null;
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                minimum: number | null;
+                                                /** @enum {string} */
+                                                unit: "hour" | "day" | "business_day" | "week" | "month";
+                                            } | null;
+                                            display_name: string;
+                                            /** @default  */
+                                            stripe_shipping_rate_id: string;
+                                            /**
+                                             * @default unspecified
+                                             * @enum {string}
+                                             */
+                                            tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                        }[];
+                                        /**
+                                         * Format: uint32
+                                         * @description Free-trial length in days, at most 730. Applies only to a
+                                         *     `subscription` offer.
+                                         * @default 0
+                                         */
+                                        trial_days: number;
+                                    };
+                                    components: {
+                                        /**
+                                         * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                         *     is in integer minor units (cents) of the offer's currency and must not be
+                                         *     negative; `input` names a variable's `key`.
+                                         */
+                                        amount: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            type: "per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            /** Format: int64 */
+                                            base_amount_minor: number;
+                                            input: string;
+                                            /** @constant */
+                                            type: "flat_plus_per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            prices: {
+                                                [key: string]: number;
+                                            };
+                                            /** @constant */
+                                            type: "lookup";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "graduated";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "volume";
+                                        } | {
+                                            input: string;
+                                            /** Format: int64 */
+                                            package_amount_minor: number;
+                                            /** @default up */
+                                            rounding: "up" | "exact";
+                                            /** @constant */
+                                            type: "package";
+                                            /** Format: uint64 */
+                                            units_per_package: number;
+                                        };
+                                        /**
+                                         * @description When a component applies, tagged by `op`. `input` names a variable's
+                                         *     `key`; a component whose condition does not hold is charged nothing.
+                                         * @default {
+                                         *       "op": "always"
+                                         *     }
+                                         */
+                                        condition: {
+                                            /** @constant */
+                                            op: "always";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "all";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "any";
+                                        } | {
+                                            condition: components["schemas"]["Condition"];
+                                            /** @constant */
+                                            op: "not";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "present";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "not_equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "in";
+                                            values: unknown[];
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "contains";
+                                            value: unknown;
+                                        };
+                                        /** @default  */
+                                        description: string;
+                                        id: string;
+                                        key: string;
+                                        label: string;
+                                        /** @default {} */
+                                        metadata: {
+                                            [key: string]: unknown;
+                                        };
+                                        /**
+                                         * @default {
+                                         *       "type": "fixed",
+                                         *       "value": 1
+                                         *     }
+                                         */
+                                        quantity: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: uint64 */
+                                            value: number;
+                                        } | {
+                                            input: string;
+                                            /**
+                                             * Format: uint64
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint64
+                                             * @default 1
+                                             */
+                                            minimum: number;
+                                            /** @constant */
+                                            type: "from_input";
+                                        };
+                                        /** @default null */
+                                        recurrence: {
+                                            /** @enum {string} */
+                                            interval: "day" | "week" | "month" | "year";
+                                            /**
+                                             * Format: uint32
+                                             * @default 1
+                                             */
+                                            interval_count: number;
+                                        } | null;
+                                        /** @default false */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default  */
+                                        stripe_price_id: string;
+                                    }[];
                                     currency: string;
                                     id: string;
+                                    /**
+                                     * Format: uint32
+                                     * @default 1
+                                     */
                                     interval_count: number;
                                     /** @enum {string} */
                                     mode: "payment" | "subscription";
@@ -5874,18 +6568,117 @@ export interface paths {
                                     /** @enum {string} */
                                     pricing_model: "fixed" | "components";
                                     product_id: string;
-                                    recurring_interval?: string | null;
+                                    /**
+                                     * @default null
+                                     * @enum {string|null}
+                                     */
+                                    recurring_interval: "day" | "week" | "month" | "year" | null;
+                                    /** @default  */
                                     stripe_price_id: string;
+                                    /** @default  */
                                     stripe_product_id: string;
-                                    tax_behavior: string;
-                                    usage_type: string;
-                                    variables: Record<string, never>[];
+                                    /** @enum {string} */
+                                    tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    /** @enum {string} */
+                                    usage_type: "licensed" | "metered";
+                                    /** @default [] */
+                                    variables: {
+                                        /**
+                                         * @description The choices of a `select` or `multi_select` input; required for those
+                                         *     kinds.
+                                         * @default []
+                                         */
+                                        allowed_values: string[];
+                                        /** @default null */
+                                        default_value: unknown;
+                                        /** @default  */
+                                        help_text: string;
+                                        /**
+                                         * @description Name that amount rules and conditions use to read this input, e.g.
+                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         */
+                                        key: string;
+                                        /**
+                                         * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                         *     `graduated`, `volume` and `package` amounts need `number` or
+                                         *     `integer`; `lookup` needs `select` or `text`.
+                                         * @enum {string}
+                                         */
+                                        kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                        /** @description What the customer sees beside the input. */
+                                        label: string;
+                                        /** @default null */
+                                        maximum: string | null;
+                                        /**
+                                         * Format: uint
+                                         * @default null
+                                         */
+                                        maximum_length: number | null;
+                                        /** @default null */
+                                        minimum: string | null;
+                                        /**
+                                         * @description Whether pricing is refused when the customer leaves this input out
+                                         *     and it has no `default_value`.
+                                         * @default false
+                                         */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default null */
+                                        step: string | null;
+                                        /**
+                                         * @default public
+                                         * @enum {string}
+                                         */
+                                        visibility: "public" | "hidden" | "admin_only";
+                                    }[];
+                                    /** Format: uint32 */
                                     version: number;
                                 };
-                                /** @enum {string} */
+                                /**
+                                 * @description Lifecycle state of an offer: the `status` column of
+                                 *     `impresspress__products__offers`.
+                                 *
+                                 *     The type existed before this PR but nothing wrote it: every transition
+                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
+                                 *     back out for its compare-and-swap expectations, so the CAS guard and
+                                 *     the column could drift apart silently. Both are this type now.
+                                 *
+                                 *     - `draft` — editable; the only state whose definition may still change.
+                                 *     - `active` — published and purchasable; the definition is immutable.
+                                 *     - `archived` — withdrawn. Existing orders keep referring to it by
+                                 *       version.
+                                 * @enum {string}
+                                 */
                                 status: "draft" | "active" | "archived";
+                                /** @default  */
                                 sync_error: string;
-                                sync_status: string;
+                                /**
+                                 * @description Where an offer stands against its Stripe Product/Price: the
+                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 *
+                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Price. The two were both plain strings and both called "status" on the
+                                 *     same row.
+                                 *
+                                 *     `impresspress__products__payment_links` has a `sync_status` column with
+                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                                 *     note `error`, not `failed`). It is deliberately not typed with this
+                                 *     enum; giving it one means either changing a stored literal or carrying a
+                                 *     fourth spelling, and that is its own decision.
+                                 *
+                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `syncing` — a synchronization is in flight.
+                                 *     - `synced` — Stripe holds a Product and Price matching this offer
+                                 *       version.
+                                 *     - `failed` — the last synchronization failed; `sync_error` says why.
+                                 * @enum {string}
+                                 */
+                                sync_status: "not_synced" | "syncing" | "synced" | "failed";
                             }[];
                         };
                     };
@@ -5908,23 +6701,402 @@ export interface paths {
                     "application/json": {
                         /** @enum {string} */
                         billing_scheme: "per_unit" | "tiered";
-                        checkout?: Record<string, never>;
-                        components: Record<string, never>[];
+                        /**
+                         * @description How checkout behaves for an offer. Every field is optional; leaving the
+                         *     whole object out uses the defaults.
+                         * @default {
+                         *       "allow_promotion_codes": false,
+                         *       "allowed_shipping_countries": [],
+                         *       "automatic_tax": false,
+                         *       "collect_billing_address": false,
+                         *       "collect_shipping_address": false,
+                         *       "create_customer": false,
+                         *       "maximum_total_minor": null,
+                         *       "minimum_total_minor": null,
+                         *       "require_terms_consent": false,
+                         *       "shipping_options": [],
+                         *       "trial_days": 0
+                         *     }
+                         */
+                        checkout?: {
+                            /** @default false */
+                            allow_promotion_codes?: boolean;
+                            /** @default [] */
+                            allowed_shipping_countries?: string[];
+                            /** @default false */
+                            automatic_tax?: boolean;
+                            /** @default false */
+                            collect_billing_address?: boolean;
+                            /** @default false */
+                            collect_shipping_address?: boolean;
+                            /** @default false */
+                            create_customer?: boolean;
+                            /**
+                             * Format: int64
+                             * @description Maximum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            maximum_total_minor?: number | null;
+                            /**
+                             * Format: int64
+                             * @description Minimum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            minimum_total_minor?: number | null;
+                            /** @default false */
+                            require_terms_consent?: boolean;
+                            /** @default [] */
+                            shipping_options?: {
+                                /** Format: int64 */
+                                amount_minor: number;
+                                /** @default null */
+                                delivery_estimate?: {
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    maximum?: number | null;
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    minimum?: number | null;
+                                    /** @enum {string} */
+                                    unit: "hour" | "day" | "business_day" | "week" | "month";
+                                } | null;
+                                display_name: string;
+                                /** @default  */
+                                stripe_shipping_rate_id?: string;
+                                /**
+                                 * @default unspecified
+                                 * @enum {string}
+                                 */
+                                tax_behavior?: "unspecified" | "inclusive" | "exclusive";
+                            }[];
+                            /**
+                             * Format: uint32
+                             * @description Free-trial length in days, at most 730. Applies only to a
+                             *     `subscription` offer.
+                             * @default 0
+                             */
+                            trial_days?: number;
+                        };
+                        /** @description The offer's priced lines; at least one. */
+                        components: {
+                            /**
+                             * @description How this line's price is computed. `{"type": "fixed",
+                             *     "unit_amount_minor": 1450}` is a fixed price of 14.50 in the offer's
+                             *     currency; the other `type`s price from a customer input.
+                             */
+                            amount: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                type: "per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                /** Format: int64 */
+                                base_amount_minor: number;
+                                input: string;
+                                /** @constant */
+                                type: "flat_plus_per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                prices: {
+                                    [key: string]: number;
+                                };
+                                /** @constant */
+                                type: "lookup";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "graduated";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "volume";
+                            } | {
+                                input: string;
+                                /** Format: int64 */
+                                package_amount_minor: number;
+                                /** @default up */
+                                rounding?: "up" | "exact";
+                                /** @constant */
+                                type: "package";
+                                /** Format: uint64 */
+                                units_per_package: number;
+                            };
+                            /**
+                             * @description When this line applies; `{"op": "always"}` by default.
+                             * @default {
+                             *       "op": "always"
+                             *     }
+                             */
+                            condition?: {
+                                /** @constant */
+                                op: "always";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "all";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "any";
+                            } | {
+                                condition: components["schemas"]["Condition"];
+                                /** @constant */
+                                op: "not";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "present";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "not_equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "in";
+                                values: unknown[];
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "contains";
+                                value: unknown;
+                            };
+                            /** @default  */
+                            description?: string;
+                            /**
+                             * @description Stable identifier for this line within the offer, e.g. `"bag"`.
+                             *     Must be non-empty and unique within the offer.
+                             */
+                            key: string;
+                            /** @description What the buyer sees on the line, e.g. `"250 g bag"`. */
+                            label: string;
+                            /** @default {} */
+                            metadata?: {
+                                [key: string]: unknown;
+                            };
+                            /**
+                             * @description How many units of this line are charged; one by default.
+                             * @default {
+                             *       "type": "fixed",
+                             *       "value": 1
+                             *     }
+                             */
+                            quantity?: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: uint64 */
+                                value: number;
+                            } | {
+                                input: string;
+                                /**
+                                 * Format: uint64
+                                 * @default null
+                                 */
+                                maximum?: number | null;
+                                /**
+                                 * Format: uint64
+                                 * @default 1
+                                 */
+                                minimum?: number;
+                                /** @constant */
+                                type: "from_input";
+                            };
+                            /**
+                             * @description A subscription line's billing interval. Leave it out for a `payment`
+                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             * @default null
+                             */
+                            recurrence?: {
+                                /** @enum {string} */
+                                interval: "day" | "week" | "month" | "year";
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
+                                interval_count?: number;
+                            } | null;
+                            /** @default false */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @description Position of this line among the offer's components, lowest first.
+                             * @default 0
+                             */
+                            sort_order?: number;
+                        }[];
+                        /**
+                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         *     offer is in this currency's minor units.
+                         */
                         currency: string;
-                        /** @default 1 */
+                        /**
+                         * Format: uint32
+                         * @description Number of `recurring_interval`s between charges; 1 by default.
+                         * @default 1
+                         */
                         interval_count?: number;
-                        /** @enum {string} */
+                        /**
+                         * @description `payment` for a one-off purchase, `subscription` for a recurring one.
+                         * @enum {string}
+                         */
                         mode: "payment" | "subscription";
+                        /** @description Name of the offer, e.g. `"250 g bag"`. */
                         name: string;
-                        /** @enum {string} */
+                        /**
+                         * @description `fixed` requires exactly one component with a `fixed` amount;
+                         *     `components` allows any number of components and amount rules.
+                         * @enum {string}
+                         */
                         pricing_model: "fixed" | "components";
-                        /** @enum {string|null} */
+                        /**
+                         * @description Billing interval of a `subscription` offer. Required for
+                         *     `subscription`, and must be left out for `payment`.
+                         * @default null
+                         * @enum {string|null}
+                         */
                         recurring_interval?: "day" | "week" | "month" | "year" | null;
                         /** @enum {string} */
                         tax_behavior: "unspecified" | "inclusive" | "exclusive";
                         /** @enum {string} */
                         usage_type: "licensed" | "metered";
-                        variables?: Record<string, never>[];
+                        /**
+                         * @description Inputs the customer fills in at checkout, which amount rules and
+                         *     conditions read by `key`. Not needed for a `fixed` amount.
+                         * @default []
+                         */
+                        variables?: {
+                            /**
+                             * @description The choices of a `select` or `multi_select` input; required for those
+                             *     kinds.
+                             * @default []
+                             */
+                            allowed_values?: string[];
+                            /** @default null */
+                            default_value?: unknown;
+                            /** @default  */
+                            help_text?: string;
+                            /**
+                             * @description Name that amount rules and conditions use to read this input, e.g.
+                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             */
+                            key: string;
+                            /**
+                             * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                             *     `graduated`, `volume` and `package` amounts need `number` or
+                             *     `integer`; `lookup` needs `select` or `text`.
+                             * @enum {string}
+                             */
+                            kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                            /** @description What the customer sees beside the input. */
+                            label: string;
+                            /** @default null */
+                            maximum?: string | null;
+                            /**
+                             * Format: uint
+                             * @default null
+                             */
+                            maximum_length?: number | null;
+                            /** @default null */
+                            minimum?: string | null;
+                            /**
+                             * @description Whether pricing is refused when the customer leaves this input out
+                             *     and it has no `default_value`.
+                             * @default false
+                             */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @default 0
+                             */
+                            sort_order?: number;
+                            /** @default null */
+                            step?: string | null;
+                            /**
+                             * @default public
+                             * @enum {string}
+                             */
+                            visibility?: "public" | "hidden" | "admin_only";
+                        }[];
                     };
                 };
             };
@@ -5937,11 +7109,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -5949,18 +7419,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -6000,11 +7569,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -6012,18 +7879,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -6052,11 +8018,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -6064,18 +8328,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -6099,23 +8462,402 @@ export interface paths {
                     "application/json": {
                         /** @enum {string} */
                         billing_scheme: "per_unit" | "tiered";
-                        checkout?: Record<string, never>;
-                        components: Record<string, never>[];
+                        /**
+                         * @description How checkout behaves for an offer. Every field is optional; leaving the
+                         *     whole object out uses the defaults.
+                         * @default {
+                         *       "allow_promotion_codes": false,
+                         *       "allowed_shipping_countries": [],
+                         *       "automatic_tax": false,
+                         *       "collect_billing_address": false,
+                         *       "collect_shipping_address": false,
+                         *       "create_customer": false,
+                         *       "maximum_total_minor": null,
+                         *       "minimum_total_minor": null,
+                         *       "require_terms_consent": false,
+                         *       "shipping_options": [],
+                         *       "trial_days": 0
+                         *     }
+                         */
+                        checkout?: {
+                            /** @default false */
+                            allow_promotion_codes?: boolean;
+                            /** @default [] */
+                            allowed_shipping_countries?: string[];
+                            /** @default false */
+                            automatic_tax?: boolean;
+                            /** @default false */
+                            collect_billing_address?: boolean;
+                            /** @default false */
+                            collect_shipping_address?: boolean;
+                            /** @default false */
+                            create_customer?: boolean;
+                            /**
+                             * Format: int64
+                             * @description Maximum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            maximum_total_minor?: number | null;
+                            /**
+                             * Format: int64
+                             * @description Minimum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            minimum_total_minor?: number | null;
+                            /** @default false */
+                            require_terms_consent?: boolean;
+                            /** @default [] */
+                            shipping_options?: {
+                                /** Format: int64 */
+                                amount_minor: number;
+                                /** @default null */
+                                delivery_estimate?: {
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    maximum?: number | null;
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    minimum?: number | null;
+                                    /** @enum {string} */
+                                    unit: "hour" | "day" | "business_day" | "week" | "month";
+                                } | null;
+                                display_name: string;
+                                /** @default  */
+                                stripe_shipping_rate_id?: string;
+                                /**
+                                 * @default unspecified
+                                 * @enum {string}
+                                 */
+                                tax_behavior?: "unspecified" | "inclusive" | "exclusive";
+                            }[];
+                            /**
+                             * Format: uint32
+                             * @description Free-trial length in days, at most 730. Applies only to a
+                             *     `subscription` offer.
+                             * @default 0
+                             */
+                            trial_days?: number;
+                        };
+                        /** @description The offer's priced lines; at least one. */
+                        components: {
+                            /**
+                             * @description How this line's price is computed. `{"type": "fixed",
+                             *     "unit_amount_minor": 1450}` is a fixed price of 14.50 in the offer's
+                             *     currency; the other `type`s price from a customer input.
+                             */
+                            amount: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                type: "per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                /** Format: int64 */
+                                base_amount_minor: number;
+                                input: string;
+                                /** @constant */
+                                type: "flat_plus_per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                prices: {
+                                    [key: string]: number;
+                                };
+                                /** @constant */
+                                type: "lookup";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "graduated";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "volume";
+                            } | {
+                                input: string;
+                                /** Format: int64 */
+                                package_amount_minor: number;
+                                /** @default up */
+                                rounding?: "up" | "exact";
+                                /** @constant */
+                                type: "package";
+                                /** Format: uint64 */
+                                units_per_package: number;
+                            };
+                            /**
+                             * @description When this line applies; `{"op": "always"}` by default.
+                             * @default {
+                             *       "op": "always"
+                             *     }
+                             */
+                            condition?: {
+                                /** @constant */
+                                op: "always";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "all";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "any";
+                            } | {
+                                condition: components["schemas"]["Condition"];
+                                /** @constant */
+                                op: "not";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "present";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "not_equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "in";
+                                values: unknown[];
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "contains";
+                                value: unknown;
+                            };
+                            /** @default  */
+                            description?: string;
+                            /**
+                             * @description Stable identifier for this line within the offer, e.g. `"bag"`.
+                             *     Must be non-empty and unique within the offer.
+                             */
+                            key: string;
+                            /** @description What the buyer sees on the line, e.g. `"250 g bag"`. */
+                            label: string;
+                            /** @default {} */
+                            metadata?: {
+                                [key: string]: unknown;
+                            };
+                            /**
+                             * @description How many units of this line are charged; one by default.
+                             * @default {
+                             *       "type": "fixed",
+                             *       "value": 1
+                             *     }
+                             */
+                            quantity?: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: uint64 */
+                                value: number;
+                            } | {
+                                input: string;
+                                /**
+                                 * Format: uint64
+                                 * @default null
+                                 */
+                                maximum?: number | null;
+                                /**
+                                 * Format: uint64
+                                 * @default 1
+                                 */
+                                minimum?: number;
+                                /** @constant */
+                                type: "from_input";
+                            };
+                            /**
+                             * @description A subscription line's billing interval. Leave it out for a `payment`
+                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             * @default null
+                             */
+                            recurrence?: {
+                                /** @enum {string} */
+                                interval: "day" | "week" | "month" | "year";
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
+                                interval_count?: number;
+                            } | null;
+                            /** @default false */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @description Position of this line among the offer's components, lowest first.
+                             * @default 0
+                             */
+                            sort_order?: number;
+                        }[];
+                        /**
+                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         *     offer is in this currency's minor units.
+                         */
                         currency: string;
-                        /** @default 1 */
+                        /**
+                         * Format: uint32
+                         * @description Number of `recurring_interval`s between charges; 1 by default.
+                         * @default 1
+                         */
                         interval_count?: number;
-                        /** @enum {string} */
+                        /**
+                         * @description `payment` for a one-off purchase, `subscription` for a recurring one.
+                         * @enum {string}
+                         */
                         mode: "payment" | "subscription";
+                        /** @description Name of the offer, e.g. `"250 g bag"`. */
                         name: string;
-                        /** @enum {string} */
+                        /**
+                         * @description `fixed` requires exactly one component with a `fixed` amount;
+                         *     `components` allows any number of components and amount rules.
+                         * @enum {string}
+                         */
                         pricing_model: "fixed" | "components";
-                        /** @enum {string|null} */
+                        /**
+                         * @description Billing interval of a `subscription` offer. Required for
+                         *     `subscription`, and must be left out for `payment`.
+                         * @default null
+                         * @enum {string|null}
+                         */
                         recurring_interval?: "day" | "week" | "month" | "year" | null;
                         /** @enum {string} */
                         tax_behavior: "unspecified" | "inclusive" | "exclusive";
                         /** @enum {string} */
                         usage_type: "licensed" | "metered";
-                        variables?: Record<string, never>[];
+                        /**
+                         * @description Inputs the customer fills in at checkout, which amount rules and
+                         *     conditions read by `key`. Not needed for a `fixed` amount.
+                         * @default []
+                         */
+                        variables?: {
+                            /**
+                             * @description The choices of a `select` or `multi_select` input; required for those
+                             *     kinds.
+                             * @default []
+                             */
+                            allowed_values?: string[];
+                            /** @default null */
+                            default_value?: unknown;
+                            /** @default  */
+                            help_text?: string;
+                            /**
+                             * @description Name that amount rules and conditions use to read this input, e.g.
+                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             */
+                            key: string;
+                            /**
+                             * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                             *     `graduated`, `volume` and `package` amounts need `number` or
+                             *     `integer`; `lookup` needs `select` or `text`.
+                             * @enum {string}
+                             */
+                            kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                            /** @description What the customer sees beside the input. */
+                            label: string;
+                            /** @default null */
+                            maximum?: string | null;
+                            /**
+                             * Format: uint
+                             * @default null
+                             */
+                            maximum_length?: number | null;
+                            /** @default null */
+                            minimum?: string | null;
+                            /**
+                             * @description Whether pricing is refused when the customer leaves this input out
+                             *     and it has no `default_value`.
+                             * @default false
+                             */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @default 0
+                             */
+                            sort_order?: number;
+                            /** @default null */
+                            step?: string | null;
+                            /**
+                             * @default public
+                             * @enum {string}
+                             */
+                            visibility?: "public" | "hidden" | "admin_only";
+                        }[];
                     };
                 };
             };
@@ -6128,11 +8870,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -6140,18 +9180,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -6189,11 +9328,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -6201,18 +9638,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -6742,11 +10278,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -6754,18 +10588,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -6807,11 +10740,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -6819,18 +11050,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -9205,11 +13535,309 @@ export interface paths {
                         "application/json": {
                             offers: {
                                 offer: {
-                                    billing_scheme: string;
-                                    checkout: Record<string, never>;
-                                    components: Record<string, never>[];
+                                    /** @enum {string} */
+                                    billing_scheme: "per_unit" | "tiered";
+                                    /**
+                                     * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                     *     whole object out uses the defaults.
+                                     * @default {
+                                     *       "allow_promotion_codes": false,
+                                     *       "allowed_shipping_countries": [],
+                                     *       "automatic_tax": false,
+                                     *       "collect_billing_address": false,
+                                     *       "collect_shipping_address": false,
+                                     *       "create_customer": false,
+                                     *       "maximum_total_minor": null,
+                                     *       "minimum_total_minor": null,
+                                     *       "require_terms_consent": false,
+                                     *       "shipping_options": [],
+                                     *       "trial_days": 0
+                                     *     }
+                                     */
+                                    checkout: {
+                                        /** @default false */
+                                        allow_promotion_codes: boolean;
+                                        /** @default [] */
+                                        allowed_shipping_countries: string[];
+                                        /** @default false */
+                                        automatic_tax: boolean;
+                                        /** @default false */
+                                        collect_billing_address: boolean;
+                                        /** @default false */
+                                        collect_shipping_address: boolean;
+                                        /** @default false */
+                                        create_customer: boolean;
+                                        /**
+                                         * Format: int64
+                                         * @description Maximum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        maximum_total_minor: number | null;
+                                        /**
+                                         * Format: int64
+                                         * @description Minimum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        minimum_total_minor: number | null;
+                                        /** @default false */
+                                        require_terms_consent: boolean;
+                                        /** @default [] */
+                                        shipping_options: {
+                                            /** Format: int64 */
+                                            amount_minor: number;
+                                            /** @default null */
+                                            delivery_estimate: {
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                maximum: number | null;
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                minimum: number | null;
+                                                /** @enum {string} */
+                                                unit: "hour" | "day" | "business_day" | "week" | "month";
+                                            } | null;
+                                            display_name: string;
+                                            /** @default  */
+                                            stripe_shipping_rate_id: string;
+                                            /**
+                                             * @default unspecified
+                                             * @enum {string}
+                                             */
+                                            tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                        }[];
+                                        /**
+                                         * Format: uint32
+                                         * @description Free-trial length in days, at most 730. Applies only to a
+                                         *     `subscription` offer.
+                                         * @default 0
+                                         */
+                                        trial_days: number;
+                                    };
+                                    components: {
+                                        /**
+                                         * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                         *     is in integer minor units (cents) of the offer's currency and must not be
+                                         *     negative; `input` names a variable's `key`.
+                                         */
+                                        amount: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            type: "per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            /** Format: int64 */
+                                            base_amount_minor: number;
+                                            input: string;
+                                            /** @constant */
+                                            type: "flat_plus_per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            prices: {
+                                                [key: string]: number;
+                                            };
+                                            /** @constant */
+                                            type: "lookup";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "graduated";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "volume";
+                                        } | {
+                                            input: string;
+                                            /** Format: int64 */
+                                            package_amount_minor: number;
+                                            /** @default up */
+                                            rounding: "up" | "exact";
+                                            /** @constant */
+                                            type: "package";
+                                            /** Format: uint64 */
+                                            units_per_package: number;
+                                        };
+                                        /**
+                                         * @description When a component applies, tagged by `op`. `input` names a variable's
+                                         *     `key`; a component whose condition does not hold is charged nothing.
+                                         * @default {
+                                         *       "op": "always"
+                                         *     }
+                                         */
+                                        condition: {
+                                            /** @constant */
+                                            op: "always";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "all";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "any";
+                                        } | {
+                                            condition: components["schemas"]["Condition"];
+                                            /** @constant */
+                                            op: "not";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "present";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "not_equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "in";
+                                            values: unknown[];
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "contains";
+                                            value: unknown;
+                                        };
+                                        /** @default  */
+                                        description: string;
+                                        id: string;
+                                        key: string;
+                                        label: string;
+                                        /** @default {} */
+                                        metadata: {
+                                            [key: string]: unknown;
+                                        };
+                                        /**
+                                         * @default {
+                                         *       "type": "fixed",
+                                         *       "value": 1
+                                         *     }
+                                         */
+                                        quantity: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: uint64 */
+                                            value: number;
+                                        } | {
+                                            input: string;
+                                            /**
+                                             * Format: uint64
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint64
+                                             * @default 1
+                                             */
+                                            minimum: number;
+                                            /** @constant */
+                                            type: "from_input";
+                                        };
+                                        /** @default null */
+                                        recurrence: {
+                                            /** @enum {string} */
+                                            interval: "day" | "week" | "month" | "year";
+                                            /**
+                                             * Format: uint32
+                                             * @default 1
+                                             */
+                                            interval_count: number;
+                                        } | null;
+                                        /** @default false */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default  */
+                                        stripe_price_id: string;
+                                    }[];
                                     currency: string;
                                     id: string;
+                                    /**
+                                     * Format: uint32
+                                     * @default 1
+                                     */
                                     interval_count: number;
                                     /** @enum {string} */
                                     mode: "payment" | "subscription";
@@ -9217,21 +13845,119 @@ export interface paths {
                                     /** @enum {string} */
                                     pricing_model: "fixed" | "components";
                                     product_id: string;
-                                    recurring_interval?: string | null;
+                                    /**
+                                     * @default null
+                                     * @enum {string|null}
+                                     */
+                                    recurring_interval: "day" | "week" | "month" | "year" | null;
+                                    /** @default  */
                                     stripe_price_id: string;
+                                    /** @default  */
                                     stripe_product_id: string;
-                                    tax_behavior: string;
-                                    usage_type: string;
-                                    variables: Record<string, never>[];
+                                    /** @enum {string} */
+                                    tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    /** @enum {string} */
+                                    usage_type: "licensed" | "metered";
+                                    /** @default [] */
+                                    variables: {
+                                        /**
+                                         * @description The choices of a `select` or `multi_select` input; required for those
+                                         *     kinds.
+                                         * @default []
+                                         */
+                                        allowed_values: string[];
+                                        /** @default null */
+                                        default_value: unknown;
+                                        /** @default  */
+                                        help_text: string;
+                                        /**
+                                         * @description Name that amount rules and conditions use to read this input, e.g.
+                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         */
+                                        key: string;
+                                        /**
+                                         * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                         *     `graduated`, `volume` and `package` amounts need `number` or
+                                         *     `integer`; `lookup` needs `select` or `text`.
+                                         * @enum {string}
+                                         */
+                                        kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                        /** @description What the customer sees beside the input. */
+                                        label: string;
+                                        /** @default null */
+                                        maximum: string | null;
+                                        /**
+                                         * Format: uint
+                                         * @default null
+                                         */
+                                        maximum_length: number | null;
+                                        /** @default null */
+                                        minimum: string | null;
+                                        /**
+                                         * @description Whether pricing is refused when the customer leaves this input out
+                                         *     and it has no `default_value`.
+                                         * @default false
+                                         */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default null */
+                                        step: string | null;
+                                        /**
+                                         * @default public
+                                         * @enum {string}
+                                         */
+                                        visibility: "public" | "hidden" | "admin_only";
+                                    }[];
+                                    /** Format: uint32 */
                                     version: number;
                                 };
-                                /** @enum {string} */
+                                /**
+                                 * @description Lifecycle state of an offer: the `status` column of
+                                 *     `impresspress__products__offers`.
+                                 *
+                                 *     The type existed before this PR but nothing wrote it: every transition
+                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
+                                 *     back out for its compare-and-swap expectations, so the CAS guard and
+                                 *     the column could drift apart silently. Both are this type now.
+                                 *
+                                 *     - `draft` — editable; the only state whose definition may still change.
+                                 *     - `active` — published and purchasable; the definition is immutable.
+                                 *     - `archived` — withdrawn. Existing orders keep referring to it by
+                                 *       version.
+                                 * @enum {string}
+                                 */
                                 status: "draft" | "active" | "archived";
+                                /** @default  */
                                 sync_error: string;
-                                sync_status: string;
+                                /**
+                                 * @description Where an offer stands against its Stripe Product/Price: the
+                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 *
+                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Price. The two were both plain strings and both called "status" on the
+                                 *     same row.
+                                 *
+                                 *     `impresspress__products__payment_links` has a `sync_status` column with
+                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                                 *     note `error`, not `failed`). It is deliberately not typed with this
+                                 *     enum; giving it one means either changing a stored literal or carrying a
+                                 *     fourth spelling, and that is its own decision.
+                                 *
+                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `syncing` — a synchronization is in flight.
+                                 *     - `synced` — Stripe holds a Product and Price matching this offer
+                                 *       version.
+                                 *     - `failed` — the last synchronization failed; `sync_error` says why.
+                                 * @enum {string}
+                                 */
+                                sync_status: "not_synced" | "syncing" | "synced" | "failed";
                             }[];
                             /**
-                             * ProductView
                              * @description A product row as published to its owner and to administrators: every
                              *     column of the products table.
                              */
@@ -9510,11 +14236,309 @@ export interface paths {
                         "application/json": {
                             offers: {
                                 offer: {
-                                    billing_scheme: string;
-                                    checkout: Record<string, never>;
-                                    components: Record<string, never>[];
+                                    /** @enum {string} */
+                                    billing_scheme: "per_unit" | "tiered";
+                                    /**
+                                     * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                     *     whole object out uses the defaults.
+                                     * @default {
+                                     *       "allow_promotion_codes": false,
+                                     *       "allowed_shipping_countries": [],
+                                     *       "automatic_tax": false,
+                                     *       "collect_billing_address": false,
+                                     *       "collect_shipping_address": false,
+                                     *       "create_customer": false,
+                                     *       "maximum_total_minor": null,
+                                     *       "minimum_total_minor": null,
+                                     *       "require_terms_consent": false,
+                                     *       "shipping_options": [],
+                                     *       "trial_days": 0
+                                     *     }
+                                     */
+                                    checkout: {
+                                        /** @default false */
+                                        allow_promotion_codes: boolean;
+                                        /** @default [] */
+                                        allowed_shipping_countries: string[];
+                                        /** @default false */
+                                        automatic_tax: boolean;
+                                        /** @default false */
+                                        collect_billing_address: boolean;
+                                        /** @default false */
+                                        collect_shipping_address: boolean;
+                                        /** @default false */
+                                        create_customer: boolean;
+                                        /**
+                                         * Format: int64
+                                         * @description Maximum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        maximum_total_minor: number | null;
+                                        /**
+                                         * Format: int64
+                                         * @description Minimum evaluated item total before provider discounts, tax, or
+                                         *     shipping, in integer minor units (cents).
+                                         * @default null
+                                         */
+                                        minimum_total_minor: number | null;
+                                        /** @default false */
+                                        require_terms_consent: boolean;
+                                        /** @default [] */
+                                        shipping_options: {
+                                            /** Format: int64 */
+                                            amount_minor: number;
+                                            /** @default null */
+                                            delivery_estimate: {
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                maximum: number | null;
+                                                /**
+                                                 * Format: uint32
+                                                 * @default null
+                                                 */
+                                                minimum: number | null;
+                                                /** @enum {string} */
+                                                unit: "hour" | "day" | "business_day" | "week" | "month";
+                                            } | null;
+                                            display_name: string;
+                                            /** @default  */
+                                            stripe_shipping_rate_id: string;
+                                            /**
+                                             * @default unspecified
+                                             * @enum {string}
+                                             */
+                                            tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                        }[];
+                                        /**
+                                         * Format: uint32
+                                         * @description Free-trial length in days, at most 730. Applies only to a
+                                         *     `subscription` offer.
+                                         * @default 0
+                                         */
+                                        trial_days: number;
+                                    };
+                                    components: {
+                                        /**
+                                         * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                         *     is in integer minor units (cents) of the offer's currency and must not be
+                                         *     negative; `input` names a variable's `key`.
+                                         */
+                                        amount: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            type: "per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            /** Format: int64 */
+                                            base_amount_minor: number;
+                                            input: string;
+                                            /** @constant */
+                                            type: "flat_plus_per_unit";
+                                            /** Format: int64 */
+                                            unit_amount_minor: number;
+                                        } | {
+                                            input: string;
+                                            prices: {
+                                                [key: string]: number;
+                                            };
+                                            /** @constant */
+                                            type: "lookup";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "graduated";
+                                        } | {
+                                            input: string;
+                                            tiers: {
+                                                /**
+                                                 * Format: int64
+                                                 * @description Flat amount added once when this tier applies, in integer minor units
+                                                 *     (cents).
+                                                 * @default 0
+                                                 */
+                                                flat_amount_minor: number;
+                                                /**
+                                                 * Format: int64
+                                                 * @description Price per unit in this tier, in integer minor units (cents).
+                                                 */
+                                                unit_amount_minor: number;
+                                                /**
+                                                 * Format: uint64
+                                                 * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                                 * @default null
+                                                 */
+                                                up_to: number | null;
+                                            }[];
+                                            /** @constant */
+                                            type: "volume";
+                                        } | {
+                                            input: string;
+                                            /** Format: int64 */
+                                            package_amount_minor: number;
+                                            /** @default up */
+                                            rounding: "up" | "exact";
+                                            /** @constant */
+                                            type: "package";
+                                            /** Format: uint64 */
+                                            units_per_package: number;
+                                        };
+                                        /**
+                                         * @description When a component applies, tagged by `op`. `input` names a variable's
+                                         *     `key`; a component whose condition does not hold is charged nothing.
+                                         * @default {
+                                         *       "op": "always"
+                                         *     }
+                                         */
+                                        condition: {
+                                            /** @constant */
+                                            op: "always";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "all";
+                                        } | {
+                                            conditions: components["schemas"]["Condition"][];
+                                            /** @constant */
+                                            op: "any";
+                                        } | {
+                                            condition: components["schemas"]["Condition"];
+                                            /** @constant */
+                                            op: "not";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "present";
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "not_equals";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "greater_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "less_than_or_equal";
+                                            value: unknown;
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "in";
+                                            values: unknown[];
+                                        } | {
+                                            input: string;
+                                            /** @constant */
+                                            op: "contains";
+                                            value: unknown;
+                                        };
+                                        /** @default  */
+                                        description: string;
+                                        id: string;
+                                        key: string;
+                                        label: string;
+                                        /** @default {} */
+                                        metadata: {
+                                            [key: string]: unknown;
+                                        };
+                                        /**
+                                         * @default {
+                                         *       "type": "fixed",
+                                         *       "value": 1
+                                         *     }
+                                         */
+                                        quantity: {
+                                            /** @constant */
+                                            type: "fixed";
+                                            /** Format: uint64 */
+                                            value: number;
+                                        } | {
+                                            input: string;
+                                            /**
+                                             * Format: uint64
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint64
+                                             * @default 1
+                                             */
+                                            minimum: number;
+                                            /** @constant */
+                                            type: "from_input";
+                                        };
+                                        /** @default null */
+                                        recurrence: {
+                                            /** @enum {string} */
+                                            interval: "day" | "week" | "month" | "year";
+                                            /**
+                                             * Format: uint32
+                                             * @default 1
+                                             */
+                                            interval_count: number;
+                                        } | null;
+                                        /** @default false */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default  */
+                                        stripe_price_id: string;
+                                    }[];
                                     currency: string;
                                     id: string;
+                                    /**
+                                     * Format: uint32
+                                     * @default 1
+                                     */
                                     interval_count: number;
                                     /** @enum {string} */
                                     mode: "payment" | "subscription";
@@ -9522,18 +14546,117 @@ export interface paths {
                                     /** @enum {string} */
                                     pricing_model: "fixed" | "components";
                                     product_id: string;
-                                    recurring_interval?: string | null;
+                                    /**
+                                     * @default null
+                                     * @enum {string|null}
+                                     */
+                                    recurring_interval: "day" | "week" | "month" | "year" | null;
+                                    /** @default  */
                                     stripe_price_id: string;
+                                    /** @default  */
                                     stripe_product_id: string;
-                                    tax_behavior: string;
-                                    usage_type: string;
-                                    variables: Record<string, never>[];
+                                    /** @enum {string} */
+                                    tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    /** @enum {string} */
+                                    usage_type: "licensed" | "metered";
+                                    /** @default [] */
+                                    variables: {
+                                        /**
+                                         * @description The choices of a `select` or `multi_select` input; required for those
+                                         *     kinds.
+                                         * @default []
+                                         */
+                                        allowed_values: string[];
+                                        /** @default null */
+                                        default_value: unknown;
+                                        /** @default  */
+                                        help_text: string;
+                                        /**
+                                         * @description Name that amount rules and conditions use to read this input, e.g.
+                                         *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                         */
+                                        key: string;
+                                        /**
+                                         * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                         *     `graduated`, `volume` and `package` amounts need `number` or
+                                         *     `integer`; `lookup` needs `select` or `text`.
+                                         * @enum {string}
+                                         */
+                                        kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                        /** @description What the customer sees beside the input. */
+                                        label: string;
+                                        /** @default null */
+                                        maximum: string | null;
+                                        /**
+                                         * Format: uint
+                                         * @default null
+                                         */
+                                        maximum_length: number | null;
+                                        /** @default null */
+                                        minimum: string | null;
+                                        /**
+                                         * @description Whether pricing is refused when the customer leaves this input out
+                                         *     and it has no `default_value`.
+                                         * @default false
+                                         */
+                                        required: boolean;
+                                        /**
+                                         * Format: int32
+                                         * @default 0
+                                         */
+                                        sort_order: number;
+                                        /** @default null */
+                                        step: string | null;
+                                        /**
+                                         * @default public
+                                         * @enum {string}
+                                         */
+                                        visibility: "public" | "hidden" | "admin_only";
+                                    }[];
+                                    /** Format: uint32 */
                                     version: number;
                                 };
-                                /** @enum {string} */
+                                /**
+                                 * @description Lifecycle state of an offer: the `status` column of
+                                 *     `impresspress__products__offers`.
+                                 *
+                                 *     The type existed before this PR but nothing wrote it: every transition
+                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
+                                 *     back out for its compare-and-swap expectations, so the CAS guard and
+                                 *     the column could drift apart silently. Both are this type now.
+                                 *
+                                 *     - `draft` — editable; the only state whose definition may still change.
+                                 *     - `active` — published and purchasable; the definition is immutable.
+                                 *     - `archived` — withdrawn. Existing orders keep referring to it by
+                                 *       version.
+                                 * @enum {string}
+                                 */
                                 status: "draft" | "active" | "archived";
+                                /** @default  */
                                 sync_error: string;
-                                sync_status: string;
+                                /**
+                                 * @description Where an offer stands against its Stripe Product/Price: the
+                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 *
+                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Price. The two were both plain strings and both called "status" on the
+                                 *     same row.
+                                 *
+                                 *     `impresspress__products__payment_links` has a `sync_status` column with
+                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                                 *     note `error`, not `failed`). It is deliberately not typed with this
+                                 *     enum; giving it one means either changing a stored literal or carrying a
+                                 *     fourth spelling, and that is its own decision.
+                                 *
+                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `syncing` — a synchronization is in flight.
+                                 *     - `synced` — Stripe holds a Product and Price matching this offer
+                                 *       version.
+                                 *     - `failed` — the last synchronization failed; `sync_error` says why.
+                                 * @enum {string}
+                                 */
+                                sync_status: "not_synced" | "syncing" | "synced" | "failed";
                             }[];
                         };
                     };
@@ -9556,23 +14679,402 @@ export interface paths {
                     "application/json": {
                         /** @enum {string} */
                         billing_scheme: "per_unit" | "tiered";
-                        checkout?: Record<string, never>;
-                        components: Record<string, never>[];
+                        /**
+                         * @description How checkout behaves for an offer. Every field is optional; leaving the
+                         *     whole object out uses the defaults.
+                         * @default {
+                         *       "allow_promotion_codes": false,
+                         *       "allowed_shipping_countries": [],
+                         *       "automatic_tax": false,
+                         *       "collect_billing_address": false,
+                         *       "collect_shipping_address": false,
+                         *       "create_customer": false,
+                         *       "maximum_total_minor": null,
+                         *       "minimum_total_minor": null,
+                         *       "require_terms_consent": false,
+                         *       "shipping_options": [],
+                         *       "trial_days": 0
+                         *     }
+                         */
+                        checkout?: {
+                            /** @default false */
+                            allow_promotion_codes?: boolean;
+                            /** @default [] */
+                            allowed_shipping_countries?: string[];
+                            /** @default false */
+                            automatic_tax?: boolean;
+                            /** @default false */
+                            collect_billing_address?: boolean;
+                            /** @default false */
+                            collect_shipping_address?: boolean;
+                            /** @default false */
+                            create_customer?: boolean;
+                            /**
+                             * Format: int64
+                             * @description Maximum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            maximum_total_minor?: number | null;
+                            /**
+                             * Format: int64
+                             * @description Minimum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            minimum_total_minor?: number | null;
+                            /** @default false */
+                            require_terms_consent?: boolean;
+                            /** @default [] */
+                            shipping_options?: {
+                                /** Format: int64 */
+                                amount_minor: number;
+                                /** @default null */
+                                delivery_estimate?: {
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    maximum?: number | null;
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    minimum?: number | null;
+                                    /** @enum {string} */
+                                    unit: "hour" | "day" | "business_day" | "week" | "month";
+                                } | null;
+                                display_name: string;
+                                /** @default  */
+                                stripe_shipping_rate_id?: string;
+                                /**
+                                 * @default unspecified
+                                 * @enum {string}
+                                 */
+                                tax_behavior?: "unspecified" | "inclusive" | "exclusive";
+                            }[];
+                            /**
+                             * Format: uint32
+                             * @description Free-trial length in days, at most 730. Applies only to a
+                             *     `subscription` offer.
+                             * @default 0
+                             */
+                            trial_days?: number;
+                        };
+                        /** @description The offer's priced lines; at least one. */
+                        components: {
+                            /**
+                             * @description How this line's price is computed. `{"type": "fixed",
+                             *     "unit_amount_minor": 1450}` is a fixed price of 14.50 in the offer's
+                             *     currency; the other `type`s price from a customer input.
+                             */
+                            amount: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                type: "per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                /** Format: int64 */
+                                base_amount_minor: number;
+                                input: string;
+                                /** @constant */
+                                type: "flat_plus_per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                prices: {
+                                    [key: string]: number;
+                                };
+                                /** @constant */
+                                type: "lookup";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "graduated";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "volume";
+                            } | {
+                                input: string;
+                                /** Format: int64 */
+                                package_amount_minor: number;
+                                /** @default up */
+                                rounding?: "up" | "exact";
+                                /** @constant */
+                                type: "package";
+                                /** Format: uint64 */
+                                units_per_package: number;
+                            };
+                            /**
+                             * @description When this line applies; `{"op": "always"}` by default.
+                             * @default {
+                             *       "op": "always"
+                             *     }
+                             */
+                            condition?: {
+                                /** @constant */
+                                op: "always";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "all";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "any";
+                            } | {
+                                condition: components["schemas"]["Condition"];
+                                /** @constant */
+                                op: "not";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "present";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "not_equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "in";
+                                values: unknown[];
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "contains";
+                                value: unknown;
+                            };
+                            /** @default  */
+                            description?: string;
+                            /**
+                             * @description Stable identifier for this line within the offer, e.g. `"bag"`.
+                             *     Must be non-empty and unique within the offer.
+                             */
+                            key: string;
+                            /** @description What the buyer sees on the line, e.g. `"250 g bag"`. */
+                            label: string;
+                            /** @default {} */
+                            metadata?: {
+                                [key: string]: unknown;
+                            };
+                            /**
+                             * @description How many units of this line are charged; one by default.
+                             * @default {
+                             *       "type": "fixed",
+                             *       "value": 1
+                             *     }
+                             */
+                            quantity?: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: uint64 */
+                                value: number;
+                            } | {
+                                input: string;
+                                /**
+                                 * Format: uint64
+                                 * @default null
+                                 */
+                                maximum?: number | null;
+                                /**
+                                 * Format: uint64
+                                 * @default 1
+                                 */
+                                minimum?: number;
+                                /** @constant */
+                                type: "from_input";
+                            };
+                            /**
+                             * @description A subscription line's billing interval. Leave it out for a `payment`
+                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             * @default null
+                             */
+                            recurrence?: {
+                                /** @enum {string} */
+                                interval: "day" | "week" | "month" | "year";
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
+                                interval_count?: number;
+                            } | null;
+                            /** @default false */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @description Position of this line among the offer's components, lowest first.
+                             * @default 0
+                             */
+                            sort_order?: number;
+                        }[];
+                        /**
+                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         *     offer is in this currency's minor units.
+                         */
                         currency: string;
-                        /** @default 1 */
+                        /**
+                         * Format: uint32
+                         * @description Number of `recurring_interval`s between charges; 1 by default.
+                         * @default 1
+                         */
                         interval_count?: number;
-                        /** @enum {string} */
+                        /**
+                         * @description `payment` for a one-off purchase, `subscription` for a recurring one.
+                         * @enum {string}
+                         */
                         mode: "payment" | "subscription";
+                        /** @description Name of the offer, e.g. `"250 g bag"`. */
                         name: string;
-                        /** @enum {string} */
+                        /**
+                         * @description `fixed` requires exactly one component with a `fixed` amount;
+                         *     `components` allows any number of components and amount rules.
+                         * @enum {string}
+                         */
                         pricing_model: "fixed" | "components";
-                        /** @enum {string|null} */
+                        /**
+                         * @description Billing interval of a `subscription` offer. Required for
+                         *     `subscription`, and must be left out for `payment`.
+                         * @default null
+                         * @enum {string|null}
+                         */
                         recurring_interval?: "day" | "week" | "month" | "year" | null;
                         /** @enum {string} */
                         tax_behavior: "unspecified" | "inclusive" | "exclusive";
                         /** @enum {string} */
                         usage_type: "licensed" | "metered";
-                        variables?: Record<string, never>[];
+                        /**
+                         * @description Inputs the customer fills in at checkout, which amount rules and
+                         *     conditions read by `key`. Not needed for a `fixed` amount.
+                         * @default []
+                         */
+                        variables?: {
+                            /**
+                             * @description The choices of a `select` or `multi_select` input; required for those
+                             *     kinds.
+                             * @default []
+                             */
+                            allowed_values?: string[];
+                            /** @default null */
+                            default_value?: unknown;
+                            /** @default  */
+                            help_text?: string;
+                            /**
+                             * @description Name that amount rules and conditions use to read this input, e.g.
+                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             */
+                            key: string;
+                            /**
+                             * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                             *     `graduated`, `volume` and `package` amounts need `number` or
+                             *     `integer`; `lookup` needs `select` or `text`.
+                             * @enum {string}
+                             */
+                            kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                            /** @description What the customer sees beside the input. */
+                            label: string;
+                            /** @default null */
+                            maximum?: string | null;
+                            /**
+                             * Format: uint
+                             * @default null
+                             */
+                            maximum_length?: number | null;
+                            /** @default null */
+                            minimum?: string | null;
+                            /**
+                             * @description Whether pricing is refused when the customer leaves this input out
+                             *     and it has no `default_value`.
+                             * @default false
+                             */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @default 0
+                             */
+                            sort_order?: number;
+                            /** @default null */
+                            step?: string | null;
+                            /**
+                             * @default public
+                             * @enum {string}
+                             */
+                            visibility?: "public" | "hidden" | "admin_only";
+                        }[];
                     };
                 };
             };
@@ -9585,11 +15087,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -9597,18 +15397,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -9648,11 +15547,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -9660,18 +15857,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -9700,11 +15996,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -9712,18 +16306,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -9747,23 +16440,402 @@ export interface paths {
                     "application/json": {
                         /** @enum {string} */
                         billing_scheme: "per_unit" | "tiered";
-                        checkout?: Record<string, never>;
-                        components: Record<string, never>[];
+                        /**
+                         * @description How checkout behaves for an offer. Every field is optional; leaving the
+                         *     whole object out uses the defaults.
+                         * @default {
+                         *       "allow_promotion_codes": false,
+                         *       "allowed_shipping_countries": [],
+                         *       "automatic_tax": false,
+                         *       "collect_billing_address": false,
+                         *       "collect_shipping_address": false,
+                         *       "create_customer": false,
+                         *       "maximum_total_minor": null,
+                         *       "minimum_total_minor": null,
+                         *       "require_terms_consent": false,
+                         *       "shipping_options": [],
+                         *       "trial_days": 0
+                         *     }
+                         */
+                        checkout?: {
+                            /** @default false */
+                            allow_promotion_codes?: boolean;
+                            /** @default [] */
+                            allowed_shipping_countries?: string[];
+                            /** @default false */
+                            automatic_tax?: boolean;
+                            /** @default false */
+                            collect_billing_address?: boolean;
+                            /** @default false */
+                            collect_shipping_address?: boolean;
+                            /** @default false */
+                            create_customer?: boolean;
+                            /**
+                             * Format: int64
+                             * @description Maximum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            maximum_total_minor?: number | null;
+                            /**
+                             * Format: int64
+                             * @description Minimum evaluated item total before provider discounts, tax, or
+                             *     shipping, in integer minor units (cents).
+                             * @default null
+                             */
+                            minimum_total_minor?: number | null;
+                            /** @default false */
+                            require_terms_consent?: boolean;
+                            /** @default [] */
+                            shipping_options?: {
+                                /** Format: int64 */
+                                amount_minor: number;
+                                /** @default null */
+                                delivery_estimate?: {
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    maximum?: number | null;
+                                    /**
+                                     * Format: uint32
+                                     * @default null
+                                     */
+                                    minimum?: number | null;
+                                    /** @enum {string} */
+                                    unit: "hour" | "day" | "business_day" | "week" | "month";
+                                } | null;
+                                display_name: string;
+                                /** @default  */
+                                stripe_shipping_rate_id?: string;
+                                /**
+                                 * @default unspecified
+                                 * @enum {string}
+                                 */
+                                tax_behavior?: "unspecified" | "inclusive" | "exclusive";
+                            }[];
+                            /**
+                             * Format: uint32
+                             * @description Free-trial length in days, at most 730. Applies only to a
+                             *     `subscription` offer.
+                             * @default 0
+                             */
+                            trial_days?: number;
+                        };
+                        /** @description The offer's priced lines; at least one. */
+                        components: {
+                            /**
+                             * @description How this line's price is computed. `{"type": "fixed",
+                             *     "unit_amount_minor": 1450}` is a fixed price of 14.50 in the offer's
+                             *     currency; the other `type`s price from a customer input.
+                             */
+                            amount: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                type: "per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                /** Format: int64 */
+                                base_amount_minor: number;
+                                input: string;
+                                /** @constant */
+                                type: "flat_plus_per_unit";
+                                /** Format: int64 */
+                                unit_amount_minor: number;
+                            } | {
+                                input: string;
+                                prices: {
+                                    [key: string]: number;
+                                };
+                                /** @constant */
+                                type: "lookup";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "graduated";
+                            } | {
+                                input: string;
+                                tiers: {
+                                    /**
+                                     * Format: int64
+                                     * @description Flat amount added once when this tier applies, in integer minor units
+                                     *     (cents).
+                                     * @default 0
+                                     */
+                                    flat_amount_minor?: number;
+                                    /**
+                                     * Format: int64
+                                     * @description Price per unit in this tier, in integer minor units (cents).
+                                     */
+                                    unit_amount_minor: number;
+                                    /**
+                                     * Format: uint64
+                                     * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                     * @default null
+                                     */
+                                    up_to?: number | null;
+                                }[];
+                                /** @constant */
+                                type: "volume";
+                            } | {
+                                input: string;
+                                /** Format: int64 */
+                                package_amount_minor: number;
+                                /** @default up */
+                                rounding?: "up" | "exact";
+                                /** @constant */
+                                type: "package";
+                                /** Format: uint64 */
+                                units_per_package: number;
+                            };
+                            /**
+                             * @description When this line applies; `{"op": "always"}` by default.
+                             * @default {
+                             *       "op": "always"
+                             *     }
+                             */
+                            condition?: {
+                                /** @constant */
+                                op: "always";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "all";
+                            } | {
+                                conditions: components["schemas"]["Condition"][];
+                                /** @constant */
+                                op: "any";
+                            } | {
+                                condition: components["schemas"]["Condition"];
+                                /** @constant */
+                                op: "not";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "present";
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "not_equals";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "greater_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "less_than_or_equal";
+                                value: unknown;
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "in";
+                                values: unknown[];
+                            } | {
+                                input: string;
+                                /** @constant */
+                                op: "contains";
+                                value: unknown;
+                            };
+                            /** @default  */
+                            description?: string;
+                            /**
+                             * @description Stable identifier for this line within the offer, e.g. `"bag"`.
+                             *     Must be non-empty and unique within the offer.
+                             */
+                            key: string;
+                            /** @description What the buyer sees on the line, e.g. `"250 g bag"`. */
+                            label: string;
+                            /** @default {} */
+                            metadata?: {
+                                [key: string]: unknown;
+                            };
+                            /**
+                             * @description How many units of this line are charged; one by default.
+                             * @default {
+                             *       "type": "fixed",
+                             *       "value": 1
+                             *     }
+                             */
+                            quantity?: {
+                                /** @constant */
+                                type: "fixed";
+                                /** Format: uint64 */
+                                value: number;
+                            } | {
+                                input: string;
+                                /**
+                                 * Format: uint64
+                                 * @default null
+                                 */
+                                maximum?: number | null;
+                                /**
+                                 * Format: uint64
+                                 * @default 1
+                                 */
+                                minimum?: number;
+                                /** @constant */
+                                type: "from_input";
+                            };
+                            /**
+                             * @description A subscription line's billing interval. Leave it out for a `payment`
+                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             * @default null
+                             */
+                            recurrence?: {
+                                /** @enum {string} */
+                                interval: "day" | "week" | "month" | "year";
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
+                                interval_count?: number;
+                            } | null;
+                            /** @default false */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @description Position of this line among the offer's components, lowest first.
+                             * @default 0
+                             */
+                            sort_order?: number;
+                        }[];
+                        /**
+                         * @description Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+                         *     offer is in this currency's minor units.
+                         */
                         currency: string;
-                        /** @default 1 */
+                        /**
+                         * Format: uint32
+                         * @description Number of `recurring_interval`s between charges; 1 by default.
+                         * @default 1
+                         */
                         interval_count?: number;
-                        /** @enum {string} */
+                        /**
+                         * @description `payment` for a one-off purchase, `subscription` for a recurring one.
+                         * @enum {string}
+                         */
                         mode: "payment" | "subscription";
+                        /** @description Name of the offer, e.g. `"250 g bag"`. */
                         name: string;
-                        /** @enum {string} */
+                        /**
+                         * @description `fixed` requires exactly one component with a `fixed` amount;
+                         *     `components` allows any number of components and amount rules.
+                         * @enum {string}
+                         */
                         pricing_model: "fixed" | "components";
-                        /** @enum {string|null} */
+                        /**
+                         * @description Billing interval of a `subscription` offer. Required for
+                         *     `subscription`, and must be left out for `payment`.
+                         * @default null
+                         * @enum {string|null}
+                         */
                         recurring_interval?: "day" | "week" | "month" | "year" | null;
                         /** @enum {string} */
                         tax_behavior: "unspecified" | "inclusive" | "exclusive";
                         /** @enum {string} */
                         usage_type: "licensed" | "metered";
-                        variables?: Record<string, never>[];
+                        /**
+                         * @description Inputs the customer fills in at checkout, which amount rules and
+                         *     conditions read by `key`. Not needed for a `fixed` amount.
+                         * @default []
+                         */
+                        variables?: {
+                            /**
+                             * @description The choices of a `select` or `multi_select` input; required for those
+                             *     kinds.
+                             * @default []
+                             */
+                            allowed_values?: string[];
+                            /** @default null */
+                            default_value?: unknown;
+                            /** @default  */
+                            help_text?: string;
+                            /**
+                             * @description Name that amount rules and conditions use to read this input, e.g.
+                             *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                             */
+                            key: string;
+                            /**
+                             * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                             *     `graduated`, `volume` and `package` amounts need `number` or
+                             *     `integer`; `lookup` needs `select` or `text`.
+                             * @enum {string}
+                             */
+                            kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                            /** @description What the customer sees beside the input. */
+                            label: string;
+                            /** @default null */
+                            maximum?: string | null;
+                            /**
+                             * Format: uint
+                             * @default null
+                             */
+                            maximum_length?: number | null;
+                            /** @default null */
+                            minimum?: string | null;
+                            /**
+                             * @description Whether pricing is refused when the customer leaves this input out
+                             *     and it has no `default_value`.
+                             * @default false
+                             */
+                            required?: boolean;
+                            /**
+                             * Format: int32
+                             * @default 0
+                             */
+                            sort_order?: number;
+                            /** @default null */
+                            step?: string | null;
+                            /**
+                             * @default public
+                             * @enum {string}
+                             */
+                            visibility?: "public" | "hidden" | "admin_only";
+                        }[];
                     };
                 };
             };
@@ -9776,11 +16848,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -9788,18 +17158,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -9837,11 +17306,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -9849,18 +17616,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -10390,11 +18256,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -10402,18 +18566,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -10455,11 +18718,309 @@ export interface paths {
                     content: {
                         "application/json": {
                             offer: {
-                                billing_scheme: string;
-                                checkout: Record<string, never>;
-                                components: Record<string, never>[];
+                                /** @enum {string} */
+                                billing_scheme: "per_unit" | "tiered";
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 * @default {
+                                 *       "allow_promotion_codes": false,
+                                 *       "allowed_shipping_countries": [],
+                                 *       "automatic_tax": false,
+                                 *       "collect_billing_address": false,
+                                 *       "collect_shipping_address": false,
+                                 *       "create_customer": false,
+                                 *       "maximum_total_minor": null,
+                                 *       "minimum_total_minor": null,
+                                 *       "require_terms_consent": false,
+                                 *       "shipping_options": [],
+                                 *       "trial_days": 0
+                                 *     }
+                                 */
+                                checkout: {
+                                    /** @default false */
+                                    allow_promotion_codes: boolean;
+                                    /** @default [] */
+                                    allowed_shipping_countries: string[];
+                                    /** @default false */
+                                    automatic_tax: boolean;
+                                    /** @default false */
+                                    collect_billing_address: boolean;
+                                    /** @default false */
+                                    collect_shipping_address: boolean;
+                                    /** @default false */
+                                    create_customer: boolean;
+                                    /**
+                                     * Format: int64
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    maximum_total_minor: number | null;
+                                    /**
+                                     * Format: int64
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
+                                     * @default null
+                                     */
+                                    minimum_total_minor: number | null;
+                                    /** @default false */
+                                    require_terms_consent: boolean;
+                                    /** @default [] */
+                                    shipping_options: {
+                                        /** Format: int64 */
+                                        amount_minor: number;
+                                        /** @default null */
+                                        delivery_estimate: {
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            maximum: number | null;
+                                            /**
+                                             * Format: uint32
+                                             * @default null
+                                             */
+                                            minimum: number | null;
+                                            /** @enum {string} */
+                                            unit: "hour" | "day" | "business_day" | "week" | "month";
+                                        } | null;
+                                        display_name: string;
+                                        /** @default  */
+                                        stripe_shipping_rate_id: string;
+                                        /**
+                                         * @default unspecified
+                                         * @enum {string}
+                                         */
+                                        tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                    }[];
+                                    /**
+                                     * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
+                                     * @default 0
+                                     */
+                                    trial_days: number;
+                                };
+                                components: {
+                                    /**
+                                     * @description How a component's unit price is computed, tagged by `type`. Every amount
+                                     *     is in integer minor units (cents) of the offer's currency and must not be
+                                     *     negative; `input` names a variable's `key`.
+                                     */
+                                    amount: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        type: "per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        /** Format: int64 */
+                                        base_amount_minor: number;
+                                        input: string;
+                                        /** @constant */
+                                        type: "flat_plus_per_unit";
+                                        /** Format: int64 */
+                                        unit_amount_minor: number;
+                                    } | {
+                                        input: string;
+                                        prices: {
+                                            [key: string]: number;
+                                        };
+                                        /** @constant */
+                                        type: "lookup";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "graduated";
+                                    } | {
+                                        input: string;
+                                        tiers: {
+                                            /**
+                                             * Format: int64
+                                             * @description Flat amount added once when this tier applies, in integer minor units
+                                             *     (cents).
+                                             * @default 0
+                                             */
+                                            flat_amount_minor: number;
+                                            /**
+                                             * Format: int64
+                                             * @description Price per unit in this tier, in integer minor units (cents).
+                                             */
+                                            unit_amount_minor: number;
+                                            /**
+                                             * Format: uint64
+                                             * @description Inclusive upper bound for this tier. Only the final tier may omit it.
+                                             * @default null
+                                             */
+                                            up_to: number | null;
+                                        }[];
+                                        /** @constant */
+                                        type: "volume";
+                                    } | {
+                                        input: string;
+                                        /** Format: int64 */
+                                        package_amount_minor: number;
+                                        /** @default up */
+                                        rounding: "up" | "exact";
+                                        /** @constant */
+                                        type: "package";
+                                        /** Format: uint64 */
+                                        units_per_package: number;
+                                    };
+                                    /**
+                                     * @description When a component applies, tagged by `op`. `input` names a variable's
+                                     *     `key`; a component whose condition does not hold is charged nothing.
+                                     * @default {
+                                     *       "op": "always"
+                                     *     }
+                                     */
+                                    condition: {
+                                        /** @constant */
+                                        op: "always";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "all";
+                                    } | {
+                                        conditions: components["schemas"]["Condition"][];
+                                        /** @constant */
+                                        op: "any";
+                                    } | {
+                                        condition: components["schemas"]["Condition"];
+                                        /** @constant */
+                                        op: "not";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "present";
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "not_equals";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "greater_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "less_than_or_equal";
+                                        value: unknown;
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "in";
+                                        values: unknown[];
+                                    } | {
+                                        input: string;
+                                        /** @constant */
+                                        op: "contains";
+                                        value: unknown;
+                                    };
+                                    /** @default  */
+                                    description: string;
+                                    id: string;
+                                    key: string;
+                                    label: string;
+                                    /** @default {} */
+                                    metadata: {
+                                        [key: string]: unknown;
+                                    };
+                                    /**
+                                     * @default {
+                                     *       "type": "fixed",
+                                     *       "value": 1
+                                     *     }
+                                     */
+                                    quantity: {
+                                        /** @constant */
+                                        type: "fixed";
+                                        /** Format: uint64 */
+                                        value: number;
+                                    } | {
+                                        input: string;
+                                        /**
+                                         * Format: uint64
+                                         * @default null
+                                         */
+                                        maximum: number | null;
+                                        /**
+                                         * Format: uint64
+                                         * @default 1
+                                         */
+                                        minimum: number;
+                                        /** @constant */
+                                        type: "from_input";
+                                    };
+                                    /** @default null */
+                                    recurrence: {
+                                        /** @enum {string} */
+                                        interval: "day" | "week" | "month" | "year";
+                                        /**
+                                         * Format: uint32
+                                         * @default 1
+                                         */
+                                        interval_count: number;
+                                    } | null;
+                                    /** @default false */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default  */
+                                    stripe_price_id: string;
+                                }[];
                                 currency: string;
                                 id: string;
+                                /**
+                                 * Format: uint32
+                                 * @default 1
+                                 */
                                 interval_count: number;
                                 /** @enum {string} */
                                 mode: "payment" | "subscription";
@@ -10467,18 +19028,117 @@ export interface paths {
                                 /** @enum {string} */
                                 pricing_model: "fixed" | "components";
                                 product_id: string;
-                                recurring_interval?: string | null;
+                                /**
+                                 * @default null
+                                 * @enum {string|null}
+                                 */
+                                recurring_interval: "day" | "week" | "month" | "year" | null;
+                                /** @default  */
                                 stripe_price_id: string;
+                                /** @default  */
                                 stripe_product_id: string;
-                                tax_behavior: string;
-                                usage_type: string;
-                                variables: Record<string, never>[];
+                                /** @enum {string} */
+                                tax_behavior: "unspecified" | "inclusive" | "exclusive";
+                                /** @enum {string} */
+                                usage_type: "licensed" | "metered";
+                                /** @default [] */
+                                variables: {
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
+                                    allowed_values: string[];
+                                    /** @default null */
+                                    default_value: unknown;
+                                    /** @default  */
+                                    help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
+                                    key: string;
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
+                                    kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
+                                    label: string;
+                                    /** @default null */
+                                    maximum: string | null;
+                                    /**
+                                     * Format: uint
+                                     * @default null
+                                     */
+                                    maximum_length: number | null;
+                                    /** @default null */
+                                    minimum: string | null;
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
+                                    required: boolean;
+                                    /**
+                                     * Format: int32
+                                     * @default 0
+                                     */
+                                    sort_order: number;
+                                    /** @default null */
+                                    step: string | null;
+                                    /**
+                                     * @default public
+                                     * @enum {string}
+                                     */
+                                    visibility: "public" | "hidden" | "admin_only";
+                                }[];
+                                /** Format: uint32 */
                                 version: number;
                             };
-                            /** @enum {string} */
+                            /**
+                             * @description Lifecycle state of an offer: the `status` column of
+                             *     `impresspress__products__offers`.
+                             *
+                             *     The type existed before this PR but nothing wrote it: every transition
+                             *     wrote a string literal and `repo::offers` re-spelled the three variants
+                             *     back out for its compare-and-swap expectations, so the CAS guard and
+                             *     the column could drift apart silently. Both are this type now.
+                             *
+                             *     - `draft` — editable; the only state whose definition may still change.
+                             *     - `active` — published and purchasable; the definition is immutable.
+                             *     - `archived` — withdrawn. Existing orders keep referring to it by
+                             *       version.
+                             * @enum {string}
+                             */
                             status: "draft" | "active" | "archived";
+                            /** @default  */
                             sync_error: string;
-                            sync_status: string;
+                            /**
+                             * @description Where an offer stands against its Stripe Product/Price: the
+                             *     `sync_status` column of `impresspress__products__offers`.
+                             *
+                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Price. The two were both plain strings and both called "status" on the
+                             *     same row.
+                             *
+                             *     `impresspress__products__payment_links` has a `sync_status` column with
+                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+                             *     note `error`, not `failed`). It is deliberately not typed with this
+                             *     enum; giving it one means either changing a stored literal or carrying a
+                             *     fourth spelling, and that is its own decision.
+                             *
+                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `syncing` — a synchronization is in flight.
+                             *     - `synced` — Stripe holds a Product and Price matching this offer
+                             *       version.
+                             *     - `failed` — the last synchronization failed; `sync_error` says why.
+                             * @enum {string}
+                             */
+                            sync_status: "not_synced" | "syncing" | "synced" | "failed";
                         };
                     };
                 };
@@ -12934,6 +21594,10 @@ export interface paths {
                             image_url: string;
                             name: string;
                             offers: {
+                                /**
+                                 * @description How checkout behaves for an offer. Every field is optional; leaving the
+                                 *     whole object out uses the defaults.
+                                 */
                                 checkout: {
                                     /** @default false */
                                     allow_promotion_codes: boolean;
@@ -12949,13 +21613,15 @@ export interface paths {
                                     create_customer: boolean;
                                     /**
                                      * Format: int64
-                                     * @description Maximum evaluated item total before provider discounts, tax, or shipping.
+                                     * @description Maximum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
                                      * @default null
                                      */
                                     maximum_total_minor: number | null;
                                     /**
                                      * Format: int64
-                                     * @description Minimum evaluated item total before provider discounts, tax, or shipping.
+                                     * @description Minimum evaluated item total before provider discounts, tax, or
+                                     *     shipping, in integer minor units (cents).
                                      * @default null
                                      */
                                     minimum_total_minor: number | null;
@@ -12991,6 +21657,8 @@ export interface paths {
                                     }[];
                                     /**
                                      * Format: uint32
+                                     * @description Free-trial length in days, at most 730. Applies only to a
+                                     *     `subscription` offer.
                                      * @default 0
                                      */
                                     trial_days: number;
@@ -13066,15 +21734,29 @@ export interface paths {
                                  */
                                 recurring_interval: "day" | "week" | "month" | "year" | null;
                                 variables: {
-                                    /** @default [] */
+                                    /**
+                                     * @description The choices of a `select` or `multi_select` input; required for those
+                                     *     kinds.
+                                     * @default []
+                                     */
                                     allowed_values: string[];
                                     /** @default null */
                                     default_value: unknown;
                                     /** @default  */
                                     help_text: string;
+                                    /**
+                                     * @description Name that amount rules and conditions use to read this input, e.g.
+                                     *     `"kilograms"`. Letters, digits and underscores; unique within the offer.
+                                     */
                                     key: string;
-                                    /** @enum {string} */
+                                    /**
+                                     * @description Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+                                     *     `graduated`, `volume` and `package` amounts need `number` or
+                                     *     `integer`; `lookup` needs `select` or `text`.
+                                     * @enum {string}
+                                     */
                                     kind: "number" | "integer" | "boolean" | "date" | "date_time" | "select" | "multi_select" | "text";
+                                    /** @description What the customer sees beside the input. */
                                     label: string;
                                     /** @default null */
                                     maximum: string | null;
@@ -13085,7 +21767,11 @@ export interface paths {
                                     maximum_length: number | null;
                                     /** @default null */
                                     minimum: string | null;
-                                    /** @default false */
+                                    /**
+                                     * @description Whether pricing is refused when the customer leaves this input out
+                                     *     and it has no `default_value`.
+                                     * @default false
+                                     */
                                     required: boolean;
                                     /**
                                      * Format: int32
@@ -15783,7 +24469,72 @@ export interface paths {
 }
 export type webhooks = Record<string, never>;
 export interface components {
-    schemas: never;
+    schemas: {
+        /**
+         * @description When a component applies, tagged by `op`. `input` names a variable's
+         *     `key`; a component whose condition does not hold is charged nothing.
+         */
+        Condition: {
+            /** @constant */
+            op: "always";
+        } | {
+            conditions: components["schemas"]["Condition"][];
+            /** @constant */
+            op: "all";
+        } | {
+            conditions: components["schemas"]["Condition"][];
+            /** @constant */
+            op: "any";
+        } | {
+            condition: components["schemas"]["Condition"];
+            /** @constant */
+            op: "not";
+        } | {
+            input: string;
+            /** @constant */
+            op: "present";
+        } | {
+            input: string;
+            /** @constant */
+            op: "equals";
+            value: unknown;
+        } | {
+            input: string;
+            /** @constant */
+            op: "not_equals";
+            value: unknown;
+        } | {
+            input: string;
+            /** @constant */
+            op: "greater_than";
+            value: unknown;
+        } | {
+            input: string;
+            /** @constant */
+            op: "greater_than_or_equal";
+            value: unknown;
+        } | {
+            input: string;
+            /** @constant */
+            op: "less_than";
+            value: unknown;
+        } | {
+            input: string;
+            /** @constant */
+            op: "less_than_or_equal";
+            value: unknown;
+        } | {
+            input: string;
+            /** @constant */
+            op: "in";
+            values: unknown[];
+        } | {
+            input: string;
+            /** @constant */
+            op: "contains";
+            value: unknown;
+        };
+    };
     responses: never;
     parameters: never;
     requestBodies: never;
