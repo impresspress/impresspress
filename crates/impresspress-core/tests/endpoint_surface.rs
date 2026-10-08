@@ -1,10 +1,10 @@
 //! Per-block endpoint-surface snapshots.
 //!
 //! One line per `info().endpoints` entry,
-//! `METHOD path auth [tool=name] [server_only]`, sorted. The OpenAPI snapshot beside this one lists only endpoints that
-//! carry a schema (`BlockEndpoint::has_schema`), so a page or a schema-less
-//! API can be added, dropped or moved to another auth level without it
-//! noticing. This file is the contract for the part of the surface the
+//! `METHOD path auth [tool=name] [server_only]`, sorted. The OpenAPI
+//! snapshot beside this one lists only endpoints that carry a schema
+//! (`BlockEndpoint::has_schema`), so a page or a schema-less API can be
+//! added, dropped or moved to another auth level without it noticing. This file is the contract for the part of the surface the
 //! router enforces: which (method, path) pairs a block declares and the
 //! level each requires. `server_only` marks an endpoint the browser
 //! runtime's discovery documents leave out (`pipeline::discoverable_infos`),

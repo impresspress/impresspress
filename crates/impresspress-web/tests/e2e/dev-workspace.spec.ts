@@ -648,7 +648,7 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // instead of showing a button that can only fail, and the shopper's agent
   // is not offered `start_checkout`.
   const widget = shop.locator('impresspress-product');
-  await expect(widget.getByText("Checkout isn't available in this preview.")).toBeVisible();
+  await expect(widget.getByText("Checkout isn't available on this site.")).toBeVisible();
   await expect(widget.getByRole('button', { name: /checkout/i })).toHaveCount(0);
   console.log(`shopper: anonymous page renders the product: ${Date.now() - shopperStart} ms`);
 

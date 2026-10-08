@@ -392,10 +392,31 @@ test.describe("products static storefront widget", () => {
 
     await openStaticPage(page);
     const widget = await mount(page, "hosted");
-    await expect(widget.getByText("Checkout isn't available in this preview.")).toBeVisible();
+    await expect(widget.getByText("Checkout isn't available on this site.")).toBeVisible();
     await expect(widget.getByRole("button", { name: /checkout/i })).toHaveCount(0);
     // The price still previews: only the purchase step is unavailable.
     await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+  });
+
+  test("a failed config read keeps the product and price, hides checkout and says why", async ({ page }) => {
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/pricing/preview") return json(route, quote());
+      if (path === "/b/products/storefront/config") return json(route, { error: "config store offline" }, 500);
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page);
+    const widget = await mount(page, "hosted");
+    await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+    await expect(widget.getByRole("button", { name: /checkout/i })).toHaveCount(0);
+    await expect(widget.locator(".status")).toHaveText(
+      "Could not check whether checkout is available: config store offline",
+    );
+    // The widget does not know checkout is unavailable, only that it could
+    // not ask: the "not available" line stays hidden.
+    await expect(widget.getByText("Checkout isn't available on this site.")).toBeHidden();
   });
 
   test("a Payment Link still sells where checkout cannot run", async ({ page }) => {
@@ -411,7 +432,7 @@ test.describe("products static storefront widget", () => {
     await openStaticPage(page);
     const widget = await mount(page, "payment_link");
     await expect(widget.getByRole("button", { name: "Buy with Stripe" })).toBeEnabled();
-    await expect(widget.getByText("Checkout isn't available in this preview.")).toBeHidden();
+    await expect(widget.getByText("Checkout isn't available on this site.")).toBeHidden();
     // A Payment Link never calls checkout, so it never asks whether it can.
     expect(apiPaths).toEqual(["/b/products/storefront/product_static"]);
   });
