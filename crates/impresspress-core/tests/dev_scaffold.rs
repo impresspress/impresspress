@@ -453,6 +453,7 @@ async fn reference_returns_the_site_guide_the_seed_carried() {
     )
     .await;
     assert_eq!(body["template"], "bootstrap");
+    assert_eq!(body["suggested_prompt"], "Build me a shop.");
     assert_eq!(
         body["site_markdown"],
         "# Building the site\n\nLink /vendor/bootstrap/bootstrap.min.css.\n"
@@ -462,7 +463,7 @@ async fn reference_returns_the_site_guide_the_seed_carried() {
 }
 
 /// No sandbox block (an instance whose seed was refused, or carried none):
-/// both fields are null and the call still answers.
+/// both fields are null, the prompt is empty, and the call still answers.
 #[tokio::test]
 async fn reference_without_a_seed_guide_answers_null_fields() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
@@ -475,4 +476,8 @@ async fn reference_without_a_seed_guide_answers_null_fields() {
     // contract is that both fields are present and null.
     assert_eq!(body.get("template"), Some(&serde_json::Value::Null));
     assert_eq!(body.get("site_markdown"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        body.get("suggested_prompt"),
+        Some(&serde_json::Value::String(String::new()))
+    );
 }

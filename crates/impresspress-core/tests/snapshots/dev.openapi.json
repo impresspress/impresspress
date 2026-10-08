@@ -1318,7 +1318,7 @@
                   },
                   "expected_sha256": {
                     "default": null,
-                    "description": "The SHA-256 you expect the file to have right now, or `null` if you\nexpect it not to exist yet. A mismatch is a `409` carrying the hash\nthe file actually has, so a caller that has fallen behind re-reads\ninstead of silently overwriting an edit it never saw.\n\nOmitting the field means the same as `null` — serde defaults an\nabsent `Option` to `None`, and `#[serde(default)]` says so in the\nsource rather than leaving it to a rule the schema does not show. That\nis a safe default rather than a lax one: over a file that exists,\n\"I expect nothing here\" is itself a conflict.",
+                    "description": "The SHA-256 the file has now, as your last read returned it, or\n`null` if you expect the file not to exist yet. Leaving the field out\nis the same as `null`. If the file changed since you read it, the\nwrite is refused with `409` and the file's current hash: re-read it,\nthen write again.",
                     "type": [
                       "string",
                       "null"
@@ -1606,7 +1606,7 @@
                         },
                         "expected_sha256": {
                           "default": null,
-                          "description": "The SHA-256 you expect the file to have right now, or `null` if you\nexpect it not to exist yet. A mismatch is a `409` carrying the hash\nthe file actually has, so a caller that has fallen behind re-reads\ninstead of silently overwriting an edit it never saw.\n\nOmitting the field means the same as `null` — serde defaults an\nabsent `Option` to `None`, and `#[serde(default)]` says so in the\nsource rather than leaving it to a rule the schema does not show. That\nis a safe default rather than a lax one: over a file that exists,\n\"I expect nothing here\" is itself a conflict.",
+                          "description": "The SHA-256 the file has now, as your last read returned it, or\n`null` if you expect the file not to exist yet. Leaving the field out\nis the same as `null`. If the file changed since you read it, the\nwrite is refused with `409` and the file's current hash: re-read it,\nthen write again.",
                           "type": [
                             "string",
                             "null"
@@ -2743,6 +2743,10 @@
                         "null"
                       ]
                     },
+                    "suggested_prompt": {
+                      "description": "The task this template was designed to walk an agent through, as the\nworkspace page suggests it. Empty when the template suggests none or\nthe sandbox carries no seed.",
+                      "type": "string"
+                    },
                     "template": {
                       "description": "The template this sandbox was seeded from (`dev_status.template`), or\nnull when the seed carried no sandbox block.",
                       "type": [
@@ -2761,6 +2765,7 @@
                     "wafer_guest_version",
                     "markdown",
                     "template",
+                    "suggested_prompt",
                     "site_markdown"
                   ],
                   "title": "ReferenceResponse",

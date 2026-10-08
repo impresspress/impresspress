@@ -316,16 +316,11 @@ pub struct FileWriteRequest {
     /// How `content` is encoded. Defaults to `utf8`.
     #[serde(default)]
     pub encoding: FileEncoding,
-    /// The SHA-256 you expect the file to have right now, or `null` if you
-    /// expect it not to exist yet. A mismatch is a `409` carrying the hash
-    /// the file actually has, so a caller that has fallen behind re-reads
-    /// instead of silently overwriting an edit it never saw.
-    ///
-    /// Omitting the field means the same as `null` — serde defaults an
-    /// absent `Option` to `None`, and `#[serde(default)]` says so in the
-    /// source rather than leaving it to a rule the schema does not show. That
-    /// is a safe default rather than a lax one: over a file that exists,
-    /// "I expect nothing here" is itself a conflict.
+    /// The SHA-256 the file has now, as your last read returned it, or
+    /// `null` if you expect the file not to exist yet. Leaving the field out
+    /// is the same as `null`. If the file changed since you read it, the
+    /// write is refused with `409` and the file's current hash: re-read it,
+    /// then write again.
     #[serde(default)]
     pub expected_sha256: Option<String>,
 }
@@ -567,6 +562,10 @@ pub struct ReferenceResponse {
     /// The template this sandbox was seeded from (`dev_status.template`), or
     /// null when the seed carried no sandbox block.
     pub template: Option<String>,
+    /// The task this template was designed to walk an agent through, as the
+    /// workspace page suggests it. Empty when the template suggests none or
+    /// the sandbox carries no seed.
+    pub suggested_prompt: String,
     /// This sandbox's site-authoring guide, as Markdown: the CSS framework
     /// it ships, the page skeleton, the storefront element, the catalog API,
     /// what a write refuses. Read it before writing under `site/`. Null when

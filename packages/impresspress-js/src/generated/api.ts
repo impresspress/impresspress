@@ -2392,16 +2392,11 @@ export interface paths {
                          */
                         encoding?: "utf8" | "base64";
                         /**
-                         * @description The SHA-256 you expect the file to have right now, or `null` if you
-                         *     expect it not to exist yet. A mismatch is a `409` carrying the hash
-                         *     the file actually has, so a caller that has fallen behind re-reads
-                         *     instead of silently overwriting an edit it never saw.
-                         *
-                         *     Omitting the field means the same as `null` — serde defaults an
-                         *     absent `Option` to `None`, and `#[serde(default)]` says so in the
-                         *     source rather than leaving it to a rule the schema does not show. That
-                         *     is a safe default rather than a lax one: over a file that exists,
-                         *     "I expect nothing here" is itself a conflict.
+                         * @description The SHA-256 the file has now, as your last read returned it, or
+                         *     `null` if you expect the file not to exist yet. Leaving the field out
+                         *     is the same as `null`. If the file changed since you read it, the
+                         *     write is refused with `409` and the file's current hash: re-read it,
+                         *     then write again.
                          * @default null
                          */
                         expected_sha256?: string | null;
@@ -2518,16 +2513,11 @@ export interface paths {
                              */
                             encoding?: "utf8" | "base64";
                             /**
-                             * @description The SHA-256 you expect the file to have right now, or `null` if you
-                             *     expect it not to exist yet. A mismatch is a `409` carrying the hash
-                             *     the file actually has, so a caller that has fallen behind re-reads
-                             *     instead of silently overwriting an edit it never saw.
-                             *
-                             *     Omitting the field means the same as `null` — serde defaults an
-                             *     absent `Option` to `None`, and `#[serde(default)]` says so in the
-                             *     source rather than leaving it to a rule the schema does not show. That
-                             *     is a safe default rather than a lax one: over a file that exists,
-                             *     "I expect nothing here" is itself a conflict.
+                             * @description The SHA-256 the file has now, as your last read returned it, or
+                             *     `null` if you expect the file not to exist yet. Leaving the field out
+                             *     is the same as `null`. If the file changed since you read it, the
+                             *     write is refused with `409` and the file's current hash: re-read it,
+                             *     then write again.
                              * @default null
                              */
                             expected_sha256?: string | null;
@@ -3019,6 +3009,12 @@ export interface paths {
                              *     the seed carried none.
                              */
                             site_markdown: string | null;
+                            /**
+                             * @description The task this template was designed to walk an agent through, as the
+                             *     workspace page suggests it. Empty when the template suggests none or
+                             *     the sandbox carries no seed.
+                             */
+                            suggested_prompt: string;
                             /**
                              * @description The template this sandbox was seeded from (`dev_status.template`), or
                              *     null when the seed carried no sandbox block.

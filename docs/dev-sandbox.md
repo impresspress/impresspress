@@ -205,7 +205,9 @@ cannot drift from them. Read it before writing Rust.
 
 The same response carries `site_markdown` — the site-authoring guide this
 sandbox's seed ships: the page skeleton, the shop pieces, what a write
-refuses — and `template`, the seed's name (`dev_status` reports it too). Read
+refuses — `template`, the seed's name (`dev_status` reports it too), and
+`suggested_prompt`, the task the workspace page suggests for that template
+(empty when it suggests none or the sandbox has no seed). Read
 `site_markdown` before writing under `site/`.
 
 ### Compiling one

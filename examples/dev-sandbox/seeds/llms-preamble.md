@@ -46,6 +46,10 @@ built.
      `dev_rollback`;
    - to hand the site over: `dev_export_manifest`, `dev_export`;
    - and the `shop_*` family, for products and offers.
+
+   `dev_read_reference` also returns this template's suggested task as
+   `suggested_prompt`: read it first, it is what the page suggests to a
+   person.
 4. Write the site under `site/`. Every write is published at once; the live
    site is at `/`.
 5. When the site is done, `dev_export` downloads it as one zip that any

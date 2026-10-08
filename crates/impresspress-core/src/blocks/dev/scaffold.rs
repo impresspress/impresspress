@@ -276,6 +276,10 @@ pub async fn handle_reference(ctx: &dyn Context) -> OutputStream {
         wafer_guest_version: WAFER_GUEST_VERSION,
         markdown: reference_markdown(),
         template: seed.as_ref().map(|seed| seed.template.clone()),
+        suggested_prompt: seed
+            .as_ref()
+            .map(|seed| seed.suggested_prompt.clone())
+            .unwrap_or_default(),
         site_markdown: seed.map(|seed| seed.guide_markdown),
     })
 }
