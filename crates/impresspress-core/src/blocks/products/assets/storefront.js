@@ -35,14 +35,14 @@
   }
 
   function exponent(currency) {
-    const code = String(currency || "").toUpperCase();
+    const code = String(currency || "");
     if (ZERO_DECIMAL.has(code)) return 0;
     if (THREE_DECIMAL.has(code)) return 3;
     return 2;
   }
 
   function money(minor, currency) {
-    const code = String(currency || "USD").toUpperCase();
+    const code = String(currency || "USD");
     let value;
     try {
       value = BigInt(String(minor));

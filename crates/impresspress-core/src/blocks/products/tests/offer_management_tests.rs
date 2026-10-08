@@ -1014,3 +1014,29 @@ fn the_offer_editor_checks_variable_keys_with_the_server_grammar() {
         "the editor must test keys with {check}"
     );
 }
+
+/// `VARIABLE_KEY_PATTERN` (what the schema publishes) and `is_variable_key`
+/// (what every write and pricing call applies) state one rule twice; this
+/// holds them to the same verdicts, compiling the pattern the way a JSON
+/// Schema validator would.
+#[test]
+fn the_published_variable_key_pattern_agrees_with_the_check() {
+    use super::super::contracts::{is_variable_key, VARIABLE_KEY_PATTERN};
+    let pattern = regex::Regex::new(VARIABLE_KEY_PATTERN).expect("the pattern compiles");
+    for (key, valid) in [
+        ("a", true),
+        ("_", true),
+        ("2x", true),
+        ("kilo_grams", true),
+        ("Pages9", true),
+        ("", false),
+        ("kilo-grams", false),
+        ("a b", false),
+        ("é", false),
+        ("x\n", false),
+        ("٣", false),
+    ] {
+        assert_eq!(is_variable_key(key), valid, "is_variable_key({key:?})");
+        assert_eq!(pattern.is_match(key), valid, "pattern on {key:?}");
+    }
+}

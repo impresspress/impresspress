@@ -118,7 +118,9 @@ fn reject_unsettable_fields(data: &HashMap<String, serde_json::Value>) -> Result
 /// columns before the write, so a product created with `nzd` answers `NZD`
 /// like the offers under it instead of echoing the caller's spelling back.
 /// The seller create's configured default is normalised where it is read,
-/// and a duplicate copies a value that was stored through here.
+/// the data-snapshot import normalises a bundle's rows the same way, and
+/// migration 023 brought older rows into this spelling, so a duplicate
+/// copies a canonical value.
 fn canonical_currency(data: &mut HashMap<String, serde_json::Value>) -> Result<(), OutputStream> {
     let Some(value) = data.get_mut("currency") else {
         return Ok(());

@@ -24,9 +24,10 @@ use super::{
 };
 use crate::config_vars::{ALLOW_USER_PRODUCTS_KEY, FRONTEND_URL_KEY};
 
+/// A stored amount and its stored currency, which every writer keeps in the
+/// canonical upper-case ISO 4217 spelling, so it is shown as stored.
 fn display_money(amount_minor: i64, currency: &str) -> String {
-    let currency = money::normalize_currency(currency).unwrap_or_else(|_| currency.to_uppercase());
-    match money::format_amount_minor(amount_minor, &currency) {
+    match money::format_amount_minor(amount_minor, currency) {
         Ok(amount) => format!("{amount} {currency}"),
         Err(_) => format!("{amount_minor} minor units ({currency})"),
     }

@@ -1926,3 +1926,150 @@ async fn an_import_over_the_statement_budget_writes_nothing() {
     assert_eq!(ids_in(&ctx, users::TABLE).await, ["user_existing"]);
     assert!(ids_in(&ctx, PRODUCTS_TABLE).await.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Imported products and offers meet the same rules as their API writers.
+// ---------------------------------------------------------------------------
+
+fn row(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    json_map(value).into_iter().collect()
+}
+
+fn snapshot_of(
+    tables: Vec<(&str, Vec<serde_json::Map<String, serde_json::Value>>)>,
+) -> DataSnapshot {
+    DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables: tables
+            .into_iter()
+            .map(|(table, rows)| (table.to_string(), rows))
+            .collect(),
+    }
+}
+
+fn product_row(currency: &str) -> serde_json::Map<String, serde_json::Value> {
+    row(json!({
+        "id": "prod_imported",
+        "name": "Imported",
+        "currency": currency,
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }))
+}
+
+fn offer_row(currency: &str) -> serde_json::Map<String, serde_json::Value> {
+    row(json!({
+        "id": "offer_imported",
+        "product_id": "prod_imported",
+        "name": "Imported offer",
+        "currency": currency,
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }))
+}
+
+fn variable_row(id: &str, name: &str) -> serde_json::Map<String, serde_json::Value> {
+    row(json!({
+        "id": id,
+        "offer_id": "offer_imported",
+        "name": name,
+        "var_type": "integer",
+        "label": "Weight",
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }))
+}
+
+/// A bundle's product and offer currencies are stored in the one spelling
+/// every API writer stores — the upper-case ISO 4217 code — whatever case
+/// the sender used. Migration 023 repairs rows only when the migration set
+/// replays, so an import after it would otherwise keep `nzd` for good, and
+/// a duplicate of that product would copy it.
+#[tokio::test]
+async fn import_stores_product_and_offer_currencies_upper_case() {
+    let ctx = TestContext::with_products().await.fixture();
+    let snap = snapshot_of(vec![
+        (PRODUCTS_TABLE, vec![product_row(" nzd ")]),
+        (OFFERS_TABLE, vec![offer_row("usd")]),
+    ]);
+    data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
+
+    let products = db::list_all(&ctx, PRODUCTS_TABLE, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(products[0].data["currency"], json!("NZD"));
+    let offers = db::list_all(&ctx, OFFERS_TABLE, Vec::new()).await.unwrap();
+    assert_eq!(offers[0].data["currency"], json!("USD"));
+}
+
+/// A currency that is not a three-letter code is refused before anything is
+/// written, for a product row and for an offer row alike.
+#[tokio::test]
+async fn import_refuses_a_malformed_product_or_offer_currency() {
+    for (table, rows) in [
+        (PRODUCTS_TABLE, vec![product_row("nz1")]),
+        (OFFERS_TABLE, vec![offer_row("dollars")]),
+    ] {
+        let ctx = TestContext::with_products().await.fixture();
+        let snap = snapshot_of(vec![(table, rows)]);
+        let err = data_snapshot::import(&as_dev(&ctx), &snap)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument, "{table}");
+        assert!(
+            err.message.contains("three-letter ISO code"),
+            "{table}: {}",
+            err.message
+        );
+        assert!(
+            db::list_all(&ctx, table, Vec::new())
+                .await
+                .unwrap()
+                .is_empty(),
+            "{table}: a refused import must write nothing"
+        );
+    }
+}
+
+/// An offer's variables are held to the rules every offer write applies
+/// (`offer_pricing`'s variable-definition check): a key outside the grammar,
+/// such as `kilo-grams`, is refused here as it is by the API, rather than
+/// imported into an offer no preview or checkout could ever price.
+#[tokio::test]
+async fn import_refuses_an_offer_variable_the_offer_writers_refuse() {
+    let ctx = TestContext::with_products().await.fixture();
+    let snap = snapshot_of(vec![
+        (OFFERS_TABLE, vec![offer_row("NZD")]),
+        (
+            PRODUCTS_VARIABLES_TABLE,
+            vec![variable_row("var_bad", "kilo-grams")],
+        ),
+    ]);
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
+    assert!(
+        err.message.contains("kilo-grams")
+            && err.message.contains("letters, numbers, and underscores"),
+        "{}",
+        err.message
+    );
+    assert!(db::list_all(&ctx, OFFERS_TABLE, Vec::new())
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The same offer with a good key, and two offers each using the same key,
+    // import cleanly: the check is per offer.
+    let mut other = variable_row("var_other", "kilo_grams");
+    other.insert("offer_id".to_string(), json!("offer_other"));
+    let snap = snapshot_of(vec![
+        (OFFERS_TABLE, vec![offer_row("NZD")]),
+        (
+            PRODUCTS_VARIABLES_TABLE,
+            vec![variable_row("var_good", "kilo_grams"), other],
+        ),
+    ]);
+    data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
+}

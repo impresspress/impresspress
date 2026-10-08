@@ -78,9 +78,9 @@ const SQL_021_POSTGRES: &str = include_str!("021_payment_link_request.postgres.s
 const SQL_022_SQLITE: &str = include_str!("022_canonical_subscription_status.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_022_POSTGRES: &str = include_str!("022_canonical_subscription_status.postgres.sql");
-const SQL_023_SQLITE: &str = include_str!("023_canonical_product_currency.sqlite.sql");
+const SQL_023_SQLITE: &str = include_str!("023_canonical_currency.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
-const SQL_023_POSTGRES: &str = include_str!("023_canonical_product_currency.postgres.sql");
+const SQL_023_POSTGRES: &str = include_str!("023_canonical_currency.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
@@ -108,7 +108,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("020_normalize_blank_deleted_at", SQL_020_SQLITE),
     ("021_payment_link_request", SQL_021_SQLITE),
     ("022_canonical_subscription_status", SQL_022_SQLITE),
-    ("023_canonical_product_currency", SQL_023_SQLITE),
+    ("023_canonical_currency", SQL_023_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, one per entry in
@@ -144,7 +144,7 @@ const POSTGRES_MIGRATION_FILES: &[(&str, &str)] = &[
     ("020_normalize_blank_deleted_at", SQL_020_POSTGRES),
     ("021_payment_link_request", SQL_021_POSTGRES),
     ("022_canonical_subscription_status", SQL_022_POSTGRES),
-    ("023_canonical_product_currency", SQL_023_POSTGRES),
+    ("023_canonical_currency", SQL_023_POSTGRES),
 ];
 
 /// The PostgreSQL scripts a deployment actually applies. Empty when the
@@ -727,15 +727,15 @@ mod strict_upgrade_tests {
         }
     }
 
-    const CANONICAL_CURRENCY: &str = "023_canonical_product_currency";
+    const CANONICAL_CURRENCY: &str = "023_canonical_currency";
 
-    async fn product_currencies(db: &Arc<dyn DatabaseService>) -> Vec<(String, String)> {
+    async fn currencies(db: &Arc<dyn DatabaseService>, table: &str) -> Vec<(String, String)> {
         db.query_raw(
-            "SELECT id, currency FROM impresspress__products__products ORDER BY id",
+            &format!("SELECT id, currency FROM {table} ORDER BY id"),
             &[],
         )
         .await
-        .expect("query product currencies")
+        .unwrap_or_else(|error| panic!("query {table} currencies: {error}"))
         .iter()
         .map(|row| {
             let text = |key: &str| {
@@ -750,16 +750,20 @@ mod strict_upgrade_tests {
         .collect()
     }
 
-    /// A product stored with its currency as the caller spelled it — the
-    /// product write paths stored `currency` verbatim before 023 — is
-    /// rewritten to the upper-case code every offer, preview and order
+    const PRODUCTS: &str = "impresspress__products__products";
+    const PURCHASES: &str = "impresspress__products__purchases";
+
+    /// A product or order stored with its currency as the caller spelled it
+    /// — every product write before 023, and every order the pre-005
+    /// checkout created from its request's own `currency` field — is
+    /// rewritten to the upper-case code every offer, preview and new order
     /// carries. A row already upper-case is left as it was.
     ///
     /// The second half replays every file over the migrated rows, as the
     /// block does whenever the combined hash changes: nothing is dropped and
     /// the rewrite has nothing left to match.
     #[tokio::test]
-    async fn a_stored_product_currency_is_upper_cased_by_023() {
+    async fn stored_product_and_order_currencies_are_upper_cased_by_023() {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
         let before: Vec<&str> = SQLITE_MIGRATIONS
@@ -780,61 +784,76 @@ mod strict_upgrade_tests {
             .await
             .expect("apply pre-023 products migrations");
 
-        for (id, currency) in [
-            ("product_canonical", "NZD"),
-            ("product_lower", "nzd"),
-            ("product_mixed", "Usd"),
-            ("product_padded", " eur "),
-        ] {
-            let row = HashMap::from([
+        let seeded = [
+            ("row_canonical", "NZD"),
+            ("row_lower", "nzd"),
+            ("row_mixed", "Usd"),
+            ("row_padded", " eur "),
+        ];
+        for (id, currency) in seeded {
+            let product = HashMap::from([
                 ("id".to_string(), json!(id)),
                 ("name".to_string(), json!(id)),
                 ("slug".to_string(), json!(id.replace('_', "-"))),
                 ("currency".to_string(), json!(currency)),
             ]);
-            db.create("impresspress__products__products", row)
+            db.create(PRODUCTS, product)
                 .await
-                .unwrap_or_else(|error| panic!("seed {id}: {error}"));
+                .unwrap_or_else(|error| panic!("seed product {id}: {error}"));
+            let order = HashMap::from([
+                ("id".to_string(), json!(id)),
+                ("user_id".to_string(), json!("buyer")),
+                ("currency".to_string(), json!(currency)),
+            ]);
+            db.create(PURCHASES, order)
+                .await
+                .unwrap_or_else(|error| panic!("seed order {id}: {error}"));
         }
 
         let expected: Vec<(String, String)> = [
-            ("product_canonical", "NZD"),
-            ("product_lower", "NZD"),
-            ("product_mixed", "USD"),
-            ("product_padded", "EUR"),
+            ("row_canonical", "NZD"),
+            ("row_lower", "NZD"),
+            ("row_mixed", "USD"),
+            ("row_padded", "EUR"),
         ]
         .into_iter()
         .map(|(id, currency)| (id.to_string(), currency.to_string()))
         .collect();
 
         apply_ddl_via_service(&db, &from).await.expect("apply 023");
-        assert_eq!(product_currencies(&db).await, expected);
+        for table in [PRODUCTS, PURCHASES] {
+            assert_eq!(currencies(&db, table).await, expected, "{table}");
+        }
 
         let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
         apply_ddl_via_service(&db, &all)
             .await
             .expect("replay the whole products migration set");
-        assert_eq!(
-            product_currencies(&db).await,
-            expected,
-            "a replay of every products migration must keep every row and change nothing"
-        );
+        for table in [PRODUCTS, PURCHASES] {
+            assert_eq!(
+                currencies(&db, table).await,
+                expected,
+                "{table}: a replay of every products migration must keep every row and change \
+                 nothing"
+            );
+        }
     }
 
     #[test]
-    fn canonical_product_currency_migration_matches_sqlite_and_postgres() {
+    fn canonical_currency_migration_matches_sqlite_and_postgres() {
         for fragment in [
             "UPDATE impresspress__products__products",
+            "UPDATE impresspress__products__purchases",
             "SET currency = UPPER(TRIM(currency))",
             "WHERE currency <> UPPER(TRIM(currency))",
         ] {
             assert!(
                 SQL_023_SQLITE.contains(fragment),
-                "SQLite product currency migration is missing {fragment}"
+                "SQLite currency migration is missing {fragment}"
             );
             assert!(
                 SQL_023_POSTGRES.contains(fragment),
-                "PostgreSQL product currency migration is missing {fragment}"
+                "PostgreSQL currency migration is missing {fragment}"
             );
         }
     }

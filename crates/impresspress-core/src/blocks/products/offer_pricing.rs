@@ -440,7 +440,7 @@ pub enum InputScope {
 /// offer write that breaks one is refused with a 400 instead of being saved
 /// and then refused by every preview and checkout; [`validate_inputs`]
 /// applies them too, because it is public and reads `definitions` by key.
-fn validate_variable_definitions(
+pub(crate) fn validate_variable_definitions(
     definitions: &[VariableDefinition],
 ) -> Result<BTreeMap<&str, &VariableDefinition>, PricingError> {
     let mut by_key = BTreeMap::new();
