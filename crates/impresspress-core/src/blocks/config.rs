@@ -1103,7 +1103,7 @@ mod boot_owned_key_tests {
 
     /// The browser adapter's runtime marker must beat a variables row.
     ///
-    /// `products::RUNTIME_KIND_CONFIG_KEY` is documented as set by the browser
+    /// `runtime_kind::RUNTIME_KIND_CONFIG_KEY` is documented as set by the browser
     /// adapter "after loading persisted variables, so an admin database value
     /// cannot accidentally turn a public browser runtime into a trusted
     /// secret holder". `products::stripe_secret_operations_allowed` reads it
@@ -1116,7 +1116,7 @@ mod boot_owned_key_tests {
     #[cfg(feature = "block-products")]
     #[tokio::test]
     async fn a_table_row_cannot_override_an_internal_adapter_key() {
-        let key = crate::blocks::products::RUNTIME_KIND_CONFIG_KEY;
+        let key = crate::runtime_kind::RUNTIME_KIND_CONFIG_KEY;
         let ctx = booted_with(&[(key, "browser")]).await;
         store_row(&ctx, key, "server").await;
 

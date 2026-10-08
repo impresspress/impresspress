@@ -82,6 +82,8 @@
       this.previewTimer = null;
       this.previewRequest = null;
       this.embeddedCheckout = null;
+      this.storefrontConfig = null;
+      this.configError = null;
       this.renderShell();
     }
 
@@ -187,6 +189,7 @@
                 <div class="total"><span>Total</span><span></span></div>
               </div>
               <button class="checkout" type="submit" disabled>Continue to checkout</button>
+              <p class="checkout-unavailable" hidden>Checkout isn't available on this site.</p>
               <p class="status" role="status" aria-live="polite"></p>
             </form>
             <div class="embedded" hidden></div>
@@ -209,6 +212,7 @@
       this.taxNode = this.shadowRoot.querySelector(".tax");
       this.totalNode = this.shadowRoot.querySelector(".total span:last-child");
       this.checkoutNode = this.shadowRoot.querySelector(".checkout");
+      this.unavailableNode = this.shadowRoot.querySelector(".checkout-unavailable");
       this.statusNode = this.shadowRoot.querySelector(".status");
       this.embeddedNode = this.shadowRoot.querySelector(".embedded");
       this.offerNode.addEventListener("change", () => this.selectOffer());
@@ -226,8 +230,26 @@
         return;
       }
       try {
-        this.product = await this.request(`/b/products/storefront/${encodeURIComponent(this.productId)}`);
+        // Payment Links never call checkout, so they need no config; the
+        // other two presentations need to know whether checkout can run here.
+        // A failed config read must not take the product down with it: the
+        // product and its price still render, checkout is treated as
+        // unavailable, and the status line says why.
+        this.configError = null;
+        const config = this.presentation === "payment_link"
+          ? Promise.resolve(null)
+          : this.request("/b/products/storefront/config").catch((error) => {
+            this.configError = new Error(`Could not check whether checkout is available: ${error.message}`);
+            return null;
+          });
+        const [product, storefrontConfig] = await Promise.all([
+          this.request(`/b/products/storefront/${encodeURIComponent(this.productId)}`),
+          config,
+        ]);
+        this.product = product;
+        this.storefrontConfig = storefrontConfig;
         this.renderProduct();
+        if (this.configError) this.fail(this.configError);
         await this.resumeReceipt();
         this.dispatchEvent(new CustomEvent("impresspress:ready", { detail: this.product }));
       } catch (error) {
@@ -285,10 +307,25 @@
         this.quote = link && link.pricing;
         if (this.quote) this.renderQuote();
         this.checkoutNode.disabled = !link;
+        this.checkoutNode.hidden = false;
+        this.unavailableNode.hidden = true;
         this.setStatus(link ? "" : "No reusable Payment Link is available for this offer.");
       } else {
+        // `POST /b/products/checkout` cannot succeed here (the browser
+        // runtime, or no Stripe secret key): say so rather than offer a
+        // button that can only fail. The price preview still runs.
+        // A config that could not be read is reported in the status line
+        // instead: "not available" would be a claim the widget cannot make.
+        const available = this.checkoutAvailable();
+        this.checkoutNode.hidden = !available;
+        this.unavailableNode.hidden = available || Boolean(this.configError);
         this.schedulePreview(0);
       }
+    }
+
+    /** Whether `POST /b/products/checkout` can run against this API. */
+    checkoutAvailable() {
+      return Boolean(this.storefrontConfig && this.storefrontConfig.checkout_available);
     }
 
     renderVariable(variable) {
@@ -384,9 +421,14 @@
         this.checkoutNode.disabled = this.presentation === "payment_link"
           ? !this.paymentLink()
           : false;
-        this.setStatus(this.presentation === "payment_link" && !this.paymentLink()
-          ? "No reusable Payment Link is available for this offer."
-          : "");
+        if (this.presentation === "payment_link" && !this.paymentLink()) {
+          this.setStatus("No reusable Payment Link is available for this offer.");
+        } else if (this.configError) {
+          // Keep the config failure visible once the price has rendered.
+          this.setStatus(this.configError.message, "error");
+        } else {
+          this.setStatus("");
+        }
         this.dispatchEvent(new CustomEvent("impresspress:quote", { detail: quote }));
       } catch (error) {
         if (error.name !== "AbortError") this.fail(error);
@@ -461,6 +503,9 @@
         window.location.assign(link.url);
         return;
       }
+      // The button is hidden when checkout cannot run, but a hidden submit
+      // button still submits the form when a field takes Enter.
+      if (!this.checkoutAvailable()) return;
 
       this.checkoutNode.disabled = true;
       this.setStatus("Preparing secure checkout…");
@@ -468,10 +513,8 @@
         let Stripe;
         let storefrontConfig;
         if (this.presentation === "embedded") {
-          [Stripe, storefrontConfig] = await Promise.all([
-            stripeJs(),
-            this.request("/b/products/storefront/config"),
-          ]);
+          Stripe = await stripeJs();
+          storefrontConfig = this.storefrontConfig;
           if (!storefrontConfig.embedded_checkout_available || !storefrontConfig.stripe_publishable_key) {
             throw new Error("Embedded Checkout is not configured");
           }

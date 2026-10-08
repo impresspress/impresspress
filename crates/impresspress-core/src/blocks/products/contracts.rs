@@ -702,6 +702,12 @@ pub enum StripeMode {
 pub struct StorefrontConfig {
     pub schema_version: u32,
     pub embedded_checkout_available: bool,
+    /// Whether `POST /b/products/checkout` can run here: secret-key
+    /// operations are allowed in this runtime and a Stripe secret key is
+    /// configured. False in the browser runtime. `embedded_checkout_available`
+    /// implies it; it does not imply `embedded_checkout_available`. Payment
+    /// Links do not need it: they never call checkout.
+    pub checkout_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(required)]
     pub stripe_publishable_key: Option<String>,

@@ -82,6 +82,7 @@ pub mod platform_state;
 pub mod prepared_plan;
 pub mod release_inventory;
 pub mod routing;
+pub mod runtime_kind;
 pub mod secret_tables;
 pub mod sqlite_text_error;
 pub mod ssrf;

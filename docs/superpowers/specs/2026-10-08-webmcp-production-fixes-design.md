@@ -158,9 +158,11 @@ a URL, and the storefront widget still shows "Continue to secure checkout".
   in impresspress. The declaration sits on the endpoint, not in a list kept
   somewhere else.
 - Exactly the endpoints whose handler refuses **unconditionally** in the
-  browser runtime declare it: checkout, the Stripe webhook receiver, webhook
-  replay, catalog sync (admin and owner) and payment-link creation (admin and
-  owner). Offer archival and payment-link deactivation do **not**: in the
+  browser runtime declare it: every success path passes
+  `stripe_secret_operations_allowed`, directly or through
+  `StripeClient::load`, and that check fails in the browser runtime. The rule decides, not a list; the endpoint-surface snapshot
+  (`tests/snapshots/products.endpoints.json`, the ` server_only` suffix)
+  records the current set for review. Offer archival and payment-link deactivation do **not**: in the
   browser they still succeed for an offer that was never synced and a link
   that was never sent to Stripe (`archive_offer_catalog`,
   `deactivate_payment_link` refuse only when Stripe holds something), so
@@ -193,8 +195,11 @@ a URL, and the storefront widget still shows "Continue to secure checkout".
 - The widget fetches `/b/products/storefront/config` once on load for the
   `hosted` and `embedded` presentations (today only `embedded` fetches it,
   and only on click). When `checkout_available` is false it renders no
-  checkout button and shows one line: "Checkout isn't available in this
-  preview." The `payment_link` presentation is untouched: it navigates to a
+  checkout button and shows one line: "Checkout isn't available on this
+  site." (It is also what a server with no Stripe secret key shows, so it
+  does not say "preview".) If the config request itself fails, the product
+  and its price still render, no checkout button is shown, and the status
+  line reports the failure instead of claiming checkout is unavailable. The `payment_link` presentation is untouched: it navigates to a
   pre-created Payment Link URL, never calls `/b/products/checkout`, works in
   the browser runtime, and still makes no config request.
 

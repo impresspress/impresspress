@@ -514,6 +514,12 @@ export interface StorefrontProduct {
 export interface StorefrontConfig {
   schema_version: number;
   embedded_checkout_available: boolean;
+  /**
+   * Whether `POST /b/products/checkout` can run against this API: false in
+   * the browser runtime and when no Stripe secret key is configured. Payment
+   * Links do not need it.
+   */
+  checkout_available: boolean;
   stripe_publishable_key?: string;
   stripe_mode?: "test" | "live";
 }

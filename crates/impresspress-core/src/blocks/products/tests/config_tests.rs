@@ -54,7 +54,7 @@ async fn runtime_kind_is_adapter_injected_not_shared_config() {
     // the double-underscore internal convention rather than claiming the
     // admin-writable WAFER_RUN_SHARED__ prefix.
     assert!(
-        !crate::blocks::products::RUNTIME_KIND_CONFIG_KEY.starts_with("WAFER_RUN_SHARED__"),
+        !crate::runtime_kind::RUNTIME_KIND_CONFIG_KEY.starts_with("WAFER_RUN_SHARED__"),
         "runtime kind must not use the admin-writable shared prefix"
     );
 
@@ -63,7 +63,7 @@ async fn runtime_kind_is_adapter_injected_not_shared_config() {
         &legacy
     ));
 
-    let browser = ctx_with(&[(crate::blocks::products::RUNTIME_KIND_CONFIG_KEY, "browser")]).await;
+    let browser = ctx_with(&[(crate::runtime_kind::RUNTIME_KIND_CONFIG_KEY, "browser")]).await;
     assert!(!crate::blocks::products::stripe_secret_operations_allowed(
         &browser
     ));
