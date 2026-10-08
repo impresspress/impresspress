@@ -1,882 +1,801 @@
 {
-  "/b/llm/api/chat": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "Request body shared by `POST /b/llm/api/chat` and\n`POST /b/llm/api/chat/stream`.",
-              "properties": {
-                "max_tokens": {
-                  "description": "Largest reply, in output tokens, this turn may generate. Omitted, the\ndeployment's `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS` applies — every\nrequest reaches the provider with a budget, because\nAnthropic-protocol providers refuse one that carries none.\n\nMust be at least 1: zero asks for no answer at all and is answered\n`400` here rather than by the provider. There is no upper bound on\nthis side, deliberately — the real ceiling is the model's, it differs\nper model and per provider, and the provider is the only party that\nknows it. A value the model will not accept comes back as that\nprovider's own error rather than one invented here. (The configured\ndefault is treated differently: a value that is not a positive integer\nfalls back with a warning, because an operator's typo must not break\nevery chat on the deployment at once.)",
-                  "format": "uint32",
-                  "minimum": 1,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "message": {
-                  "description": "The user's message.",
-                  "type": "string"
-                },
-                "model": {
-                  "description": "Model id within the provider. Same precedence as `provider`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "provider": {
-                  "description": "Provider to route to, by name. A per-thread override set through\n`POST /b/llm/api/config` takes precedence; when neither is set the\nconfigured default provider is used.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "thread_id": {
-                  "description": "Messages-block context id the conversation lives in. The user turn is\nstored there before the model runs and the assistant turn after it.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "thread_id",
-                "message"
-              ],
-              "title": "ChatRequest",
-              "type": "object"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/b/llm/api/chat": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "`POST /b/llm/api/chat` response body.",
+                "description": "Request body shared by `POST /b/llm/api/chat` and\n`POST /b/llm/api/chat/stream`.",
                 "properties": {
-                  "content": {
-                    "description": "The assistant's reply: every text delta the model produced,\nconcatenated.",
-                    "type": "string"
+                  "max_tokens": {
+                    "description": "Largest reply, in output tokens, this turn may generate. Omitted, the\ndeployment's `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS` applies — every\nrequest reaches the provider with a budget, because\nAnthropic-protocol providers refuse one that carries none.\n\nMust be at least 1: zero asks for no answer at all and is answered\n`400` here rather than by the provider. There is no upper bound on\nthis side, deliberately — the real ceiling is the model's, it differs\nper model and per provider, and the provider is the only party that\nknows it. A value the model will not accept comes back as that\nprovider's own error rather than one invented here. (The configured\ndefault is treated differently: a value that is not a positive integer\nfalls back with a warning, because an operator's typo must not break\nevery chat on the deployment at once.)",
+                    "format": "uint32",
+                    "minimum": 1,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
                   },
-                  "message_id": {
-                    "description": "Id of the assistant entry persisted in the messages block. Always\npopulated: a reply the store refused is answered with a 500, not a\nbody (see `routes::chat::handle_chat`).",
+                  "message": {
+                    "description": "The user's message.",
                     "type": "string"
                   },
                   "model": {
-                    "description": "The model the request was served by, after per-thread and default\nresolution.",
-                    "type": "string"
+                    "description": "Model id within the provider. Same precedence as `provider`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  "truncated": {
-                    "description": "`true` when `content` is a prefix of the answer rather than the whole\nof it. Two ceilings can do that, and the flag does not distinguish\nthem because a caller's response to either is the same — ask again,\nor ask for less:\n\n* the model stopped at its output-token budget (the request's own\n  `max_tokens`, or `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS`), which it\n  reports as a `length` finish reason;\n* the reply exceeded the 1 MiB buffering cap of this endpoint, in\n  which case the text ends at the last delta that fitted and nothing\n  after it is appended, so it is never spliced across a gap.",
-                    "type": "boolean"
+                  "provider": {
+                    "description": "Provider to route to, by name. A per-thread override set through\n`POST /b/llm/api/config` takes precedence; when neither is set the\nconfigured default provider is used.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "thread_id": {
+                    "description": "Messages-block context id the conversation lives in. The user turn is\nstored there before the model runs and the assistant turn after it.",
+                    "type": "string"
                   }
                 },
                 "required": [
-                  "content",
-                  "message_id",
-                  "model",
-                  "truncated"
+                  "thread_id",
+                  "message"
                 ],
-                "title": "ChatResponse",
+                "title": "ChatRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Send a chat message"
-    }
-  },
-  "/b/llm/api/chat/stream": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "Request body shared by `POST /b/llm/api/chat` and\n`POST /b/llm/api/chat/stream`.",
-              "properties": {
-                "max_tokens": {
-                  "description": "Largest reply, in output tokens, this turn may generate. Omitted, the\ndeployment's `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS` applies — every\nrequest reaches the provider with a budget, because\nAnthropic-protocol providers refuse one that carries none.\n\nMust be at least 1: zero asks for no answer at all and is answered\n`400` here rather than by the provider. There is no upper bound on\nthis side, deliberately — the real ceiling is the model's, it differs\nper model and per provider, and the provider is the only party that\nknows it. A value the model will not accept comes back as that\nprovider's own error rather than one invented here. (The configured\ndefault is treated differently: a value that is not a positive integer\nfalls back with a warning, because an operator's typo must not break\nevery chat on the deployment at once.)",
-                  "format": "uint32",
-                  "minimum": 1,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "message": {
-                  "description": "The user's message.",
-                  "type": "string"
-                },
-                "model": {
-                  "description": "Model id within the provider. Same precedence as `provider`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "provider": {
-                  "description": "Provider to route to, by name. A per-thread override set through\n`POST /b/llm/api/config` takes precedence; when neither is set the\nconfigured default provider is used.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "thread_id": {
-                  "description": "Messages-block context id the conversation lives in. The user turn is\nstored there before the model runs and the assistant turn after it.",
-                  "type": "string"
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/llm/api/chat` response body.",
+                  "properties": {
+                    "content": {
+                      "description": "The assistant's reply: every text delta the model produced,\nconcatenated.",
+                      "type": "string"
+                    },
+                    "message_id": {
+                      "description": "Id of the assistant entry persisted in the messages block. Always\npopulated: a reply the store refused is answered with a 500, not a\nbody (see `routes::chat::handle_chat`).",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The model the request was served by, after per-thread and default\nresolution.",
+                      "type": "string"
+                    },
+                    "truncated": {
+                      "description": "`true` when `content` is a prefix of the answer rather than the whole\nof it. Two ceilings can do that, and the flag does not distinguish\nthem because a caller's response to either is the same — ask again,\nor ask for less:\n\n* the model stopped at its output-token budget (the request's own\n  `max_tokens`, or `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS`), which it\n  reports as a `length` finish reason;\n* the reply exceeded the 1 MiB buffering cap of this endpoint, in\n  which case the text ends at the last delta that fitted and nothing\n  after it is appended, so it is never spliced across a gap.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "content",
+                    "message_id",
+                    "model",
+                    "truncated"
+                  ],
+                  "title": "ChatResponse",
+                  "type": "object"
                 }
-              },
-              "required": [
-                "thread_id",
-                "message"
-              ],
-              "title": "ChatRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Send a chat message (SSE streaming)"
-    }
-  },
-  "/b/llm/api/config": {
-    "get": {
-      "responses": {
-        "200": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Send a chat message"
+      }
+    },
+    "/b/llm/api/chat/stream": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "`GET /b/llm/api/config` response body: the global defaults every thread\nwithout an override resolves to.",
+                "description": "Request body shared by `POST /b/llm/api/chat` and\n`POST /b/llm/api/chat/stream`.",
+                "properties": {
+                  "max_tokens": {
+                    "description": "Largest reply, in output tokens, this turn may generate. Omitted, the\ndeployment's `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS` applies — every\nrequest reaches the provider with a budget, because\nAnthropic-protocol providers refuse one that carries none.\n\nMust be at least 1: zero asks for no answer at all and is answered\n`400` here rather than by the provider. There is no upper bound on\nthis side, deliberately — the real ceiling is the model's, it differs\nper model and per provider, and the provider is the only party that\nknows it. A value the model will not accept comes back as that\nprovider's own error rather than one invented here. (The configured\ndefault is treated differently: a value that is not a positive integer\nfalls back with a warning, because an operator's typo must not break\nevery chat on the deployment at once.)",
+                    "format": "uint32",
+                    "minimum": 1,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "description": "The user's message.",
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "Model id within the provider. Same precedence as `provider`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "provider": {
+                    "description": "Provider to route to, by name. A per-thread override set through\n`POST /b/llm/api/config` takes precedence; when neither is set the\nconfigured default provider is used.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "thread_id": {
+                    "description": "Messages-block context id the conversation lives in. The user turn is\nstored there before the model runs and the assistant turn after it.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "thread_id",
+                  "message"
+                ],
+                "title": "ChatRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Send a chat message (SSE streaming)"
+      }
+    },
+    "/b/llm/api/config": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/llm/api/config` response body: the global defaults every thread\nwithout an override resolves to.",
+                  "properties": {
+                    "default_model": {
+                      "description": "Default model id (`IMPRESSPRESS__LLM__DEFAULT_MODEL`). Empty means the\nprovider's own default.",
+                      "type": "string"
+                    },
+                    "default_provider": {
+                      "description": "Default provider name (`IMPRESSPRESS__LLM__DEFAULT_PROVIDER`).",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "default_provider",
+                    "default_model"
+                  ],
+                  "title": "LlmConfigResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get default provider/model config"
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`POST /b/llm/api/config` request body: create or update one thread's\nprovider/model override.",
                 "properties": {
                   "default_model": {
-                    "description": "Default model id (`IMPRESSPRESS__LLM__DEFAULT_MODEL`). Empty means the\nprovider's own default.",
-                    "type": "string"
+                    "description": "Not settable here: the global default is\n`IMPRESSPRESS__LLM__DEFAULT_MODEL`. Sending it is refused.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "default_provider": {
-                    "description": "Default provider name (`IMPRESSPRESS__LLM__DEFAULT_PROVIDER`).",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "default_provider",
-                  "default_model"
-                ],
-                "title": "LlmConfigResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Get default provider/model config"
-    },
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/llm/api/config` request body: create or update one thread's\nprovider/model override.",
-              "properties": {
-                "default_model": {
-                  "description": "Not settable here: the global default is\n`IMPRESSPRESS__LLM__DEFAULT_MODEL`. Sending it is refused.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "default_provider": {
-                  "description": "Not settable here: the global default is\n`IMPRESSPRESS__LLM__DEFAULT_PROVIDER`. Sending it is refused.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "model": {
-                  "description": "Model id to pin the thread to. When creating an override, omitted\nmeans `\"\"` — use the default model.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "provider_block": {
-                  "description": "Provider name to pin the thread to. When creating an override, omitted\nmeans `\"\"` — use the default provider.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "thread_id": {
-                  "description": "Thread to set the override on. Without it nothing is written and the\nrequest is only acknowledged.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "title": "ConfigUpdateRequest",
-              "type": "object"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "description": "The override row after it was created or updated.",
-                    "properties": {
-                      "created_at": {
-                        "description": "RFC 3339 creation timestamp.",
-                        "type": "string"
-                      },
-                      "id": {
-                        "description": "Stable row identifier.",
-                        "type": "string"
-                      },
-                      "model": {
-                        "description": "Pinned model id. Empty means the default model.",
-                        "type": "string"
-                      },
-                      "provider_block": {
-                        "description": "Pinned provider name. Empty means the default provider.",
-                        "type": "string"
-                      },
-                      "thread_id": {
-                        "description": "Messages-block context id the override applies to.",
-                        "type": "string"
-                      },
-                      "updated_at": {
-                        "description": "RFC 3339 timestamp of the last modification.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "thread_id",
-                      "provider_block",
-                      "model",
-                      "created_at",
-                      "updated_at"
-                    ],
-                    "type": "object"
+                    "description": "Not settable here: the global default is\n`IMPRESSPRESS__LLM__DEFAULT_PROVIDER`. Sending it is refused.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  {
-                    "description": "Nothing was written.",
-                    "properties": {
-                      "updated": {
-                        "description": "Always `true`, although nothing was written: the request named no\n`thread_id`, so there was no override to change.",
-                        "type": "boolean"
-                      }
-                    },
-                    "required": [
-                      "updated"
-                    ],
-                    "type": "object"
-                  }
-                ],
-                "description": "`POST /b/llm/api/config` response body: the override after the write, or\na bare acknowledgement when the request named no `thread_id`.",
-                "title": "ConfigUpdateResponse"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update per-thread provider/model override"
-    }
-  },
-  "/b/llm/api/config/{id}": {
-    "delete": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Override row id, as returned by `POST /b/llm/api/config`.",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`DELETE /b/llm/api/config/{id}` response body.",
-                "properties": {
-                  "deleted": {
-                    "description": "Always `true`: a delete that did not happen is an error response.",
-                    "type": "boolean"
+                  "model": {
+                    "description": "Model id to pin the thread to. When creating an override, omitted\nmeans `\"\"` — use the default model.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "provider_block": {
+                    "description": "Provider name to pin the thread to. When creating an override, omitted\nmeans `\"\"` — use the default provider.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "thread_id": {
+                    "description": "Thread to set the override on. Without it nothing is written and the\nrequest is only acknowledged.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "deleted"
-                ],
-                "title": "ConfigDeleteResponse",
+                "title": "ConfigUpdateRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Remove a per-thread provider/model override"
-    }
-  },
-  "/b/llm/api/models": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/llm/api/models` response body: every model across every\nregistered backend.",
-                "properties": {
-                  "models": {
-                    "items": {
-                      "description": "A model one of the registered backends can serve. Mirrors\n`wafer_core::clients::llm::ModelInfo`.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "description": "The override row after it was created or updated.",
                       "properties": {
-                        "backend_id": {
-                          "description": "Backend (provider name) the model is hosted in.",
-                          "type": "string"
-                        },
-                        "capabilities": {
-                          "description": "Declared model capabilities.",
-                          "properties": {
-                            "json_mode": {
-                              "description": "Supports structured JSON output mode.",
-                              "type": "boolean"
-                            },
-                            "max_context_tokens": {
-                              "description": "Maximum input context window in tokens, when the backend reports one.",
-                              "format": "uint32",
-                              "minimum": 0,
-                              "type": [
-                                "integer",
-                                "null"
-                              ]
-                            },
-                            "max_output_tokens": {
-                              "description": "Maximum output tokens per request, when the backend reports one.",
-                              "format": "uint32",
-                              "minimum": 0,
-                              "type": [
-                                "integer",
-                                "null"
-                              ]
-                            },
-                            "streaming": {
-                              "description": "Supports streaming responses.",
-                              "type": "boolean"
-                            },
-                            "tools": {
-                              "description": "Supports tool / function calling.",
-                              "type": "boolean"
-                            },
-                            "vision": {
-                              "description": "Accepts image inputs.",
-                              "type": "boolean"
-                            }
-                          },
-                          "required": [
-                            "streaming",
-                            "tools",
-                            "vision",
-                            "json_mode",
-                            "max_context_tokens",
-                            "max_output_tokens"
-                          ],
-                          "type": "object"
-                        },
-                        "display_name": {
-                          "description": "Human-readable display name.",
-                          "type": "string"
-                        },
-                        "model_id": {
-                          "description": "Backend-side model identifier.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "backend_id",
-                        "model_id",
-                        "display_name",
-                        "capabilities"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "models"
-                ],
-                "title": "ModelListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List available models (aggregated across backends)"
-    }
-  },
-  "/b/llm/api/models/{backend_id}/{model_id}/load": {
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "backend_id",
-          "required": true,
-          "schema": {
-            "description": "Backend (provider name) hosting the model, as listed by `GET /b/llm/api/models`.",
-            "type": "string"
-          }
-        },
-        {
-          "in": "path",
-          "name": "model_id",
-          "required": true,
-          "schema": {
-            "description": "Model id within that backend.",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Load a model (SSE progress)"
-    }
-  },
-  "/b/llm/api/models/{backend_id}/{model_id}/status": {
-    "get": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "backend_id",
-          "required": true,
-          "schema": {
-            "description": "Backend (provider name) hosting the model, as listed by `GET /b/llm/api/models`.",
-            "type": "string"
-          }
-        },
-        {
-          "in": "path",
-          "name": "model_id",
-          "required": true,
-          "schema": {
-            "description": "Model id within that backend.",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/llm/api/models/{backend_id}/{model_id}/status` response body.",
-                "properties": {
-                  "status": {
-                    "description": "Lifecycle status of one model on one backend. Mirrors\n`wafer_core::clients::llm::ModelStatus`.",
-                    "properties": {
-                      "progress": {
-                        "description": "Load progress in `0.0..=1.0`. Present only while `state` is\n`Loading`.",
-                        "format": "float",
-                        "type": "number"
-                      },
-                      "state": {
-                        "description": "High-level state.",
-                        "oneOf": [
-                          {
-                            "const": "Ready",
-                            "description": "Local backend: weights loaded. Remote backend: endpoint reachable.",
-                            "type": "string"
-                          },
-                          {
-                            "const": "Loading",
-                            "description": "Local backend: weights currently downloading or initializing.",
-                            "type": "string"
-                          },
-                          {
-                            "const": "Unloaded",
-                            "description": "Local backend only: weights not in memory.",
-                            "type": "string"
-                          },
-                          {
-                            "additionalProperties": false,
-                            "description": "Loading or serving failed.",
-                            "properties": {
-                              "Error": {
-                                "properties": {
-                                  "message": {
-                                    "description": "Failure message.",
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "message"
-                                ],
-                                "type": "object"
-                              }
-                            },
-                            "required": [
-                              "Error"
-                            ],
-                            "type": "object"
-                          }
-                        ]
-                      }
-                    },
-                    "required": [
-                      "state"
-                    ],
-                    "type": "object"
-                  }
-                },
-                "required": [
-                  "status"
-                ],
-                "title": "ModelStatusResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Model status (ready / loading / unloaded)"
-    }
-  },
-  "/b/llm/api/models/{backend_id}/{model_id}/unload": {
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "backend_id",
-          "required": true,
-          "schema": {
-            "description": "Backend (provider name) hosting the model, as listed by `GET /b/llm/api/models`.",
-            "type": "string"
-          }
-        },
-        {
-          "in": "path",
-          "name": "model_id",
-          "required": true,
-          "schema": {
-            "description": "Model id within that backend.",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`POST /b/llm/api/models/{backend_id}/{model_id}/unload` response body.",
-                "properties": {
-                  "unloaded": {
-                    "description": "Always `true`: an unload that did not happen is an error response.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "unloaded"
-                ],
-                "title": "ModelUnloadResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Unload a model"
-    }
-  },
-  "/b/llm/api/providers": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/llm/api/providers` response body: every configured provider,\nenabled or not.",
-                "properties": {
-                  "providers": {
-                    "items": {
-                      "description": "A configured LLM provider as published by the admin API.",
-                      "properties": {
-                        "enabled": {
-                          "description": "Whether chat requests may route to this provider.",
-                          "type": "boolean"
-                        },
-                        "endpoint": {
-                          "description": "Base URL of the provider's API, e.g. `https://api.openai.com/v1`.",
+                        "created_at": {
+                          "description": "RFC 3339 creation timestamp.",
                           "type": "string"
                         },
                         "id": {
-                          "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                          "description": "Stable row identifier.",
                           "type": "string"
                         },
-                        "key_var": {
-                          "description": "Name of the admin configuration variable holding this provider's API\nkey, or `null` for a provider that runs unauthenticated. The key\nitself is never published.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "max_tokens_field": {
-                          "anyOf": [
-                            {
-                              "description": "Which field carries the output-token budget in a `/chat/completions` body.",
-                              "oneOf": [
-                                {
-                                  "const": "max_tokens",
-                                  "description": "`max_tokens` — the spelling the OpenAI-compatible servers accept.",
-                                  "type": "string"
-                                },
-                                {
-                                  "const": "max_completion_tokens",
-                                  "description": "`max_completion_tokens` — OpenAI's current spelling; its reasoning\nmodels refuse the other one.",
-                                  "type": "string"
-                                }
-                              ]
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ],
-                          "description": "Which field carries the output-token budget in this provider's chat\nbodies, or `null` to send the one its `protocol` implies."
-                        },
-                        "models": {
-                          "description": "Explicit model list. Empty means the models are discovered from the\nprovider's `/v1/models`.",
-                          "items": {
-                            "type": "string"
-                          },
-                          "type": "array"
-                        },
-                        "name": {
-                          "description": "Unique provider name. This is the `backend_id` chat requests route on.",
+                        "model": {
+                          "description": "Pinned model id. Empty means the default model.",
                           "type": "string"
                         },
-                        "protocol": {
-                          "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
-                          "enum": [
-                            "open_ai",
-                            "anthropic",
-                            "open_ai_compatible"
-                          ],
+                        "provider_block": {
+                          "description": "Pinned provider name. Empty means the default provider.",
+                          "type": "string"
+                        },
+                        "thread_id": {
+                          "description": "Messages-block context id the override applies to.",
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "description": "RFC 3339 timestamp of the last modification.",
                           "type": "string"
                         }
                       },
                       "required": [
                         "id",
-                        "name",
-                        "protocol",
-                        "endpoint",
-                        "key_var",
-                        "max_tokens_field",
-                        "models",
-                        "enabled"
+                        "thread_id",
+                        "provider_block",
+                        "model",
+                        "created_at",
+                        "updated_at"
                       ],
                       "type": "object"
                     },
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "providers"
-                ],
-                "title": "ProviderListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List configured LLM providers"
-    },
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "`POST /b/llm/api/providers` request body.",
-              "properties": {
-                "enabled": {
-                  "description": "Whether chat requests may route to this provider. Defaults to `true`\nwhen the JSON body omits it; an unticked checkbox on the form path is\n`false`, because that is the only thing an absent checkbox can mean.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "endpoint": {
-                  "description": "Base URL of the provider's API. Must resolve to a public address:\nprivate, link-local and cloud-metadata ranges are refused.",
-                  "type": "string"
-                },
-                "key_var": {
-                  "description": "Name of the admin configuration variable holding the API key. Omit,\nor send an empty string, for a provider that needs no key.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "max_tokens_field": {
-                  "anyOf": [
                     {
-                      "description": "Which field carries the output-token budget in a `/chat/completions` body.",
-                      "oneOf": [
-                        {
-                          "const": "max_tokens",
-                          "description": "`max_tokens` — the spelling the OpenAI-compatible servers accept.",
-                          "type": "string"
-                        },
-                        {
-                          "const": "max_completion_tokens",
-                          "description": "`max_completion_tokens` — OpenAI's current spelling; its reasoning\nmodels refuse the other one.",
-                          "type": "string"
+                      "description": "Nothing was written.",
+                      "properties": {
+                        "updated": {
+                          "description": "Always `true`, although nothing was written: the request named no\n`thread_id`, so there was no override to change.",
+                          "type": "boolean"
                         }
-                      ]
-                    },
-                    {
-                      "type": "null"
+                      },
+                      "required": [
+                        "updated"
+                      ],
+                      "type": "object"
                     }
                   ],
-                  "description": "Which field carries the output-token budget in this provider's chat\nbodies. Omit to send the one `protocol` implies, which is what all but\na handful of endpoints want. Refused on the `anthropic` protocol,\nwhose wire format has only one such field."
-                },
-                "models": {
-                  "description": "Explicit model list. Omitted or empty means the models are discovered\nfrom the provider's `/v1/models`.",
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
-                },
-                "name": {
-                  "description": "Unique provider name. Becomes the `backend_id` chat requests route on.",
-                  "type": "string"
-                },
-                "protocol": {
-                  "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
-                  "enum": [
-                    "open_ai",
-                    "anthropic",
-                    "open_ai_compatible"
-                  ],
-                  "type": "string"
+                  "description": "`POST /b/llm/api/config` response body: the override after the write, or\na bare acknowledgement when the request named no `thread_id`.",
+                  "title": "ConfigUpdateResponse"
                 }
-              },
-              "required": [
-                "name",
-                "protocol",
-                "endpoint"
-              ],
-              "title": "CreateProviderRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update per-thread provider/model override"
+      }
+    },
+    "/b/llm/api/config/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Override row id, as returned by `POST /b/llm/api/config`.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`DELETE /b/llm/api/config/{id}` response body.",
+                  "properties": {
+                    "deleted": {
+                      "description": "Always `true`: a delete that did not happen is an error response.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "title": "ConfigDeleteResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Remove a per-thread provider/model override"
+      }
+    },
+    "/b/llm/api/models": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/llm/api/models` response body: every model across every\nregistered backend.",
+                  "properties": {
+                    "models": {
+                      "items": {
+                        "description": "A model one of the registered backends can serve. Mirrors\n`wafer_core::clients::llm::ModelInfo`.",
+                        "properties": {
+                          "backend_id": {
+                            "description": "Backend (provider name) the model is hosted in.",
+                            "type": "string"
+                          },
+                          "capabilities": {
+                            "description": "Declared model capabilities.",
+                            "properties": {
+                              "json_mode": {
+                                "description": "Supports structured JSON output mode.",
+                                "type": "boolean"
+                              },
+                              "max_context_tokens": {
+                                "description": "Maximum input context window in tokens, when the backend reports one.",
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "max_output_tokens": {
+                                "description": "Maximum output tokens per request, when the backend reports one.",
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "streaming": {
+                                "description": "Supports streaming responses.",
+                                "type": "boolean"
+                              },
+                              "tools": {
+                                "description": "Supports tool / function calling.",
+                                "type": "boolean"
+                              },
+                              "vision": {
+                                "description": "Accepts image inputs.",
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "streaming",
+                              "tools",
+                              "vision",
+                              "json_mode",
+                              "max_context_tokens",
+                              "max_output_tokens"
+                            ],
+                            "type": "object"
+                          },
+                          "display_name": {
+                            "description": "Human-readable display name.",
+                            "type": "string"
+                          },
+                          "model_id": {
+                            "description": "Backend-side model identifier.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "backend_id",
+                          "model_id",
+                          "display_name",
+                          "capabilities"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "models"
+                  ],
+                  "title": "ModelListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List available models (aggregated across backends)"
+      }
+    },
+    "/b/llm/api/models/{backend_id}/{model_id}/load": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "backend_id",
+            "required": true,
+            "schema": {
+              "description": "Backend (provider name) hosting the model, as listed by `GET /b/llm/api/models`.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "description": "Model id within that backend.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Load a model (SSE progress)"
+      }
+    },
+    "/b/llm/api/models/{backend_id}/{model_id}/status": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "backend_id",
+            "required": true,
+            "schema": {
+              "description": "Backend (provider name) hosting the model, as listed by `GET /b/llm/api/models`.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "description": "Model id within that backend.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/llm/api/models/{backend_id}/{model_id}/status` response body.",
+                  "properties": {
+                    "status": {
+                      "description": "Lifecycle status of one model on one backend. Mirrors\n`wafer_core::clients::llm::ModelStatus`.",
+                      "properties": {
+                        "progress": {
+                          "description": "Load progress in `0.0..=1.0`. Present only while `state` is\n`Loading`.",
+                          "format": "float",
+                          "type": "number"
+                        },
+                        "state": {
+                          "description": "High-level state.",
+                          "oneOf": [
+                            {
+                              "const": "Ready",
+                              "description": "Local backend: weights loaded. Remote backend: endpoint reachable.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "Loading",
+                              "description": "Local backend: weights currently downloading or initializing.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "Unloaded",
+                              "description": "Local backend only: weights not in memory.",
+                              "type": "string"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "description": "Loading or serving failed.",
+                              "properties": {
+                                "Error": {
+                                  "properties": {
+                                    "message": {
+                                      "description": "Failure message.",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "message"
+                                  ],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "Error"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "title": "ModelStatusResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Model status (ready / loading / unloaded)"
+      }
+    },
+    "/b/llm/api/models/{backend_id}/{model_id}/unload": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "backend_id",
+            "required": true,
+            "schema": {
+              "description": "Backend (provider name) hosting the model, as listed by `GET /b/llm/api/models`.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "description": "Model id within that backend.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/llm/api/models/{backend_id}/{model_id}/unload` response body.",
+                  "properties": {
+                    "unloaded": {
+                      "description": "Always `true`: an unload that did not happen is an error response.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "unloaded"
+                  ],
+                  "title": "ModelUnloadResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Unload a model"
+      }
+    },
+    "/b/llm/api/providers": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/llm/api/providers` response body: every configured provider,\nenabled or not.",
+                  "properties": {
+                    "providers": {
+                      "items": {
+                        "description": "A configured LLM provider as published by the admin API.",
+                        "properties": {
+                          "enabled": {
+                            "description": "Whether chat requests may route to this provider.",
+                            "type": "boolean"
+                          },
+                          "endpoint": {
+                            "description": "Base URL of the provider's API, e.g. `https://api.openai.com/v1`.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                            "type": "string"
+                          },
+                          "key_var": {
+                            "description": "Name of the admin configuration variable holding this provider's API\nkey, or `null` for a provider that runs unauthenticated. The key\nitself is never published.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "max_tokens_field": {
+                            "anyOf": [
+                              {
+                                "description": "Which field carries the output-token budget in a `/chat/completions` body.",
+                                "oneOf": [
+                                  {
+                                    "const": "max_tokens",
+                                    "description": "`max_tokens` — the spelling the OpenAI-compatible servers accept.",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "max_completion_tokens",
+                                    "description": "`max_completion_tokens` — OpenAI's current spelling; its reasoning\nmodels refuse the other one.",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "description": "Which field carries the output-token budget in this provider's chat\nbodies, or `null` to send the one its `protocol` implies."
+                          },
+                          "models": {
+                            "description": "Explicit model list. Empty means the models are discovered from the\nprovider's `/v1/models`.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "name": {
+                            "description": "Unique provider name. This is the `backend_id` chat requests route on.",
+                            "type": "string"
+                          },
+                          "protocol": {
+                            "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
+                            "enum": [
+                              "open_ai",
+                              "anthropic",
+                              "open_ai_compatible"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "protocol",
+                          "endpoint",
+                          "key_var",
+                          "max_tokens_field",
+                          "models",
+                          "enabled"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "providers"
+                  ],
+                  "title": "ProviderListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List configured LLM providers"
       },
-      "responses": {
-        "200": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "A configured LLM provider as published by the admin API.",
+                "additionalProperties": false,
+                "description": "`POST /b/llm/api/providers` request body.",
                 "properties": {
                   "enabled": {
-                    "description": "Whether chat requests may route to this provider.",
-                    "type": "boolean"
+                    "description": "Whether chat requests may route to this provider. Defaults to `true`\nwhen the JSON body omits it; an unticked checkbox on the form path is\n`false`, because that is the only thing an absent checkbox can mean.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   },
                   "endpoint": {
-                    "description": "Base URL of the provider's API, e.g. `https://api.openai.com/v1`.",
-                    "type": "string"
-                  },
-                  "id": {
-                    "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                    "description": "Base URL of the provider's API. Must resolve to a public address:\nprivate, link-local and cloud-metadata ranges are refused.",
                     "type": "string"
                   },
                   "key_var": {
-                    "description": "Name of the admin configuration variable holding this provider's API\nkey, or `null` for a provider that runs unauthenticated. The key\nitself is never published.",
+                    "description": "Name of the admin configuration variable holding the API key. Omit,\nor send an empty string, for a provider that needs no key.",
                     "type": [
                       "string",
                       "null"
@@ -903,17 +822,20 @@
                         "type": "null"
                       }
                     ],
-                    "description": "Which field carries the output-token budget in this provider's chat\nbodies, or `null` to send the one its `protocol` implies."
+                    "description": "Which field carries the output-token budget in this provider's chat\nbodies. Omit to send the one `protocol` implies, which is what all but\na handful of endpoints want. Refused on the `anthropic` protocol,\nwhose wire format has only one such field."
                   },
                   "models": {
-                    "description": "Explicit model list. Empty means the models are discovered from the\nprovider's `/v1/models`.",
+                    "description": "Explicit model list. Omitted or empty means the models are discovered\nfrom the provider's `/v1/models`.",
                     "items": {
                       "type": "string"
                     },
-                    "type": "array"
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   },
                   "name": {
-                    "description": "Unique provider name. This is the `backend_id` chat requests route on.",
+                    "description": "Unique provider name. Becomes the `backend_id` chat requests route on.",
                     "type": "string"
                   },
                   "protocol": {
@@ -927,193 +849,190 @@
                   }
                 },
                 "required": [
-                  "id",
                   "name",
                   "protocol",
-                  "endpoint",
-                  "key_var",
-                  "max_tokens_field",
-                  "models",
-                  "enabled"
+                  "endpoint"
                 ],
-                "title": "ProviderView",
+                "title": "CreateProviderRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create LLM provider"
-    }
-  },
-  "/b/llm/api/providers/{id}": {
-    "delete": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`DELETE /b/llm/api/providers/{id}` response body.",
-                "properties": {
-                  "deleted": {
-                    "description": "Always `true`: a delete that did not happen is an error response.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "deleted"
-                ],
-                "title": "ProviderDeleteResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Delete LLM provider"
-    },
-    "patch": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "`PATCH /b/llm/api/providers/{id}` request body. Every field is optional\nand only the ones present are applied. The two fields a provider can hold\nas `null` — `key_var` and `max_tokens_field` — are cleared by sending\n`null` (`key_var` also by an empty string); an empty `name` or `endpoint`\nis ignored.",
-              "properties": {
-                "enabled": {
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "endpoint": {
-                  "description": "Re-validated on every change: must resolve to a public address.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "key_var": {
-                  "description": "Name of the admin configuration variable holding the API key, or\n`null` (or `\"\"`) to leave the provider unauthenticated.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "max_tokens_field": {
-                  "anyOf": [
-                    {
-                      "description": "Which field carries the output-token budget in a `/chat/completions` body.",
-                      "oneOf": [
-                        {
-                          "const": "max_tokens",
-                          "description": "`max_tokens` — the spelling the OpenAI-compatible servers accept.",
-                          "type": "string"
-                        },
-                        {
-                          "const": "max_completion_tokens",
-                          "description": "`max_completion_tokens` — OpenAI's current spelling; its reasoning\nmodels refuse the other one.",
-                          "type": "string"
-                        }
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A configured LLM provider as published by the admin API.",
+                  "properties": {
+                    "enabled": {
+                      "description": "Whether chat requests may route to this provider.",
+                      "type": "boolean"
+                    },
+                    "endpoint": {
+                      "description": "Base URL of the provider's API, e.g. `https://api.openai.com/v1`.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                      "type": "string"
+                    },
+                    "key_var": {
+                      "description": "Name of the admin configuration variable holding this provider's API\nkey, or `null` for a provider that runs unauthenticated. The key\nitself is never published.",
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     },
-                    {
-                      "type": "null"
+                    "max_tokens_field": {
+                      "anyOf": [
+                        {
+                          "description": "Which field carries the output-token budget in a `/chat/completions` body.",
+                          "oneOf": [
+                            {
+                              "const": "max_tokens",
+                              "description": "`max_tokens` — the spelling the OpenAI-compatible servers accept.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "max_completion_tokens",
+                              "description": "`max_completion_tokens` — OpenAI's current spelling; its reasoning\nmodels refuse the other one.",
+                              "type": "string"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Which field carries the output-token budget in this provider's chat\nbodies, or `null` to send the one its `protocol` implies."
+                    },
+                    "models": {
+                      "description": "Explicit model list. Empty means the models are discovered from the\nprovider's `/v1/models`.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "name": {
+                      "description": "Unique provider name. This is the `backend_id` chat requests route on.",
+                      "type": "string"
+                    },
+                    "protocol": {
+                      "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
+                      "enum": [
+                        "open_ai",
+                        "anthropic",
+                        "open_ai_compatible"
+                      ],
+                      "type": "string"
                     }
-                  ],
-                  "description": "Which field carries the output-token budget, or `null` to go back to\nthe one `protocol` implies."
-                },
-                "models": {
-                  "items": {
-                    "type": "string"
                   },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
-                },
-                "name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "protocol": {
-                  "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
-                  "enum": [
-                    "open_ai",
-                    "anthropic",
-                    "open_ai_compatible",
-                    null
+                  "required": [
+                    "id",
+                    "name",
+                    "protocol",
+                    "endpoint",
+                    "key_var",
+                    "max_tokens_field",
+                    "models",
+                    "enabled"
                   ],
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "title": "ProviderView",
+                  "type": "object"
                 }
-              },
-              "title": "UpdateProviderRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create LLM provider"
+      }
+    },
+    "/b/llm/api/providers/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`DELETE /b/llm/api/providers/{id}` response body.",
+                  "properties": {
+                    "deleted": {
+                      "description": "Always `true`: a delete that did not happen is an error response.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "title": "ProviderDeleteResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete LLM provider"
       },
-      "responses": {
-        "200": {
+      "patch": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "A configured LLM provider as published by the admin API.",
+                "additionalProperties": false,
+                "description": "`PATCH /b/llm/api/providers/{id}` request body. Every field is optional\nand only the ones present are applied. The two fields a provider can hold\nas `null` — `key_var` and `max_tokens_field` — are cleared by sending\n`null` (`key_var` also by an empty string); an empty `name` or `endpoint`\nis ignored.",
                 "properties": {
                   "enabled": {
-                    "description": "Whether chat requests may route to this provider.",
-                    "type": "boolean"
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   },
                   "endpoint": {
-                    "description": "Base URL of the provider's API, e.g. `https://api.openai.com/v1`.",
-                    "type": "string"
-                  },
-                  "id": {
-                    "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
-                    "type": "string"
+                    "description": "Re-validated on every change: must resolve to a public address.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "key_var": {
-                    "description": "Name of the admin configuration variable holding this provider's API\nkey, or `null` for a provider that runs unauthenticated. The key\nitself is never published.",
+                    "description": "Name of the admin configuration variable holding the API key, or\n`null` (or `\"\"`) to leave the provider unauthenticated.",
                     "type": [
                       "string",
                       "null"
@@ -1140,100 +1059,186 @@
                         "type": "null"
                       }
                     ],
-                    "description": "Which field carries the output-token budget in this provider's chat\nbodies, or `null` to send the one its `protocol` implies."
+                    "description": "Which field carries the output-token budget, or `null` to go back to\nthe one `protocol` implies."
                   },
                   "models": {
-                    "description": "Explicit model list. Empty means the models are discovered from the\nprovider's `/v1/models`.",
                     "items": {
                       "type": "string"
                     },
-                    "type": "array"
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   },
                   "name": {
-                    "description": "Unique provider name. This is the `backend_id` chat requests route on.",
-                    "type": "string"
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "protocol": {
                     "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
                     "enum": [
                       "open_ai",
                       "anthropic",
-                      "open_ai_compatible"
+                      "open_ai_compatible",
+                      null
                     ],
-                    "type": "string"
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "id",
-                  "name",
-                  "protocol",
-                  "endpoint",
-                  "key_var",
-                  "max_tokens_field",
-                  "models",
-                  "enabled"
-                ],
-                "title": "ProviderView",
+                "title": "UpdateProviderRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update LLM provider"
-    }
-  },
-  "/b/llm/api/providers/{id}/discover-models": {
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`POST /b/llm/api/providers/{id}/discover-models` response body.",
-                "properties": {
-                  "models": {
-                    "description": "Model ids the provider reported — or its explicit list, when one is\nconfigured — now stored as the provider's `models`.",
-                    "items": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A configured LLM provider as published by the admin API.",
+                  "properties": {
+                    "enabled": {
+                      "description": "Whether chat requests may route to this provider.",
+                      "type": "boolean"
+                    },
+                    "endpoint": {
+                      "description": "Base URL of the provider's API, e.g. `https://api.openai.com/v1`.",
                       "type": "string"
                     },
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "models"
-                ],
-                "title": "DiscoveredModelsResponse",
-                "type": "object"
+                    "id": {
+                      "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                      "type": "string"
+                    },
+                    "key_var": {
+                      "description": "Name of the admin configuration variable holding this provider's API\nkey, or `null` for a provider that runs unauthenticated. The key\nitself is never published.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "max_tokens_field": {
+                      "anyOf": [
+                        {
+                          "description": "Which field carries the output-token budget in a `/chat/completions` body.",
+                          "oneOf": [
+                            {
+                              "const": "max_tokens",
+                              "description": "`max_tokens` — the spelling the OpenAI-compatible servers accept.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "max_completion_tokens",
+                              "description": "`max_completion_tokens` — OpenAI's current spelling; its reasoning\nmodels refuse the other one.",
+                              "type": "string"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Which field carries the output-token budget in this provider's chat\nbodies, or `null` to send the one its `protocol` implies."
+                    },
+                    "models": {
+                      "description": "Explicit model list. Empty means the models are discovered from the\nprovider's `/v1/models`.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "name": {
+                      "description": "Unique provider name. This is the `backend_id` chat requests route on.",
+                      "type": "string"
+                    },
+                    "protocol": {
+                      "description": "Wire protocol a configured provider speaks.\n\n`open_ai` and `anthropic` are the providers' native APIs.\n`open_ai_compatible` covers every third-party endpoint implementing\nOpenAI's `/v1` interface — Ollama, llama-server, LM Studio, vLLM, LocalAI,\nKoboldCpp, Azure OpenAI, Groq, Together, OpenRouter, Mistral API, Anyscale,\nand so on.",
+                      "enum": [
+                        "open_ai",
+                        "anthropic",
+                        "open_ai_compatible"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "protocol",
+                    "endpoint",
+                    "key_var",
+                    "max_tokens_field",
+                    "models",
+                    "enabled"
+                  ],
+                  "title": "ProviderView",
+                  "type": "object"
+                }
               }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update LLM provider"
+      }
+    },
+    "/b/llm/api/providers/{id}/discover-models": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
+              "type": "string"
             }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Discover provider models via /v1/models"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/llm/api/providers/{id}/discover-models` response body.",
+                  "properties": {
+                    "models": {
+                      "description": "Model ids the provider reported — or its explicit list, when one is\nconfigured — now stored as the provider's `models`.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "models"
+                  ],
+                  "title": "DiscoveredModelsResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Discover provider models via /v1/models"
+      }
     }
   }
 }

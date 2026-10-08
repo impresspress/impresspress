@@ -78,19 +78,74 @@ fn snapshot_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots")
 }
 
-/// Every path in the generated OpenAPI document belonging to `block`,
-/// pretty-printed with sorted keys so the output is diff-stable.
-fn block_openapi(doc: &serde_json::Value, prefixes: &[&str]) -> String {
+/// The paths of the generated OpenAPI document that belong to one block, as
+/// the block's snapshot: `{"components": {"schemas": …}, "paths": …}`.
+struct BlockOpenapi {
+    /// Number of paths the block's prefixes matched.
+    path_count: usize,
+    /// The snapshot text, pretty-printed with sorted keys so it is
+    /// diff-stable.
+    text: String,
+}
+
+/// A block's slice of the document, self-contained: its paths, plus every
+/// `components/schemas` entry those paths reach through `$ref` (followed
+/// transitively). Without the schemas a `$ref` in the snapshot would point at
+/// a table the snapshot does not carry, and the TypeScript SDK, which builds
+/// its document from these files (`packages/impresspress-js/scripts/
+/// openapi-document.mjs`), could not resolve it.
+fn block_openapi(doc: &serde_json::Value, prefixes: &[&str]) -> BlockOpenapi {
+    use std::collections::BTreeMap;
+
     let paths = doc["paths"].as_object().expect("openapi paths object");
 
     // BTreeMap gives deterministic key ordering regardless of how the
     // generator happened to insert them.
-    let filtered: std::collections::BTreeMap<&String, &serde_json::Value> = paths
+    let filtered: BTreeMap<&String, &serde_json::Value> = paths
         .iter()
         .filter(|(path, _)| prefixes.iter().any(|p| path.starts_with(p)))
         .collect();
 
-    serde_json::to_string_pretty(&filtered).expect("serialize block paths")
+    let mut schemas: BTreeMap<String, &serde_json::Value> = BTreeMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    for item in filtered.values() {
+        schema_refs(item, &mut pending);
+    }
+    while let Some(name) = pending.pop() {
+        if schemas.contains_key(&name) {
+            continue;
+        }
+        let schema = doc["components"]["schemas"]
+            .get(&name)
+            .unwrap_or_else(|| panic!("`$ref` to components/schemas/{name}, which does not exist"));
+        schema_refs(schema, &mut pending);
+        schemas.insert(name, schema);
+    }
+
+    let snapshot = serde_json::json!({
+        "components": {"schemas": schemas},
+        "paths": filtered,
+    });
+    BlockOpenapi {
+        path_count: filtered.len(),
+        text: serde_json::to_string_pretty(&snapshot).expect("serialize block openapi"),
+    }
+}
+
+/// The `components/schemas` names `value` references through `$ref`.
+fn schema_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(target)) = map.get("$ref") {
+                if let Some(name) = target.strip_prefix("#/components/schemas/") {
+                    out.push(name.to_string());
+                }
+            }
+            map.values().for_each(|v| schema_refs(v, out));
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|v| schema_refs(v, out)),
+        _ => {}
+    }
 }
 
 #[tokio::test]
@@ -112,7 +167,10 @@ async fn openapi_matches_committed_snapshots() {
         .filter(|(_, _, compiled)| *compiled)
         .map(|(block, prefixes, _)| (*block, *prefixes));
     for (block, prefixes) in always.chain(gated) {
-        let actual = block_openapi(&doc, prefixes);
+        let BlockOpenapi {
+            path_count,
+            text: actual,
+        } = block_openapi(&doc, prefixes);
         let path = snapshot_dir().join(format!("{block}.openapi.json"));
         compared.push(block.to_string());
 
@@ -120,7 +178,7 @@ async fn openapi_matches_committed_snapshots() {
         // means the prefix map is wrong and this block is being "guarded" by
         // a diff that can never change. Only the blocks in
         // `LEGITIMATELY_EMPTY` are exempt.
-        if !LEGITIMATELY_EMPTY.contains(&block) && actual.trim() == "{}" {
+        if !LEGITIMATELY_EMPTY.contains(&block) && path_count == 0 {
             failures.push(format!(
                 "\n=== {block} ===\nEMPTY snapshot. This block's prefixes {prefixes:?} matched no \
                  OpenAPI paths, so its gate is vacuous. Either the prefix map is wrong or the \
@@ -1425,6 +1483,51 @@ async fn path_placeholders_and_path_parameters_agree() {
             declared.iter().any(|name| name == param),
             "`{published}` must declare its rest segment as the plain `in: path` parameter \
              `{param}`; declared: {declared:?}"
+        );
+    }
+}
+
+/// A derived schema that reaches a recursive type (products' offers reach
+/// `Condition`) carries `$ref`s, and in the published document each one must
+/// resolve against the document root: the generator hoists the type into
+/// `components/schemas`, and no `#/$defs/…` pointer — which would resolve
+/// against a root that has no `$defs` — may survive. The per-block snapshots
+/// carry the schemas their own paths reach; this checks the whole document.
+#[tokio::test]
+async fn every_openapi_ref_resolves_against_the_document() {
+    let ctx = impresspress_core::test_support::TestContext::new().await;
+    let doc = impresspress_core::test_support::openapi_document(&ctx).await;
+
+    fn refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(target)) = map.get("$ref") {
+                    out.push(target);
+                }
+                map.values().for_each(|v| refs(v, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    refs(&doc, &mut found);
+
+    assert!(
+        doc["components"]["schemas"]["Condition"].is_object(),
+        "the offers' recursive `Condition` is not hoisted into components/schemas"
+    );
+    assert!(
+        found.contains(&"#/components/schemas/Condition"),
+        "no `$ref` points at the hoisted `Condition`"
+    );
+    for target in found {
+        let pointer = target
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("`$ref` {target} is not document-local"));
+        assert!(
+            doc.pointer(pointer).is_some(),
+            "`$ref` {target} resolves to nothing in the document"
         );
     }
 }

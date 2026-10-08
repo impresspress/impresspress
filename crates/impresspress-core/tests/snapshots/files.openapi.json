@@ -1,1421 +1,1426 @@
 {
-  "/b/cloudstorage/admin/access-logs": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
-                "properties": {
-                  "page": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "items": {
-                      "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
-                      "properties": {
-                        "data": {
-                          "description": "One access-log row, decoded. The child audit table of a share: a log row\nis meaningless without the share it points at, which is why both tables\nlive behind this one module.",
-                          "properties": {
-                            "accessed_at": {
-                              "description": "RFC 3339 instant of the recorded access.",
-                              "type": "string"
-                            },
-                            "created_at": {
-                              "type": "string"
-                            },
-                            "id": {
-                              "type": "string"
-                            },
-                            "ip_address": {
-                              "type": "string"
-                            },
-                            "share_id": {
-                              "type": "string"
-                            },
-                            "updated_at": {
-                              "type": "string"
-                            },
-                            "user_agent": {
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "share_id",
-                            "accessed_at",
-                            "ip_address",
-                            "user_agent",
-                            "created_at",
-                            "updated_at"
-                          ],
-                          "type": "object"
-                        },
-                        "id": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "data"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "total_count": {
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "RecordListView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Share access logs (admin)",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
+  "components": {
+    "schemas": {}
   },
-  "/b/cloudstorage/admin/quotas": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
-                "properties": {
-                  "page": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "items": {
-                      "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
-                      "properties": {
-                        "data": {
-                          "description": "One quota-override row, decoded.",
-                          "properties": {
-                            "created_at": {
-                              "type": "string"
-                            },
-                            "id": {
-                              "type": "string"
-                            },
-                            "max_file_size_bytes": {
-                              "format": "int64",
-                              "type": "integer"
-                            },
-                            "max_files_per_bucket": {
-                              "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
-                              "format": "int64",
-                              "type": "integer"
-                            },
-                            "max_storage_bytes": {
-                              "format": "int64",
-                              "type": "integer"
-                            },
-                            "updated_at": {
-                              "type": "string"
-                            },
-                            "user_id": {
-                              "description": "The user this override applies to. Unique across the table.",
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "user_id",
-                            "max_storage_bytes",
-                            "max_file_size_bytes",
-                            "max_files_per_bucket",
-                            "created_at",
-                            "updated_at"
-                          ],
-                          "type": "object"
-                        },
-                        "id": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "data"
-                      ],
-                      "type": "object"
+  "paths": {
+    "/b/cloudstorage/admin/access-logs": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
+                  "properties": {
+                    "page": {
+                      "format": "int64",
+                      "type": "integer"
                     },
-                    "type": "array"
+                    "page_size": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                        "properties": {
+                          "data": {
+                            "description": "One access-log row, decoded. The child audit table of a share: a log row\nis meaningless without the share it points at, which is why both tables\nlive behind this one module.",
+                            "properties": {
+                              "accessed_at": {
+                                "description": "RFC 3339 instant of the recorded access.",
+                                "type": "string"
+                              },
+                              "created_at": {
+                                "type": "string"
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "ip_address": {
+                                "type": "string"
+                              },
+                              "share_id": {
+                                "type": "string"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              },
+                              "user_agent": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "share_id",
+                              "accessed_at",
+                              "ip_address",
+                              "user_agent",
+                              "created_at",
+                              "updated_at"
+                            ],
+                            "type": "object"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
                   },
-                  "total_count": {
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "RecordListView",
-                "type": "object"
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "RecordListView",
+                  "type": "object"
+                }
               }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Per-user quotas (admin)",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
-  },
-  "/b/cloudstorage/admin/quotas/{id}": {
-    "patch": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "User id whose quota is being set",
-            "type": "string"
+            },
+            "description": "Successful response"
           }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
-                "properties": {
-                  "data": {
-                    "description": "One quota-override row, decoded.",
-                    "properties": {
-                      "created_at": {
-                        "type": "string"
-                      },
-                      "id": {
-                        "type": "string"
-                      },
-                      "max_file_size_bytes": {
-                        "format": "int64",
-                        "type": "integer"
-                      },
-                      "max_files_per_bucket": {
-                        "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
-                        "format": "int64",
-                        "type": "integer"
-                      },
-                      "max_storage_bytes": {
-                        "format": "int64",
-                        "type": "integer"
-                      },
-                      "updated_at": {
-                        "type": "string"
-                      },
-                      "user_id": {
-                        "description": "The user this override applies to. Unique across the table.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "user_id",
-                      "max_storage_bytes",
-                      "max_file_size_bytes",
-                      "max_files_per_bucket",
-                      "created_at",
-                      "updated_at"
-                    ],
-                    "type": "object"
-                  },
-                  "id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id",
-                  "data"
-                ],
-                "title": "RecordView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Set a user's quota (admin)",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
-  },
-  "/b/cloudstorage/admin/shares": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
-                "properties": {
-                  "page": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "items": {
-                      "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
-                      "properties": {
-                        "data": {
-                          "description": "One share row, decoded.",
-                          "properties": {
-                            "access_count": {
-                              "format": "int64",
-                              "type": "integer"
-                            },
-                            "bucket": {
-                              "type": "string"
-                            },
-                            "created_at": {
-                              "description": "RFC 3339 creation instant.",
-                              "type": "string"
-                            },
-                            "created_by": {
-                              "description": "User id of the share's creator — the ownership key\n`handle_delete_share` checks.",
-                              "type": "string"
-                            },
-                            "expires_at": {
-                              "description": "The end this share link records, as an RFC 3339 stamp.\n\n`None` is a SQL `NULL` or a stored empty string — one meaning, since\nthe column is nullable and every caller treated `\"\"` as unset. It is\nNOT \"never expires\": every share link has an end, and a row that\nrecords none cannot be shown to be live, so the public link refuses\nit. Creating a share cannot produce one — `NewShare` takes a\nnon-optional expiry — and migration 003 gave every historical row an\nend, so a `None` here is a row that reached the table some other\nway.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "id": {
-                              "type": "string"
-                            },
-                            "key": {
-                              "type": "string"
-                            },
-                            "max_access_count": {
-                              "description": "Access cap, or `None` for unlimited. A non-positive stored value is\n`None` too, which is the meaning [`NewShare::max_access_count`]\ndocuments and the meaning\n[`increment_access_count_capped`] enforces.",
-                              "format": "int64",
-                              "type": [
-                                "integer",
-                                "null"
-                              ]
-                            },
-                            "token": {
-                              "description": "The opaque token embedded in the public `/b/storage/direct/{token}`\nURL: random bytes, hex-encoded, asserting nothing about the share.\nThis row is what it addresses, and what decides whether the link\nstill works. Unique across the table.",
-                              "type": "string"
-                            },
-                            "updated_at": {
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "token",
-                            "bucket",
-                            "key",
-                            "created_by",
-                            "created_at",
-                            "expires_at",
-                            "access_count",
-                            "max_access_count",
-                            "updated_at"
-                          ],
-                          "type": "object"
-                        },
-                        "id": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "data"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "total_count": {
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "RecordListView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Recent shares, all users (admin)",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
-  },
-  "/b/cloudstorage/quota": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/cloudstorage/quota` response body.",
-                "properties": {
-                  "quota": {
-                    "description": "The caller's effective caps: their override row if they have one,\notherwise the block defaults.",
-                    "properties": {
-                      "max_file_size_bytes": {
-                        "format": "int64",
-                        "type": "integer"
-                      },
-                      "max_files_per_bucket": {
-                        "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
-                        "format": "int64",
-                        "type": "integer"
-                      },
-                      "max_storage_bytes": {
-                        "format": "int64",
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "max_storage_bytes",
-                      "max_file_size_bytes",
-                      "max_files_per_bucket"
-                    ],
-                    "type": "object"
-                  },
-                  "usage": {
-                    "description": "The `usage` half of [`QuotaResponse`]. Both numbers are computed over the\ncaller's object rows, not read from a counter column.",
-                    "properties": {
-                      "file_count": {
-                        "description": "Objects the caller owns across all buckets, `Pending` included; not\nwhat the per-bucket `max_files_per_bucket` cap is checked against.",
-                        "format": "int64",
-                        "type": "integer"
-                      },
-                      "total_bytes": {
-                        "description": "`SUM(size)` over the caller's rows, `Pending` reservations included.",
-                        "format": "int64",
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "total_bytes",
-                      "file_count"
-                    ],
-                    "type": "object"
-                  }
-                },
-                "required": [
-                  "quota",
-                  "usage"
-                ],
-                "title": "QuotaResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "My quota and usage",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
-  },
-  "/b/cloudstorage/shares": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
-                "properties": {
-                  "page": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "items": {
-                      "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
-                      "properties": {
-                        "data": {
-                          "description": "One share row, decoded.",
-                          "properties": {
-                            "access_count": {
-                              "format": "int64",
-                              "type": "integer"
-                            },
-                            "bucket": {
-                              "type": "string"
-                            },
-                            "created_at": {
-                              "description": "RFC 3339 creation instant.",
-                              "type": "string"
-                            },
-                            "created_by": {
-                              "description": "User id of the share's creator — the ownership key\n`handle_delete_share` checks.",
-                              "type": "string"
-                            },
-                            "expires_at": {
-                              "description": "The end this share link records, as an RFC 3339 stamp.\n\n`None` is a SQL `NULL` or a stored empty string — one meaning, since\nthe column is nullable and every caller treated `\"\"` as unset. It is\nNOT \"never expires\": every share link has an end, and a row that\nrecords none cannot be shown to be live, so the public link refuses\nit. Creating a share cannot produce one — `NewShare` takes a\nnon-optional expiry — and migration 003 gave every historical row an\nend, so a `None` here is a row that reached the table some other\nway.",
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            },
-                            "id": {
-                              "type": "string"
-                            },
-                            "key": {
-                              "type": "string"
-                            },
-                            "max_access_count": {
-                              "description": "Access cap, or `None` for unlimited. A non-positive stored value is\n`None` too, which is the meaning [`NewShare::max_access_count`]\ndocuments and the meaning\n[`increment_access_count_capped`] enforces.",
-                              "format": "int64",
-                              "type": [
-                                "integer",
-                                "null"
-                              ]
-                            },
-                            "token": {
-                              "description": "The opaque token embedded in the public `/b/storage/direct/{token}`\nURL: random bytes, hex-encoded, asserting nothing about the share.\nThis row is what it addresses, and what decides whether the link\nstill works. Unique across the table.",
-                              "type": "string"
-                            },
-                            "updated_at": {
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "token",
-                            "bucket",
-                            "key",
-                            "created_by",
-                            "created_at",
-                            "expires_at",
-                            "access_count",
-                            "max_access_count",
-                            "updated_at"
-                          ],
-                          "type": "object"
-                        },
-                        "id": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "data"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "total_count": {
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "RecordListView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List my share links",
-      "tags": [
-        "cloudstorage"
-      ]
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Share access logs (admin)",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
     },
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`POST /b/cloudstorage/shares` response body.",
-                "properties": {
-                  "direct_url": {
-                    "description": "Path of the public share link, relative to the deployment's origin.",
-                    "type": "string"
+    "/b/cloudstorage/admin/quotas": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
+                  "properties": {
+                    "page": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                        "properties": {
+                          "data": {
+                            "description": "One quota-override row, decoded.",
+                            "properties": {
+                              "created_at": {
+                                "type": "string"
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "max_file_size_bytes": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "max_files_per_bucket": {
+                                "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "max_storage_bytes": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              },
+                              "user_id": {
+                                "description": "The user this override applies to. Unique across the table.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "user_id",
+                              "max_storage_bytes",
+                              "max_file_size_bytes",
+                              "max_files_per_bucket",
+                              "created_at",
+                              "updated_at"
+                            ],
+                            "type": "object"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
                   },
-                  "id": {
-                    "description": "Row id of the new share — the `{id}` of `DELETE\n/b/cloudstorage/shares/{id}`.",
-                    "type": "string"
-                  },
-                  "token": {
-                    "description": "The opaque token embedded in `direct_url`. It carries no expiry of\nits own: the share's own `expires_at` and access cap are what end a\nlink.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id",
-                  "token",
-                  "direct_url"
-                ],
-                "title": "ShareCreatedResponse",
-                "type": "object"
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "RecordListView",
+                  "type": "object"
+                }
               }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create a share link",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
-  },
-  "/b/cloudstorage/shares/{id}": {
-    "delete": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Share row id, as `POST /b/cloudstorage/shares` returned it",
-            "type": "string"
+            },
+            "description": "Successful response"
           }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The body every delete on this block answers: bucket, object and share.\nOne type because it is one shape; a per-endpoint copy is how the three\nwould drift apart.",
-                "properties": {
-                  "deleted": {
-                    "description": "Always `true` — a delete that did not happen is an error status, not\n`{\"deleted\": false}`.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "deleted"
-                ],
-                "title": "DeletedResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Delete a share link",
-      "tags": [
-        "cloudstorage"
-      ]
-    }
-  },
-  "/b/storage/admin/api/buckets": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/storage/api/buckets` and `GET /b/storage/admin/api/buckets`\nresponse body — both routes reach the same handler\n([`super::storage::buckets::handle_list_buckets`]), which differs only in\nwhether it scopes the read to the caller.",
-                "properties": {
-                  "buckets": {
-                    "description": "Bucket names, from `repo::buckets::TABLE` — the single source of\ntruth for bucket existence. Not the blob namespace's folder list.",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "truncated": {
-                    "description": "Whether more buckets are visible to the caller than `buckets` names.\n\nBuckets are created self-service, so the admin view of this listing\ngrows with the deployment and is read up to a ceiling; this is how a\nclient tells a complete list from a prefix of one.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "buckets",
-                  "truncated"
-                ],
-                "title": "BucketListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List every bucket (admin)",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/admin/api/stats": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/storage/admin/api/stats` response body.",
-                "properties": {
-                  "bucket_count": {
-                    "description": "Rows in `repo::buckets::TABLE`, not folders in the blob namespace.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "total_objects": {
-                    "description": "Objects in `Complete` status. A `Pending` reservation is not a file.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "total_size_bytes": {
-                    "description": "Sum of `size` over the same set.",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "total_objects",
-                  "total_size_bytes",
-                  "bucket_count"
-                ],
-                "title": "StorageStatsResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Storage totals (admin)",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/api/buckets": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/storage/api/buckets` and `GET /b/storage/admin/api/buckets`\nresponse body — both routes reach the same handler\n([`super::storage::buckets::handle_list_buckets`]), which differs only in\nwhether it scopes the read to the caller.",
-                "properties": {
-                  "buckets": {
-                    "description": "Bucket names, from `repo::buckets::TABLE` — the single source of\ntruth for bucket existence. Not the blob namespace's folder list.",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "truncated": {
-                    "description": "Whether more buckets are visible to the caller than `buckets` names.\n\nBuckets are created self-service, so the admin view of this listing\ngrows with the deployment and is read up to a ceiling; this is how a\nclient tells a complete list from a prefix of one.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "buckets",
-                  "truncated"
-                ],
-                "title": "BucketListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List buckets",
-      "tags": [
-        "storage"
-      ]
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Per-user quotas (admin)",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
     },
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`POST /b/storage/api/buckets` response body.",
-                "properties": {
-                  "created": {
-                    "description": "Always `true` — the handler answers this body only after both the\nfolder and the metadata row are in place.",
-                    "type": "boolean"
-                  },
-                  "name": {
-                    "description": "The bucket that now exists, echoed back from the request.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "name",
-                  "created"
-                ],
-                "title": "BucketCreatedResponse",
-                "type": "object"
-              }
+    "/b/cloudstorage/admin/quotas/{id}": {
+      "patch": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "User id whose quota is being set",
+              "type": "string"
             }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create bucket",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/api/buckets/{name}": {
-    "delete": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "name",
-          "required": true,
-          "schema": {
-            "description": "Bucket name",
-            "type": "string"
           }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The body every delete on this block answers: bucket, object and share.\nOne type because it is one shape; a per-endpoint copy is how the three\nwould drift apart.",
-                "properties": {
-                  "deleted": {
-                    "description": "Always `true` — a delete that did not happen is an error status, not\n`{\"deleted\": false}`.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "deleted"
-                ],
-                "title": "DeletedResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Delete bucket",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/api/buckets/{name}/objects": {
-    "get": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "name",
-          "required": true,
-          "schema": {
-            "description": "Bucket name",
-            "type": "string"
-          }
-        },
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 50,
-            "maximum": 100,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "prefix",
-          "required": false,
-          "schema": {
-            "description": "Key prefix filter",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/storage/api/buckets/{name}/objects` response body.",
-                "properties": {
-                  "objects": {
-                    "description": "Objects in this page.",
-                    "items": {
-                      "description": "One object in a bucket listing, as its metadata row records it.",
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                  "properties": {
+                    "data": {
+                      "description": "One quota-override row, decoded.",
                       "properties": {
-                        "content_type": {
+                        "created_at": {
                           "type": "string"
                         },
-                        "key": {
-                          "description": "Object key.",
+                        "id": {
                           "type": "string"
                         },
-                        "last_modified": {
-                          "format": "date-time",
+                        "max_file_size_bytes": {
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "max_files_per_bucket": {
+                          "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "max_storage_bytes": {
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "updated_at": {
                           "type": "string"
                         },
-                        "size": {
-                          "description": "Size in bytes.",
+                        "user_id": {
+                          "description": "The user this override applies to. Unique across the table.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "user_id",
+                        "max_storage_bytes",
+                        "max_file_size_bytes",
+                        "max_files_per_bucket",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "type": "object"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "data"
+                  ],
+                  "title": "RecordView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Set a user's quota (admin)",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
+    },
+    "/b/cloudstorage/admin/shares": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
+                  "properties": {
+                    "page": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                        "properties": {
+                          "data": {
+                            "description": "One share row, decoded.",
+                            "properties": {
+                              "access_count": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "bucket": {
+                                "type": "string"
+                              },
+                              "created_at": {
+                                "description": "RFC 3339 creation instant.",
+                                "type": "string"
+                              },
+                              "created_by": {
+                                "description": "User id of the share's creator — the ownership key\n`handle_delete_share` checks.",
+                                "type": "string"
+                              },
+                              "expires_at": {
+                                "description": "The end this share link records, as an RFC 3339 stamp.\n\n`None` is a SQL `NULL` or a stored empty string — one meaning, since\nthe column is nullable and every caller treated `\"\"` as unset. It is\nNOT \"never expires\": every share link has an end, and a row that\nrecords none cannot be shown to be live, so the public link refuses\nit. Creating a share cannot produce one — `NewShare` takes a\nnon-optional expiry — and migration 003 gave every historical row an\nend, so a `None` here is a row that reached the table some other\nway.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "key": {
+                                "type": "string"
+                              },
+                              "max_access_count": {
+                                "description": "Access cap, or `None` for unlimited. A non-positive stored value is\n`None` too, which is the meaning [`NewShare::max_access_count`]\ndocuments and the meaning\n[`increment_access_count_capped`] enforces.",
+                                "format": "int64",
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "token": {
+                                "description": "The opaque token embedded in the public `/b/storage/direct/{token}`\nURL: random bytes, hex-encoded, asserting nothing about the share.\nThis row is what it addresses, and what decides whether the link\nstill works. Unique across the table.",
+                                "type": "string"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "token",
+                              "bucket",
+                              "key",
+                              "created_by",
+                              "created_at",
+                              "expires_at",
+                              "access_count",
+                              "max_access_count",
+                              "updated_at"
+                            ],
+                            "type": "object"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "RecordListView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Recent shares, all users (admin)",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
+    },
+    "/b/cloudstorage/quota": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/cloudstorage/quota` response body.",
+                  "properties": {
+                    "quota": {
+                      "description": "The caller's effective caps: their override row if they have one,\notherwise the block defaults.",
+                      "properties": {
+                        "max_file_size_bytes": {
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "max_files_per_bucket": {
+                          "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "max_storage_bytes": {
                           "format": "int64",
                           "type": "integer"
                         }
                       },
                       "required": [
-                        "key",
-                        "size",
-                        "content_type",
-                        "last_modified"
+                        "max_storage_bytes",
+                        "max_file_size_bytes",
+                        "max_files_per_bucket"
                       ],
                       "type": "object"
                     },
-                    "type": "array"
-                  },
-                  "total_count": {
-                    "description": "Total number of objects matching the filter (across all pages).",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "objects",
-                  "total_count"
-                ],
-                "title": "ObjectListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List objects",
-      "tags": [
-        "storage"
-      ]
-    },
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "name",
-          "required": true,
-          "schema": {
-            "description": "Bucket name",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`POST /b/storage/api/buckets/{name}/objects` response body.",
-                "properties": {
-                  "bucket": {
-                    "type": "string"
-                  },
-                  "key": {
-                    "description": "The stored key. For a multipart upload this is the key the handler\nresolved, which may differ from the one the caller sent.",
-                    "type": "string"
-                  },
-                  "uploaded": {
-                    "description": "Always `true`.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "bucket",
-                  "key",
-                  "uploaded"
-                ],
-                "title": "ObjectUploadedResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Upload file",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/api/buckets/{name}/objects/{key}": {
-    "delete": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "key",
-          "required": true,
-          "schema": {
-            "description": "Object key (may contain '/')",
-            "type": "string"
-          }
-        },
-        {
-          "in": "path",
-          "name": "name",
-          "required": true,
-          "schema": {
-            "description": "Bucket name",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The body every delete on this block answers: bucket, object and share.\nOne type because it is one shape; a per-endpoint copy is how the three\nwould drift apart.",
-                "properties": {
-                  "deleted": {
-                    "description": "Always `true` — a delete that did not happen is an error status, not\n`{\"deleted\": false}`.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "deleted"
-                ],
-                "title": "DeletedResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Delete file",
-      "tags": [
-        "storage"
-      ]
-    },
-    "get": {
-      "description": "Returns the raw object bytes with the stored Content-Type — not a JSON envelope.",
-      "parameters": [
-        {
-          "in": "path",
-          "name": "key",
-          "required": true,
-          "schema": {
-            "description": "Object key (may contain '/')",
-            "type": "string"
-          }
-        },
-        {
-          "in": "path",
-          "name": "name",
-          "required": true,
-          "schema": {
-            "description": "Bucket name",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Download file",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/api/recent": {
-    "get": {
-      "description": "Object-view audit rows, newest first — one row per tracked download, naming the object viewed and when. Not object metadata.",
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
-                "properties": {
-                  "page": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "items": {
-                      "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                    "usage": {
+                      "description": "The `usage` half of [`QuotaResponse`]. Both numbers are computed over the\ncaller's object rows, not read from a counter column.",
                       "properties": {
-                        "data": {
-                          "description": "One object-view audit row, decoded.",
-                          "properties": {
-                            "bucket": {
-                              "description": "Bucket holding the viewed object.",
-                              "type": "string"
-                            },
-                            "created_at": {
-                              "type": "string"
-                            },
-                            "id": {
-                              "type": "string"
-                            },
-                            "key": {
-                              "description": "Object key within the bucket.",
-                              "type": "string"
-                            },
-                            "updated_at": {
-                              "type": "string"
-                            },
-                            "user_id": {
-                              "description": "The viewer.",
-                              "type": "string"
-                            },
-                            "viewed_at": {
-                              "description": "RFC 3339 instant of the view.",
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "bucket",
-                            "key",
-                            "user_id",
-                            "viewed_at",
-                            "created_at",
-                            "updated_at"
-                          ],
-                          "type": "object"
+                        "file_count": {
+                          "description": "Objects the caller owns across all buckets, `Pending` included; not\nwhat the per-bucket `max_files_per_bucket` cap is checked against.",
+                          "format": "int64",
+                          "type": "integer"
                         },
-                        "id": {
-                          "type": "string"
+                        "total_bytes": {
+                          "description": "`SUM(size)` over the caller's rows, `Pending` reservations included.",
+                          "format": "int64",
+                          "type": "integer"
                         }
                       },
                       "required": [
-                        "id",
-                        "data"
+                        "total_bytes",
+                        "file_count"
                       ],
                       "type": "object"
-                    },
-                    "type": "array"
+                    }
                   },
-                  "total_count": {
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "RecordListView",
-                "type": "object"
+                  "required": [
+                    "quota",
+                    "usage"
+                  ],
+                  "title": "QuotaResponse",
+                  "type": "object"
+                }
               }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Recently viewed objects",
-      "tags": [
-        "storage"
-      ]
-    }
-  },
-  "/b/storage/api/search": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
-                "properties": {
-                  "page": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "items": {
-                      "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
-                      "properties": {
-                        "data": {
-                          "description": "One object-metadata row, decoded.",
-                          "properties": {
-                            "bucket": {
-                              "description": "Bucket name; `(bucket, key)` is unique.",
-                              "type": "string"
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "My quota and usage",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
+    },
+    "/b/cloudstorage/shares": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
+                  "properties": {
+                    "page": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                        "properties": {
+                          "data": {
+                            "description": "One share row, decoded.",
+                            "properties": {
+                              "access_count": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "bucket": {
+                                "type": "string"
+                              },
+                              "created_at": {
+                                "description": "RFC 3339 creation instant.",
+                                "type": "string"
+                              },
+                              "created_by": {
+                                "description": "User id of the share's creator — the ownership key\n`handle_delete_share` checks.",
+                                "type": "string"
+                              },
+                              "expires_at": {
+                                "description": "The end this share link records, as an RFC 3339 stamp.\n\n`None` is a SQL `NULL` or a stored empty string — one meaning, since\nthe column is nullable and every caller treated `\"\"` as unset. It is\nNOT \"never expires\": every share link has an end, and a row that\nrecords none cannot be shown to be live, so the public link refuses\nit. Creating a share cannot produce one — `NewShare` takes a\nnon-optional expiry — and migration 003 gave every historical row an\nend, so a `None` here is a row that reached the table some other\nway.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "key": {
+                                "type": "string"
+                              },
+                              "max_access_count": {
+                                "description": "Access cap, or `None` for unlimited. A non-positive stored value is\n`None` too, which is the meaning [`NewShare::max_access_count`]\ndocuments and the meaning\n[`increment_access_count_capped`] enforces.",
+                                "format": "int64",
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              },
+                              "token": {
+                                "description": "The opaque token embedded in the public `/b/storage/direct/{token}`\nURL: random bytes, hex-encoded, asserting nothing about the share.\nThis row is what it addresses, and what decides whether the link\nstill works. Unique across the table.",
+                                "type": "string"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              }
                             },
-                            "content_type": {
-                              "type": "string"
-                            },
-                            "created_at": {
-                              "type": "string"
-                            },
-                            "id": {
-                              "type": "string"
-                            },
-                            "key": {
-                              "description": "Object key within the bucket.",
-                              "type": "string"
-                            },
-                            "size": {
-                              "description": "Size in bytes. `i64_field` so a TEXT-stored number still counts\ntoward the quota rather than reading as zero.",
-                              "format": "int64",
-                              "type": "integer"
-                            },
-                            "status": {
-                              "description": "`Pending` while the storage upload is in flight, `Complete` after.\nQuota accounting counts both; user-facing search and admin stats see\nonly `Complete`.",
-                              "oneOf": [
-                                {
-                                  "const": "pending",
-                                  "description": "Reserved: the row exists and counts against quota, the blob may not.",
-                                  "type": "string"
-                                },
-                                {
-                                  "const": "complete",
-                                  "description": "Uploaded: the blob is in storage and the object is listable.",
-                                  "type": "string"
-                                }
-                              ]
-                            },
-                            "updated_at": {
-                              "type": "string"
-                            },
-                            "uploaded_at": {
-                              "description": "When the upload was reserved — the timestamp the object browser\nrenders as \"modified\", and the one `list_stale_pending` compares.",
-                              "type": "string"
-                            },
-                            "uploaded_by": {
-                              "type": "string"
-                            }
+                            "required": [
+                              "id",
+                              "token",
+                              "bucket",
+                              "key",
+                              "created_by",
+                              "created_at",
+                              "expires_at",
+                              "access_count",
+                              "max_access_count",
+                              "updated_at"
+                            ],
+                            "type": "object"
                           },
-                          "required": [
-                            "id",
-                            "bucket",
-                            "key",
-                            "size",
-                            "content_type",
-                            "status",
-                            "uploaded_by",
-                            "uploaded_at",
-                            "created_at",
-                            "updated_at"
-                          ],
-                          "type": "object"
+                          "id": {
+                            "type": "string"
+                          }
                         },
-                        "id": {
-                          "type": "string"
-                        }
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
                       },
-                      "required": [
-                        "id",
-                        "data"
-                      ],
-                      "type": "object"
+                      "type": "array"
                     },
-                    "type": "array"
+                    "total_count": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
                   },
-                  "total_count": {
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "RecordListView",
-                "type": "object"
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "RecordListView",
+                  "type": "object"
+                }
               }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List my share links",
+        "tags": [
+          "cloudstorage"
+        ]
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/cloudstorage/shares` response body.",
+                  "properties": {
+                    "direct_url": {
+                      "description": "Path of the public share link, relative to the deployment's origin.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Row id of the new share — the `{id}` of `DELETE\n/b/cloudstorage/shares/{id}`.",
+                      "type": "string"
+                    },
+                    "token": {
+                      "description": "The opaque token embedded in `direct_url`. It carries no expiry of\nits own: the share's own `expires_at` and access cap are what end a\nlink.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "token",
+                    "direct_url"
+                  ],
+                  "title": "ShareCreatedResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a share link",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
+    },
+    "/b/cloudstorage/shares/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Share row id, as `POST /b/cloudstorage/shares` returned it",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The body every delete on this block answers: bucket, object and share.\nOne type because it is one shape; a per-endpoint copy is how the three\nwould drift apart.",
+                  "properties": {
+                    "deleted": {
+                      "description": "Always `true` — a delete that did not happen is an error status, not\n`{\"deleted\": false}`.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "title": "DeletedResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete a share link",
+        "tags": [
+          "cloudstorage"
+        ]
+      }
+    },
+    "/b/storage/admin/api/buckets": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/storage/api/buckets` and `GET /b/storage/admin/api/buckets`\nresponse body — both routes reach the same handler\n([`super::storage::buckets::handle_list_buckets`]), which differs only in\nwhether it scopes the read to the caller.",
+                  "properties": {
+                    "buckets": {
+                      "description": "Bucket names, from `repo::buckets::TABLE` — the single source of\ntruth for bucket existence. Not the blob namespace's folder list.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "truncated": {
+                      "description": "Whether more buckets are visible to the caller than `buckets` names.\n\nBuckets are created self-service, so the admin view of this listing\ngrows with the deployment and is read up to a ceiling; this is how a\nclient tells a complete list from a prefix of one.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "buckets",
+                    "truncated"
+                  ],
+                  "title": "BucketListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List every bucket (admin)",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/admin/api/stats": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/storage/admin/api/stats` response body.",
+                  "properties": {
+                    "bucket_count": {
+                      "description": "Rows in `repo::buckets::TABLE`, not folders in the blob namespace.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "total_objects": {
+                      "description": "Objects in `Complete` status. A `Pending` reservation is not a file.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "total_size_bytes": {
+                      "description": "Sum of `size` over the same set.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "total_objects",
+                    "total_size_bytes",
+                    "bucket_count"
+                  ],
+                  "title": "StorageStatsResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Storage totals (admin)",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/api/buckets": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/storage/api/buckets` and `GET /b/storage/admin/api/buckets`\nresponse body — both routes reach the same handler\n([`super::storage::buckets::handle_list_buckets`]), which differs only in\nwhether it scopes the read to the caller.",
+                  "properties": {
+                    "buckets": {
+                      "description": "Bucket names, from `repo::buckets::TABLE` — the single source of\ntruth for bucket existence. Not the blob namespace's folder list.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "truncated": {
+                      "description": "Whether more buckets are visible to the caller than `buckets` names.\n\nBuckets are created self-service, so the admin view of this listing\ngrows with the deployment and is read up to a ceiling; this is how a\nclient tells a complete list from a prefix of one.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "buckets",
+                    "truncated"
+                  ],
+                  "title": "BucketListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List buckets",
+        "tags": [
+          "storage"
+        ]
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/storage/api/buckets` response body.",
+                  "properties": {
+                    "created": {
+                      "description": "Always `true` — the handler answers this body only after both the\nfolder and the metadata row are in place.",
+                      "type": "boolean"
+                    },
+                    "name": {
+                      "description": "The bucket that now exists, echoed back from the request.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "created"
+                  ],
+                  "title": "BucketCreatedResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create bucket",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/api/buckets/{name}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Bucket name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The body every delete on this block answers: bucket, object and share.\nOne type because it is one shape; a per-endpoint copy is how the three\nwould drift apart.",
+                  "properties": {
+                    "deleted": {
+                      "description": "Always `true` — a delete that did not happen is an error status, not\n`{\"deleted\": false}`.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "title": "DeletedResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete bucket",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/api/buckets/{name}/objects": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Bucket name",
+              "type": "string"
             }
           },
-          "description": "Successful response"
-        }
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "prefix",
+            "required": false,
+            "schema": {
+              "description": "Key prefix filter",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/storage/api/buckets/{name}/objects` response body.",
+                  "properties": {
+                    "objects": {
+                      "description": "Objects in this page.",
+                      "items": {
+                        "description": "One object in a bucket listing, as its metadata row records it.",
+                        "properties": {
+                          "content_type": {
+                            "type": "string"
+                          },
+                          "key": {
+                            "description": "Object key.",
+                            "type": "string"
+                          },
+                          "last_modified": {
+                            "format": "date-time",
+                            "type": "string"
+                          },
+                          "size": {
+                            "description": "Size in bytes.",
+                            "format": "int64",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "size",
+                          "content_type",
+                          "last_modified"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "description": "Total number of objects matching the filter (across all pages).",
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "objects",
+                    "total_count"
+                  ],
+                  "title": "ObjectListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List objects",
+        "tags": [
+          "storage"
+        ]
       },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Search objects",
-      "tags": [
-        "storage"
-      ]
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Bucket name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/storage/api/buckets/{name}/objects` response body.",
+                  "properties": {
+                    "bucket": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "description": "The stored key. For a multipart upload this is the key the handler\nresolved, which may differ from the one the caller sent.",
+                      "type": "string"
+                    },
+                    "uploaded": {
+                      "description": "Always `true`.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "bucket",
+                    "key",
+                    "uploaded"
+                  ],
+                  "title": "ObjectUploadedResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Upload file",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/api/buckets/{name}/objects/{key}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "description": "Object key (may contain '/')",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Bucket name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The body every delete on this block answers: bucket, object and share.\nOne type because it is one shape; a per-endpoint copy is how the three\nwould drift apart.",
+                  "properties": {
+                    "deleted": {
+                      "description": "Always `true` — a delete that did not happen is an error status, not\n`{\"deleted\": false}`.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "title": "DeletedResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete file",
+        "tags": [
+          "storage"
+        ]
+      },
+      "get": {
+        "description": "Returns the raw object bytes with the stored Content-Type — not a JSON envelope.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "description": "Object key (may contain '/')",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Bucket name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Download file",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/api/recent": {
+      "get": {
+        "description": "Object-view audit rows, newest first — one row per tracked download, naming the object viewed and when. Not object metadata.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
+                  "properties": {
+                    "page": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                        "properties": {
+                          "data": {
+                            "description": "One object-view audit row, decoded.",
+                            "properties": {
+                              "bucket": {
+                                "description": "Bucket holding the viewed object.",
+                                "type": "string"
+                              },
+                              "created_at": {
+                                "type": "string"
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "key": {
+                                "description": "Object key within the bucket.",
+                                "type": "string"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              },
+                              "user_id": {
+                                "description": "The viewer.",
+                                "type": "string"
+                              },
+                              "viewed_at": {
+                                "description": "RFC 3339 instant of the view.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "bucket",
+                              "key",
+                              "user_id",
+                              "viewed_at",
+                              "created_at",
+                              "updated_at"
+                            ],
+                            "type": "object"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "RecordListView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Recently viewed objects",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
+    "/b/storage/api/search": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The `RecordList` envelope the block's JSON list endpoints publish:\n`{ records, total_count, page, page_size }`.\n\nThis is a *published contract*, not an implementation detail. The repo\nreturns [`Page`], which is not `Serialize`; this view is the single place\na page becomes a response body, so the envelope cannot drift one endpoint\nat a time. `packages/impresspress-js/src/services/storage.service.ts`\ndeclares the matching `RecordListWire<T>` and names\n`/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;\nthat SDK has its own CI job and is the reason this shape is preserved\nrather than modernised here. Changing it is a deliberate, separate\nchange that moves the SDK in lockstep — see the follow-up in the PR that\nintroduced this type.",
+                  "properties": {
+                    "page": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "items": {
+                        "description": "One record in the [`RecordListView`] envelope: the row's `id` beside the\nrow's columns, exactly as `wafer_core::clients::database::Record`\nserializes. The backends put `id` in BOTH places (`row_to_record` inserts\nevery column into `data` and copies `id` out to the envelope), and\n`packages/impresspress-js` reads the envelope one\n(`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.\n\nGeneric in the row type rather than carrying an untyped\n`serde_json::Map<String, Value>`. The SDK reads *named columns* out of\n`data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in\n`extensions.service.ts` — so an untyped `data` would publish a schema\nthat says nothing about the fields those interfaces rely on, and the\nSDK's type-freshness gate would report green on exactly the columns that\ncan drift. `T` is the row struct the handler already had in hand, so the\nbytes are unchanged.",
+                        "properties": {
+                          "data": {
+                            "description": "One object-metadata row, decoded.",
+                            "properties": {
+                              "bucket": {
+                                "description": "Bucket name; `(bucket, key)` is unique.",
+                                "type": "string"
+                              },
+                              "content_type": {
+                                "type": "string"
+                              },
+                              "created_at": {
+                                "type": "string"
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "key": {
+                                "description": "Object key within the bucket.",
+                                "type": "string"
+                              },
+                              "size": {
+                                "description": "Size in bytes. `i64_field` so a TEXT-stored number still counts\ntoward the quota rather than reading as zero.",
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "status": {
+                                "description": "`Pending` while the storage upload is in flight, `Complete` after.\nQuota accounting counts both; user-facing search and admin stats see\nonly `Complete`.",
+                                "oneOf": [
+                                  {
+                                    "const": "pending",
+                                    "description": "Reserved: the row exists and counts against quota, the blob may not.",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "complete",
+                                    "description": "Uploaded: the blob is in storage and the object is listable.",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              },
+                              "uploaded_at": {
+                                "description": "When the upload was reserved — the timestamp the object browser\nrenders as \"modified\", and the one `list_stale_pending` compares.",
+                                "type": "string"
+                              },
+                              "uploaded_by": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "bucket",
+                              "key",
+                              "size",
+                              "content_type",
+                              "status",
+                              "uploaded_by",
+                              "uploaded_at",
+                              "created_at",
+                              "updated_at"
+                            ],
+                            "type": "object"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "RecordListView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Search objects",
+        "tags": [
+          "storage"
+        ]
+      }
     }
   }
 }

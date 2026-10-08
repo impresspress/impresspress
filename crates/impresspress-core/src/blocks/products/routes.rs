@@ -176,24 +176,6 @@ pub(super) enum Route {
 // handler's only reader); the few endpoints that read a single
 // `msg.query(..)` keep the hand-written form beside that call.
 
-/// The schema `response_schema_of::<T>` would declare for `T`, as a value,
-/// for the one place a derived row must be embedded inside a hand-written
-/// envelope: the product duplication response, whose sibling `offers` field
-/// reaches the recursive `Condition` and so cannot be derived at all yet.
-/// Same settings as wafer-block's `self_contained_schema` (inlined, no
-/// `$schema`, serialize contract), which is private upstream.
-fn view_schema<T: schemars::JsonSchema>() -> serde_json::Value {
-    schemars::generate::SchemaSettings::draft2020_12()
-        .with(|settings| {
-            settings.inline_subschemas = true;
-            settings.meta_schema = None;
-            settings.contract = schemars::generate::Contract::Serialize;
-        })
-        .into_generator()
-        .into_root_schema_for::<T>()
-        .to_value()
-}
-
 fn id_path_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -339,94 +321,6 @@ fn webhook_event_schema() -> serde_json::Value {
             }
         },
         "additionalProperties": true
-    })
-}
-
-// NOT derivable: `Condition` is recursive (`All`/`Any` hold child
-// `Condition`s), and it reaches these three schemas through
-// `OfferComponent`/`OfferComponentDraft`. schemars cannot inline a cycle, so
-// it closes it with `{"$ref": "#/$defs/Condition"}` plus a sibling `$defs`.
-// Embedded in an OpenAPI document that pointer resolves against the
-// *document* root, where no `$defs` exists — a dangling reference that reads
-// as an ordinary `$ref` in a diff. Verified by swapping one call site and
-// reading the output. These stay hand-written until `generate_openapi`
-// hoists definitions into `components/schemas` and rewrites the pointers.
-fn offer_definition_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "mode", "currency", "pricing_model", "usage_type", "billing_scheme", "tax_behavior", "components"],
-        "properties": {
-            "name": {"type": "string"},
-            "mode": {"type": "string", "enum": ["payment", "subscription"]},
-            "currency": {"type": "string"},
-            "pricing_model": {"type": "string", "enum": ["fixed", "components"]},
-            "recurring_interval": {"type": ["string", "null"], "enum": ["day", "week", "month", "year", null]},
-            "interval_count": {"type": "integer", "minimum": 1, "default": 1},
-            "usage_type": {"type": "string", "enum": ["licensed", "metered"]},
-            "billing_scheme": {"type": "string", "enum": ["per_unit", "tiered"]},
-            "tax_behavior": {"type": "string", "enum": ["unspecified", "inclusive", "exclusive"]},
-            "variables": {"type": "array", "items": {"type": "object"}},
-            "components": {"type": "array", "items": {"type": "object"}},
-            "checkout": {"type": "object"}
-        }
-    })
-}
-
-fn managed_offer_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["status", "sync_status", "sync_error", "offer"],
-        "properties": {
-            "status": {"type": "string", "enum": ["draft", "active", "archived"]},
-            "sync_status": {"type": "string"},
-            "sync_error": {"type": "string"},
-            "offer": {
-                "type": "object",
-                "required": ["id", "product_id", "version", "name", "mode", "currency", "pricing_model", "interval_count", "usage_type", "billing_scheme", "tax_behavior", "variables", "components", "checkout", "stripe_product_id", "stripe_price_id"],
-                "properties": {
-                    "id": {"type": "string"},
-                    "product_id": {"type": "string"},
-                    "version": {"type": "integer"},
-                    "name": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["payment", "subscription"]},
-                    "currency": {"type": "string"},
-                    "pricing_model": {"type": "string", "enum": ["fixed", "components"]},
-                    "recurring_interval": {"type": ["string", "null"]},
-                    "interval_count": {"type": "integer"},
-                    "usage_type": {"type": "string"},
-                    "billing_scheme": {"type": "string"},
-                    "tax_behavior": {"type": "string"},
-                    "variables": {"type": "array", "items": {"type": "object"}},
-                    "components": {"type": "array", "items": {"type": "object"}},
-                    "checkout": {"type": "object"},
-                    "stripe_product_id": {"type": "string"},
-                    "stripe_price_id": {"type": "string"}
-                }
-            }
-        }
-    })
-}
-
-fn offer_list_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "required": ["offers"],
-        "properties": {"offers": {"type": "array", "items": managed_offer_schema()}}
-    })
-}
-
-/// Half derived: `product` is `contracts::ProductView`; `offers` stays
-/// hand-written because `ManagedOffer` is recursive (see above).
-fn product_duplicate_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "required": ["product", "offers"],
-        "properties": {
-            "product": view_schema::<contracts::ProductView>(),
-            "offers": {"type": "array", "items": managed_offer_schema()}
-        }
     })
 }
 
@@ -635,7 +529,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Duplicate product and editable offers")
     .path_params(id_path_schema)
-    .output(product_duplicate_schema)
+    .output(response_schema_of::<contracts::ProductDuplicateResponse>)
     .tags(&["products", "admin"]),
     EndpointRoute::admin(
         HttpMethod::Post,
@@ -674,7 +568,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("List product offers")
     .path_params(product_id_path_schema)
-    .output(offer_list_schema)
+    .output(response_schema_of::<contracts::OfferList>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Post,
@@ -683,8 +577,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Create product offer")
     .path_params(product_id_path_schema)
-    .input(offer_definition_schema)
-    .output(managed_offer_schema)
+    .input(request_schema_of::<contracts::OfferDefinitionRequest>)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -693,7 +587,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Get product offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Post,
@@ -713,8 +607,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Update draft offer")
     .path_params(offer_path_schema)
-    .input(offer_definition_schema)
-    .output(managed_offer_schema)
+    .input(request_schema_of::<contracts::OfferDefinitionRequest>)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Post,
@@ -723,7 +617,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Publish offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Post,
@@ -732,7 +626,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Synchronize immutable Product and fixed Prices to Stripe")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers", "stripe"]),
     EndpointRoute::admin(
         HttpMethod::Post,
@@ -741,7 +635,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Duplicate offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Delete,
@@ -750,7 +644,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Archive offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "admin", "offers"]),
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -1079,7 +973,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Duplicate own product and editable offers")
     .path_params(id_path_schema)
-    .output(product_duplicate_schema)
+    .output(response_schema_of::<contracts::ProductDuplicateResponse>)
     .tags(&["products", "seller"]),
     EndpointRoute::authenticated(
         HttpMethod::Get,
@@ -1088,7 +982,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("List own product offers")
     .path_params(product_id_path_schema)
-    .output(offer_list_schema)
+    .output(response_schema_of::<contracts::OfferList>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Post,
@@ -1097,8 +991,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Create own product offer")
     .path_params(product_id_path_schema)
-    .input(offer_definition_schema)
-    .output(managed_offer_schema)
+    .input(request_schema_of::<contracts::OfferDefinitionRequest>)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Get,
@@ -1107,7 +1001,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Get own product offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Post,
@@ -1127,8 +1021,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Update own draft offer")
     .path_params(offer_path_schema)
-    .input(offer_definition_schema)
-    .output(managed_offer_schema)
+    .input(request_schema_of::<contracts::OfferDefinitionRequest>)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Post,
@@ -1137,7 +1031,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Publish own offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Post,
@@ -1146,7 +1040,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Synchronize own immutable Product and fixed Prices to Stripe")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers", "stripe"]),
     EndpointRoute::authenticated(
         HttpMethod::Post,
@@ -1155,7 +1049,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Duplicate own offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Delete,
@@ -1164,7 +1058,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Archive own offer")
     .path_params(offer_path_schema)
-    .output(managed_offer_schema)
+    .output(response_schema_of::<contracts::ManagedOffer>)
     .tags(&["products", "seller", "offers"]),
     EndpointRoute::authenticated(
         HttpMethod::Get,

@@ -34,7 +34,7 @@
 2	crates/impresspress-core/src/blocks/legalpages/pages.rs
 2	crates/impresspress-core/src/blocks/llm/pages.rs
 1	crates/impresspress-core/src/blocks/llm/routes/chat.rs
-2	crates/impresspress-core/src/blocks/products/contracts.rs
+1	crates/impresspress-core/src/blocks/products/contracts.rs
 1	crates/impresspress-core/src/blocks/products/routes.rs
 1	crates/impresspress-core/src/blocks/products/tests/handler_tests.rs
 1	crates/impresspress-core/src/blocks/products/tests/status_enum_tests.rs

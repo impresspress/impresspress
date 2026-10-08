@@ -1,900 +1,905 @@
 {
-  "/b/admin/api/database/query": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/admin/api/database/query` request body.",
-              "properties": {
-                "args": {
-                  "default": [],
-                  "description": "Positional bind values for the statement's `?` placeholders. Empty\nwhen omitted.",
-                  "items": true,
-                  "type": "array"
-                },
-                "query": {
-                  "description": "One read-only statement: `SELECT`, `WITH`, `EXPLAIN` or a whitelisted\n`PRAGMA`. Anything else, more than one statement, or a statement that\nnames a table holding credentials is refused.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "query"
-              ],
-              "title": "AdminSqlQueryRequest",
-              "type": "object"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/b/admin/api/database/query": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "Response body of `POST /b/admin/api/database/query`: the result set of\none read-only query.",
+                "description": "`POST /b/admin/api/database/query` request body.",
                 "properties": {
-                  "columns": {
-                    "description": "The result's column names in the order the query returned them —\n`SELECT b, a, c` answers `[\"b\", \"a\", \"c\"]`. Empty when no row matched:\nthe column list is read off the rows.",
-                    "items": {
-                      "type": "string"
-                    },
+                  "args": {
+                    "default": [],
+                    "description": "Positional bind values for the statement's `?` placeholders. Empty\nwhen omitted.",
+                    "items": true,
                     "type": "array"
                   },
-                  "row_count": {
-                    "description": "Number of rows.",
-                    "format": "uint",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "rows": {
-                    "description": "The rows, in the order the query returned them.",
-                    "items": {
-                      "description": "One row of an [`AdminSqlQueryResponse`].",
-                      "properties": {
-                        "data": {
-                          "additionalProperties": true,
-                          "description": "Every column of the row, name → value, its keys written in\n[`AdminSqlQueryResponse::columns`] order. Read the order from\n`columns`, not from this object: a JSON parser need not keep key order,\nand JavaScript's `JSON.parse` enumerates integer-like names (`1`)\nbefore the others. Two result columns with one name collapse into one\nentry — alias them apart.",
-                          "type": "object"
-                        },
-                        "id": {
-                          "description": "The row's `id` column as text; `\"\"` when the query selected no `id`\n(or it held no string or integer).",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "data"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
+                  "query": {
+                    "description": "One read-only statement: `SELECT`, `WITH`, `EXPLAIN` or a whitelisted\n`PRAGMA`. Anything else, more than one statement, or a statement that\nnames a table holding credentials is refused.",
+                    "type": "string"
                   }
                 },
                 "required": [
-                  "columns",
-                  "rows",
-                  "row_count"
+                  "query"
                 ],
-                "title": "AdminSqlQueryResponse",
+                "title": "AdminSqlQueryRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Run read-only SQL API"
-    }
-  },
-  "/b/admin/api/extensions": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "items": {
-                  "description": "One row of `GET /b/admin/api/extensions`: a registered block, projected\noff wafer-run's `BlockInfo`.\n\nA closed field list for the same reason every view in this module is one\n— `BlockInfo` carries config keys, collection schemas, endpoint tables and\ncapability grants that this endpoint has never published and must not\nstart publishing because upstream grew a field.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `POST /b/admin/api/database/query`: the result set of\none read-only query.",
                   "properties": {
-                    "enabled": {
-                      "description": "Whether the block is enabled.\n\nRead from the boot block-settings snapshot — the same source\n`routing::route_to_block`'s feature gate consults — so `false` means\nthe router answers \"endpoint not found\" for every one of this block's\nroutes. A block with no stored row reports `true`.",
-                      "type": "boolean"
+                    "columns": {
+                      "description": "The result's column names in the order the query returned them —\n`SELECT b, a, c` answers `[\"b\", \"a\", \"c\"]`. Empty when no row matched:\nthe column list is read off the rows.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
                     },
-                    "interface": {
-                      "description": "Interface identifier, e.g. `\"http-handler@v1\"`.",
-                      "type": "string"
+                    "row_count": {
+                      "description": "Number of rows.",
+                      "format": "uint",
+                      "minimum": 0,
+                      "type": "integer"
                     },
-                    "name": {
-                      "description": "Block name in the canonical `{org}/{block}` form.",
-                      "type": "string"
-                    },
-                    "summary": {
-                      "description": "One-line summary of what the block does.",
-                      "type": "string"
-                    },
-                    "version": {
-                      "description": "Semantic version of the block implementation.",
-                      "type": "string"
+                    "rows": {
+                      "description": "The rows, in the order the query returned them.",
+                      "items": {
+                        "description": "One row of an [`AdminSqlQueryResponse`].",
+                        "properties": {
+                          "data": {
+                            "additionalProperties": true,
+                            "description": "Every column of the row, name → value, its keys written in\n[`AdminSqlQueryResponse::columns`] order. Read the order from\n`columns`, not from this object: a JSON parser need not keep key order,\nand JavaScript's `JSON.parse` enumerates integer-like names (`1`)\nbefore the others. Two result columns with one name collapse into one\nentry — alias them apart.",
+                            "type": "object"
+                          },
+                          "id": {
+                            "description": "The row's `id` column as text; `\"\"` when the query selected no `id`\n(or it held no string or integer).",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "data"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
                     }
                   },
                   "required": [
-                    "name",
-                    "version",
-                    "interface",
-                    "summary",
-                    "enabled"
+                    "columns",
+                    "rows",
+                    "row_count"
                   ],
+                  "title": "AdminSqlQueryResponse",
                   "type": "object"
-                },
-                "title": "Array_of_AdminExtensionView",
-                "type": "array"
+                }
               }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List registered blocks API"
-    }
-  },
-  "/b/admin/api/iam/roles": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `GET /b/admin/api/iam/roles`.\n\nThe endpoint takes no query parameters: it returns every role, sorted by\nname, up to the handler's fixed 1000-row ceiling.",
-                "properties": {
-                  "page": {
-                    "description": "1-based index of this page. Always 1 — the handler does not paginate.",
-                    "format": "int64",
-                    "type": "integer"
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Run read-only SQL API"
+      }
+    },
+    "/b/admin/api/extensions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "description": "One row of `GET /b/admin/api/extensions`: a registered block, projected\noff wafer-run's `BlockInfo`.\n\nA closed field list for the same reason every view in this module is one\n— `BlockInfo` carries config keys, collection schemas, endpoint tables and\ncapability grants that this endpoint has never published and must not\nstart publishing because upstream grew a field.",
+                    "properties": {
+                      "enabled": {
+                        "description": "Whether the block is enabled.\n\nRead from the boot block-settings snapshot — the same source\n`routing::route_to_block`'s feature gate consults — so `false` means\nthe router answers \"endpoint not found\" for every one of this block's\nroutes. A block with no stored row reports `true`.",
+                        "type": "boolean"
+                      },
+                      "interface": {
+                        "description": "Interface identifier, e.g. `\"http-handler@v1\"`.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Block name in the canonical `{org}/{block}` form.",
+                        "type": "string"
+                      },
+                      "summary": {
+                        "description": "One-line summary of what the block does.",
+                        "type": "string"
+                      },
+                      "version": {
+                        "description": "Semantic version of the block implementation.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "version",
+                      "interface",
+                      "summary",
+                      "enabled"
+                    ],
+                    "type": "object"
                   },
-                  "page_size": {
-                    "description": "Rows per page. Always the handler's fixed 1000-row ceiling.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "description": "Roles, sorted by name ascending.",
-                    "items": {
-                      "description": "A role definition as published by the admin API.",
-                      "properties": {
-                        "created_at": {
-                          "description": "RFC 3339 creation timestamp.",
-                          "type": "string"
-                        },
-                        "description": {
-                          "description": "Human-readable description shown in the IAM UI.",
-                          "type": "string"
-                        },
-                        "id": {
-                          "description": "Stable role identifier.",
-                          "type": "string"
-                        },
-                        "is_system": {
-                          "description": "Whether this is a built-in role. System roles cannot be renamed or\ndeleted.",
-                          "type": "boolean"
-                        },
-                        "name": {
-                          "description": "Unique role name (`\"admin\"`, `\"user\"`, …). This is the value stored in\n`user_roles.role` and checked by the auth layer.",
-                          "type": "string"
-                        },
-                        "permissions": {
-                          "description": "Permission names attached to the role. Advisory metadata for the IAM\nUI — WRAP grants, not this list, are what the runtime enforces.",
-                          "items": {
+                  "title": "Array_of_AdminExtensionView",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List registered blocks API"
+      }
+    },
+    "/b/admin/api/iam/roles": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/admin/api/iam/roles`.\n\nThe endpoint takes no query parameters: it returns every role, sorted by\nname, up to the handler's fixed 1000-row ceiling.",
+                  "properties": {
+                    "page": {
+                      "description": "1-based index of this page. Always 1 — the handler does not paginate.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "description": "Rows per page. Always the handler's fixed 1000-row ceiling.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "description": "Roles, sorted by name ascending.",
+                      "items": {
+                        "description": "A role definition as published by the admin API.",
+                        "properties": {
+                          "created_at": {
+                            "description": "RFC 3339 creation timestamp.",
                             "type": "string"
                           },
-                          "type": "array"
+                          "description": {
+                            "description": "Human-readable description shown in the IAM UI.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "Stable role identifier.",
+                            "type": "string"
+                          },
+                          "is_system": {
+                            "description": "Whether this is a built-in role. System roles cannot be renamed or\ndeleted.",
+                            "type": "boolean"
+                          },
+                          "name": {
+                            "description": "Unique role name (`\"admin\"`, `\"user\"`, …). This is the value stored in\n`user_roles.role` and checked by the auth layer.",
+                            "type": "string"
+                          },
+                          "permissions": {
+                            "description": "Permission names attached to the role. Advisory metadata for the IAM\nUI — WRAP grants, not this list, are what the runtime enforces.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "updated_at": {
+                            "description": "RFC 3339 timestamp of the last modification.",
+                            "type": "string"
+                          }
                         },
-                        "updated_at": {
-                          "description": "RFC 3339 timestamp of the last modification.",
-                          "type": "string"
-                        }
+                        "required": [
+                          "id",
+                          "name",
+                          "description",
+                          "permissions",
+                          "is_system",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "type": "object"
                       },
-                      "required": [
-                        "id",
-                        "name",
-                        "description",
-                        "permissions",
-                        "is_system",
-                        "created_at",
-                        "updated_at"
-                      ],
-                      "type": "object"
+                      "type": "array"
                     },
-                    "type": "array"
+                    "total_count": {
+                      "description": "Total roles defined.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
                   },
-                  "total_count": {
-                    "description": "Total roles defined.",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "AdminRoleListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List roles API"
-    },
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/admin/api/iam/roles` request body.",
-              "properties": {
-                "description": {
-                  "description": "Human-readable description shown in the IAM UI. Empty when omitted.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "name": {
-                  "description": "Unique role name. This is the value stored in `user_roles.role` and\nchecked by the auth layer.",
-                  "type": "string"
-                },
-                "permissions": {
-                  "description": "Permission names to attach. Advisory metadata for the IAM UI — WRAP\ngrants, not this list, are what the runtime enforces. None when\nomitted.",
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "AdminRoleListResponse",
+                  "type": "object"
                 }
-              },
-              "required": [
-                "name"
-              ],
-              "title": "CreateRoleRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List roles API"
       },
-      "responses": {
-        "200": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "A role definition as published by the admin API.",
+                "description": "`POST /b/admin/api/iam/roles` request body.",
                 "properties": {
-                  "created_at": {
-                    "description": "RFC 3339 creation timestamp.",
-                    "type": "string"
-                  },
                   "description": {
-                    "description": "Human-readable description shown in the IAM UI.",
-                    "type": "string"
-                  },
-                  "id": {
-                    "description": "Stable role identifier.",
-                    "type": "string"
-                  },
-                  "is_system": {
-                    "description": "Whether this is a built-in role. System roles cannot be renamed or\ndeleted.",
-                    "type": "boolean"
-                  },
-                  "name": {
-                    "description": "Unique role name (`\"admin\"`, `\"user\"`, …). This is the value stored in\n`user_roles.role` and checked by the auth layer.",
-                    "type": "string"
-                  },
-                  "permissions": {
-                    "description": "Permission names attached to the role. Advisory metadata for the IAM\nUI — WRAP grants, not this list, are what the runtime enforces.",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "updated_at": {
-                    "description": "RFC 3339 timestamp of the last modification.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id",
-                  "name",
-                  "description",
-                  "permissions",
-                  "is_system",
-                  "created_at",
-                  "updated_at"
-                ],
-                "title": "AdminRoleView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create role API"
-    }
-  },
-  "/b/admin/api/iam/roles/{id}": {
-    "delete": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Role id, as returned by the list endpoint (not the role name).",
-            "type": "string"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`DELETE /b/admin/api/iam/roles/{id}` response body.",
-                "properties": {
-                  "deleted": {
-                    "description": "Always `true`: a delete that did not happen is an error response.",
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "deleted"
-                ],
-                "title": "AdminRoleDeleteResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Delete role API"
-    },
-    "patch": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Role id, as returned by the list endpoint (not the role name).",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`PATCH /b/admin/api/iam/roles/{id}` request body. Every field is optional\nand only the ones present are applied. `name` is refused on a system role:\nrenaming `admin` would break auth.",
-              "properties": {
-                "description": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "permissions": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
-                }
-              },
-              "title": "UpdateRoleRequest",
-              "type": "object"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`PATCH /b/admin/api/iam/roles/{id}` response body: the role as it now is.",
-                "properties": {
-                  "created_at": {
-                    "description": "RFC 3339 creation timestamp.",
-                    "type": "string"
-                  },
-                  "description": {
-                    "description": "Human-readable description shown in the IAM UI.",
-                    "type": "string"
-                  },
-                  "id": {
-                    "description": "Stable role identifier.",
-                    "type": "string"
-                  },
-                  "is_system": {
-                    "description": "Whether this is a built-in role. System roles cannot be renamed or\ndeleted.",
-                    "type": "boolean"
-                  },
-                  "name": {
-                    "description": "Unique role name (`\"admin\"`, `\"user\"`, …). This is the value stored in\n`user_roles.role` and checked by the auth layer.",
-                    "type": "string"
-                  },
-                  "permissions": {
-                    "description": "Permission names attached to the role. Advisory metadata for the IAM\nUI — WRAP grants, not this list, are what the runtime enforces.",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "updated_at": {
-                    "description": "RFC 3339 timestamp of the last modification.",
-                    "type": "string"
-                  },
-                  "warning": {
-                    "description": "Present when the update was saved but a rename's grants did not all\nfollow it: says which still name the old role, and how to move them.",
+                    "description": "Human-readable description shown in the IAM UI. Empty when omitted.",
                     "type": [
                       "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "description": "Unique role name. This is the value stored in `user_roles.role` and\nchecked by the auth layer.",
+                    "type": "string"
+                  },
+                  "permissions": {
+                    "description": "Permission names to attach. Advisory metadata for the IAM UI — WRAP\ngrants, not this list, are what the runtime enforces. None when\nomitted.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
                       "null"
                     ]
                   }
                 },
                 "required": [
-                  "id",
-                  "name",
-                  "description",
-                  "permissions",
-                  "is_system",
-                  "created_at",
-                  "updated_at"
+                  "name"
                 ],
-                "title": "AdminRoleUpdateResponse",
+                "title": "CreateRoleRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A role definition as published by the admin API.",
+                  "properties": {
+                    "created_at": {
+                      "description": "RFC 3339 creation timestamp.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "Human-readable description shown in the IAM UI.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable role identifier.",
+                      "type": "string"
+                    },
+                    "is_system": {
+                      "description": "Whether this is a built-in role. System roles cannot be renamed or\ndeleted.",
+                      "type": "boolean"
+                    },
+                    "name": {
+                      "description": "Unique role name (`\"admin\"`, `\"user\"`, …). This is the value stored in\n`user_roles.role` and checked by the auth layer.",
+                      "type": "string"
+                    },
+                    "permissions": {
+                      "description": "Permission names attached to the role. Advisory metadata for the IAM\nUI — WRAP grants, not this list, are what the runtime enforces.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "updated_at": {
+                      "description": "RFC 3339 timestamp of the last modification.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "description",
+                    "permissions",
+                    "is_system",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "title": "AdminRoleView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create role API"
+      }
+    },
+    "/b/admin/api/iam/roles/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Role id, as returned by the list endpoint (not the role name).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`DELETE /b/admin/api/iam/roles/{id}` response body.",
+                  "properties": {
+                    "deleted": {
+                      "description": "Always `true`: a delete that did not happen is an error response.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "title": "AdminRoleDeleteResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete role API"
       },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update role API"
-    }
-  },
-  "/b/admin/api/logs": {
-    "get": {
-      "parameters": [
-        {
-          "in": "query",
-          "name": "action",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on the action name.",
-            "type": [
-              "string",
-              "null"
-            ]
+      "patch": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Role id, as returned by the list endpoint (not the role name).",
+              "type": "string"
+            }
           }
-        },
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "description": "1-based page number. Values below 1 clamp to 1.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 50,
-            "description": "Rows per page, capped at 100.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "resource",
-          "required": false,
-          "schema": {
-            "description": "`LIKE '%…%'` filter on the affected resource.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "in": "query",
-          "name": "user_id",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on the acting admin's user id.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "responses": {
-        "200": {
+        ],
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "Response body of `GET /b/admin/api/logs`.",
+                "description": "`PATCH /b/admin/api/iam/roles/{id}` request body. Every field is optional\nand only the ones present are applied. `name` is refused on a system role:\nrenaming `admin` would break auth.",
                 "properties": {
-                  "page": {
-                    "description": "1-based index of this page.",
-                    "format": "int64",
-                    "type": "integer"
+                  "description": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  "page_size": {
-                    "description": "Rows per page used to compute `page`.",
-                    "format": "int64",
-                    "type": "integer"
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  "records": {
-                    "description": "Audit entries on this page, newest first.",
+                  "permissions": {
                     "items": {
-                      "description": "One audit-log entry: an admin-initiated mutation, recorded whenever an\nadmin changes a user, a role, or a configuration variable.",
-                      "properties": {
-                        "action": {
-                          "description": "Action name (`\"user.delete\"`, `\"role.create\"`, …).",
-                          "type": "string"
-                        },
-                        "created_at": {
-                          "description": "RFC 3339 timestamp the action was recorded at.",
-                          "type": "string"
-                        },
-                        "id": {
-                          "description": "Stable entry identifier.",
-                          "type": "string"
-                        },
-                        "ip_address": {
-                          "description": "Client IP the action came from, as seen by the request pipeline. Empty\nwhen the pipeline could not determine one.",
-                          "type": "string"
-                        },
-                        "resource": {
-                          "description": "Target the action was applied to.",
-                          "type": "string"
-                        },
-                        "updated_at": {
-                          "description": "RFC 3339 write timestamp. Audit rows are never updated, so this always\nequals `created_at`.",
-                          "type": "string"
-                        },
-                        "user_id": {
-                          "description": "Id of the admin who performed the action. Empty when the action had no\nauthenticated actor.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "user_id",
-                        "action",
-                        "resource",
-                        "ip_address",
-                        "created_at",
-                        "updated_at"
-                      ],
-                      "type": "object"
+                      "type": "string"
                     },
-                    "type": "array"
-                  },
-                  "total_count": {
-                    "description": "Total entries matching the filters, across all pages.",
-                    "format": "int64",
-                    "type": "integer"
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "AdminAuditLogListResponse",
+                "title": "UpdateRoleRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Audit logs API"
-    }
-  },
-  "/b/admin/api/settings": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "additionalProperties": false,
-                "description": "Response body of `GET /b/admin/api/settings`: every configuration\nvariable, sorted by key.\n\n**Sensitive values are never present.** A variable is treated as sensitive\nwhen it is flagged sensitive in the database, or its key ends in `_SECRET`\nor `_KEY`, or its declaration is a password-typed or auto-generated\nvariable; its value is then replaced with `\"********\"` before the response\nis built. Reading this endpoint cannot recover a secret, nor its length.",
-                "properties": {
-                  "settings": {
-                    "items": {
-                      "description": "One configuration variable, as published by `GET /b/admin/api/settings`.\n\n`sensitive` is what makes the masking legible to a reader that is not a\nperson: a bare `\"********\"` is indistinguishable from a variable whose\nvalue really is that string, and a caller cannot tell it must not treat\nthe value as usable.",
-                      "properties": {
-                        "key": {
-                          "description": "Variable name, e.g. `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`.",
-                          "type": "string"
-                        },
-                        "sensitive": {
-                          "description": "Whether `value` is masked. True when the row carries the sensitive\nflag, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
-                          "type": "boolean"
-                        },
-                        "value": {
-                          "description": "The stored value, or `\"********\"` when `sensitive` is true.\n\nTyped as `any` rather than `string` because the stored column is text\nthat the SQLite and D1 backends decode back into JSON when it looks\nlike an object or an array: a variable holding `[\"a\",\"b\"]` reads back\nas an array, one holding `on` reads back as a string."
-                        }
-                      },
-                      "required": [
-                        "key",
-                        "value",
-                        "sensitive"
-                      ],
-                      "type": "object"
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`PATCH /b/admin/api/iam/roles/{id}` response body: the role as it now is.",
+                  "properties": {
+                    "created_at": {
+                      "description": "RFC 3339 creation timestamp.",
+                      "type": "string"
                     },
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "settings"
-                ],
-                "title": "AdminSettingsResponse",
-                "type": "object"
+                    "description": {
+                      "description": "Human-readable description shown in the IAM UI.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable role identifier.",
+                      "type": "string"
+                    },
+                    "is_system": {
+                      "description": "Whether this is a built-in role. System roles cannot be renamed or\ndeleted.",
+                      "type": "boolean"
+                    },
+                    "name": {
+                      "description": "Unique role name (`\"admin\"`, `\"user\"`, …). This is the value stored in\n`user_roles.role` and checked by the auth layer.",
+                      "type": "string"
+                    },
+                    "permissions": {
+                      "description": "Permission names attached to the role. Advisory metadata for the IAM\nUI — WRAP grants, not this list, are what the runtime enforces.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "updated_at": {
+                      "description": "RFC 3339 timestamp of the last modification.",
+                      "type": "string"
+                    },
+                    "warning": {
+                      "description": "Present when the update was saved but a rename's grants did not all\nfollow it: says which still name the old role, and how to move them.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "description",
+                    "permissions",
+                    "is_system",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "title": "AdminRoleUpdateResponse",
+                  "type": "object"
+                }
               }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update role API"
+      }
+    },
+    "/b/admin/api/logs": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on the action name.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List variables API"
-    }
-  },
-  "/b/admin/api/users": {
-    "get": {
-      "parameters": [
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "description": "1-based page number. Values below 1 clamp to 1.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "1-based page number. Values below 1 clamp to 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Rows per page, capped at 100.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resource",
+            "required": false,
+            "schema": {
+              "description": "`LIKE '%…%'` filter on the affected resource.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on the acting admin's user id.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
-        },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 20,
-            "description": "Rows per page, capped at 100.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "search",
-          "required": false,
-          "schema": {
-            "description": "Case-insensitive `LIKE '%…%'` filter on the email address.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `GET /b/admin/api/users`.",
-                "properties": {
-                  "page": {
-                    "description": "1-based index of this page.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "description": "Rows per page used to compute `page`.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "description": "Users on this page, newest first.",
-                    "items": {
-                      "description": "A user account as published by the admin API.",
-                      "properties": {
-                        "avatar_url": {
-                          "description": "Avatar image URL, when set.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "created_at": {
-                          "description": "RFC 3339 creation timestamp.",
-                          "type": "string"
-                        },
-                        "deleted_at": {
-                          "description": "RFC 3339 soft-delete timestamp. Always `null` in the list response,\nwhich filters on `deleted_at IS NULL`.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "disabled": {
-                          "description": "Whether the account is disabled (blocked from signing in).",
-                          "type": "boolean"
-                        },
-                        "display_name": {
-                          "description": "Display name shown in the UI.",
-                          "type": "string"
-                        },
-                        "email": {
-                          "description": "Login email address.",
-                          "type": "string"
-                        },
-                        "email_verified": {
-                          "description": "Whether the email address has been verified.",
-                          "type": "boolean"
-                        },
-                        "id": {
-                          "description": "Stable user identifier.",
-                          "type": "string"
-                        },
-                        "last_login_at": {
-                          "description": "RFC 3339 timestamp of the last successful sign-in, if any.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "name": {
-                          "description": "Full name, when the user supplied one.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "role": {
-                          "description": "Legacy single-role column on the user row (`\"user\"` by default).\nAuthorization uses `roles`; this field is retained because the column is\nstill written by the signup path.",
-                          "type": "string"
-                        },
-                        "roles": {
-                          "description": "Role names assigned to this user in `impresspress__admin__user_roles`.",
-                          "items": {
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/admin/api/logs`.",
+                  "properties": {
+                    "page": {
+                      "description": "1-based index of this page.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "description": "Rows per page used to compute `page`.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "description": "Audit entries on this page, newest first.",
+                      "items": {
+                        "description": "One audit-log entry: an admin-initiated mutation, recorded whenever an\nadmin changes a user, a role, or a configuration variable.",
+                        "properties": {
+                          "action": {
+                            "description": "Action name (`\"user.delete\"`, `\"role.create\"`, …).",
                             "type": "string"
                           },
-                          "type": "array"
+                          "created_at": {
+                            "description": "RFC 3339 timestamp the action was recorded at.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "Stable entry identifier.",
+                            "type": "string"
+                          },
+                          "ip_address": {
+                            "description": "Client IP the action came from, as seen by the request pipeline. Empty\nwhen the pipeline could not determine one.",
+                            "type": "string"
+                          },
+                          "resource": {
+                            "description": "Target the action was applied to.",
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "description": "RFC 3339 write timestamp. Audit rows are never updated, so this always\nequals `created_at`.",
+                            "type": "string"
+                          },
+                          "user_id": {
+                            "description": "Id of the admin who performed the action. Empty when the action had no\nauthenticated actor.",
+                            "type": "string"
+                          }
                         },
-                        "updated_at": {
-                          "description": "RFC 3339 timestamp of the last modification.",
-                          "type": "string"
-                        }
+                        "required": [
+                          "id",
+                          "user_id",
+                          "action",
+                          "resource",
+                          "ip_address",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "type": "object"
                       },
-                      "required": [
-                        "id",
-                        "email",
-                        "display_name",
-                        "name",
-                        "avatar_url",
-                        "role",
-                        "roles",
-                        "email_verified",
-                        "disabled",
-                        "last_login_at",
-                        "created_at",
-                        "updated_at",
-                        "deleted_at"
-                      ],
-                      "type": "object"
+                      "type": "array"
                     },
-                    "type": "array"
+                    "total_count": {
+                      "description": "Total entries matching the filters, across all pages.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
                   },
-                  "total_count": {
-                    "description": "Total users matching the filter, across all pages.",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "AdminUserListResponse",
-                "type": "object"
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "AdminAuditLogListResponse",
+                  "type": "object"
+                }
               }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Audit logs API"
+      }
+    },
+    "/b/admin/api/settings": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "description": "Response body of `GET /b/admin/api/settings`: every configuration\nvariable, sorted by key.\n\n**Sensitive values are never present.** A variable is treated as sensitive\nwhen it is flagged sensitive in the database, or its key ends in `_SECRET`\nor `_KEY`, or its declaration is a password-typed or auto-generated\nvariable; its value is then replaced with `\"********\"` before the response\nis built. Reading this endpoint cannot recover a secret, nor its length.",
+                  "properties": {
+                    "settings": {
+                      "items": {
+                        "description": "One configuration variable, as published by `GET /b/admin/api/settings`.\n\n`sensitive` is what makes the masking legible to a reader that is not a\nperson: a bare `\"********\"` is indistinguishable from a variable whose\nvalue really is that string, and a caller cannot tell it must not treat\nthe value as usable.",
+                        "properties": {
+                          "key": {
+                            "description": "Variable name, e.g. `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`.",
+                            "type": "string"
+                          },
+                          "sensitive": {
+                            "description": "Whether `value` is masked. True when the row carries the sensitive\nflag, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
+                            "type": "boolean"
+                          },
+                          "value": {
+                            "description": "The stored value, or `\"********\"` when `sensitive` is true.\n\nTyped as `any` rather than `string` because the stored column is text\nthat the SQLite and D1 backends decode back into JSON when it looks\nlike an object or an array: a variable holding `[\"a\",\"b\"]` reads back\nas an array, one holding `on` reads back as a string."
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "value",
+                          "sensitive"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "settings"
+                  ],
+                  "title": "AdminSettingsResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List variables API"
+      }
+    },
+    "/b/admin/api/users": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "1-based page number. Values below 1 clamp to 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List users API"
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Rows per page, capped at 100.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "description": "Case-insensitive `LIKE '%…%'` filter on the email address.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/admin/api/users`.",
+                  "properties": {
+                    "page": {
+                      "description": "1-based index of this page.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "description": "Rows per page used to compute `page`.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "description": "Users on this page, newest first.",
+                      "items": {
+                        "description": "A user account as published by the admin API.",
+                        "properties": {
+                          "avatar_url": {
+                            "description": "Avatar image URL, when set.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "created_at": {
+                            "description": "RFC 3339 creation timestamp.",
+                            "type": "string"
+                          },
+                          "deleted_at": {
+                            "description": "RFC 3339 soft-delete timestamp. Always `null` in the list response,\nwhich filters on `deleted_at IS NULL`.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "disabled": {
+                            "description": "Whether the account is disabled (blocked from signing in).",
+                            "type": "boolean"
+                          },
+                          "display_name": {
+                            "description": "Display name shown in the UI.",
+                            "type": "string"
+                          },
+                          "email": {
+                            "description": "Login email address.",
+                            "type": "string"
+                          },
+                          "email_verified": {
+                            "description": "Whether the email address has been verified.",
+                            "type": "boolean"
+                          },
+                          "id": {
+                            "description": "Stable user identifier.",
+                            "type": "string"
+                          },
+                          "last_login_at": {
+                            "description": "RFC 3339 timestamp of the last successful sign-in, if any.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "name": {
+                            "description": "Full name, when the user supplied one.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "role": {
+                            "description": "Legacy single-role column on the user row (`\"user\"` by default).\nAuthorization uses `roles`; this field is retained because the column is\nstill written by the signup path.",
+                            "type": "string"
+                          },
+                          "roles": {
+                            "description": "Role names assigned to this user in `impresspress__admin__user_roles`.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "updated_at": {
+                            "description": "RFC 3339 timestamp of the last modification.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "email",
+                          "display_name",
+                          "name",
+                          "avatar_url",
+                          "role",
+                          "roles",
+                          "email_verified",
+                          "disabled",
+                          "last_login_at",
+                          "created_at",
+                          "updated_at",
+                          "deleted_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "description": "Total users matching the filter, across all pages.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "AdminUserListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List users API"
+      }
     }
   }
 }

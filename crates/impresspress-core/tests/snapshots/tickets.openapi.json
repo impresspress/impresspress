@@ -1,316 +1,845 @@
 {
-  "/b/tickets/api/admin/retention/prune": {
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Outcome of one retention pass, as returned by\n`POST /b/tickets/api/admin/retention/prune`.",
-                "properties": {
-                  "analyses_deleted": {
-                    "description": "Expired analyses removed.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "complete": {
-                    "description": "Whether every delete in the pass succeeded. A `false` here is answered\nwith HTTP 503 so a scheduler retries.",
-                    "type": "boolean"
-                  },
-                  "errors": {
-                    "description": "Names of the deletes that failed (`\"analyses\"`, `\"events\"`,\n`\"tickets\"`, `\"rate-counters\"`).",
-                    "items": {
-                      "type": "string"
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/b/tickets/api/admin/retention/prune": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Outcome of one retention pass, as returned by\n`POST /b/tickets/api/admin/retention/prune`.",
+                  "properties": {
+                    "analyses_deleted": {
+                      "description": "Expired analyses removed.",
+                      "format": "int64",
+                      "type": "integer"
                     },
-                    "type": "array"
+                    "complete": {
+                      "description": "Whether every delete in the pass succeeded. A `false` here is answered\nwith HTTP 503 so a scheduler retries.",
+                      "type": "boolean"
+                    },
+                    "errors": {
+                      "description": "Names of the deletes that failed (`\"analyses\"`, `\"events\"`,\n`\"tickets\"`, `\"rate-counters\"`).",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "events_deleted": {
+                      "description": "Expired audit events removed.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "rate_counters_deleted": {
+                      "description": "Stale submission rate-limit counters removed.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "tickets_deleted": {
+                      "description": "Expired tickets removed. Tickets under legal hold never expire.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
                   },
-                  "events_deleted": {
-                    "description": "Expired audit events removed.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "rate_counters_deleted": {
-                    "description": "Stale submission rate-limit counters removed.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "tickets_deleted": {
-                    "description": "Expired tickets removed. Tickets under legal hold never expire.",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "complete",
-                  "analyses_deleted",
-                  "events_deleted",
-                  "tickets_deleted",
-                  "rate_counters_deleted",
-                  "errors"
-                ],
-                "title": "MaintenanceResult",
-                "type": "object"
+                  "required": [
+                    "complete",
+                    "analyses_deleted",
+                    "events_deleted",
+                    "tickets_deleted",
+                    "rate_counters_deleted",
+                    "errors"
+                  ],
+                  "title": "MaintenanceResult",
+                  "type": "object"
+                }
               }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Run bounded ticket retention"
+      }
+    },
+    "/b/tickets/api/admin/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/tickets/api/admin/status`.",
+                  "properties": {
+                    "audit_degraded": {
+                      "description": "Whether an audit-timeline write has failed since the flag was last\ncleared. While true, the timeline may be incomplete.",
+                      "type": "boolean"
+                    },
+                    "last_maintenance": {
+                      "description": "The last retention pass, or `null` when none has run.",
+                      "properties": {
+                        "last_prune_error": {
+                          "description": "Comma-joined names of the deletes that failed on the last pass, or `\"\"`\nwhen it completed.",
+                          "type": "string"
+                        },
+                        "last_pruned_at": {
+                          "description": "RFC 3339 timestamp of the last pass, or `null` before the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "last_pruned_day": {
+                          "description": "`YYYY-MM-DD` of the last pass, or `\"\"` before the first one.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "last_pruned_day",
+                        "last_pruned_at",
+                        "last_prune_error"
+                      ],
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "new_tickets": {
+                      "description": "Tickets still in the `\"new\"` state.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "open_tickets": {
+                      "description": "Tickets in `\"new\"`, `\"triaged\"` or `\"investigating\"`.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "security": {
+                      "description": "Whether protected public reporting is currently able to accept a\nsubmission, and what is missing when it is not.",
+                      "properties": {
+                        "block_enabled": {
+                          "description": "Whether the tickets block itself is enabled.",
+                          "type": "boolean"
+                        },
+                        "has_public_type": {
+                          "description": "Whether at least one active, publicly visible ticket type exists.",
+                          "type": "boolean"
+                        },
+                        "identity_secret_configured": {
+                          "description": "Whether the abuse-digest identity secret is configured.",
+                          "type": "boolean"
+                        },
+                        "positive_limits": {
+                          "description": "Whether both submission rate limits have a positive cap and window.",
+                          "type": "boolean"
+                        },
+                        "public_enabled": {
+                          "description": "Whether the operator has turned public submissions on.",
+                          "type": "boolean"
+                        },
+                        "ready": {
+                          "description": "Whether all of the checks below passed.",
+                          "type": "boolean"
+                        },
+                        "reasons": {
+                          "description": "Human-readable reason for each failed check, in check order. Empty when\n`ready`.",
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "site_key_configured": {
+                          "description": "Whether a Turnstile widget site key is configured.",
+                          "type": "boolean"
+                        },
+                        "turnstile_secret_configured": {
+                          "description": "Whether a Turnstile Siteverify secret is configured.",
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "ready",
+                        "block_enabled",
+                        "public_enabled",
+                        "site_key_configured",
+                        "turnstile_secret_configured",
+                        "identity_secret_configured",
+                        "positive_limits",
+                        "has_public_type",
+                        "reasons"
+                      ],
+                      "type": "object"
+                    },
+                    "urgent_tickets": {
+                      "description": "Tickets at `\"urgent\"` priority, in any state.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "security",
+                    "new_tickets",
+                    "urgent_tickets",
+                    "open_tickets",
+                    "last_maintenance",
+                    "audit_degraded"
+                  ],
+                  "title": "OperationalStatus",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Queue and security readiness"
+      }
+    },
+    "/b/tickets/api/admin/tickets": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "assignee_id",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on the assigned reviewer's id.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
-          "description": "Successful response"
-        }
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "1-based page number. Values below 1 clamp to 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "description": "Rows per page, capped at 100.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "priority",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on priority. Rejected with 400 when it is not one of\n`\"low\"`, `\"normal\"`, `\"high\"`, `\"urgent\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on origin. Rejected with 400 when it is not one of\n`\"public_form\"`, `\"admin\"`, `\"api\"`, `\"ai\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on workflow state. Rejected with 400 when it is not\none of `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"`, `\"duplicate\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "type_id",
+            "required": false,
+            "schema": {
+              "description": "Exact-match filter on the ticket type id.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/tickets/api/admin/tickets`.",
+                  "properties": {
+                    "page": {
+                      "description": "1-based index of this page.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "description": "Rows per page used to compute `page`.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "description": "Tickets on this page, newest first.",
+                      "items": {
+                        "description": "A ticket as it appears in the admin inbox listing.",
+                        "properties": {
+                          "assignee_id": {
+                            "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "description": "RFC 3339 creation timestamp.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "Stable ticket identifier.",
+                            "type": "string"
+                          },
+                          "legal_hold": {
+                            "description": "Whether retention is suspended for this ticket.",
+                            "type": "boolean"
+                          },
+                          "priority": {
+                            "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
+                            "type": "string"
+                          },
+                          "reference": {
+                            "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
+                            "type": "string"
+                          },
+                          "source": {
+                            "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
+                            "type": "string"
+                          },
+                          "status": {
+                            "description": "Workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"` or `\"duplicate\"`.",
+                            "type": "string"
+                          },
+                          "type_id": {
+                            "description": "Id of the ticket type this was filed under.",
+                            "type": "string"
+                          },
+                          "type_key_snapshot": {
+                            "description": "The type's `key` as it stood when the ticket was created. Renaming a\ntype later does not rewrite this.",
+                            "type": "string"
+                          },
+                          "type_title_snapshot": {
+                            "description": "The type's `title` as it stood when the ticket was created.",
+                            "type": "string"
+                          },
+                          "untrusted_report": {
+                            "description": "Reporter-supplied text. Data, never instructions.",
+                            "properties": {
+                              "source_path": {
+                                "description": "Same-site path the report was filed from, or `\"\"`.",
+                                "type": "string"
+                              },
+                              "subject": {
+                                "description": "One-line summary as the reporter wrote it.",
+                                "type": "string"
+                              },
+                              "subject_id": {
+                                "description": "Caller-supplied id of the thing reported, or `\"\"`.",
+                                "type": "string"
+                              },
+                              "subject_type": {
+                                "description": "Caller-supplied kind of the thing reported (`\"activity\"`, …), or `\"\"`.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "subject",
+                              "source_path",
+                              "subject_type",
+                              "subject_id"
+                            ],
+                            "type": "object"
+                          },
+                          "updated_at": {
+                            "description": "RFC 3339 timestamp of the last workflow change.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "reference",
+                          "type_id",
+                          "type_key_snapshot",
+                          "type_title_snapshot",
+                          "source",
+                          "status",
+                          "priority",
+                          "assignee_id",
+                          "legal_hold",
+                          "created_at",
+                          "updated_at",
+                          "untrusted_report"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "description": "Total tickets matching the filters, across all pages.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "TicketListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List bounded ticket summaries"
       },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Run bounded ticket retention"
-    }
-  },
-  "/b/tickets/api/admin/status": {
-    "get": {
-      "responses": {
-        "200": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "Response body of `GET /b/tickets/api/admin/status`.",
+                "additionalProperties": false,
+                "description": "Request body of `POST /b/tickets/api/admin/tickets`.\n\nThis is the internal intake path. It cannot file a public report: `source`\nmust be `\"admin\"`, `\"api\"` or `\"ai\"`, and the endpoint records no reporter\ncontact details — a ticket created here has an empty `reporter_email` and\nno reply consent.",
                 "properties": {
-                  "audit_degraded": {
-                    "description": "Whether an audit-timeline write has failed since the flag was last\ncleared. While true, the timeline may be incomplete.",
-                    "type": "boolean"
+                  "description": {
+                    "description": "Full description, 20–4000 characters.",
+                    "type": "string"
                   },
-                  "last_maintenance": {
-                    "description": "The last retention pass, or `null` when none has run.",
-                    "properties": {
-                      "last_prune_error": {
-                        "description": "Comma-joined names of the deletes that failed on the last pass, or `\"\"`\nwhen it completed.",
-                        "type": "string"
-                      },
-                      "last_pruned_at": {
-                        "description": "RFC 3339 timestamp of the last pass, or `null` before the first one.",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "last_pruned_day": {
-                        "description": "`YYYY-MM-DD` of the last pass, or `\"\"` before the first one.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "last_pruned_day",
-                      "last_pruned_at",
-                      "last_prune_error"
-                    ],
+                  "evidence_url": {
+                    "default": "",
+                    "description": "Supporting `http(s)` URL without credentials, ≤1024 characters.",
+                    "type": "string"
+                  },
+                  "priority": {
+                    "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`. Defaults to the ticket\ntype's own default priority.",
                     "type": [
-                      "object",
+                      "string",
                       "null"
                     ]
                   },
-                  "new_tickets": {
-                    "description": "Tickets still in the `\"new\"` state.",
-                    "format": "int64",
-                    "type": "integer"
+                  "source": {
+                    "description": "Origin to record: `\"admin\"`, `\"api\"` or `\"ai\"`. `\"public_form\"` is\nrejected with 400.",
+                    "type": "string"
                   },
-                  "open_tickets": {
-                    "description": "Tickets in `\"new\"`, `\"triaged\"` or `\"investigating\"`.",
-                    "format": "int64",
-                    "type": "integer"
+                  "source_path": {
+                    "default": "",
+                    "description": "Same-site path the ticket refers to. Must start with a single `/`.",
+                    "type": "string"
                   },
-                  "security": {
-                    "description": "Whether protected public reporting is currently able to accept a\nsubmission, and what is missing when it is not.",
-                    "properties": {
-                      "block_enabled": {
-                        "description": "Whether the tickets block itself is enabled.",
-                        "type": "boolean"
-                      },
-                      "has_public_type": {
-                        "description": "Whether at least one active, publicly visible ticket type exists.",
-                        "type": "boolean"
-                      },
-                      "identity_secret_configured": {
-                        "description": "Whether the abuse-digest identity secret is configured.",
-                        "type": "boolean"
-                      },
-                      "positive_limits": {
-                        "description": "Whether both submission rate limits have a positive cap and window.",
-                        "type": "boolean"
-                      },
-                      "public_enabled": {
-                        "description": "Whether the operator has turned public submissions on.",
-                        "type": "boolean"
-                      },
-                      "ready": {
-                        "description": "Whether all of the checks below passed.",
-                        "type": "boolean"
-                      },
-                      "reasons": {
-                        "description": "Human-readable reason for each failed check, in check order. Empty when\n`ready`.",
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      },
-                      "site_key_configured": {
-                        "description": "Whether a Turnstile widget site key is configured.",
-                        "type": "boolean"
-                      },
-                      "turnstile_secret_configured": {
-                        "description": "Whether a Turnstile Siteverify secret is configured.",
-                        "type": "boolean"
-                      }
-                    },
-                    "required": [
-                      "ready",
-                      "block_enabled",
-                      "public_enabled",
-                      "site_key_configured",
-                      "turnstile_secret_configured",
-                      "identity_secret_configured",
-                      "positive_limits",
-                      "has_public_type",
-                      "reasons"
-                    ],
-                    "type": "object"
+                  "subject": {
+                    "description": "One-line summary, 5–160 characters.",
+                    "type": "string"
                   },
-                  "urgent_tickets": {
-                    "description": "Tickets at `\"urgent\"` priority, in any state.",
-                    "format": "int64",
-                    "type": "integer"
+                  "subject_id": {
+                    "default": "",
+                    "description": "Id of the thing this is about (≤160 characters).",
+                    "type": "string"
+                  },
+                  "subject_type": {
+                    "default": "",
+                    "description": "Kind of the thing this is about (lowercase slug, ≤64 characters).",
+                    "type": "string"
+                  },
+                  "type_id": {
+                    "description": "Id of an active ticket type.",
+                    "type": "string"
                   }
                 },
                 "required": [
-                  "security",
-                  "new_tickets",
-                  "urgent_tickets",
-                  "open_tickets",
-                  "last_maintenance",
-                  "audit_degraded"
+                  "source",
+                  "type_id",
+                  "subject",
+                  "description"
                 ],
-                "title": "OperationalStatus",
+                "title": "AdminCreateTicketRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Queue and security readiness"
-    }
-  },
-  "/b/tickets/api/admin/tickets": {
-    "get": {
-      "parameters": [
-        {
-          "in": "query",
-          "name": "assignee_id",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on the assigned reviewer's id.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
+          "required": true
         },
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "description": "1-based page number. Values below 1 clamp to 1.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 25,
-            "description": "Rows per page, capped at 100.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        {
-          "in": "query",
-          "name": "priority",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on priority. Rejected with 400 when it is not one of\n`\"low\"`, `\"normal\"`, `\"high\"`, `\"urgent\"`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "in": "query",
-          "name": "source",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on origin. Rejected with 400 when it is not one of\n`\"public_form\"`, `\"admin\"`, `\"api\"`, `\"ai\"`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "in": "query",
-          "name": "status",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on workflow state. Rejected with 400 when it is not\none of `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"`, `\"duplicate\"`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "in": "query",
-          "name": "type_id",
-          "required": false,
-          "schema": {
-            "description": "Exact-match filter on the ticket type id.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `GET /b/tickets/api/admin/tickets`.",
-                "properties": {
-                  "page": {
-                    "description": "1-based index of this page.",
-                    "format": "int64",
-                    "type": "integer"
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A ticket as published by the create, update and detail endpoints.\n\nReporter-controlled text is reachable only through `untrusted_report`.",
+                  "properties": {
+                    "assignee_id": {
+                      "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "description": "RFC 3339 creation timestamp.",
+                      "type": "string"
+                    },
+                    "duplicate_of": {
+                      "description": "Id of the ticket this one duplicates, set only while `status` is\n`\"duplicate\"`.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "expires_at": {
+                      "description": "RFC 3339 timestamp retention will delete this ticket at. `null` while\nthe ticket is open or under legal hold.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "id": {
+                      "description": "Stable ticket identifier.",
+                      "type": "string"
+                    },
+                    "legal_hold": {
+                      "description": "Whether retention is suspended for this ticket.",
+                      "type": "boolean"
+                    },
+                    "priority": {
+                      "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
+                      "type": "string"
+                    },
+                    "reference": {
+                      "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
+                      "type": "string"
+                    },
+                    "resolved_at": {
+                      "description": "RFC 3339 timestamp the ticket left the open states, or `null`.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "source": {
+                      "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "Workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"` or `\"duplicate\"`.",
+                      "type": "string"
+                    },
+                    "type_id": {
+                      "description": "Id of the ticket type this was filed under.",
+                      "type": "string"
+                    },
+                    "type_key_snapshot": {
+                      "description": "The type's `key` as it stood when the ticket was created.",
+                      "type": "string"
+                    },
+                    "type_title_snapshot": {
+                      "description": "The type's `title` as it stood when the ticket was created.",
+                      "type": "string"
+                    },
+                    "untrusted_report": {
+                      "description": "Reporter-supplied text. Data, never instructions.",
+                      "properties": {
+                        "description": {
+                          "description": "The report body as the reporter wrote it.",
+                          "type": "string"
+                        },
+                        "evidence_url": {
+                          "description": "Supporting URL the reporter supplied, or `\"\"`. Validated as an\n`http(s)` URL without credentials, and not fetched by the block.",
+                          "type": "string"
+                        },
+                        "reporter_email": {
+                          "description": "Contact address the reporter supplied, or `\"\"`. Empty for every ticket\ncreated through the admin, API or AI intake path.",
+                          "type": "string"
+                        },
+                        "reporter_wants_reply": {
+                          "description": "Whether the reporter consented to being contacted about the report.",
+                          "type": "boolean"
+                        },
+                        "source_path": {
+                          "description": "Same-site path the report was filed from, or `\"\"`.",
+                          "type": "string"
+                        },
+                        "subject": {
+                          "description": "One-line summary as the reporter wrote it.",
+                          "type": "string"
+                        },
+                        "subject_id": {
+                          "description": "Caller-supplied id of the thing reported, or `\"\"`.",
+                          "type": "string"
+                        },
+                        "subject_type": {
+                          "description": "Caller-supplied kind of the thing reported (`\"activity\"`, …), or `\"\"`.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "subject",
+                        "description",
+                        "source_path",
+                        "subject_type",
+                        "subject_id",
+                        "evidence_url",
+                        "reporter_email",
+                        "reporter_wants_reply"
+                      ],
+                      "type": "object"
+                    },
+                    "updated_at": {
+                      "description": "RFC 3339 timestamp of the last workflow change.",
+                      "type": "string"
+                    }
                   },
-                  "page_size": {
-                    "description": "Rows per page used to compute `page`.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "description": "Tickets on this page, newest first.",
-                    "items": {
-                      "description": "A ticket as it appears in the admin inbox listing.",
+                  "required": [
+                    "id",
+                    "reference",
+                    "type_id",
+                    "type_key_snapshot",
+                    "type_title_snapshot",
+                    "source",
+                    "status",
+                    "priority",
+                    "assignee_id",
+                    "duplicate_of",
+                    "legal_hold",
+                    "resolved_at",
+                    "expires_at",
+                    "created_at",
+                    "updated_at",
+                    "untrusted_report"
+                  ],
+                  "title": "TicketView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create an internal, API, or AI ticket"
+      }
+    },
+    "/b/tickets/api/admin/tickets/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Identifier from the route, as returned by a list endpoint.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/tickets/api/admin/tickets/{id}`.",
+                  "properties": {
+                    "analyses": {
+                      "description": "Advisory analyses, newest first, capped at 100 entries.",
+                      "items": {
+                        "description": "One advisory analysis attached to a ticket.\n\nAnalyses are suggestions. Nothing here has changed the ticket: the block\nstores them alongside the workflow fields and never lets them mutate one.",
+                        "properties": {
+                          "confidence": {
+                            "description": "Producer-reported confidence, between 0 and 1 inclusive.",
+                            "format": "double",
+                            "type": "number"
+                          },
+                          "created_at": {
+                            "description": "RFC 3339 timestamp the analysis was recorded at.",
+                            "type": "string"
+                          },
+                          "expires_at": {
+                            "description": "RFC 3339 timestamp retention will delete this analysis at, tracking the\nticket's own expiry. `null` while the ticket is open.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "id": {
+                            "description": "Stable analysis identifier.",
+                            "type": "string"
+                          },
+                          "model": {
+                            "description": "Model identifier, when the producer recorded one.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "prompt_version": {
+                            "description": "Prompt version the producer recorded, or `\"\"`.",
+                            "type": "string"
+                          },
+                          "source": {
+                            "description": "Free-form name of the system that produced it.",
+                            "type": "string"
+                          },
+                          "suggested_actions": {
+                            "description": "Producer-proposed follow-up actions. Free-form; the block neither\ninterprets nor executes them.",
+                            "items": true,
+                            "type": "array"
+                          },
+                          "suggested_priority": {
+                            "description": "Priority the producer would set, if any.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "suggested_type_id": {
+                            "description": "Ticket type the producer would file this under, if any.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "summary": {
+                            "description": "The analysis itself, as the producer wrote it. Advisory text, not a\nreviewer's finding.",
+                            "type": "string"
+                          },
+                          "ticket_id": {
+                            "description": "Ticket this analysis is about.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "ticket_id",
+                          "source",
+                          "model",
+                          "prompt_version",
+                          "summary",
+                          "suggested_type_id",
+                          "suggested_priority",
+                          "confidence",
+                          "suggested_actions",
+                          "expires_at",
+                          "created_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "analyses_truncated": {
+                      "description": "Whether the analysis list was cut off at 100 entries.",
+                      "type": "boolean"
+                    },
+                    "events": {
+                      "description": "Audit timeline, newest first, capped at 200 entries.",
+                      "items": {
+                        "description": "One entry in a ticket's append-only audit timeline.",
+                        "properties": {
+                          "actor_id": {
+                            "description": "Id of the acting user, or `\"\"` for public and system actors.",
+                            "type": "string"
+                          },
+                          "actor_type": {
+                            "description": "Who acted: `\"public\"`, `\"admin\"`, `\"api\"`, `\"ai\"` or `\"system\"`.",
+                            "type": "string"
+                          },
+                          "body": {
+                            "description": "Reviewer-authored text: the note for a `\"note\"` event, the reason for a\nworkflow change, `\"\"` otherwise. Never carries reporter text.",
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "description": "RFC 3339 timestamp the event was recorded at.",
+                            "type": "string"
+                          },
+                          "event_type": {
+                            "description": "`\"created\"`, `\"note\"`, `\"workflow_updated\"`, or the status the ticket\nmoved to.",
+                            "type": "string"
+                          },
+                          "expires_at": {
+                            "description": "RFC 3339 timestamp retention will delete this entry at, tracking the\nticket's own expiry. `null` while the ticket is open.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "id": {
+                            "description": "Stable event identifier.",
+                            "type": "string"
+                          },
+                          "metadata": {
+                            "additionalProperties": true,
+                            "description": "Structured context for the change (requested status, priority,\nassignee, duplicate target, legal hold).",
+                            "type": "object"
+                          },
+                          "ticket_id": {
+                            "description": "Ticket this event belongs to.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "ticket_id",
+                          "event_type",
+                          "actor_type",
+                          "actor_id",
+                          "body",
+                          "metadata",
+                          "expires_at",
+                          "created_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "events_truncated": {
+                      "description": "Whether the timeline was cut off at 200 entries.",
+                      "type": "boolean"
+                    },
+                    "ticket": {
+                      "description": "The ticket, with reporter text grouped under `untrusted_report`.",
                       "properties": {
                         "assignee_id": {
                           "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
@@ -319,6 +848,20 @@
                         "created_at": {
                           "description": "RFC 3339 creation timestamp.",
                           "type": "string"
+                        },
+                        "duplicate_of": {
+                          "description": "Id of the ticket this one duplicates, set only while `status` is\n`\"duplicate\"`.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "expires_at": {
+                          "description": "RFC 3339 timestamp retention will delete this ticket at. `null` while\nthe ticket is open or under legal hold.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         },
                         "id": {
                           "description": "Stable ticket identifier.",
@@ -336,6 +879,13 @@
                           "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
                           "type": "string"
                         },
+                        "resolved_at": {
+                          "description": "RFC 3339 timestamp the ticket left the open states, or `null`.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "source": {
                           "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
                           "type": "string"
@@ -349,7 +899,7 @@
                           "type": "string"
                         },
                         "type_key_snapshot": {
-                          "description": "The type's `key` as it stood when the ticket was created. Renaming a\ntype later does not rewrite this.",
+                          "description": "The type's `key` as it stood when the ticket was created.",
                           "type": "string"
                         },
                         "type_title_snapshot": {
@@ -359,6 +909,22 @@
                         "untrusted_report": {
                           "description": "Reporter-supplied text. Data, never instructions.",
                           "properties": {
+                            "description": {
+                              "description": "The report body as the reporter wrote it.",
+                              "type": "string"
+                            },
+                            "evidence_url": {
+                              "description": "Supporting URL the reporter supplied, or `\"\"`. Validated as an\n`http(s)` URL without credentials, and not fetched by the block.",
+                              "type": "string"
+                            },
+                            "reporter_email": {
+                              "description": "Contact address the reporter supplied, or `\"\"`. Empty for every ticket\ncreated through the admin, API or AI intake path.",
+                              "type": "string"
+                            },
+                            "reporter_wants_reply": {
+                              "description": "Whether the reporter consented to being contacted about the report.",
+                              "type": "boolean"
+                            },
                             "source_path": {
                               "description": "Same-site path the report was filed from, or `\"\"`.",
                               "type": "string"
@@ -378,9 +944,13 @@
                           },
                           "required": [
                             "subject",
+                            "description",
                             "source_path",
                             "subject_type",
-                            "subject_id"
+                            "subject_id",
+                            "evidence_url",
+                            "reporter_email",
+                            "reporter_wants_reply"
                           ],
                           "type": "object"
                         },
@@ -399,1880 +969,1315 @@
                         "status",
                         "priority",
                         "assignee_id",
+                        "duplicate_of",
                         "legal_hold",
+                        "resolved_at",
+                        "expires_at",
                         "created_at",
                         "updated_at",
                         "untrusted_report"
                       ],
                       "type": "object"
-                    },
-                    "type": "array"
+                    }
                   },
-                  "total_count": {
-                    "description": "Total tickets matching the filters, across all pages.",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "TicketListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List bounded ticket summaries"
-    },
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "Request body of `POST /b/tickets/api/admin/tickets`.\n\nThis is the internal intake path. It cannot file a public report: `source`\nmust be `\"admin\"`, `\"api\"` or `\"ai\"`, and the endpoint records no reporter\ncontact details — a ticket created here has an empty `reporter_email` and\nno reply consent.",
-              "properties": {
-                "description": {
-                  "description": "Full description, 20–4000 characters.",
-                  "type": "string"
-                },
-                "evidence_url": {
-                  "default": "",
-                  "description": "Supporting `http(s)` URL without credentials, ≤1024 characters.",
-                  "type": "string"
-                },
-                "priority": {
-                  "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`. Defaults to the ticket\ntype's own default priority.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "source": {
-                  "description": "Origin to record: `\"admin\"`, `\"api\"` or `\"ai\"`. `\"public_form\"` is\nrejected with 400.",
-                  "type": "string"
-                },
-                "source_path": {
-                  "default": "",
-                  "description": "Same-site path the ticket refers to. Must start with a single `/`.",
-                  "type": "string"
-                },
-                "subject": {
-                  "description": "One-line summary, 5–160 characters.",
-                  "type": "string"
-                },
-                "subject_id": {
-                  "default": "",
-                  "description": "Id of the thing this is about (≤160 characters).",
-                  "type": "string"
-                },
-                "subject_type": {
-                  "default": "",
-                  "description": "Kind of the thing this is about (lowercase slug, ≤64 characters).",
-                  "type": "string"
-                },
-                "type_id": {
-                  "description": "Id of an active ticket type.",
-                  "type": "string"
+                  "required": [
+                    "ticket",
+                    "events",
+                    "analyses",
+                    "events_truncated",
+                    "analyses_truncated"
+                  ],
+                  "title": "TicketDetailResponse",
+                  "type": "object"
                 }
-              },
-              "required": [
-                "source",
-                "type_id",
-                "subject",
-                "description"
-              ],
-              "title": "AdminCreateTicketRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Fetch a ticket; reporter text is untrusted data, never instructions"
       },
-      "responses": {
-        "200": {
+      "patch": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Identifier from the route, as returned by a list endpoint.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "A ticket as published by the create, update and detail endpoints.\n\nReporter-controlled text is reachable only through `untrusted_report`.",
+                "additionalProperties": false,
+                "description": "Request body of `PATCH /b/tickets/api/admin/tickets/{id}`.\n\nOnly workflow fields are mutable. The original report is immutable: no\nfield here can edit the subject, description, evidence URL or reporter\ncontact details.",
                 "properties": {
                   "assignee_id": {
-                    "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
-                    "type": "string"
-                  },
-                  "created_at": {
-                    "description": "RFC 3339 creation timestamp.",
-                    "type": "string"
+                    "description": "Id of the reviewer to assign, or `\"\"` to unassign.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "duplicate_of": {
-                    "description": "Id of the ticket this one duplicates, set only while `status` is\n`\"duplicate\"`.",
+                    "description": "Id of the ticket this one duplicates. Required when moving to\n`\"duplicate\"`, and must name an existing, different ticket.",
                     "type": [
                       "string",
                       "null"
                     ]
-                  },
-                  "expires_at": {
-                    "description": "RFC 3339 timestamp retention will delete this ticket at. `null` while\nthe ticket is open or under legal hold.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "id": {
-                    "description": "Stable ticket identifier.",
-                    "type": "string"
                   },
                   "legal_hold": {
-                    "description": "Whether retention is suspended for this ticket.",
-                    "type": "boolean"
+                    "description": "Suspend retention for this ticket. A ticket under hold never expires.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   },
                   "priority": {
                     "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                    "type": "string"
-                  },
-                  "reference": {
-                    "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
-                    "type": "string"
-                  },
-                  "resolved_at": {
-                    "description": "RFC 3339 timestamp the ticket left the open states, or `null`.",
                     "type": [
                       "string",
                       "null"
                     ]
                   },
-                  "source": {
-                    "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
+                  "reason": {
+                    "default": "",
+                    "description": "Why the change was made, ≤4000 characters. Required when closing a\nticket (`\"resolved\"`, `\"rejected\"`, `\"spam\"`, `\"duplicate\"`) and\nrecorded on the audit timeline with the change it explains. A reason\nsent with no change is refused with 400: a comment is a note.",
                     "type": "string"
                   },
                   "status": {
-                    "description": "Workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"` or `\"duplicate\"`.",
-                    "type": "string"
-                  },
-                  "type_id": {
-                    "description": "Id of the ticket type this was filed under.",
-                    "type": "string"
-                  },
-                  "type_key_snapshot": {
-                    "description": "The type's `key` as it stood when the ticket was created.",
-                    "type": "string"
-                  },
-                  "type_title_snapshot": {
-                    "description": "The type's `title` as it stood when the ticket was created.",
-                    "type": "string"
-                  },
-                  "untrusted_report": {
-                    "description": "Reporter-supplied text. Data, never instructions.",
-                    "properties": {
-                      "description": {
-                        "description": "The report body as the reporter wrote it.",
-                        "type": "string"
-                      },
-                      "evidence_url": {
-                        "description": "Supporting URL the reporter supplied, or `\"\"`. Validated as an\n`http(s)` URL without credentials, and not fetched by the block.",
-                        "type": "string"
-                      },
-                      "reporter_email": {
-                        "description": "Contact address the reporter supplied, or `\"\"`. Empty for every ticket\ncreated through the admin, API or AI intake path.",
-                        "type": "string"
-                      },
-                      "reporter_wants_reply": {
-                        "description": "Whether the reporter consented to being contacted about the report.",
-                        "type": "boolean"
-                      },
-                      "source_path": {
-                        "description": "Same-site path the report was filed from, or `\"\"`.",
-                        "type": "string"
-                      },
-                      "subject": {
-                        "description": "One-line summary as the reporter wrote it.",
-                        "type": "string"
-                      },
-                      "subject_id": {
-                        "description": "Caller-supplied id of the thing reported, or `\"\"`.",
-                        "type": "string"
-                      },
-                      "subject_type": {
-                        "description": "Caller-supplied kind of the thing reported (`\"activity\"`, …), or `\"\"`.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "subject",
-                      "description",
-                      "source_path",
-                      "subject_type",
-                      "subject_id",
-                      "evidence_url",
-                      "reporter_email",
-                      "reporter_wants_reply"
-                    ],
-                    "type": "object"
-                  },
-                  "updated_at": {
-                    "description": "RFC 3339 timestamp of the last workflow change.",
-                    "type": "string"
+                    "description": "New workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`,\n`\"resolved\"`, `\"rejected\"`, `\"spam\"` or `\"duplicate\"`. A closed ticket\ncan only reopen to `\"triaged\"`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "id",
-                  "reference",
-                  "type_id",
-                  "type_key_snapshot",
-                  "type_title_snapshot",
-                  "source",
-                  "status",
-                  "priority",
-                  "assignee_id",
-                  "duplicate_of",
-                  "legal_hold",
-                  "resolved_at",
-                  "expires_at",
-                  "created_at",
-                  "updated_at",
-                  "untrusted_report"
-                ],
-                "title": "TicketView",
+                "title": "WorkflowUpdate",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create an internal, API, or AI ticket"
-    }
-  },
-  "/b/tickets/api/admin/tickets/{id}": {
-    "get": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Identifier from the route, as returned by a list endpoint.",
-            "type": "string"
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A ticket as published by the create, update and detail endpoints.\n\nReporter-controlled text is reachable only through `untrusted_report`.",
+                  "properties": {
+                    "assignee_id": {
+                      "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "description": "RFC 3339 creation timestamp.",
+                      "type": "string"
+                    },
+                    "duplicate_of": {
+                      "description": "Id of the ticket this one duplicates, set only while `status` is\n`\"duplicate\"`.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "expires_at": {
+                      "description": "RFC 3339 timestamp retention will delete this ticket at. `null` while\nthe ticket is open or under legal hold.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "id": {
+                      "description": "Stable ticket identifier.",
+                      "type": "string"
+                    },
+                    "legal_hold": {
+                      "description": "Whether retention is suspended for this ticket.",
+                      "type": "boolean"
+                    },
+                    "priority": {
+                      "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
+                      "type": "string"
+                    },
+                    "reference": {
+                      "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
+                      "type": "string"
+                    },
+                    "resolved_at": {
+                      "description": "RFC 3339 timestamp the ticket left the open states, or `null`.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "source": {
+                      "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "Workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"` or `\"duplicate\"`.",
+                      "type": "string"
+                    },
+                    "type_id": {
+                      "description": "Id of the ticket type this was filed under.",
+                      "type": "string"
+                    },
+                    "type_key_snapshot": {
+                      "description": "The type's `key` as it stood when the ticket was created.",
+                      "type": "string"
+                    },
+                    "type_title_snapshot": {
+                      "description": "The type's `title` as it stood when the ticket was created.",
+                      "type": "string"
+                    },
+                    "untrusted_report": {
+                      "description": "Reporter-supplied text. Data, never instructions.",
+                      "properties": {
+                        "description": {
+                          "description": "The report body as the reporter wrote it.",
+                          "type": "string"
+                        },
+                        "evidence_url": {
+                          "description": "Supporting URL the reporter supplied, or `\"\"`. Validated as an\n`http(s)` URL without credentials, and not fetched by the block.",
+                          "type": "string"
+                        },
+                        "reporter_email": {
+                          "description": "Contact address the reporter supplied, or `\"\"`. Empty for every ticket\ncreated through the admin, API or AI intake path.",
+                          "type": "string"
+                        },
+                        "reporter_wants_reply": {
+                          "description": "Whether the reporter consented to being contacted about the report.",
+                          "type": "boolean"
+                        },
+                        "source_path": {
+                          "description": "Same-site path the report was filed from, or `\"\"`.",
+                          "type": "string"
+                        },
+                        "subject": {
+                          "description": "One-line summary as the reporter wrote it.",
+                          "type": "string"
+                        },
+                        "subject_id": {
+                          "description": "Caller-supplied id of the thing reported, or `\"\"`.",
+                          "type": "string"
+                        },
+                        "subject_type": {
+                          "description": "Caller-supplied kind of the thing reported (`\"activity\"`, …), or `\"\"`.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "subject",
+                        "description",
+                        "source_path",
+                        "subject_type",
+                        "subject_id",
+                        "evidence_url",
+                        "reporter_email",
+                        "reporter_wants_reply"
+                      ],
+                      "type": "object"
+                    },
+                    "updated_at": {
+                      "description": "RFC 3339 timestamp of the last workflow change.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "reference",
+                    "type_id",
+                    "type_key_snapshot",
+                    "type_title_snapshot",
+                    "source",
+                    "status",
+                    "priority",
+                    "assignee_id",
+                    "duplicate_of",
+                    "legal_hold",
+                    "resolved_at",
+                    "expires_at",
+                    "created_at",
+                    "updated_at",
+                    "untrusted_report"
+                  ],
+                  "title": "TicketView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
           }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `GET /b/tickets/api/admin/tickets/{id}`.",
-                "properties": {
-                  "analyses": {
-                    "description": "Advisory analyses, newest first, capped at 100 entries.",
-                    "items": {
-                      "description": "One advisory analysis attached to a ticket.\n\nAnalyses are suggestions. Nothing here has changed the ticket: the block\nstores them alongside the workflow fields and never lets them mutate one.",
-                      "properties": {
-                        "confidence": {
-                          "description": "Producer-reported confidence, between 0 and 1 inclusive.",
-                          "format": "double",
-                          "type": "number"
-                        },
-                        "created_at": {
-                          "description": "RFC 3339 timestamp the analysis was recorded at.",
-                          "type": "string"
-                        },
-                        "expires_at": {
-                          "description": "RFC 3339 timestamp retention will delete this analysis at, tracking the\nticket's own expiry. `null` while the ticket is open.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "id": {
-                          "description": "Stable analysis identifier.",
-                          "type": "string"
-                        },
-                        "model": {
-                          "description": "Model identifier, when the producer recorded one.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "prompt_version": {
-                          "description": "Prompt version the producer recorded, or `\"\"`.",
-                          "type": "string"
-                        },
-                        "source": {
-                          "description": "Free-form name of the system that produced it.",
-                          "type": "string"
-                        },
-                        "suggested_actions": {
-                          "description": "Producer-proposed follow-up actions. Free-form; the block neither\ninterprets nor executes them.",
-                          "items": true,
-                          "type": "array"
-                        },
-                        "suggested_priority": {
-                          "description": "Priority the producer would set, if any.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "suggested_type_id": {
-                          "description": "Ticket type the producer would file this under, if any.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "summary": {
-                          "description": "The analysis itself, as the producer wrote it. Advisory text, not a\nreviewer's finding.",
-                          "type": "string"
-                        },
-                        "ticket_id": {
-                          "description": "Ticket this analysis is about.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "ticket_id",
-                        "source",
-                        "model",
-                        "prompt_version",
-                        "summary",
-                        "suggested_type_id",
-                        "suggested_priority",
-                        "confidence",
-                        "suggested_actions",
-                        "expires_at",
-                        "created_at"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "analyses_truncated": {
-                    "description": "Whether the analysis list was cut off at 100 entries.",
-                    "type": "boolean"
-                  },
-                  "events": {
-                    "description": "Audit timeline, newest first, capped at 200 entries.",
-                    "items": {
-                      "description": "One entry in a ticket's append-only audit timeline.",
-                      "properties": {
-                        "actor_id": {
-                          "description": "Id of the acting user, or `\"\"` for public and system actors.",
-                          "type": "string"
-                        },
-                        "actor_type": {
-                          "description": "Who acted: `\"public\"`, `\"admin\"`, `\"api\"`, `\"ai\"` or `\"system\"`.",
-                          "type": "string"
-                        },
-                        "body": {
-                          "description": "Reviewer-authored text: the note for a `\"note\"` event, the reason for a\nworkflow change, `\"\"` otherwise. Never carries reporter text.",
-                          "type": "string"
-                        },
-                        "created_at": {
-                          "description": "RFC 3339 timestamp the event was recorded at.",
-                          "type": "string"
-                        },
-                        "event_type": {
-                          "description": "`\"created\"`, `\"note\"`, `\"workflow_updated\"`, or the status the ticket\nmoved to.",
-                          "type": "string"
-                        },
-                        "expires_at": {
-                          "description": "RFC 3339 timestamp retention will delete this entry at, tracking the\nticket's own expiry. `null` while the ticket is open.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "id": {
-                          "description": "Stable event identifier.",
-                          "type": "string"
-                        },
-                        "metadata": {
-                          "additionalProperties": true,
-                          "description": "Structured context for the change (requested status, priority,\nassignee, duplicate target, legal hold).",
-                          "type": "object"
-                        },
-                        "ticket_id": {
-                          "description": "Ticket this event belongs to.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "ticket_id",
-                        "event_type",
-                        "actor_type",
-                        "actor_id",
-                        "body",
-                        "metadata",
-                        "expires_at",
-                        "created_at"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "events_truncated": {
-                    "description": "Whether the timeline was cut off at 200 entries.",
-                    "type": "boolean"
-                  },
-                  "ticket": {
-                    "description": "The ticket, with reporter text grouped under `untrusted_report`.",
-                    "properties": {
-                      "assignee_id": {
-                        "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
-                        "type": "string"
-                      },
-                      "created_at": {
-                        "description": "RFC 3339 creation timestamp.",
-                        "type": "string"
-                      },
-                      "duplicate_of": {
-                        "description": "Id of the ticket this one duplicates, set only while `status` is\n`\"duplicate\"`.",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "expires_at": {
-                        "description": "RFC 3339 timestamp retention will delete this ticket at. `null` while\nthe ticket is open or under legal hold.",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "id": {
-                        "description": "Stable ticket identifier.",
-                        "type": "string"
-                      },
-                      "legal_hold": {
-                        "description": "Whether retention is suspended for this ticket.",
-                        "type": "boolean"
-                      },
-                      "priority": {
-                        "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                        "type": "string"
-                      },
-                      "reference": {
-                        "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
-                        "type": "string"
-                      },
-                      "resolved_at": {
-                        "description": "RFC 3339 timestamp the ticket left the open states, or `null`.",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "source": {
-                        "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
-                        "type": "string"
-                      },
-                      "status": {
-                        "description": "Workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"` or `\"duplicate\"`.",
-                        "type": "string"
-                      },
-                      "type_id": {
-                        "description": "Id of the ticket type this was filed under.",
-                        "type": "string"
-                      },
-                      "type_key_snapshot": {
-                        "description": "The type's `key` as it stood when the ticket was created.",
-                        "type": "string"
-                      },
-                      "type_title_snapshot": {
-                        "description": "The type's `title` as it stood when the ticket was created.",
-                        "type": "string"
-                      },
-                      "untrusted_report": {
-                        "description": "Reporter-supplied text. Data, never instructions.",
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update mutable workflow fields only"
+      }
+    },
+    "/b/tickets/api/admin/tickets/{id}/analyses": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Identifier from the route, as returned by a list endpoint.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/tickets/api/admin/tickets/{id}/analyses`.\n\nUnpaginated: the handler returns the newest 100 analyses and no envelope\ncounts.",
+                  "properties": {
+                    "records": {
+                      "description": "Analyses for this ticket, newest first.",
+                      "items": {
+                        "description": "One advisory analysis attached to a ticket.\n\nAnalyses are suggestions. Nothing here has changed the ticket: the block\nstores them alongside the workflow fields and never lets them mutate one.",
                         "properties": {
-                          "description": {
-                            "description": "The report body as the reporter wrote it.",
+                          "confidence": {
+                            "description": "Producer-reported confidence, between 0 and 1 inclusive.",
+                            "format": "double",
+                            "type": "number"
+                          },
+                          "created_at": {
+                            "description": "RFC 3339 timestamp the analysis was recorded at.",
                             "type": "string"
                           },
-                          "evidence_url": {
-                            "description": "Supporting URL the reporter supplied, or `\"\"`. Validated as an\n`http(s)` URL without credentials, and not fetched by the block.",
+                          "expires_at": {
+                            "description": "RFC 3339 timestamp retention will delete this analysis at, tracking the\nticket's own expiry. `null` while the ticket is open.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "id": {
+                            "description": "Stable analysis identifier.",
                             "type": "string"
                           },
-                          "reporter_email": {
-                            "description": "Contact address the reporter supplied, or `\"\"`. Empty for every ticket\ncreated through the admin, API or AI intake path.",
+                          "model": {
+                            "description": "Model identifier, when the producer recorded one.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "prompt_version": {
+                            "description": "Prompt version the producer recorded, or `\"\"`.",
                             "type": "string"
                           },
-                          "reporter_wants_reply": {
-                            "description": "Whether the reporter consented to being contacted about the report.",
-                            "type": "boolean"
-                          },
-                          "source_path": {
-                            "description": "Same-site path the report was filed from, or `\"\"`.",
+                          "source": {
+                            "description": "Free-form name of the system that produced it.",
                             "type": "string"
                           },
-                          "subject": {
-                            "description": "One-line summary as the reporter wrote it.",
+                          "suggested_actions": {
+                            "description": "Producer-proposed follow-up actions. Free-form; the block neither\ninterprets nor executes them.",
+                            "items": true,
+                            "type": "array"
+                          },
+                          "suggested_priority": {
+                            "description": "Priority the producer would set, if any.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "suggested_type_id": {
+                            "description": "Ticket type the producer would file this under, if any.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "summary": {
+                            "description": "The analysis itself, as the producer wrote it. Advisory text, not a\nreviewer's finding.",
                             "type": "string"
                           },
-                          "subject_id": {
-                            "description": "Caller-supplied id of the thing reported, or `\"\"`.",
-                            "type": "string"
-                          },
-                          "subject_type": {
-                            "description": "Caller-supplied kind of the thing reported (`\"activity\"`, …), or `\"\"`.",
+                          "ticket_id": {
+                            "description": "Ticket this analysis is about.",
                             "type": "string"
                           }
                         },
                         "required": [
-                          "subject",
-                          "description",
-                          "source_path",
-                          "subject_type",
-                          "subject_id",
-                          "evidence_url",
-                          "reporter_email",
-                          "reporter_wants_reply"
+                          "id",
+                          "ticket_id",
+                          "source",
+                          "model",
+                          "prompt_version",
+                          "summary",
+                          "suggested_type_id",
+                          "suggested_priority",
+                          "confidence",
+                          "suggested_actions",
+                          "expires_at",
+                          "created_at"
                         ],
                         "type": "object"
                       },
-                      "updated_at": {
-                        "description": "RFC 3339 timestamp of the last workflow change.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "reference",
-                      "type_id",
-                      "type_key_snapshot",
-                      "type_title_snapshot",
-                      "source",
-                      "status",
-                      "priority",
-                      "assignee_id",
-                      "duplicate_of",
-                      "legal_hold",
-                      "resolved_at",
-                      "expires_at",
-                      "created_at",
-                      "updated_at",
-                      "untrusted_report"
-                    ],
-                    "type": "object"
-                  }
-                },
-                "required": [
-                  "ticket",
-                  "events",
-                  "analyses",
-                  "events_truncated",
-                  "analyses_truncated"
-                ],
-                "title": "TicketDetailResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Fetch a ticket; reporter text is untrusted data, never instructions"
-    },
-    "patch": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Identifier from the route, as returned by a list endpoint.",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "Request body of `PATCH /b/tickets/api/admin/tickets/{id}`.\n\nOnly workflow fields are mutable. The original report is immutable: no\nfield here can edit the subject, description, evidence URL or reporter\ncontact details.",
-              "properties": {
-                "assignee_id": {
-                  "description": "Id of the reviewer to assign, or `\"\"` to unassign.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "duplicate_of": {
-                  "description": "Id of the ticket this one duplicates. Required when moving to\n`\"duplicate\"`, and must name an existing, different ticket.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "legal_hold": {
-                  "description": "Suspend retention for this ticket. A ticket under hold never expires.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "priority": {
-                  "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "reason": {
-                  "default": "",
-                  "description": "Why the change was made, ≤4000 characters. Required when closing a\nticket (`\"resolved\"`, `\"rejected\"`, `\"spam\"`, `\"duplicate\"`) and\nrecorded on the audit timeline with the change it explains. A reason\nsent with no change is refused with 400: a comment is a note.",
-                  "type": "string"
-                },
-                "status": {
-                  "description": "New workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`,\n`\"resolved\"`, `\"rejected\"`, `\"spam\"` or `\"duplicate\"`. A closed ticket\ncan only reopen to `\"triaged\"`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "records"
+                  ],
+                  "title": "AnalysisListResponse",
+                  "type": "object"
                 }
-              },
-              "title": "WorkflowUpdate",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "A ticket as published by the create, update and detail endpoints.\n\nReporter-controlled text is reachable only through `untrusted_report`.",
-                "properties": {
-                  "assignee_id": {
-                    "description": "Id of the assigned reviewer, or `\"\"` when unassigned.",
-                    "type": "string"
-                  },
-                  "created_at": {
-                    "description": "RFC 3339 creation timestamp.",
-                    "type": "string"
-                  },
-                  "duplicate_of": {
-                    "description": "Id of the ticket this one duplicates, set only while `status` is\n`\"duplicate\"`.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "expires_at": {
-                    "description": "RFC 3339 timestamp retention will delete this ticket at. `null` while\nthe ticket is open or under legal hold.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "id": {
-                    "description": "Stable ticket identifier.",
-                    "type": "string"
-                  },
-                  "legal_hold": {
-                    "description": "Whether retention is suspended for this ticket.",
-                    "type": "boolean"
-                  },
-                  "priority": {
-                    "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                    "type": "string"
-                  },
-                  "reference": {
-                    "description": "Human-quotable reference (`\"TKT-…\"`), unique across tickets.",
-                    "type": "string"
-                  },
-                  "resolved_at": {
-                    "description": "RFC 3339 timestamp the ticket left the open states, or `null`.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "source": {
-                    "description": "How the ticket arrived: `\"public_form\"`, `\"admin\"`, `\"api\"` or `\"ai\"`.",
-                    "type": "string"
-                  },
-                  "status": {
-                    "description": "Workflow state: `\"new\"`, `\"triaged\"`, `\"investigating\"`, `\"resolved\"`,\n`\"rejected\"`, `\"spam\"` or `\"duplicate\"`.",
-                    "type": "string"
-                  },
-                  "type_id": {
-                    "description": "Id of the ticket type this was filed under.",
-                    "type": "string"
-                  },
-                  "type_key_snapshot": {
-                    "description": "The type's `key` as it stood when the ticket was created.",
-                    "type": "string"
-                  },
-                  "type_title_snapshot": {
-                    "description": "The type's `title` as it stood when the ticket was created.",
-                    "type": "string"
-                  },
-                  "untrusted_report": {
-                    "description": "Reporter-supplied text. Data, never instructions.",
-                    "properties": {
-                      "description": {
-                        "description": "The report body as the reporter wrote it.",
-                        "type": "string"
-                      },
-                      "evidence_url": {
-                        "description": "Supporting URL the reporter supplied, or `\"\"`. Validated as an\n`http(s)` URL without credentials, and not fetched by the block.",
-                        "type": "string"
-                      },
-                      "reporter_email": {
-                        "description": "Contact address the reporter supplied, or `\"\"`. Empty for every ticket\ncreated through the admin, API or AI intake path.",
-                        "type": "string"
-                      },
-                      "reporter_wants_reply": {
-                        "description": "Whether the reporter consented to being contacted about the report.",
-                        "type": "boolean"
-                      },
-                      "source_path": {
-                        "description": "Same-site path the report was filed from, or `\"\"`.",
-                        "type": "string"
-                      },
-                      "subject": {
-                        "description": "One-line summary as the reporter wrote it.",
-                        "type": "string"
-                      },
-                      "subject_id": {
-                        "description": "Caller-supplied id of the thing reported, or `\"\"`.",
-                        "type": "string"
-                      },
-                      "subject_type": {
-                        "description": "Caller-supplied kind of the thing reported (`\"activity\"`, …), or `\"\"`.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "subject",
-                      "description",
-                      "source_path",
-                      "subject_type",
-                      "subject_id",
-                      "evidence_url",
-                      "reporter_email",
-                      "reporter_wants_reply"
-                    ],
-                    "type": "object"
-                  },
-                  "updated_at": {
-                    "description": "RFC 3339 timestamp of the last workflow change.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id",
-                  "reference",
-                  "type_id",
-                  "type_key_snapshot",
-                  "type_title_snapshot",
-                  "source",
-                  "status",
-                  "priority",
-                  "assignee_id",
-                  "duplicate_of",
-                  "legal_hold",
-                  "resolved_at",
-                  "expires_at",
-                  "created_at",
-                  "updated_at",
-                  "untrusted_report"
-                ],
-                "title": "TicketView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update mutable workflow fields only"
-    }
-  },
-  "/b/tickets/api/admin/tickets/{id}/analyses": {
-    "get": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Identifier from the route, as returned by a list endpoint.",
-            "type": "string"
+        "security": [
+          {
+            "bearerAuth": []
           }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `GET /b/tickets/api/admin/tickets/{id}/analyses`.\n\nUnpaginated: the handler returns the newest 100 analyses and no envelope\ncounts.",
-                "properties": {
-                  "records": {
-                    "description": "Analyses for this ticket, newest first.",
-                    "items": {
-                      "description": "One advisory analysis attached to a ticket.\n\nAnalyses are suggestions. Nothing here has changed the ticket: the block\nstores them alongside the workflow fields and never lets them mutate one.",
-                      "properties": {
-                        "confidence": {
-                          "description": "Producer-reported confidence, between 0 and 1 inclusive.",
-                          "format": "double",
-                          "type": "number"
-                        },
-                        "created_at": {
-                          "description": "RFC 3339 timestamp the analysis was recorded at.",
-                          "type": "string"
-                        },
-                        "expires_at": {
-                          "description": "RFC 3339 timestamp retention will delete this analysis at, tracking the\nticket's own expiry. `null` while the ticket is open.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "id": {
-                          "description": "Stable analysis identifier.",
-                          "type": "string"
-                        },
-                        "model": {
-                          "description": "Model identifier, when the producer recorded one.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "prompt_version": {
-                          "description": "Prompt version the producer recorded, or `\"\"`.",
-                          "type": "string"
-                        },
-                        "source": {
-                          "description": "Free-form name of the system that produced it.",
-                          "type": "string"
-                        },
-                        "suggested_actions": {
-                          "description": "Producer-proposed follow-up actions. Free-form; the block neither\ninterprets nor executes them.",
-                          "items": true,
-                          "type": "array"
-                        },
-                        "suggested_priority": {
-                          "description": "Priority the producer would set, if any.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "suggested_type_id": {
-                          "description": "Ticket type the producer would file this under, if any.",
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "summary": {
-                          "description": "The analysis itself, as the producer wrote it. Advisory text, not a\nreviewer's finding.",
-                          "type": "string"
-                        },
-                        "ticket_id": {
-                          "description": "Ticket this analysis is about.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "ticket_id",
-                        "source",
-                        "model",
-                        "prompt_version",
-                        "summary",
-                        "suggested_type_id",
-                        "suggested_priority",
-                        "confidence",
-                        "suggested_actions",
-                        "expires_at",
-                        "created_at"
-                      ],
-                      "type": "object"
-                    },
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "records"
-                ],
-                "title": "AnalysisListResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
+        ],
+        "summary": "List structured ticket analyses"
       },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List structured ticket analyses"
-    },
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Identifier from the route, as returned by a list endpoint.",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
             "schema": {
-              "additionalProperties": false,
-              "description": "Request body of `POST /b/tickets/api/admin/tickets/{id}/analyses`.\n\nAn analysis is advisory and append-only. Posting one records a suggestion;\nit never changes the ticket's type, priority or status.",
-              "properties": {
-                "confidence": {
-                  "description": "Reported confidence, between 0 and 1 inclusive.",
-                  "format": "double",
-                  "type": "number"
-                },
-                "model": {
-                  "description": "Model identifier, ≤160 characters.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "prompt_version": {
-                  "default": "",
-                  "description": "Prompt version, ≤80 characters.",
-                  "type": "string"
-                },
-                "source": {
-                  "description": "Name of the system producing the analysis, 1–80 characters.",
-                  "type": "string"
-                },
-                "suggested_actions": {
-                  "default": [],
-                  "description": "Proposed follow-up actions, ≤8192 bytes once encoded. Stored verbatim;\nthe block neither interprets nor executes them.",
-                  "items": true,
-                  "type": "array"
-                },
-                "suggested_priority": {
-                  "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "suggested_type_id": {
-                  "description": "Ticket type to suggest. Must name an active type.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "summary": {
-                  "description": "The analysis itself, 1–4000 characters.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "source",
-                "summary",
-                "confidence"
-              ],
-              "title": "AnalysisInput",
-              "type": "object"
+              "description": "Identifier from the route, as returned by a list endpoint.",
+              "type": "string"
             }
           }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
+        ],
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "One advisory analysis attached to a ticket.\n\nAnalyses are suggestions. Nothing here has changed the ticket: the block\nstores them alongside the workflow fields and never lets them mutate one.",
+                "additionalProperties": false,
+                "description": "Request body of `POST /b/tickets/api/admin/tickets/{id}/analyses`.\n\nAn analysis is advisory and append-only. Posting one records a suggestion;\nit never changes the ticket's type, priority or status.",
                 "properties": {
                   "confidence": {
-                    "description": "Producer-reported confidence, between 0 and 1 inclusive.",
+                    "description": "Reported confidence, between 0 and 1 inclusive.",
                     "format": "double",
                     "type": "number"
                   },
-                  "created_at": {
-                    "description": "RFC 3339 timestamp the analysis was recorded at.",
-                    "type": "string"
-                  },
-                  "expires_at": {
-                    "description": "RFC 3339 timestamp retention will delete this analysis at, tracking the\nticket's own expiry. `null` while the ticket is open.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "id": {
-                    "description": "Stable analysis identifier.",
-                    "type": "string"
-                  },
                   "model": {
-                    "description": "Model identifier, when the producer recorded one.",
+                    "description": "Model identifier, ≤160 characters.",
                     "type": [
                       "string",
                       "null"
                     ]
                   },
                   "prompt_version": {
-                    "description": "Prompt version the producer recorded, or `\"\"`.",
+                    "default": "",
+                    "description": "Prompt version, ≤80 characters.",
                     "type": "string"
                   },
                   "source": {
-                    "description": "Free-form name of the system that produced it.",
+                    "description": "Name of the system producing the analysis, 1–80 characters.",
                     "type": "string"
                   },
                   "suggested_actions": {
-                    "description": "Producer-proposed follow-up actions. Free-form; the block neither\ninterprets nor executes them.",
+                    "default": [],
+                    "description": "Proposed follow-up actions, ≤8192 bytes once encoded. Stored verbatim;\nthe block neither interprets nor executes them.",
                     "items": true,
                     "type": "array"
                   },
                   "suggested_priority": {
-                    "description": "Priority the producer would set, if any.",
+                    "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
                     "type": [
                       "string",
                       "null"
                     ]
                   },
                   "suggested_type_id": {
-                    "description": "Ticket type the producer would file this under, if any.",
+                    "description": "Ticket type to suggest. Must name an active type.",
                     "type": [
                       "string",
                       "null"
                     ]
                   },
                   "summary": {
-                    "description": "The analysis itself, as the producer wrote it. Advisory text, not a\nreviewer's finding.",
-                    "type": "string"
-                  },
-                  "ticket_id": {
-                    "description": "Ticket this analysis is about.",
+                    "description": "The analysis itself, 1–4000 characters.",
                     "type": "string"
                   }
                 },
                 "required": [
-                  "id",
-                  "ticket_id",
                   "source",
-                  "model",
-                  "prompt_version",
                   "summary",
-                  "suggested_type_id",
-                  "suggested_priority",
-                  "confidence",
-                  "suggested_actions",
-                  "expires_at",
-                  "created_at"
+                  "confidence"
                 ],
-                "title": "TicketAnalysisView",
+                "title": "AnalysisInput",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Append advisory structured analysis"
-    }
-  },
-  "/b/tickets/api/admin/tickets/{id}/notes": {
-    "post": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Identifier from the route, as returned by a list endpoint.",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "Request body of `POST /b/tickets/api/admin/tickets/{id}/notes`.",
-              "properties": {
-                "note": {
-                  "description": "Internal note, 1–4000 characters. Appended to the audit timeline; the\noriginal report is never edited.",
-                  "type": "string"
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "One advisory analysis attached to a ticket.\n\nAnalyses are suggestions. Nothing here has changed the ticket: the block\nstores them alongside the workflow fields and never lets them mutate one.",
+                  "properties": {
+                    "confidence": {
+                      "description": "Producer-reported confidence, between 0 and 1 inclusive.",
+                      "format": "double",
+                      "type": "number"
+                    },
+                    "created_at": {
+                      "description": "RFC 3339 timestamp the analysis was recorded at.",
+                      "type": "string"
+                    },
+                    "expires_at": {
+                      "description": "RFC 3339 timestamp retention will delete this analysis at, tracking the\nticket's own expiry. `null` while the ticket is open.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "id": {
+                      "description": "Stable analysis identifier.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Model identifier, when the producer recorded one.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "prompt_version": {
+                      "description": "Prompt version the producer recorded, or `\"\"`.",
+                      "type": "string"
+                    },
+                    "source": {
+                      "description": "Free-form name of the system that produced it.",
+                      "type": "string"
+                    },
+                    "suggested_actions": {
+                      "description": "Producer-proposed follow-up actions. Free-form; the block neither\ninterprets nor executes them.",
+                      "items": true,
+                      "type": "array"
+                    },
+                    "suggested_priority": {
+                      "description": "Priority the producer would set, if any.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "suggested_type_id": {
+                      "description": "Ticket type the producer would file this under, if any.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "summary": {
+                      "description": "The analysis itself, as the producer wrote it. Advisory text, not a\nreviewer's finding.",
+                      "type": "string"
+                    },
+                    "ticket_id": {
+                      "description": "Ticket this analysis is about.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "ticket_id",
+                    "source",
+                    "model",
+                    "prompt_version",
+                    "summary",
+                    "suggested_type_id",
+                    "suggested_priority",
+                    "confidence",
+                    "suggested_actions",
+                    "expires_at",
+                    "created_at"
+                  ],
+                  "title": "TicketAnalysisView",
+                  "type": "object"
                 }
-              },
-              "required": [
-                "note"
-              ],
-              "title": "AddNoteRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Append advisory structured analysis"
+      }
+    },
+    "/b/tickets/api/admin/tickets/{id}/notes": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Identifier from the route, as returned by a list endpoint.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "One entry in a ticket's append-only audit timeline.",
+                "additionalProperties": false,
+                "description": "Request body of `POST /b/tickets/api/admin/tickets/{id}/notes`.",
                 "properties": {
-                  "actor_id": {
-                    "description": "Id of the acting user, or `\"\"` for public and system actors.",
+                  "note": {
+                    "description": "Internal note, 1–4000 characters. Appended to the audit timeline; the\noriginal report is never edited.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "note"
+                ],
+                "title": "AddNoteRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "One entry in a ticket's append-only audit timeline.",
+                  "properties": {
+                    "actor_id": {
+                      "description": "Id of the acting user, or `\"\"` for public and system actors.",
+                      "type": "string"
+                    },
+                    "actor_type": {
+                      "description": "Who acted: `\"public\"`, `\"admin\"`, `\"api\"`, `\"ai\"` or `\"system\"`.",
+                      "type": "string"
+                    },
+                    "body": {
+                      "description": "Reviewer-authored text: the note for a `\"note\"` event, the reason for a\nworkflow change, `\"\"` otherwise. Never carries reporter text.",
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "description": "RFC 3339 timestamp the event was recorded at.",
+                      "type": "string"
+                    },
+                    "event_type": {
+                      "description": "`\"created\"`, `\"note\"`, `\"workflow_updated\"`, or the status the ticket\nmoved to.",
+                      "type": "string"
+                    },
+                    "expires_at": {
+                      "description": "RFC 3339 timestamp retention will delete this entry at, tracking the\nticket's own expiry. `null` while the ticket is open.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "id": {
+                      "description": "Stable event identifier.",
+                      "type": "string"
+                    },
+                    "metadata": {
+                      "additionalProperties": true,
+                      "description": "Structured context for the change (requested status, priority,\nassignee, duplicate target, legal hold).",
+                      "type": "object"
+                    },
+                    "ticket_id": {
+                      "description": "Ticket this event belongs to.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "ticket_id",
+                    "event_type",
+                    "actor_type",
+                    "actor_id",
+                    "body",
+                    "metadata",
+                    "expires_at",
+                    "created_at"
+                  ],
+                  "title": "TicketEventView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Append an internal ticket note"
+      }
+    },
+    "/b/tickets/api/admin/types": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "1-based page number. Values below 1 clamp to 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Rows per page, capped at 100.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `GET /b/tickets/api/admin/types`.",
+                  "properties": {
+                    "page": {
+                      "description": "1-based index of this page.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "page_size": {
+                      "description": "Rows per page used to compute `page`.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "records": {
+                      "description": "Ticket types on this page, ordered by `sort_order` then `title`.\nInactive and non-public types are included.",
+                      "items": {
+                        "description": "A ticket type as published by the tickets JSON API.",
+                        "properties": {
+                          "active": {
+                            "description": "Whether the type accepts new tickets at all.",
+                            "type": "boolean"
+                          },
+                          "created_at": {
+                            "description": "RFC 3339 creation timestamp.",
+                            "type": "string"
+                          },
+                          "default_priority": {
+                            "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
+                            "type": "string"
+                          },
+                          "description": {
+                            "description": "Short explanation of what belongs under this type.",
+                            "type": "string"
+                          },
+                          "escalation_kind": {
+                            "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
+                            "type": "string"
+                          },
+                          "guidance": {
+                            "description": "Longer guidance shown on the public form.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "Stable ticket type identifier.",
+                            "type": "string"
+                          },
+                          "key": {
+                            "description": "Immutable lowercase slug identifying the type.",
+                            "type": "string"
+                          },
+                          "public_visible": {
+                            "description": "Whether the public form offers this type.",
+                            "type": "boolean"
+                          },
+                          "requests_evidence": {
+                            "description": "Whether the form asks for an evidence URL.",
+                            "type": "boolean"
+                          },
+                          "requires_contact": {
+                            "description": "Whether a reporter must supply an email address and consent to a reply.",
+                            "type": "boolean"
+                          },
+                          "sort_order": {
+                            "description": "Ordering weight on the public form and in the admin list.",
+                            "format": "int64",
+                            "type": "integer"
+                          },
+                          "title": {
+                            "description": "Title shown to reporters and reviewers.",
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "description": "RFC 3339 timestamp of the last modification.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "key",
+                          "title",
+                          "description",
+                          "guidance",
+                          "default_priority",
+                          "escalation_kind",
+                          "public_visible",
+                          "requires_contact",
+                          "requests_evidence",
+                          "active",
+                          "sort_order",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total_count": {
+                      "description": "Total ticket types defined, across all pages.",
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "total_count",
+                    "page",
+                    "page_size"
+                  ],
+                  "title": "TicketTypeListResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List ticket types"
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Request body of `POST /b/tickets/api/admin/types`.",
+                "properties": {
+                  "active": {
+                    "default": true,
+                    "description": "Whether the type accepts new tickets.",
+                    "type": "boolean"
+                  },
+                  "default_priority": {
+                    "default": "normal",
+                    "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
                     "type": "string"
                   },
-                  "actor_type": {
-                    "description": "Who acted: `\"public\"`, `\"admin\"`, `\"api\"`, `\"ai\"` or `\"system\"`.",
+                  "description": {
+                    "default": "",
+                    "description": "Short explanation of what belongs under this type, ≤500 characters.",
                     "type": "string"
                   },
-                  "body": {
-                    "description": "Reviewer-authored text: the note for a `\"note\"` event, the reason for a\nworkflow change, `\"\"` otherwise. Never carries reporter text.",
+                  "escalation_kind": {
+                    "default": "none",
+                    "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
                     "type": "string"
                   },
-                  "created_at": {
-                    "description": "RFC 3339 timestamp the event was recorded at.",
+                  "guidance": {
+                    "default": "",
+                    "description": "Longer guidance shown on the public form, ≤1000 characters.",
                     "type": "string"
                   },
-                  "event_type": {
-                    "description": "`\"created\"`, `\"note\"`, `\"workflow_updated\"`, or the status the ticket\nmoved to.",
+                  "key": {
+                    "description": "Immutable lowercase slug, 2–48 characters, identifying the type.",
                     "type": "string"
                   },
-                  "expires_at": {
-                    "description": "RFC 3339 timestamp retention will delete this entry at, tracking the\nticket's own expiry. `null` while the ticket is open.",
+                  "public_visible": {
+                    "default": false,
+                    "description": "Whether the public form offers this type.",
+                    "type": "boolean"
+                  },
+                  "requests_evidence": {
+                    "default": false,
+                    "description": "Whether the form asks for an evidence URL.",
+                    "type": "boolean"
+                  },
+                  "requires_contact": {
+                    "default": false,
+                    "description": "Whether a reporter must supply an email address and consent to a reply.",
+                    "type": "boolean"
+                  },
+                  "sort_order": {
+                    "default": 0,
+                    "description": "Ordering weight, between -1000000 and 1000000.",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "title": {
+                    "description": "Title shown to reporters and reviewers, 2–80 characters.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key",
+                  "title"
+                ],
+                "title": "TicketTypeInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A ticket type as published by the tickets JSON API.",
+                  "properties": {
+                    "active": {
+                      "description": "Whether the type accepts new tickets at all.",
+                      "type": "boolean"
+                    },
+                    "created_at": {
+                      "description": "RFC 3339 creation timestamp.",
+                      "type": "string"
+                    },
+                    "default_priority": {
+                      "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "Short explanation of what belongs under this type.",
+                      "type": "string"
+                    },
+                    "escalation_kind": {
+                      "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
+                      "type": "string"
+                    },
+                    "guidance": {
+                      "description": "Longer guidance shown on the public form.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable ticket type identifier.",
+                      "type": "string"
+                    },
+                    "key": {
+                      "description": "Immutable lowercase slug identifying the type.",
+                      "type": "string"
+                    },
+                    "public_visible": {
+                      "description": "Whether the public form offers this type.",
+                      "type": "boolean"
+                    },
+                    "requests_evidence": {
+                      "description": "Whether the form asks for an evidence URL.",
+                      "type": "boolean"
+                    },
+                    "requires_contact": {
+                      "description": "Whether a reporter must supply an email address and consent to a reply.",
+                      "type": "boolean"
+                    },
+                    "sort_order": {
+                      "description": "Ordering weight on the public form and in the admin list.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "description": "Title shown to reporters and reviewers.",
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "description": "RFC 3339 timestamp of the last modification.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "key",
+                    "title",
+                    "description",
+                    "guidance",
+                    "default_priority",
+                    "escalation_kind",
+                    "public_visible",
+                    "requires_contact",
+                    "requests_evidence",
+                    "active",
+                    "sort_order",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "title": "TicketTypeView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create ticket type"
+      }
+    },
+    "/b/tickets/api/admin/types/{id}": {
+      "patch": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Identifier from the route, as returned by a list endpoint.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Request body of `PATCH /b/tickets/api/admin/types/{id}`.\n\nEvery field is optional; an omitted field is left as stored.",
+                "properties": {
+                  "active": {
+                    "description": "Whether the type accepts new tickets. Deactivating the last public type\nwhile public submissions are on is rejected with 409.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "default_priority": {
+                    "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
                     "type": [
                       "string",
                       "null"
                     ]
                   },
-                  "id": {
-                    "description": "Stable event identifier.",
-                    "type": "string"
+                  "description": {
+                    "description": "New description, ≤500 characters.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  "metadata": {
-                    "additionalProperties": true,
-                    "description": "Structured context for the change (requested status, priority,\nassignee, duplicate target, legal hold).",
-                    "type": "object"
+                  "escalation_kind": {
+                    "description": "`\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
-                  "ticket_id": {
-                    "description": "Ticket this event belongs to.",
-                    "type": "string"
+                  "guidance": {
+                    "description": "New guidance, ≤1000 characters.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "key": {
+                    "default": null,
+                    "description": "Accepted only when it equals the stored key — the key is immutable.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "public_visible": {
+                    "description": "Whether the public form offers this type. Removing the last public type\nwhile public submissions are on is rejected with 409.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "requests_evidence": {
+                    "description": "Whether the form asks for an evidence URL.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "requires_contact": {
+                    "description": "Whether a reporter must supply an email address and consent to a reply.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "sort_order": {
+                    "description": "Ordering weight, between -1000000 and 1000000.",
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "description": "New title, 2–80 characters.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "id",
-                  "ticket_id",
-                  "event_type",
-                  "actor_type",
-                  "actor_id",
-                  "body",
-                  "metadata",
-                  "expires_at",
-                  "created_at"
-                ],
-                "title": "TicketEventView",
+                "title": "TicketTypeUpdate",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Append an internal ticket note"
-    }
-  },
-  "/b/tickets/api/admin/types": {
-    "get": {
-      "parameters": [
-        {
-          "in": "query",
-          "name": "page",
-          "required": false,
-          "schema": {
-            "default": 1,
-            "description": "1-based page number. Values below 1 clamp to 1.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
+          "required": true
         },
-        {
-          "in": "query",
-          "name": "page_size",
-          "required": false,
-          "schema": {
-            "default": 50,
-            "description": "Rows per page, capped at 100.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `GET /b/tickets/api/admin/types`.",
-                "properties": {
-                  "page": {
-                    "description": "1-based index of this page.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "page_size": {
-                    "description": "Rows per page used to compute `page`.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "records": {
-                    "description": "Ticket types on this page, ordered by `sort_order` then `title`.\nInactive and non-public types are included.",
-                    "items": {
-                      "description": "A ticket type as published by the tickets JSON API.",
-                      "properties": {
-                        "active": {
-                          "description": "Whether the type accepts new tickets at all.",
-                          "type": "boolean"
-                        },
-                        "created_at": {
-                          "description": "RFC 3339 creation timestamp.",
-                          "type": "string"
-                        },
-                        "default_priority": {
-                          "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                          "type": "string"
-                        },
-                        "description": {
-                          "description": "Short explanation of what belongs under this type.",
-                          "type": "string"
-                        },
-                        "escalation_kind": {
-                          "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
-                          "type": "string"
-                        },
-                        "guidance": {
-                          "description": "Longer guidance shown on the public form.",
-                          "type": "string"
-                        },
-                        "id": {
-                          "description": "Stable ticket type identifier.",
-                          "type": "string"
-                        },
-                        "key": {
-                          "description": "Immutable lowercase slug identifying the type.",
-                          "type": "string"
-                        },
-                        "public_visible": {
-                          "description": "Whether the public form offers this type.",
-                          "type": "boolean"
-                        },
-                        "requests_evidence": {
-                          "description": "Whether the form asks for an evidence URL.",
-                          "type": "boolean"
-                        },
-                        "requires_contact": {
-                          "description": "Whether a reporter must supply an email address and consent to a reply.",
-                          "type": "boolean"
-                        },
-                        "sort_order": {
-                          "description": "Ordering weight on the public form and in the admin list.",
-                          "format": "int64",
-                          "type": "integer"
-                        },
-                        "title": {
-                          "description": "Title shown to reporters and reviewers.",
-                          "type": "string"
-                        },
-                        "updated_at": {
-                          "description": "RFC 3339 timestamp of the last modification.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "key",
-                        "title",
-                        "description",
-                        "guidance",
-                        "default_priority",
-                        "escalation_kind",
-                        "public_visible",
-                        "requires_contact",
-                        "requests_evidence",
-                        "active",
-                        "sort_order",
-                        "created_at",
-                        "updated_at"
-                      ],
-                      "type": "object"
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A ticket type as published by the tickets JSON API.",
+                  "properties": {
+                    "active": {
+                      "description": "Whether the type accepts new tickets at all.",
+                      "type": "boolean"
                     },
-                    "type": "array"
+                    "created_at": {
+                      "description": "RFC 3339 creation timestamp.",
+                      "type": "string"
+                    },
+                    "default_priority": {
+                      "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "Short explanation of what belongs under this type.",
+                      "type": "string"
+                    },
+                    "escalation_kind": {
+                      "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
+                      "type": "string"
+                    },
+                    "guidance": {
+                      "description": "Longer guidance shown on the public form.",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Stable ticket type identifier.",
+                      "type": "string"
+                    },
+                    "key": {
+                      "description": "Immutable lowercase slug identifying the type.",
+                      "type": "string"
+                    },
+                    "public_visible": {
+                      "description": "Whether the public form offers this type.",
+                      "type": "boolean"
+                    },
+                    "requests_evidence": {
+                      "description": "Whether the form asks for an evidence URL.",
+                      "type": "boolean"
+                    },
+                    "requires_contact": {
+                      "description": "Whether a reporter must supply an email address and consent to a reply.",
+                      "type": "boolean"
+                    },
+                    "sort_order": {
+                      "description": "Ordering weight on the public form and in the admin list.",
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "description": "Title shown to reporters and reviewers.",
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "description": "RFC 3339 timestamp of the last modification.",
+                      "type": "string"
+                    }
                   },
-                  "total_count": {
-                    "description": "Total ticket types defined, across all pages.",
-                    "format": "int64",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "records",
-                  "total_count",
-                  "page",
-                  "page_size"
-                ],
-                "title": "TicketTypeListResponse",
-                "type": "object"
+                  "required": [
+                    "id",
+                    "key",
+                    "title",
+                    "description",
+                    "guidance",
+                    "default_priority",
+                    "escalation_kind",
+                    "public_visible",
+                    "requires_contact",
+                    "requests_evidence",
+                    "active",
+                    "sort_order",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "title": "TicketTypeView",
+                  "type": "object"
+                }
               }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "List ticket types"
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update or deactivate ticket type"
+      }
     },
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "Request body of `POST /b/tickets/api/admin/types`.",
-              "properties": {
-                "active": {
-                  "default": true,
-                  "description": "Whether the type accepts new tickets.",
-                  "type": "boolean"
-                },
-                "default_priority": {
-                  "default": "normal",
-                  "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                  "type": "string"
-                },
-                "description": {
-                  "default": "",
-                  "description": "Short explanation of what belongs under this type, ≤500 characters.",
-                  "type": "string"
-                },
-                "escalation_kind": {
-                  "default": "none",
-                  "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
-                  "type": "string"
-                },
-                "guidance": {
-                  "default": "",
-                  "description": "Longer guidance shown on the public form, ≤1000 characters.",
-                  "type": "string"
-                },
-                "key": {
-                  "description": "Immutable lowercase slug, 2–48 characters, identifying the type.",
-                  "type": "string"
-                },
-                "public_visible": {
-                  "default": false,
-                  "description": "Whether the public form offers this type.",
-                  "type": "boolean"
-                },
-                "requests_evidence": {
-                  "default": false,
-                  "description": "Whether the form asks for an evidence URL.",
-                  "type": "boolean"
-                },
-                "requires_contact": {
-                  "default": false,
-                  "description": "Whether a reporter must supply an email address and consent to a reply.",
-                  "type": "boolean"
-                },
-                "sort_order": {
-                  "default": 0,
-                  "description": "Ordering weight, between -1000000 and 1000000.",
-                  "format": "int64",
-                  "type": "integer"
-                },
-                "title": {
-                  "description": "Title shown to reporters and reviewers, 2–80 characters.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "key",
-                "title"
-              ],
-              "title": "TicketTypeInput",
-              "type": "object"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
+    "/b/tickets/api/submissions": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "A ticket type as published by the tickets JSON API.",
+                "description": "JSON request body of `POST /b/tickets/api/submissions`.\n\nThe same endpoint also accepts `application/x-www-form-urlencoded` from the\npublic form at `/b/tickets/submit`, which is where a browser obtains the\ntwo tokens below. Both are minted server-side; neither can be constructed\nby a caller.",
                 "properties": {
-                  "active": {
-                    "description": "Whether the type accepts new tickets at all.",
-                    "type": "boolean"
-                  },
-                  "created_at": {
-                    "description": "RFC 3339 creation timestamp.",
-                    "type": "string"
-                  },
-                  "default_priority": {
-                    "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                    "type": "string"
-                  },
                   "description": {
-                    "description": "Short explanation of what belongs under this type.",
+                    "description": "Full description, 20–4000 characters.",
                     "type": "string"
                   },
-                  "escalation_kind": {
-                    "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
+                  "evidence_url": {
+                    "default": "",
+                    "description": "Supporting `http(s)` URL without credentials, ≤1024 characters.",
                     "type": "string"
                   },
-                  "guidance": {
-                    "description": "Longer guidance shown on the public form.",
+                  "form_token": {
+                    "description": "Single-use token issued by the public form and valid for a bounded\nwindow.",
                     "type": "string"
                   },
-                  "id": {
-                    "description": "Stable ticket type identifier.",
+                  "reporter_email": {
+                    "default": "",
+                    "description": "Reporter's email address. Required by ticket types that set\n`requires_contact`.",
                     "type": "string"
                   },
-                  "key": {
-                    "description": "Immutable lowercase slug identifying the type.",
-                    "type": "string"
-                  },
-                  "public_visible": {
-                    "description": "Whether the public form offers this type.",
+                  "reporter_wants_reply": {
+                    "default": false,
+                    "description": "Whether the reporter consents to being contacted. Requires\n`reporter_email`.",
                     "type": "boolean"
                   },
-                  "requests_evidence": {
-                    "description": "Whether the form asks for an evidence URL.",
-                    "type": "boolean"
-                  },
-                  "requires_contact": {
-                    "description": "Whether a reporter must supply an email address and consent to a reply.",
-                    "type": "boolean"
-                  },
-                  "sort_order": {
-                    "description": "Ordering weight on the public form and in the admin list.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "title": {
-                    "description": "Title shown to reporters and reviewers.",
+                  "source_path": {
+                    "default": "",
+                    "description": "Same-site path the report is about. Must start with a single `/`.",
                     "type": "string"
                   },
-                  "updated_at": {
-                    "description": "RFC 3339 timestamp of the last modification.",
+                  "subject": {
+                    "description": "One-line summary, 5–160 characters.",
+                    "type": "string"
+                  },
+                  "subject_id": {
+                    "default": "",
+                    "description": "Id of the thing being reported (≤160 characters).",
+                    "type": "string"
+                  },
+                  "subject_type": {
+                    "default": "",
+                    "description": "Kind of the thing being reported (lowercase slug, ≤64 characters).",
+                    "type": "string"
+                  },
+                  "turnstile_token": {
+                    "description": "Cloudflare Turnstile response token from the form's challenge widget.",
+                    "type": "string"
+                  },
+                  "type_id": {
+                    "description": "Id of an active, publicly visible ticket type.",
                     "type": "string"
                   }
                 },
                 "required": [
-                  "id",
-                  "key",
-                  "title",
+                  "type_id",
+                  "subject",
                   "description",
-                  "guidance",
-                  "default_priority",
-                  "escalation_kind",
-                  "public_visible",
-                  "requires_contact",
-                  "requests_evidence",
-                  "active",
-                  "sort_order",
-                  "created_at",
-                  "updated_at"
+                  "form_token",
+                  "turnstile_token"
                 ],
-                "title": "TicketTypeView",
+                "title": "PublicSubmissionRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create ticket type"
-    }
-  },
-  "/b/tickets/api/admin/types/{id}": {
-    "patch": {
-      "parameters": [
-        {
-          "in": "path",
-          "name": "id",
-          "required": true,
-          "schema": {
-            "description": "Identifier from the route, as returned by a list endpoint.",
-            "type": "string"
-          }
-        }
-      ],
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "additionalProperties": false,
-              "description": "Request body of `PATCH /b/tickets/api/admin/types/{id}`.\n\nEvery field is optional; an omitted field is left as stored.",
-              "properties": {
-                "active": {
-                  "description": "Whether the type accepts new tickets. Deactivating the last public type\nwhile public submissions are on is rejected with 409.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "default_priority": {
-                  "description": "`\"low\"`, `\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "description": {
-                  "description": "New description, ≤500 characters.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "escalation_kind": {
-                  "description": "`\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "guidance": {
-                  "description": "New guidance, ≤1000 characters.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "key": {
-                  "default": null,
-                  "description": "Accepted only when it equals the stored key — the key is immutable.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "public_visible": {
-                  "description": "Whether the public form offers this type. Removing the last public type\nwhile public submissions are on is rejected with 409.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "requests_evidence": {
-                  "description": "Whether the form asks for an evidence URL.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "requires_contact": {
-                  "description": "Whether a reporter must supply an email address and consent to a reply.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "sort_order": {
-                  "description": "Ordering weight, between -1000000 and 1000000.",
-                  "format": "int64",
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "title": {
-                  "description": "New title, 2–80 characters.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Response body of `POST /b/tickets/api/submissions` when the caller asks for\nJSON. A form post is answered with a 303 redirect to the confirmation page\ninstead.",
+                  "properties": {
+                    "message": {
+                      "description": "Human-readable confirmation to show the reporter.",
+                      "type": "string"
+                    },
+                    "reference": {
+                      "description": "The new ticket's quotable reference (`\"TKT-…\"`), or `\"\"` when no\nreference was allocated.",
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "Always `\"received\"`.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "reference",
+                    "status",
+                    "message"
+                  ],
+                  "title": "SubmissionAck",
+                  "type": "object"
                 }
-              },
-              "title": "TicketTypeUpdate",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "A ticket type as published by the tickets JSON API.",
-                "properties": {
-                  "active": {
-                    "description": "Whether the type accepts new tickets at all.",
-                    "type": "boolean"
-                  },
-                  "created_at": {
-                    "description": "RFC 3339 creation timestamp.",
-                    "type": "string"
-                  },
-                  "default_priority": {
-                    "description": "Priority applied to tickets filed under this type: `\"low\"`,\n`\"normal\"`, `\"high\"` or `\"urgent\"`.",
-                    "type": "string"
-                  },
-                  "description": {
-                    "description": "Short explanation of what belongs under this type.",
-                    "type": "string"
-                  },
-                  "escalation_kind": {
-                    "description": "Review track: `\"none\"`, `\"legal\"`, `\"privacy\"` or `\"safety\"`.",
-                    "type": "string"
-                  },
-                  "guidance": {
-                    "description": "Longer guidance shown on the public form.",
-                    "type": "string"
-                  },
-                  "id": {
-                    "description": "Stable ticket type identifier.",
-                    "type": "string"
-                  },
-                  "key": {
-                    "description": "Immutable lowercase slug identifying the type.",
-                    "type": "string"
-                  },
-                  "public_visible": {
-                    "description": "Whether the public form offers this type.",
-                    "type": "boolean"
-                  },
-                  "requests_evidence": {
-                    "description": "Whether the form asks for an evidence URL.",
-                    "type": "boolean"
-                  },
-                  "requires_contact": {
-                    "description": "Whether a reporter must supply an email address and consent to a reply.",
-                    "type": "boolean"
-                  },
-                  "sort_order": {
-                    "description": "Ordering weight on the public form and in the admin list.",
-                    "format": "int64",
-                    "type": "integer"
-                  },
-                  "title": {
-                    "description": "Title shown to reporters and reviewers.",
-                    "type": "string"
-                  },
-                  "updated_at": {
-                    "description": "RFC 3339 timestamp of the last modification.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id",
-                  "key",
-                  "title",
-                  "description",
-                  "guidance",
-                  "default_priority",
-                  "escalation_kind",
-                  "public_visible",
-                  "requires_contact",
-                  "requests_evidence",
-                  "active",
-                  "sort_order",
-                  "created_at",
-                  "updated_at"
-                ],
-                "title": "TicketTypeView",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update or deactivate ticket type"
-    }
-  },
-  "/b/tickets/api/submissions": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "JSON request body of `POST /b/tickets/api/submissions`.\n\nThe same endpoint also accepts `application/x-www-form-urlencoded` from the\npublic form at `/b/tickets/submit`, which is where a browser obtains the\ntwo tokens below. Both are minted server-side; neither can be constructed\nby a caller.",
-              "properties": {
-                "description": {
-                  "description": "Full description, 20–4000 characters.",
-                  "type": "string"
-                },
-                "evidence_url": {
-                  "default": "",
-                  "description": "Supporting `http(s)` URL without credentials, ≤1024 characters.",
-                  "type": "string"
-                },
-                "form_token": {
-                  "description": "Single-use token issued by the public form and valid for a bounded\nwindow.",
-                  "type": "string"
-                },
-                "reporter_email": {
-                  "default": "",
-                  "description": "Reporter's email address. Required by ticket types that set\n`requires_contact`.",
-                  "type": "string"
-                },
-                "reporter_wants_reply": {
-                  "default": false,
-                  "description": "Whether the reporter consents to being contacted. Requires\n`reporter_email`.",
-                  "type": "boolean"
-                },
-                "source_path": {
-                  "default": "",
-                  "description": "Same-site path the report is about. Must start with a single `/`.",
-                  "type": "string"
-                },
-                "subject": {
-                  "description": "One-line summary, 5–160 characters.",
-                  "type": "string"
-                },
-                "subject_id": {
-                  "default": "",
-                  "description": "Id of the thing being reported (≤160 characters).",
-                  "type": "string"
-                },
-                "subject_type": {
-                  "default": "",
-                  "description": "Kind of the thing being reported (lowercase slug, ≤64 characters).",
-                  "type": "string"
-                },
-                "turnstile_token": {
-                  "description": "Cloudflare Turnstile response token from the form's challenge widget.",
-                  "type": "string"
-                },
-                "type_id": {
-                  "description": "Id of an active, publicly visible ticket type.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type_id",
-                "subject",
-                "description",
-                "form_token",
-                "turnstile_token"
-              ],
-              "title": "PublicSubmissionRequest",
-              "type": "object"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "Response body of `POST /b/tickets/api/submissions` when the caller asks for\nJSON. A form post is answered with a 303 redirect to the confirmation page\ninstead.",
-                "properties": {
-                  "message": {
-                    "description": "Human-readable confirmation to show the reporter.",
-                    "type": "string"
-                  },
-                  "reference": {
-                    "description": "The new ticket's quotable reference (`\"TKT-…\"`), or `\"\"` when no\nreference was allocated.",
-                    "type": "string"
-                  },
-                  "status": {
-                    "description": "Always `\"received\"`.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "reference",
-                  "status",
-                  "message"
-                ],
-                "title": "SubmissionAck",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Protected public ticket creation"
+        "summary": "Protected public ticket creation"
+      }
     }
   }
 }

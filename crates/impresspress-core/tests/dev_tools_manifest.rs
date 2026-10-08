@@ -49,28 +49,18 @@ async fn tools_json_publishes_every_selection_with_zero_refusals() {
 }
 
 /// `shop_create_offer` merges two sources into one flat `inputSchema`: the
-/// path template's `{product_id}` and the `POST` body
-/// (`offer_definition_schema`, `products/mod.rs:386`). Both halves must
-/// survive the merge intact — a client that lost either could not build a
-/// working call.
+/// path template's `{product_id}` and the `POST` body, which is
+/// `OfferDefinitionRequest`'s derived schema (the create-offer row in
+/// `products/routes.rs`). Both halves must survive the merge intact — a
+/// client that lost either could not build a working call.
 ///
-/// This project's brief drafted this test to check `$defs.is_object()`
-/// instead, on the premise that `offer_definition_schema` already carries a
-/// `$defs`-closed recursive `Condition`. That premise does not hold: the
-/// schema at `products/mod.rs:386` is hand-written and deliberately flat —
-/// `components`/`checkout` stay generic `{"type": "object"}` rather than
-/// reaching the real (recursive) `Condition` type, precisely so nothing here
-/// needs `$defs` (see the comment at `products/mod.rs:378-384` — a derived,
-/// `$ref`/`$defs`-carrying schema would embed a pointer that resolves
-/// against the wrong root once it is copied into an OpenAPI document).
-/// Generating `/b/dev/api/tools.json` from the real `SELECTIONS` confirms
-/// it: `$defs` appears in none of the 23 published tools (checked against
-/// `tests/snapshots/dev.tools.json`). Asserting `$defs.is_object()` here
-/// would therefore either fail against a correct implementation or have to
-/// be satisfied by giving `offer_definition_schema` a real `$defs` table —
-/// reversing that documented, deliberate design choice — which is out of
-/// this endpoint's scope. So this checks the property the merge actually
-/// has to get right for these two sources instead.
+/// The body reaches the recursive `Condition` (a component's `condition`
+/// can hold `all`/`any`/`not` of further conditions), which no finite
+/// inlining expresses, so the projection keeps it as a root-level
+/// `$defs.Condition` with `"$ref": "#/$defs/Condition"` back-edges. Chrome
+/// accepts that shape at `registerTool` (probed 2026-10-08). The merge must
+/// carry the table along: a `$ref` left pointing at a table the merge
+/// dropped would be a schema no client can resolve.
 #[tokio::test]
 async fn shop_create_offer_merges_its_path_and_body_schemas() {
     let ctx = TestContext::with_products()
@@ -95,7 +85,7 @@ async fn shop_create_offer_merges_its_path_and_body_schemas() {
         input["properties"]["product_id"]["type"], "string",
         "{create}"
     );
-    // From the POST body (`offer_definition_schema`).
+    // From the POST body (`OfferDefinitionRequest`).
     assert_eq!(input["properties"]["name"]["type"], "string", "{create}");
     let required: Vec<&str> = input["required"]
         .as_array()
@@ -105,6 +95,8 @@ async fn shop_create_offer_merges_its_path_and_body_schemas() {
         .collect();
     assert!(required.contains(&"product_id"), "{create}");
     assert!(required.contains(&"name"), "{create}");
+    // From the body's recursive `Condition`, closed with a root-level table.
+    assert!(input["$defs"]["Condition"].is_object(), "{create}");
 }
 
 #[tokio::test]

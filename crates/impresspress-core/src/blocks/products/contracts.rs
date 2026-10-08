@@ -132,13 +132,7 @@ pub enum OfferMode {
     Subscription,
 }
 
-/// Lifecycle state of an offer: the `status` column of
-/// `impresspress__products__offers`.
-///
-/// The type existed before this PR but nothing wrote it: every transition
-/// wrote a string literal and `repo::offers` re-spelled the three variants
-/// back out for its compare-and-swap expectations, so the CAS guard and
-/// the column could drift apart silently. Both are this type now.
+/// Lifecycle state of an offer.
 ///
 /// - `draft` — editable; the only state whose definition may still change.
 /// - `active` — published and purchasable; the definition is immutable.
@@ -147,26 +141,21 @@ pub enum OfferMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OfferStatus {
+    // The `status` column of `impresspress__products__offers`. Every
+    // transition and `repo::offers`' compare-and-swap expectations are
+    // spelled with this type, so the guard and the column cannot drift apart.
     Draft,
     Active,
     Archived,
 }
 
-/// Where an offer stands against its Stripe Product/Price: the
-/// `sync_status` column of `impresspress__products__offers`.
+/// Where an offer stands against its Stripe Product and Price.
 ///
-/// Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-/// it is published, and only becomes `synced` once Stripe has the matching
-/// Price. The two were both plain strings and both called "status" on the
-/// same row.
+/// Distinct from the offer's `status`: an offer is `active` the moment it
+/// is published, and only becomes `synced` once Stripe has the matching
+/// Price.
 ///
-/// `impresspress__products__payment_links` has a `sync_status` column with
-/// a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-/// note `error`, not `failed`). It is deliberately not typed with this
-/// enum; giving it one means either changing a stored literal or carrying a
-/// fourth spelling, and that is its own decision.
-///
-/// - `not_synced` — never sent to Stripe. The column's default.
+/// - `not_synced` — never sent to Stripe. The default.
 /// - `syncing` — a synchronization is in flight.
 /// - `synced` — Stripe holds a Product and Price matching this offer
 ///   version.
@@ -174,6 +163,13 @@ pub enum OfferStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OfferSyncStatus {
+    // The `sync_status` column of `impresspress__products__offers`.
+    //
+    // `impresspress__products__payment_links` has a `sync_status` column
+    // with a *different* value set (`not_synced`, `syncing`, `synced`,
+    // `error` — note `error`, not `failed`). It is deliberately not typed
+    // with this enum; giving it one means either changing a stored literal
+    // or carrying a fourth spelling, and that is its own decision.
     NotSynced,
     Syncing,
     Synced,
@@ -266,18 +262,30 @@ pub enum VariableVisibility {
     AdminOnly,
 }
 
+/// A value the customer supplies at checkout, e.g. a quantity or a size,
+/// that the offer's amount rules and conditions read by `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VariableDefinition {
+    /// Name that amount rules and conditions use to read this input, e.g.
+    /// `"kilograms"`. Letters, digits and underscores; unique within the offer.
     pub key: String,
+    /// Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
+    /// `graduated`, `volume` and `package` amounts need `number` or
+    /// `integer`; `lookup` needs `select` or `text`.
     pub kind: VariableKind,
+    /// What the customer sees beside the input.
     pub label: String,
     #[serde(default)]
     pub help_text: String,
+    /// Whether pricing is refused when the customer leaves this input out
+    /// and it has no `default_value`.
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
     pub default_value: Option<Value>,
+    /// The choices of a `select` or `multi_select` input; required for those
+    /// kinds.
     #[serde(default)]
     pub allowed_values: Vec<String>,
     #[serde(default)]
@@ -294,55 +302,40 @@ pub struct VariableDefinition {
     pub sort_order: i32,
 }
 
+/// When a component applies, tagged by `op`. `input` names a variable's
+/// `key`; a component whose condition does not hold is charged nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Condition {
+    /// Always applies. The default.
     #[default]
     Always,
-    All {
-        conditions: Vec<Condition>,
-    },
-    Any {
-        conditions: Vec<Condition>,
-    },
-    Not {
-        condition: Box<Condition>,
-    },
-    Present {
-        input: String,
-    },
-    Equals {
-        input: String,
-        value: Value,
-    },
-    NotEquals {
-        input: String,
-        value: Value,
-    },
-    GreaterThan {
-        input: String,
-        value: Value,
-    },
-    GreaterThanOrEqual {
-        input: String,
-        value: Value,
-    },
-    LessThan {
-        input: String,
-        value: Value,
-    },
-    LessThanOrEqual {
-        input: String,
-        value: Value,
-    },
-    In {
-        input: String,
-        values: Vec<Value>,
-    },
-    Contains {
-        input: String,
-        value: Value,
-    },
+    /// Applies when every one of `conditions` holds.
+    All { conditions: Vec<Condition> },
+    /// Applies when at least one of `conditions` holds.
+    Any { conditions: Vec<Condition> },
+    /// Applies when `condition` does not hold.
+    Not { condition: Box<Condition> },
+    /// Applies when input `input` has a value, supplied by the customer or
+    /// taken from its `default_value`.
+    Present { input: String },
+    /// Applies when input `input` equals `value`.
+    Equals { input: String, value: Value },
+    /// Applies when input `input` does not equal `value`.
+    NotEquals { input: String, value: Value },
+    /// Applies when input `input` is greater than `value`.
+    GreaterThan { input: String, value: Value },
+    /// Applies when input `input` is greater than or equal to `value`.
+    GreaterThanOrEqual { input: String, value: Value },
+    /// Applies when input `input` is less than `value`.
+    LessThan { input: String, value: Value },
+    /// Applies when input `input` is less than or equal to `value`.
+    LessThanOrEqual { input: String, value: Value },
+    /// Applies when input `input` equals one of `values`.
+    In { input: String, values: Vec<Value> },
+    /// Applies when text input `input` contains the text `value`, or a
+    /// `multi_select` input has `value` selected.
+    Contains { input: String, value: Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -351,7 +344,10 @@ pub struct PricingTier {
     /// Inclusive upper bound for this tier. Only the final tier may omit it.
     #[serde(default)]
     pub up_to: Option<u64>,
+    /// Price per unit in this tier, in integer minor units (cents).
     pub unit_amount_minor: i64,
+    /// Flat amount added once when this tier applies, in integer minor units
+    /// (cents).
     #[serde(default)]
     pub flat_amount_minor: i64,
 }
@@ -368,33 +364,47 @@ pub enum PackageRounding {
     Exact,
 }
 
+/// How a component's unit price is computed, tagged by `type`. Every amount
+/// is in integer minor units (cents) of the offer's currency and must not be
+/// negative; `input` names a variable's `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AmountRule {
-    Fixed {
-        unit_amount_minor: i64,
-    },
+    /// The same price every time, in integer minor units (cents).
+    Fixed { unit_amount_minor: i64 },
+    /// `unit_amount_minor` times the number in input `input`.
     PerUnit {
         input: String,
         unit_amount_minor: i64,
     },
+    /// `base_amount_minor` plus `unit_amount_minor` times the number in
+    /// input `input`.
     FlatPlusPerUnit {
         base_amount_minor: i64,
         input: String,
         unit_amount_minor: i64,
     },
+    /// The price in `prices` keyed by the value chosen for input `input`.
     Lookup {
         input: String,
         prices: BTreeMap<String, i64>,
     },
+    /// Each tier prices only the units of input `input` that fall inside it,
+    /// and the tier totals are summed. Requires the offer's
+    /// `billing_scheme: "tiered"`.
     Graduated {
         input: String,
         tiers: Vec<PricingTier>,
     },
+    /// The one tier that the whole number in input `input` falls in prices
+    /// every unit. Requires the offer's `billing_scheme: "tiered"`.
     Volume {
         input: String,
         tiers: Vec<PricingTier>,
     },
+    /// `package_amount_minor` times the number of packages of
+    /// `units_per_package` needed to hold the units in input `input`;
+    /// `rounding` says what a partly filled package costs.
     Package {
         input: String,
         units_per_package: u64,
@@ -465,35 +475,52 @@ pub struct OfferComponent {
     pub metadata: BTreeMap<String, Value>,
 }
 
+/// One priced line of an offer, as an administrator or seller submits it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OfferComponentDraft {
+    /// Stable identifier for this line within the offer, e.g. `"bag"`.
+    /// Must be non-empty and unique within the offer.
     pub key: String,
+    /// What the buyer sees on the line, e.g. `"250 g bag"`.
     pub label: String,
     #[serde(default)]
     pub description: String,
+    /// Position of this line among the offer's components, lowest first.
     #[serde(default)]
     pub sort_order: i32,
     #[serde(default)]
     pub required: bool,
+    /// How this line's price is computed. `{"type": "fixed",
+    /// "unit_amount_minor": 1450}` is a fixed price of 14.50 in the offer's
+    /// currency; the other `type`s price from a customer input.
     pub amount: AmountRule,
+    /// How many units of this line are charged; one by default.
     #[serde(default)]
     pub quantity: QuantityRule,
+    /// When this line applies; `{"op": "always"}` by default.
     #[serde(default)]
     pub condition: Condition,
+    /// A subscription line's billing interval. Leave it out for a `payment`
+    /// offer; on a `subscription` offer its `interval` and `interval_count`
+    /// must equal the offer's `recurring_interval` and `interval_count`.
     #[serde(default)]
     pub recurrence: Option<ComponentRecurrence>,
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
 }
 
+/// How checkout behaves for an offer. Every field is optional; leaving the
+/// whole object out uses the defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckoutPolicy {
-    /// Minimum evaluated item total before provider discounts, tax, or shipping.
+    /// Minimum evaluated item total before provider discounts, tax, or
+    /// shipping, in integer minor units (cents).
     #[serde(default)]
     pub minimum_total_minor: Option<i64>,
-    /// Maximum evaluated item total before provider discounts, tax, or shipping.
+    /// Maximum evaluated item total before provider discounts, tax, or
+    /// shipping, in integer minor units (cents).
     #[serde(default)]
     pub maximum_total_minor: Option<i64>,
     #[serde(default)]
@@ -512,6 +539,8 @@ pub struct CheckoutPolicy {
     pub create_customer: bool,
     #[serde(default)]
     pub require_terms_consent: bool,
+    /// Free-trial length in days, at most 730. Applies only to a
+    /// `subscription` offer.
     #[serde(default)]
     pub trial_days: u32,
 }
@@ -567,22 +596,39 @@ pub struct Offer {
     pub stripe_price_id: String,
 }
 
+/// Request body that creates or replaces an offer: a price for a product,
+/// made of one or more priced `components`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OfferDefinitionRequest {
+    /// Name of the offer, e.g. `"250 g bag"`.
     pub name: String,
+    /// `payment` for a one-off purchase, `subscription` for a recurring one.
     pub mode: OfferMode,
+    /// Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+    /// offer is in this currency's minor units.
     pub currency: String,
+    /// `fixed` requires exactly one component with a `fixed` amount;
+    /// `components` allows any number of components and amount rules.
     pub pricing_model: PricingModel,
+    /// Billing interval of a `subscription` offer. Required for
+    /// `subscription`, and must be left out for `payment`.
     #[serde(default)]
     pub recurring_interval: Option<RecurringInterval>,
+    /// Number of `recurring_interval`s between charges; 1 by default.
     #[serde(default = "one_u32")]
+    #[schemars(range(min = 1))]
     pub interval_count: u32,
     pub usage_type: UsageType,
+    /// Must be `tiered` when any component's amount is `graduated` or
+    /// `volume`.
     pub billing_scheme: BillingScheme,
     pub tax_behavior: TaxBehavior,
+    /// Inputs the customer fills in at checkout, which amount rules and
+    /// conditions read by `key`. Not needed for a `fixed` amount.
     #[serde(default)]
     pub variables: Vec<VariableDefinition>,
+    /// The offer's priced lines; at least one.
     pub components: Vec<OfferComponentDraft>,
     #[serde(default)]
     pub checkout: CheckoutPolicy,
@@ -596,6 +642,14 @@ pub struct ManagedOffer {
     #[serde(default)]
     pub sync_error: String,
     pub offer: Offer,
+}
+
+/// Response body of the offer list endpoints: every offer of one product,
+/// with its publication and sync state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OfferList {
+    pub offers: Vec<ManagedOffer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2295,14 +2349,9 @@ impl UpdateProductRequest {
     }
 }
 
-// Not declared through `.output::<T>()`: `ManagedOffer` reaches the recursive
-// `Condition`, so the endpoint schema for this response stays hand-written in
-// `mod.rs` (`product_duplicate_schema`), with the `product` half derived from
-// `ProductView`. The handler still builds this type, so the wire shape has one
-// source.
 /// Response body of the product duplication endpoints: the new draft product
 /// and its copied, editable offers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ProductDuplicateResponse {
     pub product: ProductView,
     pub offers: Vec<ManagedOffer>,

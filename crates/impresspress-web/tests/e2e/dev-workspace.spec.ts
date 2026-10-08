@@ -332,6 +332,17 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(product.status).toBe('draft');
   expect(product.name).toBe(SHOP_PRODUCT.name);
 
+  // The derived, recursive offer schema registers in Chrome's own registry
+  // (Review Focus 4; confirmed by the 2026-10-08 probe, kept as a light
+  // check) and carries the component shape an agent fills in.
+  await waitForTool(page, 'shop_create_offer');
+  const createOffer = (await registeredTools(page, 1)).find((t) => t.name === 'shop_create_offer');
+  expect(createOffer, 'shop_create_offer is registered').toBeTruthy();
+  const items = (createOffer!.inputSchema as {
+    properties: { components: { items: { properties: Record<string, unknown> } } };
+  }).properties.components.items;
+  expect(Object.keys(items.properties)).toEqual(expect.arrayContaining(['key', 'label', 'amount']));
+
   const offer = structured<{ status: string; offer: { id: string } }>(
     await execute(page, 'shop_create_offer', { product_id: product.id, ...SHOP_OFFER }),
   );

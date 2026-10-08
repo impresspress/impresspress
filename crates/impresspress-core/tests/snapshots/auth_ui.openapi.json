@@ -1,725 +1,730 @@
 {
-  "/b/auth/api/api-keys": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/auth/api/api-keys` request body.",
-              "properties": {
-                "expires_at": {
-                  "description": "Absolute expiry, RFC 3339 and in the future. Omit for a key that does\nnot expire.",
-                  "format": "date-time",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/b/auth/api/api-keys": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`POST /b/auth/api/api-keys` request body.",
+                "properties": {
+                  "expires_at": {
+                    "description": "Absolute expiry, RFC 3339 and in the future. Omit for a key that does\nnot expire.",
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "description": "Label shown in the key list. Required and non-empty.",
+                    "type": "string"
+                  }
                 },
-                "name": {
-                  "description": "Label shown in the key list. Required and non-empty.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "name"
-              ],
-              "title": "CreateApiKeyRequest",
-              "type": "object"
+                "required": [
+                  "name"
+                ],
+                "title": "CreateApiKeyRequest",
+                "type": "object"
+              }
             }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Create API key"
-    }
-  },
-  "/b/auth/api/change-password": {
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
-                "properties": {
-                  "message": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "message"
-                ],
-                "title": "MessageResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Change password",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/forgot-password": {
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
-                "properties": {
-                  "message": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "message"
-                ],
-                "title": "MessageResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Request a password reset email",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/login": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/auth/api/login` request body.",
-              "properties": {
-                "email": {
-                  "format": "email",
-                  "type": "string"
-                },
-                "password": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "email",
-                "password"
-              ],
-              "title": "LoginRequest",
-              "type": "object"
-            }
+        "security": [
+          {
+            "bearerAuth": []
           }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`POST /b/auth/api/login` response body.",
-                "properties": {
-                  "access_token": {
-                    "type": "string"
-                  },
-                  "default_redirect": {
-                    "description": "Role-aware post-login redirect path",
-                    "type": "string"
-                  },
-                  "expires_in": {
-                    "description": "Access token lifetime in seconds",
-                    "format": "uint64",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "refresh_token": {
-                    "type": "string"
-                  },
-                  "token_type": {
-                    "description": "The only `token_type` this API issues.",
-                    "enum": [
-                      "Bearer"
-                    ],
-                    "type": "string"
-                  },
-                  "user": {
-                    "description": "The caller's identity, as returned by a successful authentication.",
-                    "properties": {
-                      "email": {
-                        "type": "string"
-                      },
-                      "id": {
-                        "type": "string"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "roles": {
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "email",
-                      "roles",
-                      "name"
-                    ],
-                    "type": "object"
-                  }
-                },
-                "required": [
-                  "access_token",
-                  "refresh_token",
-                  "token_type",
-                  "expires_in",
-                  "default_redirect",
-                  "user"
-                ],
-                "title": "LoginResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Authenticate with email/password",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/logout": {
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
-                "properties": {
-                  "message": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "message"
-                ],
-                "title": "MessageResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Sign out",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/me": {
-    "get": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "`GET /b/auth/api/me` and `PATCH /b/auth/api/me` response body.",
-                "properties": {
-                  "user": {
-                    "description": "The caller's own profile.",
-                    "properties": {
-                      "avatar_url": {
-                        "type": "string"
-                      },
-                      "created_at": {
-                        "format": "date-time",
-                        "type": "string"
-                      },
-                      "email": {
-                        "type": "string"
-                      },
-                      "id": {
-                        "type": "string"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "roles": {
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "email",
-                      "name",
-                      "roles",
-                      "created_at",
-                      "avatar_url"
-                    ],
-                    "type": "object"
-                  }
-                },
-                "required": [
-                  "user"
-                ],
-                "title": "MeResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Get current user",
-      "tags": [
-        "auth"
-      ]
+        ],
+        "summary": "Create API key"
+      }
     },
-    "patch": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`PATCH /b/auth/api/me` request body. Every field is optional and only the\nones present are applied. `name` and `avatar_url` are the only\nuser-editable profile fields: email changes go through verification and\nroles through the admin API.",
-              "properties": {
-                "avatar_url": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+    "/b/auth/api/change-password": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "title": "MessageResponse",
+                  "type": "object"
                 }
-              },
-              "title": "UpdateMeRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Change password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/forgot-password": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "title": "MessageResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Request a password reset email",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/login": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "`GET /b/auth/api/me` and `PATCH /b/auth/api/me` response body.",
+                "description": "`POST /b/auth/api/login` request body.",
                 "properties": {
-                  "user": {
-                    "description": "The caller's own profile.",
-                    "properties": {
-                      "avatar_url": {
-                        "type": "string"
-                      },
-                      "created_at": {
-                        "format": "date-time",
-                        "type": "string"
-                      },
-                      "email": {
-                        "type": "string"
-                      },
-                      "id": {
-                        "type": "string"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "roles": {
-                        "items": {
+                  "email": {
+                    "format": "email",
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "title": "LoginRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/auth/api/login` response body.",
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    },
+                    "default_redirect": {
+                      "description": "Role-aware post-login redirect path",
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "description": "Access token lifetime in seconds",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "refresh_token": {
+                      "type": "string"
+                    },
+                    "token_type": {
+                      "description": "The only `token_type` this API issues.",
+                      "enum": [
+                        "Bearer"
+                      ],
+                      "type": "string"
+                    },
+                    "user": {
+                      "description": "The caller's identity, as returned by a successful authentication.",
+                      "properties": {
+                        "email": {
                           "type": "string"
                         },
-                        "type": "array"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "email",
-                      "name",
-                      "roles",
-                      "created_at",
-                      "avatar_url"
-                    ],
-                    "type": "object"
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "roles": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "roles",
+                        "name"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "access_token",
+                    "refresh_token",
+                    "token_type",
+                    "expires_in",
+                    "default_redirect",
+                    "user"
+                  ],
+                  "title": "LoginResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Authenticate with email/password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/logout": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "title": "MessageResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Sign out",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/me": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/auth/api/me` and `PATCH /b/auth/api/me` response body.",
+                  "properties": {
+                    "user": {
+                      "description": "The caller's own profile.",
+                      "properties": {
+                        "avatar_url": {
+                          "type": "string"
+                        },
+                        "created_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "email": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "roles": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "name",
+                        "roles",
+                        "created_at",
+                        "avatar_url"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ],
+                  "title": "MeResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get current user",
+        "tags": [
+          "auth"
+        ]
+      },
+      "patch": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "`PATCH /b/auth/api/me` request body. Every field is optional and only the\nones present are applied. `name` and `avatar_url` are the only\nuser-editable profile fields: email changes go through verification and\nroles through the admin API.",
+                "properties": {
+                  "avatar_url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "user"
-                ],
-                "title": "MeResponse",
+                "title": "UpdateMeRequest",
                 "type": "object"
               }
             }
           },
-          "description": "Successful response"
-        }
-      },
-      "security": [
-        {
-          "bearerAuth": []
-        }
-      ],
-      "summary": "Update current user profile",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/refresh": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/auth/api/refresh` request body.",
-              "properties": {
-                "refresh_token": {
-                  "type": "string"
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`GET /b/auth/api/me` and `PATCH /b/auth/api/me` response body.",
+                  "properties": {
+                    "user": {
+                      "description": "The caller's own profile.",
+                      "properties": {
+                        "avatar_url": {
+                          "type": "string"
+                        },
+                        "created_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "email": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "roles": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "name",
+                        "roles",
+                        "created_at",
+                        "avatar_url"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ],
+                  "title": "MeResponse",
+                  "type": "object"
                 }
-              },
-              "required": [
-                "refresh_token"
-              ],
-              "title": "RefreshRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update current user profile",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/refresh": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "description": "`POST /b/auth/api/refresh` response body: the rotated token pair only.\nRefresh does not re-resolve `default_redirect` or the user projection, so\nneither is present.",
+                "description": "`POST /b/auth/api/refresh` request body.",
                 "properties": {
-                  "access_token": {
-                    "type": "string"
-                  },
-                  "expires_in": {
-                    "description": "Access token lifetime in seconds",
-                    "format": "uint64",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
                   "refresh_token": {
                     "type": "string"
+                  }
+                },
+                "required": [
+                  "refresh_token"
+                ],
+                "title": "RefreshRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "`POST /b/auth/api/refresh` response body: the rotated token pair only.\nRefresh does not re-resolve `default_redirect` or the user projection, so\nneither is present.",
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "description": "Access token lifetime in seconds",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "refresh_token": {
+                      "type": "string"
+                    },
+                    "token_type": {
+                      "description": "The only `token_type` this API issues.",
+                      "enum": [
+                        "Bearer"
+                      ],
+                      "type": "string"
+                    }
                   },
-                  "token_type": {
-                    "description": "The only `token_type` this API issues.",
-                    "enum": [
-                      "Bearer"
-                    ],
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "access_token",
-                  "refresh_token",
-                  "token_type",
-                  "expires_in"
-                ],
-                "title": "RefreshResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Rotate an access/refresh token pair",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/resend-verification": {
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
-                "properties": {
-                  "message": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "message"
-                ],
-                "title": "MessageResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Re-send the verification email",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/reset-password": {
-    "post": {
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
-                "properties": {
-                  "message": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "message"
-                ],
-                "title": "MessageResponse",
-                "type": "object"
-              }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Reset password with a reset token",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/api/signup": {
-    "post": {
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "description": "`POST /b/auth/api/signup` request body.",
-              "properties": {
-                "email": {
-                  "format": "email",
-                  "type": "string"
-                },
-                "name": {
-                  "description": "Optional display name",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "password": {
-                  "type": "string"
+                  "required": [
+                    "access_token",
+                    "refresh_token",
+                    "token_type",
+                    "expires_in"
+                  ],
+                  "title": "RefreshResponse",
+                  "type": "object"
                 }
-              },
-              "required": [
-                "email",
-                "password"
-              ],
-              "title": "SignupRequest",
-              "type": "object"
-            }
+              }
+            },
+            "description": "Successful response"
           }
         },
-        "required": true
-      },
-      "responses": {
-        "200": {
+        "summary": "Rotate an access/refresh token pair",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/resend-verification": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "title": "MessageResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Re-send the verification email",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/reset-password": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "title": "MessageResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Reset password with a reset token",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/api/signup": {
+      "post": {
+        "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "description": "Verification is not required: the new account is signed in.",
-                    "properties": {
-                      "access_token": {
-                        "type": "string"
-                      },
-                      "default_redirect": {
-                        "description": "Role-aware post-login redirect path",
-                        "type": "string"
-                      },
-                      "email_verified": {
-                        "const": true,
-                        "type": "boolean"
-                      },
-                      "expires_in": {
-                        "description": "Access token lifetime in seconds",
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "refresh_token": {
-                        "type": "string"
-                      },
-                      "token_type": {
-                        "description": "The only `token_type` this API issues.",
-                        "enum": [
-                          "Bearer"
-                        ],
-                        "type": "string"
-                      },
-                      "user": {
-                        "description": "The caller's identity, as returned by a successful authentication.",
-                        "properties": {
-                          "email": {
-                            "type": "string"
-                          },
-                          "id": {
-                            "type": "string"
-                          },
-                          "name": {
-                            "type": "string"
-                          },
-                          "roles": {
-                            "items": {
+                "description": "`POST /b/auth/api/signup` request body.",
+                "properties": {
+                  "email": {
+                    "format": "email",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Optional display name",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "title": "SignupRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "description": "Verification is not required: the new account is signed in.",
+                      "properties": {
+                        "access_token": {
+                          "type": "string"
+                        },
+                        "default_redirect": {
+                          "description": "Role-aware post-login redirect path",
+                          "type": "string"
+                        },
+                        "email_verified": {
+                          "const": true,
+                          "type": "boolean"
+                        },
+                        "expires_in": {
+                          "description": "Access token lifetime in seconds",
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "refresh_token": {
+                          "type": "string"
+                        },
+                        "token_type": {
+                          "description": "The only `token_type` this API issues.",
+                          "enum": [
+                            "Bearer"
+                          ],
+                          "type": "string"
+                        },
+                        "user": {
+                          "description": "The caller's identity, as returned by a successful authentication.",
+                          "properties": {
+                            "email": {
                               "type": "string"
                             },
-                            "type": "array"
-                          }
-                        },
-                        "required": [
-                          "id",
-                          "email",
-                          "roles",
-                          "name"
-                        ],
-                        "type": "object"
-                      }
-                    },
-                    "required": [
-                      "email_verified",
-                      "access_token",
-                      "refresh_token",
-                      "token_type",
-                      "expires_in",
-                      "default_redirect",
-                      "user"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "description": "Verification is required, or the address is already registered: no\ntokens are issued.",
-                    "properties": {
-                      "email_verified": {
-                        "const": false,
-                        "type": "boolean"
+                            "id": {
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "roles": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "email",
+                            "roles",
+                            "name"
+                          ],
+                          "type": "object"
+                        }
                       },
-                      "message": {
-                        "type": "string"
-                      },
-                      "user": {
-                        "description": "The address a signup awaiting verification was made for.",
-                        "properties": {
-                          "email": {
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "email"
-                        ],
-                        "type": "object"
-                      }
+                      "required": [
+                        "email_verified",
+                        "access_token",
+                        "refresh_token",
+                        "token_type",
+                        "expires_in",
+                        "default_redirect",
+                        "user"
+                      ],
+                      "type": "object"
                     },
-                    "required": [
-                      "email_verified",
-                      "message",
-                      "user"
-                    ],
-                    "type": "object"
-                  }
-                ],
-                "description": "`POST /b/auth/api/signup` response body: signed in with tokens, or\nawaiting email verification with none.",
-                "title": "SignupResponse"
+                    {
+                      "description": "Verification is required, or the address is already registered: no\ntokens are issued.",
+                      "properties": {
+                        "email_verified": {
+                          "const": false,
+                          "type": "boolean"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "user": {
+                          "description": "The address a signup awaiting verification was made for.",
+                          "properties": {
+                            "email": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "email"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "email_verified",
+                        "message",
+                        "user"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "description": "`POST /b/auth/api/signup` response body: signed in with tokens, or\nawaiting email verification with none.",
+                  "title": "SignupResponse"
+                }
               }
-            }
-          },
-          "description": "Successful response"
-        }
-      },
-      "summary": "Create account",
-      "tags": [
-        "auth"
-      ]
-    }
-  },
-  "/b/auth/oauth/login": {
-    "get": {
-      "parameters": [
-        {
-          "in": "query",
-          "name": "provider",
-          "required": true,
-          "schema": {
-            "description": "OAuth provider to start the flow with",
-            "enum": [
-              "google",
-              "github",
-              "microsoft"
-            ],
-            "type": "string"
+            },
+            "description": "Successful response"
           }
-        }
-      ],
-      "responses": {
-        "200": {
-          "description": "Successful response"
-        }
-      },
-      "summary": "Start OAuth flow",
-      "tags": [
-        "auth"
-      ]
+        },
+        "summary": "Create account",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/b/auth/oauth/login": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "description": "OAuth provider to start the flow with",
+              "enum": [
+                "google",
+                "github",
+                "microsoft"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        },
+        "summary": "Start OAuth flow",
+        "tags": [
+          "auth"
+        ]
+      }
     }
   }
 }
