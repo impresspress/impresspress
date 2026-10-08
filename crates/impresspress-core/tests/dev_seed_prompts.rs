@@ -210,10 +210,18 @@ fn tool_tokens_splits_names_out_of_prose() {
 /// Every seed guide's "Pricing an offer" example is an argument the create-
 /// offer endpoint accepts: `product_id` goes to the path, and the rest
 /// deserializes into the handler's own type, `deny_unknown_fields` and all.
+/// Deserializing is not enough — `pricing_model: "fixed"` beside a
+/// `per_unit` amount decodes fine and is refused — so the example is also
+/// sent through the real router to the admin create-offer handler, which
+/// runs the same validation (`build_offer`, `validate_offer`) every agent
+/// call does, and the draft it creates prices at the amount the guide states.
 #[cfg(feature = "block-products")]
-#[test]
-fn every_guide_offer_example_is_a_valid_create_offer_argument() {
-    use impresspress_core::blocks::products::contracts::OfferDefinitionRequest;
+#[tokio::test]
+async fn every_guide_offer_example_is_a_valid_create_offer_argument() {
+    use impresspress_core::{
+        blocks::products::contracts::OfferDefinitionRequest,
+        test_support::{admin_msg, output_json, TestContext},
+    };
     for (path, text) in seed_files("guide.md") {
         let section = text
             .split("## Pricing an offer")
@@ -235,8 +243,45 @@ fn every_guide_offer_example_is_a_valid_create_offer_argument() {
             "{}: the example must say where product_id goes",
             path.display()
         );
-        let parsed: OfferDefinitionRequest =
-            serde_json::from_value(argument).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let parsed: OfferDefinitionRequest = serde_json::from_value(argument.clone())
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert_eq!(parsed.components.len(), 1, "{}", path.display());
+
+        let ctx = TestContext::with_products().await;
+        let product = output_json(
+            ctx.dispatch_resolved_json(
+                admin_msg("create", "/b/products/api/admin/products"),
+                &serde_json::json!({"name": "Coffee", "slug": "coffee", "currency": "nzd"}),
+            )
+            .await,
+        )
+        .await;
+        let product_id = product["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("create product: {product}"));
+        let offers = format!("/b/products/api/admin/products/{product_id}/offers");
+        let created = output_json(
+            ctx.dispatch_resolved_json(admin_msg("create", &offers), &argument)
+                .await,
+        )
+        .await;
+        assert_eq!(created["status"], "draft", "{}: {created}", path.display());
+        let offer_id = created["offer"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}: {created}", path.display()));
+        let preview = output_json(
+            ctx.dispatch_resolved_json(
+                admin_msg("create", &format!("{offers}/{offer_id}/preview")),
+                &serde_json::json!({"offer_id": offer_id}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            preview["amounts"]["total_minor"],
+            1450,
+            "{}: {preview}",
+            path.display()
+        );
     }
 }

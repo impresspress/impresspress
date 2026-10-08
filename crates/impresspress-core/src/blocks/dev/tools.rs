@@ -122,7 +122,7 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
          sandbox's site-authoring guide (the CSS framework it ships, the page skeleton, the \
          storefront element, the catalog API, what a write refuses) — read it before writing \
          under `site/`. `suggested_prompt` is the task the workspace page suggests for this \
-         template, empty when it suggests none.",
+         template, empty when it suggests none or the sandbox has no seed.",
     ),
     (
         "impresspress/dev",

@@ -88,9 +88,15 @@ This is a complete `shop_create_offer` argument (`product_id` is the id
                  "amount": {"type": "fixed", "unit_amount_minor": 1450}}]}
 ```
 
-Amounts are integer minor units (1450 = 14.50). `currency` is a three-letter
-ISO code. `shop_create_offer`'s schema lists the other `amount` types, which
-price from a customer input; a `graduated` or `volume` amount needs
+`currency` is a three-letter ISO code. Amounts are integers in the
+currency's minor unit, so their scale follows the currency's decimal places:
+for `nzd`, 1450 is NZ$14.50; for a zero-decimal currency such as `jpy`, 1450
+is ¥1450.
+
+`shop_create_offer`'s schema lists the other `amount` types, which price
+from a customer input. Changing only `amount` is refused: they need
+`pricing_model: "components"` and a `variables` entry whose `key` is the
+amount's `input`, and a `graduated` or `volume` amount also needs
 `billing_scheme: "tiered"`.
 
 ## Theming the product widget
