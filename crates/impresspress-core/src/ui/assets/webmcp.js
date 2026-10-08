@@ -23,6 +23,10 @@ function register(tool) {
 // landed without threading a callback through `refresh()`'s promise.
 var registered = [];
 var generation = 0;
+// Whether a `load()` is in flight. A refresh empties `registered` before it
+// fetches, so for that while the list says nothing about what the site
+// offers — `count()` reports no number until the load has settled.
+var loading = false;
 
 // Dispatched on `window` each time a `load()` settles, after `generation`
 // has counted it. A page that states how many tools its tab has — the
@@ -45,6 +49,7 @@ function unregisterAll() {
 }
 
 function load() {
+  loading = true;
   return fetch('/b/webmcp/manifest.json', { credentials: 'same-origin' })
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (manifest) {
@@ -76,6 +81,7 @@ function load() {
       // would hang every such poller (`webmcp.spec.ts` is one) on exactly
       // the degraded page this file otherwise takes care to tolerate.
       generation += 1;
+      loading = false;
       window.dispatchEvent(new Event(LOADED_EVENT));
     });
 }
@@ -94,9 +100,11 @@ function refresh() {
 window.__impresspressWebmcp = {
   refresh: refresh,
   generation: function () { return generation; },
-  // How many tools this script has registered with the browser right now —
-  // only the ones the browser accepted (`load` keeps no others).
-  count: function () { return registered.length; }
+  // How many tools this script's last completed load registered with the
+  // browser — only the ones the browser accepted (`load` keeps no others) —
+  // or `null` before the first load has settled and while a refresh is in
+  // flight, when there is no such number to state.
+  count: function () { return loading || generation === 0 ? null : registered.length; }
 };
 
 var sw = navigator.serviceWorker;

@@ -928,15 +928,13 @@ consoleRun.addEventListener('click', function () {
 var toolsAnnounced = false;
 
 // How many tools `webmcp.js` — the site's own registrar, on every page — has
-// registered in this tab, or `null` while that is not known yet: the script
-// has not run (it is the last one in the body and this one may run first),
-// or its first load has not settled.
+// registered in this tab, or `null` while that is not known: the script has
+// not run (it is the last one in the body and this one may run first), or a
+// load of its own — its first, or a refresh after a runtime rebuild — has
+// not settled (`count()` answers `null` then).
 function siteToolCount() {
   var site = window.__impresspressWebmcp;
-  if (!site || site.generation() === 0) {
-    return null;
-  }
-  return site.count();
+  return site ? site.count() : null;
 }
 
 // Say which way an agent reaches the tools in this browser. The guide is

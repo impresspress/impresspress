@@ -118,10 +118,8 @@ test('with WebMCP the console lists exactly the objects the registrar was handed
 // The tab's agent has two registrars' tools: this page's and the site's own
 // (`webmcp.js`, on every page). The sentence counts both, whichever script
 // finished first, and follows the site's set when it is refreshed.
-const site = (count, generation = 1) => ({
-  count: () => count,
-  generation: () => generation
-});
+// `count()` is `null` while `webmcp.js` has no completed load to report.
+const site = (count) => ({ count: () => count });
 const BOTH = (total, workspace, own) =>
   `This browser has WebMCP: ${total} tools are registered for an agent in this tab: the ` +
   `${workspace} workspace tools, which the Tool console below also runs, and the site's ` +
@@ -138,7 +136,7 @@ test('with the site’s tools already registered, the page states both counts an
 });
 
 test('the site’s tools arriving later, or changing, update the sentence', async () => {
-  const registrar = { count: () => 0, generation: () => 0 };
+  const registrar = site(null);
   const { elements, fireWindow } = instantiate({
     hasModelContext: true,
     toolsManifest: MANIFEST,
@@ -149,25 +147,37 @@ test('the site’s tools arriving later, or changing, update the sentence', asyn
   assert.match(elements.get('dev-webmcp-status').textContent, /still being registered\.$/);
 
   registrar.count = () => 10;
-  registrar.generation = () => 1;
   fireWindow('impresspress:webmcp-loaded', {});
   assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(14, 4, 10));
 
   // A refresh after a runtime rebuild (a compiled block's tools).
   registrar.count = () => 12;
-  registrar.generation = () => 2;
   fireWindow('impresspress:webmcp-loaded', {});
   assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(16, 4, 12));
 
   // A load that found none.
   registrar.count = () => 0;
-  registrar.generation = () => 3;
   fireWindow('impresspress:webmcp-loaded', {});
   assert.equal(
     elements.get('dev-webmcp-status').textContent,
     'This browser has WebMCP: the 4 workspace tools are registered for an agent in this tab, ' +
       'and the Tool console below runs the same tools. The site has registered none of its own.'
   );
+});
+
+// A refresh of the site's tools empties them before it fetches. The page
+// writing its sentence in that window — its own tools arriving then — must
+// not report the empty moment as the site having none.
+test('while a refresh of the site’s tools is in flight, no count is stated for them', async () => {
+  const { elements } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    siteRegistrar: site(null)
+  });
+  await settle();
+  const sentence = elements.get('dev-webmcp-status').textContent;
+  assert.match(sentence, /The site's own tools are still being registered\.$/);
+  assert.doesNotMatch(sentence, /none of its own/);
 });
 
 test('a site load before this page’s tools arrive, or after they are gone, writes nothing', async () => {

@@ -147,15 +147,16 @@ const SHELL_URL = '__SHELL_URL__';
 // moment, and a reload of the shell requested then CANCELS the navigation
 // under way and puts the tab back here — on `/`, rendered by the app, in
 // place of the page that was asked for. (Both live runs of 2026-10-08 opened
-// `/llms.txt` that way and landed on the sandbox's welcome page.) The
-// navigation under way already goes where the shell was going to send the
-// tab — to the app, through the worker — so the shell stands down and lets
-// it finish.
+// `/llms.txt` that way and landed on the sandbox's welcome page.) A
+// navigation under way is where the tab is going — wherever that is — so the
+// shell stands down and lets it finish.
 //
-// `beforeunload` is the signal because it is the one a browser fires at a
-// document as ANY navigation away from it begins, whoever started it;
-// the Navigation API's `navigate` event is not fired for one started from
-// the browser's own UI. There is no event for a navigation that began and
+// `beforeunload` is the signal because desktop browsers fire it at a
+// document as a navigation away from it begins, whoever started it; the
+// Navigation API's `navigate` event is not fired for one started from the
+// browser's own UI. It is not universal: iOS Safari does not fire it
+// reliably, and there the shell reloads as it always did, which can cancel
+// the navigation again. There is no event for a navigation that began and
 // then left the document in place (a download, a 204), so the line the shell
 // shows when it stands down says what to do if the page stays.
 let leaving = false;

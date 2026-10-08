@@ -130,3 +130,30 @@ test('count() is what is registered now, and every settled load is announced on 
   assert.equal(published.count(), 0, 'a refused manifest leaves nothing registered');
   assert.equal(windowEvents.length, 3, 'and is announced like any other load');
 });
+
+// A refresh unregisters everything before it fetches, so mid-flight the list
+// is empty whatever the site offers. `count()` states no number then — nor
+// before the first load has settled — rather than a 0 that is not true.
+test('count() is null before the first load and while a refresh is in flight', async () => {
+  let answer;
+  const { published } = instantiate({
+    serviceWorker: serviceWorkerStub({ controlled: true }),
+    respond: () =>
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({ ok: true, status: 200, json: async () => ({ tools: [manifestTool('list_products')] }) });
+      })
+  });
+  assert.equal(published.count(), null, 'no load has settled yet');
+  await settle();
+  answer();
+  await settle();
+  assert.equal(published.count(), 1);
+
+  const refreshed = published.refresh();
+  await settle();
+  assert.equal(published.count(), null, 'mid-refresh: nothing to report');
+  answer();
+  await refreshed;
+  assert.equal(published.count(), 1);
+});
