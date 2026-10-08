@@ -811,7 +811,7 @@
                             "type": "string"
                           },
                           "currency": {
-                            "description": "ISO 4217 presentment currency.",
+                            "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                             "type": "string"
                           },
                           "current_version": {
@@ -1023,7 +1023,7 @@
                     ]
                   },
                   "currency": {
-                    "description": "ISO 4217 currency. A seller product defaults to the platform default\ncurrency when omitted.",
+                    "description": "ISO 4217 currency, in any letter case; stored and returned\nupper-case. A seller product defaults to the platform default\ncurrency when omitted.",
                     "type": [
                       "string",
                       "null"
@@ -1180,7 +1180,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -1451,7 +1451,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -1657,7 +1657,7 @@
                     ]
                   },
                   "currency": {
-                    "description": "ISO 4217 currency.",
+                    "description": "ISO 4217 currency, in any letter case; stored and returned\nupper-case.",
                     "type": [
                       "string",
                       "null"
@@ -1813,7 +1813,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -2039,7 +2039,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -2920,7 +2920,8 @@
                                       "type": "string"
                                     },
                                     "key": {
-                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                      "pattern": "^[A-Za-z0-9_]+$",
                                       "type": "string"
                                     },
                                     "kind": {
@@ -3098,7 +3099,7 @@
                           "type": "string"
                         },
                         "currency": {
-                          "description": "ISO 4217 presentment currency.",
+                          "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                           "type": "string"
                         },
                         "current_version": {
@@ -3331,7 +3332,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -3559,7 +3560,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -4440,7 +4441,8 @@
                                       "type": "string"
                                     },
                                     "key": {
-                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                      "pattern": "^[A-Za-z0-9_]+$",
                                       "type": "string"
                                     },
                                     "kind": {
@@ -5181,7 +5183,7 @@
                     "type": "array"
                   },
                   "currency": {
-                    "description": "Three-letter ISO currency code, e.g. `\"nzd\"`. Every amount in the\noffer is in this currency's minor units.",
+                    "description": "Three-letter ISO 4217 currency code, e.g. `\"NZD\"`. Accepted in any\nletter case and stored and returned upper-case. Every amount in the\noffer is in this currency's minor units.",
                     "type": "string"
                   },
                   "interval_count": {
@@ -5264,7 +5266,8 @@
                           "type": "string"
                         },
                         "key": {
-                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                          "pattern": "^[A-Za-z0-9_]+$",
                           "type": "string"
                         },
                         "kind": {
@@ -6043,7 +6046,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -6912,7 +6916,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -7779,7 +7784,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -8520,7 +8526,7 @@
                     "type": "array"
                   },
                   "currency": {
-                    "description": "Three-letter ISO currency code, e.g. `\"nzd\"`. Every amount in the\noffer is in this currency's minor units.",
+                    "description": "Three-letter ISO 4217 currency code, e.g. `\"NZD\"`. Accepted in any\nletter case and stored and returned upper-case. Every amount in the\noffer is in this currency's minor units.",
                     "type": "string"
                   },
                   "interval_count": {
@@ -8603,7 +8609,8 @@
                           "type": "string"
                         },
                         "key": {
-                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                          "pattern": "^[A-Za-z0-9_]+$",
                           "type": "string"
                         },
                         "kind": {
@@ -9382,7 +9389,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -10251,7 +10259,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -12137,7 +12146,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -13006,7 +13016,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -14858,7 +14869,7 @@
                             "type": "string"
                           },
                           "currency": {
-                            "description": "ISO 4217 presentment currency.",
+                            "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                             "type": "string"
                           },
                           "current_version": {
@@ -16365,7 +16376,7 @@
                             "type": "string"
                           },
                           "currency": {
-                            "description": "ISO 4217 presentment currency.",
+                            "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                             "type": "string"
                           },
                           "current_version": {
@@ -16577,7 +16588,7 @@
                     ]
                   },
                   "currency": {
-                    "description": "ISO 4217 currency. A seller product defaults to the platform default\ncurrency when omitted.",
+                    "description": "ISO 4217 currency, in any letter case; stored and returned\nupper-case. A seller product defaults to the platform default\ncurrency when omitted.",
                     "type": [
                       "string",
                       "null"
@@ -16734,7 +16745,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -17005,7 +17016,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -17211,7 +17222,7 @@
                     ]
                   },
                   "currency": {
-                    "description": "ISO 4217 currency.",
+                    "description": "ISO 4217 currency, in any letter case; stored and returned\nupper-case.",
                     "type": [
                       "string",
                       "null"
@@ -17367,7 +17378,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -18247,7 +18258,8 @@
                                       "type": "string"
                                     },
                                     "key": {
-                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                      "pattern": "^[A-Za-z0-9_]+$",
                                       "type": "string"
                                     },
                                     "kind": {
@@ -18425,7 +18437,7 @@
                           "type": "string"
                         },
                         "currency": {
-                          "description": "ISO 4217 presentment currency.",
+                          "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                           "type": "string"
                         },
                         "current_version": {
@@ -18659,7 +18671,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "current_version": {
@@ -19540,7 +19552,8 @@
                                       "type": "string"
                                     },
                                     "key": {
-                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                      "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                      "pattern": "^[A-Za-z0-9_]+$",
                                       "type": "string"
                                     },
                                     "kind": {
@@ -20281,7 +20294,7 @@
                     "type": "array"
                   },
                   "currency": {
-                    "description": "Three-letter ISO currency code, e.g. `\"nzd\"`. Every amount in the\noffer is in this currency's minor units.",
+                    "description": "Three-letter ISO 4217 currency code, e.g. `\"NZD\"`. Accepted in any\nletter case and stored and returned upper-case. Every amount in the\noffer is in this currency's minor units.",
                     "type": "string"
                   },
                   "interval_count": {
@@ -20364,7 +20377,8 @@
                           "type": "string"
                         },
                         "key": {
-                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                          "pattern": "^[A-Za-z0-9_]+$",
                           "type": "string"
                         },
                         "kind": {
@@ -21143,7 +21157,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -22012,7 +22027,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -22879,7 +22895,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -23620,7 +23637,7 @@
                     "type": "array"
                   },
                   "currency": {
-                    "description": "Three-letter ISO currency code, e.g. `\"nzd\"`. Every amount in the\noffer is in this currency's minor units.",
+                    "description": "Three-letter ISO 4217 currency code, e.g. `\"NZD\"`. Accepted in any\nletter case and stored and returned upper-case. Every amount in the\noffer is in this currency's minor units.",
                     "type": "string"
                   },
                   "interval_count": {
@@ -23703,7 +23720,8 @@
                           "type": "string"
                         },
                         "key": {
-                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                          "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                          "pattern": "^[A-Za-z0-9_]+$",
                           "type": "string"
                         },
                         "kind": {
@@ -24482,7 +24500,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -25351,7 +25370,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -27237,7 +27257,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -28106,7 +28127,8 @@
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                "pattern": "^[A-Za-z0-9_]+$",
                                 "type": "string"
                               },
                               "kind": {
@@ -30072,7 +30094,7 @@
                             "type": "string"
                           },
                           "currency": {
-                            "description": "ISO 4217 presentment currency.",
+                            "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                             "type": "string"
                           },
                           "description": {
@@ -30239,7 +30261,7 @@
                       "type": "string"
                     },
                     "currency": {
-                      "description": "ISO 4217 presentment currency.",
+                      "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                       "type": "string"
                     },
                     "description": {
@@ -31205,7 +31227,7 @@
                             "type": "string"
                           },
                           "currency": {
-                            "description": "ISO 4217 presentment currency.",
+                            "description": "ISO 4217 presentment currency, upper-case (e.g. `\"NZD\"`), as on\nevery offer and order.",
                             "type": "string"
                           },
                           "current_version": {
@@ -33005,7 +33027,8 @@
                                   "type": "string"
                                 },
                                 "key": {
-                                  "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. Letters, digits and underscores; unique within the offer.",
+                                  "description": "Name that amount rules and conditions use to read this input, e.g.\n`\"kilograms\"`. One or more ASCII letters, digits or underscores, and\nunique within the offer; an offer write with any other key is refused.",
+                                  "pattern": "^[A-Za-z0-9_]+$",
                                   "type": "string"
                                 },
                                 "kind": {

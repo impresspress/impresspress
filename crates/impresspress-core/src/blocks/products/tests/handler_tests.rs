@@ -6299,3 +6299,126 @@ async fn a_duplicates_slug_is_always_in_the_grammar() {
         );
     }
 }
+
+// ============================================================
+// Currency: one spelling, upper-case ISO 4217
+// ============================================================
+
+/// A product's currency is stored and answered in the same upper-case ISO
+/// 4217 spelling as its offers, its price previews and its orders, whatever
+/// case the caller sent. Before, the product echoed `nzd` back while every
+/// offer under it said `NZD`.
+#[tokio::test]
+async fn admin_product_writes_store_the_canonical_currency() {
+    let ctx = ctx().await;
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/products",
+        serde_json::json!({"name": "Lowercase", "currency": " nzd "}),
+    );
+    let created = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(created["currency"], "NZD");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (mut update, update_input) = request_msg(
+        "update",
+        &format!("/b/products/api/admin/products/{id}"),
+        "admin_1",
+        serde_json::json!({"currency": "eur"}),
+    );
+    update.set_meta("auth.user_roles", "admin");
+    let updated = output_to_json(dispatch(&ctx, update, update_input).await).await;
+    assert_eq!(updated["currency"], "EUR");
+
+    let (get, get_input) = admin_get_msg(&format!("/b/products/api/admin/products/{id}"));
+    let fetched = output_to_json(dispatch(&ctx, get, get_input).await).await;
+    assert_eq!(fetched["currency"], "EUR", "the stored row is canonical");
+}
+
+/// A malformed currency is a 400 on the admin tier too. It used to be stored
+/// as sent, so a product could carry a code no offer could ever be priced in.
+#[tokio::test]
+async fn admin_product_writes_refuse_a_malformed_currency() {
+    let ctx = ctx().await;
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/products",
+        serde_json::json!({"name": "Bad", "currency": "nz1"}),
+    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
+
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/products",
+        serde_json::json!({"name": "Good"}),
+    );
+    let id = output_to_json(dispatch(&ctx, msg, input).await).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (mut update, update_input) = request_msg(
+        "update",
+        &format!("/b/products/api/admin/products/{id}"),
+        "admin_1",
+        serde_json::json!({"currency": "euros"}),
+    );
+    update.set_meta("auth.user_roles", "admin");
+    assert!(
+        output_is_error(
+            dispatch(&ctx, update, update_input).await,
+            ErrorCode::InvalidArgument
+        )
+        .await
+    );
+}
+
+/// The seller tier stores the canonical spelling too: of a sent currency, of
+/// a patched one, and of the configured default a product falls back to.
+#[tokio::test]
+async fn seller_product_writes_store_the_canonical_currency() {
+    let ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY", "nzd"),
+    ])
+    .await;
+    let (msg, input) = create_msg(
+        "/b/products/api/products",
+        "seller_1",
+        serde_json::json!({"name": "Defaulted"}),
+    );
+    let defaulted = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(defaulted["currency"], "NZD", "the configured default");
+
+    let (msg, input) = create_msg(
+        "/b/products/api/products",
+        "seller_1",
+        serde_json::json!({"name": "Sent", "currency": "usd"}),
+    );
+    let sent = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(sent["currency"], "USD");
+
+    let id = sent["id"].as_str().unwrap();
+    let (msg, input) = update_msg(
+        &format!("/b/products/api/products/{id}"),
+        "seller_1",
+        serde_json::json!({"currency": "eur"}),
+    );
+    let patched = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(patched["currency"], "EUR");
+}
+
+/// A default currency setting that is not a three-letter code is the
+/// operator's fault, so a seller create that falls back to it is a 500, not
+/// a 400 about a field the seller never sent, and no product is stored with
+/// the malformed code.
+#[tokio::test]
+async fn a_malformed_default_currency_is_a_server_error() {
+    let ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY", "dollars"),
+    ])
+    .await;
+    let (msg, input) = create_msg(
+        "/b/products/api/products",
+        "seller_1",
+        serde_json::json!({"name": "Defaulted"}),
+    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::Internal).await);
+}

@@ -197,7 +197,7 @@ function collectWizardVariables(){
   var variables=[],keys=new Set();
   document.querySelectorAll('[data-variable-row]').forEach(function(row,index){
     var key=row.querySelector('[data-variable-key]').value.trim();var label=row.querySelector('[data-variable-label]').value.trim();var kind=row.querySelector('[data-variable-kind]').value;
-    if(!/^[A-Za-z][A-Za-z0-9_]*$/.test(key))throw new Error('Each customer input needs a unique key using letters, numbers, and underscores.');
+    if(!/^[A-Za-z0-9_]+$/.test(key))throw new Error('Each customer input needs a unique key using letters, numbers, and underscores.');
     if(keys.has(key))throw new Error('Customer input keys must be unique: '+key);keys.add(key);
     if(!label)throw new Error('Each customer input needs a label.');
     var variable={key:key,kind:kind,label:label,required:row.querySelector('[data-variable-required]').checked,visibility:row.querySelector('[data-variable-visibility]').value,sort_order:index};

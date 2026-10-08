@@ -22,6 +22,7 @@ use crate::{
                 ProductDuplicateResponse, ProductListQuery, ProductListResponse, ProductStatus,
                 ProductView, UpdateProductRequest, PRODUCT_SLUG_MAX_LEN,
             },
+            money,
             repo::{self, offers as offer_repo},
         },
     },
@@ -106,6 +107,27 @@ fn reject_unsettable_fields(data: &HashMap<String, serde_json::Value>) -> Result
         "These fields are not settable through this endpoint: {}",
         named.join(", ")
     )))
+}
+
+/// Bring a written `currency` into the one spelling every currency is
+/// stored and answered in: the upper-case ISO 4217 code
+/// [`money::normalize_currency`] returns, which offers, price previews and
+/// orders already carry. A value that is not a three-letter code is a 400.
+///
+/// All four product create and update handlers run this on the caller's
+/// columns before the write, so a product created with `nzd` answers `NZD`
+/// like the offers under it instead of echoing the caller's spelling back.
+/// The seller create's configured default is normalised where it is read,
+/// and a duplicate copies a value that was stored through here.
+fn canonical_currency(data: &mut HashMap<String, serde_json::Value>) -> Result<(), OutputStream> {
+    let Some(value) = data.get_mut("currency") else {
+        return Ok(());
+    };
+    let Some(sent) = value.as_str() else {
+        return Err(err_bad_request("currency must be a string"));
+    };
+    *value = serde_json::Value::String(money::normalize_currency(sent).map_err(err_bad_request)?);
+    Ok(())
 }
 
 /// Whether `user_id` may act on `product` through a user-facing (non-admin)
@@ -465,6 +487,9 @@ pub(super) async fn handle_create_product(
         return response;
     }
     let mut data = request.into_columns();
+    if let Err(response) = canonical_currency(&mut data) {
+        return response;
+    }
     stamp_created(&mut data);
     // `or_insert`, and it always inserts: none of these five is a field of
     // `CreateProductRequest`, and `read_write_body` has already refused a
@@ -511,6 +536,9 @@ pub(super) async fn handle_update_product(
     }
     let activates = request.status == Some(ProductStatus::Active);
     let mut data = request.into_columns();
+    if let Err(response) = canonical_currency(&mut data) {
+        return response;
+    }
     // Publishing stamps `published_at` in the same write, as the seller
     // PATCH and moderation approval do. No read first: this handler's one
     // write is also its liveness test (below), and both other writers stamp
@@ -1072,7 +1100,18 @@ pub(super) async fn handle_user_create_product(
             Ok(currency) => currency,
             Err(e) => return crud::db_error_internal(e, "Could not read the default currency"),
         };
+        // A malformed default is the operator's to fix, not the seller's: a
+        // 500 naming the setting rather than a 400 about a field they never
+        // sent.
+        let currency = match money::normalize_currency(&currency) {
+            Ok(currency) => currency,
+            Err(error) => {
+                return err_internal("The default product currency is misconfigured", error)
+            }
+        };
         data.insert("currency".to_string(), serde_json::json!(currency));
+    } else if let Err(response) = canonical_currency(&mut data) {
+        return response;
     }
     stamp_created(&mut data);
     // Default product_template_id to the seeded "default" template's real
@@ -1142,6 +1181,9 @@ pub(super) async fn handle_user_update_product(
     // rather than dropping it silently.
     let requested_status = request.status;
     let mut data = request.into_columns();
+    if let Err(response) = canonical_currency(&mut data) {
+        return response;
+    }
     if let Err(response) = seller_policy::validate_product_fields(ctx, &data).await {
         return response;
     }

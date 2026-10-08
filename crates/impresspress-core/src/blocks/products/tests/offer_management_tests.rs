@@ -911,3 +911,106 @@ async fn a_soft_deleted_product_still_refuses_every_offer_operation_that_opens_s
         "reading one offer of a deleted product"
     );
 }
+
+/// The error an offer write was refused with, or a panic naming `context`.
+async fn refusal(out: wafer_run::OutputStream, context: &str) -> wafer_run::WaferError {
+    match out.collect_buffered().await {
+        Err(wafer_run::streams::output::TerminalNotResponse::Error(error)) => error,
+        Ok(response) => panic!(
+            "{context} must be refused, got {}",
+            String::from_utf8_lossy(&response.body)
+        ),
+        Err(other) => panic!("{context} must be refused: {other:?}"),
+    }
+}
+
+/// A variable key outside the grammar every pricing call enforces is refused
+/// when the offer is written, not first by the preview or checkout that can
+/// then never succeed. Before, `kilo-grams` saved as a draft and every later
+/// preview answered `invalid_offer`.
+#[tokio::test]
+async fn an_offer_write_refuses_a_variable_key_pricing_would_refuse() {
+    let test_ctx = ctx().await;
+    seed_product(&test_ctx, "product_keys", "").await;
+    let collection = "/b/products/api/admin/products/product_keys/offers";
+
+    let mut bad = offer_definition(25);
+    bad["variables"][0]["key"] = json!("kilo-grams");
+    bad["components"][0]["amount"]["input"] = json!("kilo-grams");
+    let (msg, input) = admin_create_msg(collection, bad.clone());
+    let error = refusal(dispatch(&test_ctx, msg, input).await, "a hyphenated key").await;
+    assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
+    assert!(
+        error.message.contains("kilo-grams")
+            && error.message.contains("letters, numbers, and underscores"),
+        "the refusal names the key and the rule: {}",
+        error.message
+    );
+
+    // The good spelling of the same offer is accepted, and a draft update
+    // that introduces the bad key is refused the same way.
+    let mut good = offer_definition(25);
+    good["variables"][0]["key"] = json!("kilo_grams");
+    good["components"][0]["amount"]["input"] = json!("kilo_grams");
+    let (msg, input) = admin_create_msg(collection, good);
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
+    assert_eq!(created["offer"]["variables"][0]["key"], "kilo_grams");
+    let offer_id = created["offer"]["id"].as_str().unwrap();
+
+    let (mut msg, input) = request_msg(
+        "update",
+        &format!("{collection}/{offer_id}"),
+        "admin_1",
+        bad,
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    let error = refusal(dispatch(&test_ctx, msg, input).await, "a draft update").await;
+    assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
+    assert!(error.message.contains("kilo-grams"), "{}", error.message);
+}
+
+/// A choice input with nothing to choose is refused at write time too: it is
+/// the other definition-level rule pricing used to be the first to apply.
+#[tokio::test]
+async fn an_offer_write_refuses_a_select_input_without_allowed_values() {
+    let test_ctx = ctx().await;
+    seed_product(&test_ctx, "product_choices", "").await;
+    let mut definition = offer_definition(25);
+    definition["variables"][1] = json!({
+        "key": "finish",
+        "kind": "select",
+        "label": "Finish",
+        "sort_order": 1
+    });
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/products/product_choices/offers",
+        definition,
+    );
+    let error = refusal(dispatch(&test_ctx, msg, input).await, "an empty select").await;
+    assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("select variables require allowed values"),
+        "{}",
+        error.message
+    );
+}
+
+/// The offer editor (the wizard's and the product manager's visual editor,
+/// which share `collectWizardVariables`) checks a variable key with the same
+/// grammar the server enforces. It used to demand a leading letter, so an
+/// offer whose key the API accepted, such as `2x`, could not be saved again
+/// from the editor.
+#[test]
+fn the_offer_editor_checks_variable_keys_with_the_server_grammar() {
+    let js = include_str!("../assets/products-wizard.js");
+    let check = format!(
+        "if(!/{}/.test(key))throw new Error('Each customer input",
+        super::super::contracts::VARIABLE_KEY_PATTERN
+    );
+    assert!(
+        js.contains(&check),
+        "the editor must test keys with {check}"
+    );
+}

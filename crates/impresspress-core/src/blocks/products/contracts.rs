@@ -262,13 +262,28 @@ pub enum VariableVisibility {
     AdminOnly,
 }
 
+/// The variable key grammar, as the published schema states it: one or more
+/// ASCII letters, digits or underscores. [`is_variable_key`] is the check
+/// every offer write and every pricing call applies.
+pub const VARIABLE_KEY_PATTERN: &str = "^[A-Za-z0-9_]+$";
+
+/// Whether `key` matches [`VARIABLE_KEY_PATTERN`].
+pub fn is_variable_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 /// A value the customer supplies at checkout, e.g. a quantity or a size,
 /// that the offer's amount rules and conditions read by `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VariableDefinition {
     /// Name that amount rules and conditions use to read this input, e.g.
-    /// `"kilograms"`. Letters, digits and underscores; unique within the offer.
+    /// `"kilograms"`. One or more ASCII letters, digits or underscores, and
+    /// unique within the offer; an offer write with any other key is refused.
+    #[schemars(regex(pattern = VARIABLE_KEY_PATTERN))]
     pub key: String,
     /// Kind of value the customer enters. `per_unit`, `flat_plus_per_unit`,
     /// `graduated`, `volume` and `package` amounts need `number` or
@@ -605,7 +620,8 @@ pub struct OfferDefinitionRequest {
     pub name: String,
     /// `payment` for a one-off purchase, `subscription` for a recurring one.
     pub mode: OfferMode,
-    /// Three-letter ISO currency code, e.g. `"nzd"`. Every amount in the
+    /// Three-letter ISO 4217 currency code, e.g. `"NZD"`. Accepted in any
+    /// letter case and stored and returned upper-case. Every amount in the
     /// offer is in this currency's minor units.
     pub currency: String,
     /// `fixed` requires exactly one component with a `fixed` amount;
@@ -1830,7 +1846,8 @@ pub struct ProductView {
     /// URL slug, unique per owner among non-deleted products. Empty when the
     /// product has none.
     pub slug: String,
-    /// ISO 4217 presentment currency.
+    /// ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+    /// every offer and order.
     pub currency: String,
     /// Publication state: `draft`, `pending_review` (seller product awaiting
     /// moderation), `active` (in the public catalog) or `archived`.
@@ -1979,7 +1996,8 @@ pub struct CatalogProductView {
     pub image_url: String,
     pub tags: Vec<String>,
     pub category: String,
-    /// ISO 4217 presentment currency.
+    /// ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
+    /// every offer and order.
     pub currency: String,
     // The *type* is the whole column's, because a projection that narrowed
     // it to the one value the query happens to select would have to be
@@ -2270,7 +2288,8 @@ pub struct CreateProductRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = PRODUCT_SLUG_MAX_LEN), regex(pattern = PRODUCT_SLUG_PATTERN))]
     pub slug: Option<String>,
-    /// ISO 4217 currency. A seller product defaults to the platform default
+    /// ISO 4217 currency, in any letter case; stored and returned
+    /// upper-case. A seller product defaults to the platform default
     /// currency when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
@@ -2330,7 +2349,8 @@ pub struct UpdateProductRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = PRODUCT_SLUG_MAX_LEN), regex(pattern = PRODUCT_SLUG_PATTERN))]
     pub slug: Option<String>,
-    /// ISO 4217 currency.
+    /// ISO 4217 currency, in any letter case; stored and returned
+    /// upper-case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     /// Publication state. A seller may set `draft`, `active` or `archived`;

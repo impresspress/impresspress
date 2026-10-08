@@ -561,11 +561,18 @@ const INVENTORIED_TAILS: &[(&str, &[Tail])] = &[
     ),
     (
         "products/handlers/product.rs",
-        &[Tail {
-            label: "Product row is outside the contract",
-            count: 3,
-            why: "invariant: an undecodable product row",
-        }],
+        &[
+            Tail {
+                label: "Product row is outside the contract",
+                count: 3,
+                why: "invariant: an undecodable product row",
+            },
+            Tail {
+                label: "The default product currency is misconfigured",
+                count: 1,
+                why: "invariant: the default currency setting is not a three-letter code",
+            },
+        ],
     ),
     (
         "products/handlers/catalog.rs",
