@@ -881,7 +881,7 @@
                             "type": "string"
                           },
                           "published_at": {
-                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                             "format": "date-time",
                             "type": [
                               "string",
@@ -1250,7 +1250,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -1521,7 +1521,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -1883,7 +1883,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -2109,7 +2109,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -3168,7 +3168,7 @@
                           "type": "string"
                         },
                         "published_at": {
-                          "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                          "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                           "format": "date-time",
                           "type": [
                             "string",
@@ -3401,7 +3401,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -3629,7 +3629,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -14928,7 +14928,7 @@
                             "type": "string"
                           },
                           "published_at": {
-                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                             "format": "date-time",
                             "type": [
                               "string",
@@ -16435,7 +16435,7 @@
                             "type": "string"
                           },
                           "published_at": {
-                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                             "format": "date-time",
                             "type": [
                               "string",
@@ -16804,7 +16804,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -17075,7 +17075,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -17437,7 +17437,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -18495,7 +18495,7 @@
                           "type": "string"
                         },
                         "published_at": {
-                          "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                          "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                           "format": "date-time",
                           "type": [
                             "string",
@@ -18729,7 +18729,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -30116,7 +30116,7 @@
                             "type": "string"
                           },
                           "published_at": {
-                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                             "format": "date-time",
                             "type": [
                               "string",
@@ -30283,7 +30283,7 @@
                       "type": "string"
                     },
                     "published_at": {
-                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                      "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                       "format": "date-time",
                       "type": [
                         "string",
@@ -31275,7 +31275,7 @@
                             "type": "string"
                           },
                           "published_at": {
-                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` (even to a\nproduct that is already active) and a moderation approval. A\nmoderation rejection clears it; every other write, archiving\nincluded, leaves it unchanged.",
+                            "description": "RFC 3339 timestamp of the product's latest publishing write, or\n`null` if there is none. Every write that makes the product active\nsets it to now: an update that sends `status: \"active\"` and takes\neffect (even on a product that is already active), and a moderation\napproval. A seller's update that sends `status: \"active\"` while\nmoderation is required and the product is not approved moves it to\n`pending_review` instead and leaves this unchanged. A moderation\nrejection clears it; every other write, archiving included, leaves it\nunchanged.",
                             "format": "date-time",
                             "type": [
                               "string",

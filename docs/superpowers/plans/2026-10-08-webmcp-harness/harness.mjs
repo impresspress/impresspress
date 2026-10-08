@@ -5,7 +5,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 const PORT = +(process.env.PORT || 7788);
 const OUT = process.env.OUT || '.';
-const BRIDGE = process.env.BRIDGE !== '0';
+// BRIDGE=1 aliases navigator.modelContext as document.modelContext, the
+// spelling pre-fix builds read. Off by default: the product reads only
+// navigator.modelContext, and a default-on alias is what masked that defect.
+// Turn it on only to re-test a build from before the fix.
+const BRIDGE = process.env.BRIDGE === '1';
 const b = await chromium.launch({ channel: 'chrome', headless: true, args: ['--enable-features=WebMCPTesting'] });
 const ctx = await b.newContext({ viewport: { width: 1280, height: 900 } });
 if (BRIDGE) await ctx.addInitScript(`if (!('modelContext' in document) && navigator.modelContext) Object.defineProperty(document,'modelContext',{value: navigator.modelContext});`);

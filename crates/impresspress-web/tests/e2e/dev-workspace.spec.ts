@@ -154,12 +154,25 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   await waitForTool(page, 'list_products');
   await waitForTool(page, 'dev_export');
   // Chrome throws on a duplicate name instead of replacing, so a name both
-  // registrars published would lose one registration. They publish disjoint
-  // names (`no_dev_or_shop_tool_leaks_into_the_global_manifest` pins the
-  // server half); this pins what the browser ends up holding, before and
-  // after webmcp.js swaps its own set out.
+  // registrars published would lose one registration — and `listTools()`
+  // can never report a duplicate, so the registry alone cannot show the
+  // loss. What can: the registry must hold every name the two registrars
+  // published, counted with repeats — `webmcp.js` the manifest served to
+  // this session, `dev.js` its `PAGE_TOOLS`. A name both published appears
+  // twice on the right and once on the left; any other registration the
+  // browser refused is missing from the left. They publish disjoint names
+  // (`no_dev_or_shop_tool_leaks_into_the_global_manifest` pins the server
+  // half); this pins what the browser ends up holding, before and after
+  // webmcp.js swaps its own set out.
   const names = await toolNames(page);
-  expect(new Set(names).size, `duplicate registrations: ${names}`).toBe(names.length);
+  const manifestNames = await page.evaluate(async () => {
+    const response = await fetch('/b/webmcp/manifest.json', { credentials: 'same-origin' });
+    const manifest = (await response.json()) as { tools: Array<{ name: string }> };
+    return manifest.tools.map((tool) => tool.name);
+  });
+  expect(names, 'the registry holds each registrar\'s names exactly once').toEqual(
+    [...manifestNames, ...PAGE_TOOLS].sort(),
+  );
   const generation = await page.evaluate(() =>
     (window as unknown as { __impresspressWebmcp: { generation(): number } }).__impresspressWebmcp.generation(),
   );

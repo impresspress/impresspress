@@ -9,6 +9,7 @@ use impresspress_core::{
     blocks::dev::test_support::FakeControl,
     test_support::{admin_msg, discovery_json_as, output_json, TestContext},
 };
+use wafer_run::context::Context;
 
 /// Host passed to [`discovery_json_as`] — arbitrary, but shared with the
 /// other discovery-document tests (`openapi_document`,
@@ -45,6 +46,39 @@ async fn tools_json_publishes_every_selection_with_zero_refusals() {
     for tool in doc["tools"].as_array().unwrap() {
         assert!(tool["inputSchema"].is_object(), "{}", tool["name"]);
         assert!(!tool["description"].as_str().unwrap().is_empty());
+    }
+}
+
+/// No curated tool names a `server_only` endpoint.
+///
+/// `/b/webmcp/manifest.json`, `/openapi.json` and the agent card drop
+/// `server_only` endpoints in the browser runtime (`pipeline.rs`'s
+/// `discoverable_infos`); `tools.json` projects `SELECTIONS` straight from
+/// the registered blocks and applies no such filter. That is right only
+/// while no selection names one: the dev block is registered by the browser
+/// runtime alone (`impresspress-web`), so a `server_only` row would publish a
+/// tool whose every call the sandbox refuses. A row like that is an authoring
+/// error in `SELECTIONS`, and failing here names it; filtering it out at
+/// serve time would only make it one fewer tool on the page.
+#[tokio::test]
+async fn no_selection_names_a_server_only_endpoint() {
+    let ctx = TestContext::with_products()
+        .await
+        .with_dev_added(FakeControl::new())
+        .await;
+    let blocks = ctx.registered_blocks();
+    for (block, method, path, tool, _) in impresspress_core::blocks::dev::tools::SELECTIONS {
+        let endpoint = blocks
+            .iter()
+            .filter(|b| b.name == *block)
+            .flat_map(|b| b.endpoints.iter())
+            .find(|ep| ep.method == *method && ep.path == *path)
+            .unwrap_or_else(|| panic!("{tool}: no {method:?} {path} declared by {block}"));
+        assert!(
+            !endpoint.server_only,
+            "{tool} selects {method:?} {path}, which is server_only: the browser runtime that \
+             serves tools.json refuses every call to it"
+        );
     }
 }
 
