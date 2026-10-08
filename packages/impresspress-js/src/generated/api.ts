@@ -5804,12 +5804,9 @@ export interface paths {
                                 };
                                 /**
                                  * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`.
-                                 *
-                                 *     The type existed before this PR but nothing wrote it: every transition
-                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
-                                 *     back out for its compare-and-swap expectations, so the CAS guard and
-                                 *     the column could drift apart silently. Both are this type now.
+                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                                 *     compare-and-swap expectations are spelled with this type, so the guard
+                                 *     and the column cannot drift apart.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -5826,14 +5823,7 @@ export interface paths {
                                  *
                                  *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                                  *     it is published, and only becomes `synced` once Stripe has the matching
-                                 *     Price. The two were both plain strings and both called "status" on the
-                                 *     same row.
-                                 *
-                                 *     `impresspress__products__payment_links` has a `sync_status` column with
-                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                                 *     note `error`, not `failed`). It is deliberately not typed with this
-                                 *     enum; giving it one means either changing a stored literal or carrying a
-                                 *     fourth spelling, and that is its own decision.
+                                 *     Price.
                                  *
                                  *     - `not_synced` — never sent to Stripe. The column's default.
                                  *     - `syncing` — a synchronization is in flight.
@@ -6640,12 +6630,9 @@ export interface paths {
                                 };
                                 /**
                                  * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`.
-                                 *
-                                 *     The type existed before this PR but nothing wrote it: every transition
-                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
-                                 *     back out for its compare-and-swap expectations, so the CAS guard and
-                                 *     the column could drift apart silently. Both are this type now.
+                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                                 *     compare-and-swap expectations are spelled with this type, so the guard
+                                 *     and the column cannot drift apart.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -6662,14 +6649,7 @@ export interface paths {
                                  *
                                  *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                                  *     it is published, and only becomes `synced` once Stripe has the matching
-                                 *     Price. The two were both plain strings and both called "status" on the
-                                 *     same row.
-                                 *
-                                 *     `impresspress__products__payment_links` has a `sync_status` column with
-                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                                 *     note `error`, not `failed`). It is deliberately not typed with this
-                                 *     enum; giving it one means either changing a stored literal or carrying a
-                                 *     fourth spelling, and that is its own decision.
+                                 *     Price.
                                  *
                                  *     - `not_synced` — never sent to Stripe. The column's default.
                                  *     - `syncing` — a synchronization is in flight.
@@ -7491,12 +7471,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -7513,14 +7490,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -7951,12 +7921,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -7973,14 +7940,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -8400,12 +8360,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -8422,14 +8379,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -9252,12 +9202,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -9274,14 +9221,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -9710,12 +9650,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -9732,14 +9669,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -10660,12 +10590,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -10682,14 +10609,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -11122,12 +11042,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -11144,14 +11061,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -13917,12 +13827,9 @@ export interface paths {
                                 };
                                 /**
                                  * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`.
-                                 *
-                                 *     The type existed before this PR but nothing wrote it: every transition
-                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
-                                 *     back out for its compare-and-swap expectations, so the CAS guard and
-                                 *     the column could drift apart silently. Both are this type now.
+                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                                 *     compare-and-swap expectations are spelled with this type, so the guard
+                                 *     and the column cannot drift apart.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -13939,14 +13846,7 @@ export interface paths {
                                  *
                                  *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                                  *     it is published, and only becomes `synced` once Stripe has the matching
-                                 *     Price. The two were both plain strings and both called "status" on the
-                                 *     same row.
-                                 *
-                                 *     `impresspress__products__payment_links` has a `sync_status` column with
-                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                                 *     note `error`, not `failed`). It is deliberately not typed with this
-                                 *     enum; giving it one means either changing a stored literal or carrying a
-                                 *     fourth spelling, and that is its own decision.
+                                 *     Price.
                                  *
                                  *     - `not_synced` — never sent to Stripe. The column's default.
                                  *     - `syncing` — a synchronization is in flight.
@@ -14618,12 +14518,9 @@ export interface paths {
                                 };
                                 /**
                                  * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`.
-                                 *
-                                 *     The type existed before this PR but nothing wrote it: every transition
-                                 *     wrote a string literal and `repo::offers` re-spelled the three variants
-                                 *     back out for its compare-and-swap expectations, so the CAS guard and
-                                 *     the column could drift apart silently. Both are this type now.
+                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                                 *     compare-and-swap expectations are spelled with this type, so the guard
+                                 *     and the column cannot drift apart.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -14640,14 +14537,7 @@ export interface paths {
                                  *
                                  *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                                  *     it is published, and only becomes `synced` once Stripe has the matching
-                                 *     Price. The two were both plain strings and both called "status" on the
-                                 *     same row.
-                                 *
-                                 *     `impresspress__products__payment_links` has a `sync_status` column with
-                                 *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                                 *     note `error`, not `failed`). It is deliberately not typed with this
-                                 *     enum; giving it one means either changing a stored literal or carrying a
-                                 *     fourth spelling, and that is its own decision.
+                                 *     Price.
                                  *
                                  *     - `not_synced` — never sent to Stripe. The column's default.
                                  *     - `syncing` — a synchronization is in flight.
@@ -15469,12 +15359,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -15491,14 +15378,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -15929,12 +15809,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -15951,14 +15828,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -16378,12 +16248,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -16400,14 +16267,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -17230,12 +17090,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -17252,14 +17109,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -17688,12 +17538,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -17710,14 +17557,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -18638,12 +18478,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -18660,14 +18497,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
@@ -19100,12 +18930,9 @@ export interface paths {
                             };
                             /**
                              * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`.
-                             *
-                             *     The type existed before this PR but nothing wrote it: every transition
-                             *     wrote a string literal and `repo::offers` re-spelled the three variants
-                             *     back out for its compare-and-swap expectations, so the CAS guard and
-                             *     the column could drift apart silently. Both are this type now.
+                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
+                             *     compare-and-swap expectations are spelled with this type, so the guard
+                             *     and the column cannot drift apart.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -19122,14 +18949,7 @@ export interface paths {
                              *
                              *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
                              *     it is published, and only becomes `synced` once Stripe has the matching
-                             *     Price. The two were both plain strings and both called "status" on the
-                             *     same row.
-                             *
-                             *     `impresspress__products__payment_links` has a `sync_status` column with
-                             *     a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-                             *     note `error`, not `failed`). It is deliberately not typed with this
-                             *     enum; giving it one means either changing a stored literal or carrying a
-                             *     fourth spelling, and that is its own decision.
+                             *     Price.
                              *
                              *     - `not_synced` — never sent to Stripe. The column's default.
                              *     - `syncing` — a synchronization is in flight.
