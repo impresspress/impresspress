@@ -132,10 +132,7 @@ pub enum OfferMode {
     Subscription,
 }
 
-/// Lifecycle state of an offer: the `status` column of
-/// `impresspress__products__offers`. Every transition and `repo::offers`'
-/// compare-and-swap expectations are spelled with this type, so the guard
-/// and the column cannot drift apart.
+/// Lifecycle state of an offer.
 ///
 /// - `draft` — editable; the only state whose definition may still change.
 /// - `active` — published and purchasable; the definition is immutable.
@@ -144,24 +141,21 @@ pub enum OfferMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OfferStatus {
+    // The `status` column of `impresspress__products__offers`. Every
+    // transition and `repo::offers`' compare-and-swap expectations are
+    // spelled with this type, so the guard and the column cannot drift apart.
     Draft,
     Active,
     Archived,
 }
 
-// `impresspress__products__payment_links` has a `sync_status` column with
-// a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
-// note `error`, not `failed`). It is deliberately not typed with this
-// enum; giving it one means either changing a stored literal or carrying a
-// fourth spelling, and that is its own decision.
-/// Where an offer stands against its Stripe Product/Price: the
-/// `sync_status` column of `impresspress__products__offers`.
+/// Where an offer stands against its Stripe Product and Price.
 ///
-/// Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-/// it is published, and only becomes `synced` once Stripe has the matching
+/// Distinct from the offer's `status`: an offer is `active` the moment it
+/// is published, and only becomes `synced` once Stripe has the matching
 /// Price.
 ///
-/// - `not_synced` — never sent to Stripe. The column's default.
+/// - `not_synced` — never sent to Stripe. The default.
 /// - `syncing` — a synchronization is in flight.
 /// - `synced` — Stripe holds a Product and Price matching this offer
 ///   version.
@@ -169,6 +163,13 @@ pub enum OfferStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OfferSyncStatus {
+    // The `sync_status` column of `impresspress__products__offers`.
+    //
+    // `impresspress__products__payment_links` has a `sync_status` column
+    // with a *different* value set (`not_synced`, `syncing`, `synced`,
+    // `error` — note `error`, not `failed`). It is deliberately not typed
+    // with this enum; giving it one means either changing a stored literal
+    // or carrying a fourth spelling, and that is its own decision.
     NotSynced,
     Syncing,
     Synced,
@@ -389,13 +390,14 @@ pub enum AmountRule {
         prices: BTreeMap<String, i64>,
     },
     /// Each tier prices only the units of input `input` that fall inside it,
-    /// and the tier totals are summed.
+    /// and the tier totals are summed. Requires the offer's
+    /// `billing_scheme: "tiered"`.
     Graduated {
         input: String,
         tiers: Vec<PricingTier>,
     },
     /// The one tier that the whole number in input `input` falls in prices
-    /// every unit.
+    /// every unit. Requires the offer's `billing_scheme: "tiered"`.
     Volume {
         input: String,
         tiers: Vec<PricingTier>,
@@ -500,7 +502,8 @@ pub struct OfferComponentDraft {
     #[serde(default)]
     pub condition: Condition,
     /// A subscription line's billing interval. Leave it out for a `payment`
-    /// offer; on a `subscription` offer it must match the offer's interval.
+    /// offer; on a `subscription` offer its `interval` and `interval_count`
+    /// must equal the offer's `recurring_interval` and `interval_count`.
     #[serde(default)]
     pub recurrence: Option<ComponentRecurrence>,
     #[serde(default)]
@@ -617,6 +620,8 @@ pub struct OfferDefinitionRequest {
     #[schemars(range(min = 1))]
     pub interval_count: u32,
     pub usage_type: UsageType,
+    /// Must be `tiered` when any component's amount is `graduated` or
+    /// `volume`.
     pub billing_scheme: BillingScheme,
     pub tax_behavior: TaxBehavior,
     /// Inputs the customer fills in at checkout, which amount rules and

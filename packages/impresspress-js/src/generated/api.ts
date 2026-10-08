@@ -5803,10 +5803,7 @@ export interface paths {
                                     version: number;
                                 };
                                 /**
-                                 * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                                 *     compare-and-swap expectations are spelled with this type, so the guard
-                                 *     and the column cannot drift apart.
+                                 * @description Lifecycle state of an offer.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -5818,14 +5815,13 @@ export interface paths {
                                 /** @default  */
                                 sync_error: string;
                                 /**
-                                 * @description Where an offer stands against its Stripe Product/Price: the
-                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 * @description Where an offer stands against its Stripe Product and Price.
                                  *
-                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Distinct from the offer's `status`: an offer is `active` the moment it
+                                 *     is published, and only becomes `synced` once Stripe has the matching
                                  *     Price.
                                  *
-                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `not_synced` — never sent to Stripe. The default.
                                  *     - `syncing` — a synchronization is in flight.
                                  *     - `synced` — Stripe holds a Product and Price matching this offer
                                  *       version.
@@ -6629,10 +6625,7 @@ export interface paths {
                                     version: number;
                                 };
                                 /**
-                                 * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                                 *     compare-and-swap expectations are spelled with this type, so the guard
-                                 *     and the column cannot drift apart.
+                                 * @description Lifecycle state of an offer.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -6644,14 +6637,13 @@ export interface paths {
                                 /** @default  */
                                 sync_error: string;
                                 /**
-                                 * @description Where an offer stands against its Stripe Product/Price: the
-                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 * @description Where an offer stands against its Stripe Product and Price.
                                  *
-                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Distinct from the offer's `status`: an offer is `active` the moment it
+                                 *     is published, and only becomes `synced` once Stripe has the matching
                                  *     Price.
                                  *
-                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `not_synced` — never sent to Stripe. The default.
                                  *     - `syncing` — a synchronization is in flight.
                                  *     - `synced` — Stripe holds a Product and Price matching this offer
                                  *       version.
@@ -6679,7 +6671,11 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @enum {string} */
+                        /**
+                         * @description Must be `tiered` when any component's amount is `graduated` or
+                         *     `volume`.
+                         * @enum {string}
+                         */
                         billing_scheme: "per_unit" | "tiered";
                         /**
                          * @description How checkout behaves for an offer. Every field is optional; leaving the
@@ -6963,7 +6959,8 @@ export interface paths {
                             };
                             /**
                              * @description A subscription line's billing interval. Leave it out for a `payment`
-                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             *     offer; on a `subscription` offer its `interval` and `interval_count`
+                             *     must equal the offer's `recurring_interval` and `interval_count`.
                              * @default null
                              */
                             recurrence?: {
@@ -7470,10 +7467,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -7485,14 +7479,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -7920,10 +7913,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -7935,14 +7925,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -8359,10 +8348,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -8374,14 +8360,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -8410,7 +8395,11 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @enum {string} */
+                        /**
+                         * @description Must be `tiered` when any component's amount is `graduated` or
+                         *     `volume`.
+                         * @enum {string}
+                         */
                         billing_scheme: "per_unit" | "tiered";
                         /**
                          * @description How checkout behaves for an offer. Every field is optional; leaving the
@@ -8694,7 +8683,8 @@ export interface paths {
                             };
                             /**
                              * @description A subscription line's billing interval. Leave it out for a `payment`
-                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             *     offer; on a `subscription` offer its `interval` and `interval_count`
+                             *     must equal the offer's `recurring_interval` and `interval_count`.
                              * @default null
                              */
                             recurrence?: {
@@ -9201,10 +9191,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -9216,14 +9203,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -9649,10 +9635,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -9664,14 +9647,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -10589,10 +10571,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -10604,14 +10583,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -11041,10 +11019,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -11056,14 +11031,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -13826,10 +13800,7 @@ export interface paths {
                                     version: number;
                                 };
                                 /**
-                                 * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                                 *     compare-and-swap expectations are spelled with this type, so the guard
-                                 *     and the column cannot drift apart.
+                                 * @description Lifecycle state of an offer.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -13841,14 +13812,13 @@ export interface paths {
                                 /** @default  */
                                 sync_error: string;
                                 /**
-                                 * @description Where an offer stands against its Stripe Product/Price: the
-                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 * @description Where an offer stands against its Stripe Product and Price.
                                  *
-                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Distinct from the offer's `status`: an offer is `active` the moment it
+                                 *     is published, and only becomes `synced` once Stripe has the matching
                                  *     Price.
                                  *
-                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `not_synced` — never sent to Stripe. The default.
                                  *     - `syncing` — a synchronization is in flight.
                                  *     - `synced` — Stripe holds a Product and Price matching this offer
                                  *       version.
@@ -14517,10 +14487,7 @@ export interface paths {
                                     version: number;
                                 };
                                 /**
-                                 * @description Lifecycle state of an offer: the `status` column of
-                                 *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                                 *     compare-and-swap expectations are spelled with this type, so the guard
-                                 *     and the column cannot drift apart.
+                                 * @description Lifecycle state of an offer.
                                  *
                                  *     - `draft` — editable; the only state whose definition may still change.
                                  *     - `active` — published and purchasable; the definition is immutable.
@@ -14532,14 +14499,13 @@ export interface paths {
                                 /** @default  */
                                 sync_error: string;
                                 /**
-                                 * @description Where an offer stands against its Stripe Product/Price: the
-                                 *     `sync_status` column of `impresspress__products__offers`.
+                                 * @description Where an offer stands against its Stripe Product and Price.
                                  *
-                                 *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                                 *     it is published, and only becomes `synced` once Stripe has the matching
+                                 *     Distinct from the offer's `status`: an offer is `active` the moment it
+                                 *     is published, and only becomes `synced` once Stripe has the matching
                                  *     Price.
                                  *
-                                 *     - `not_synced` — never sent to Stripe. The column's default.
+                                 *     - `not_synced` — never sent to Stripe. The default.
                                  *     - `syncing` — a synchronization is in flight.
                                  *     - `synced` — Stripe holds a Product and Price matching this offer
                                  *       version.
@@ -14567,7 +14533,11 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @enum {string} */
+                        /**
+                         * @description Must be `tiered` when any component's amount is `graduated` or
+                         *     `volume`.
+                         * @enum {string}
+                         */
                         billing_scheme: "per_unit" | "tiered";
                         /**
                          * @description How checkout behaves for an offer. Every field is optional; leaving the
@@ -14851,7 +14821,8 @@ export interface paths {
                             };
                             /**
                              * @description A subscription line's billing interval. Leave it out for a `payment`
-                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             *     offer; on a `subscription` offer its `interval` and `interval_count`
+                             *     must equal the offer's `recurring_interval` and `interval_count`.
                              * @default null
                              */
                             recurrence?: {
@@ -15358,10 +15329,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -15373,14 +15341,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -15808,10 +15775,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -15823,14 +15787,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -16247,10 +16210,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -16262,14 +16222,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -16298,7 +16257,11 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @enum {string} */
+                        /**
+                         * @description Must be `tiered` when any component's amount is `graduated` or
+                         *     `volume`.
+                         * @enum {string}
+                         */
                         billing_scheme: "per_unit" | "tiered";
                         /**
                          * @description How checkout behaves for an offer. Every field is optional; leaving the
@@ -16582,7 +16545,8 @@ export interface paths {
                             };
                             /**
                              * @description A subscription line's billing interval. Leave it out for a `payment`
-                             *     offer; on a `subscription` offer it must match the offer's interval.
+                             *     offer; on a `subscription` offer its `interval` and `interval_count`
+                             *     must equal the offer's `recurring_interval` and `interval_count`.
                              * @default null
                              */
                             recurrence?: {
@@ -17089,10 +17053,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -17104,14 +17065,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -17537,10 +17497,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -17552,14 +17509,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -18477,10 +18433,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -18492,14 +18445,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.
@@ -18929,10 +18881,7 @@ export interface paths {
                                 version: number;
                             };
                             /**
-                             * @description Lifecycle state of an offer: the `status` column of
-                             *     `impresspress__products__offers`. Every transition and `repo::offers`'
-                             *     compare-and-swap expectations are spelled with this type, so the guard
-                             *     and the column cannot drift apart.
+                             * @description Lifecycle state of an offer.
                              *
                              *     - `draft` — editable; the only state whose definition may still change.
                              *     - `active` — published and purchasable; the definition is immutable.
@@ -18944,14 +18893,13 @@ export interface paths {
                             /** @default  */
                             sync_error: string;
                             /**
-                             * @description Where an offer stands against its Stripe Product/Price: the
-                             *     `sync_status` column of `impresspress__products__offers`.
+                             * @description Where an offer stands against its Stripe Product and Price.
                              *
-                             *     Distinct from [`OfferStatus`]: an offer is `active` locally the moment
-                             *     it is published, and only becomes `synced` once Stripe has the matching
+                             *     Distinct from the offer's `status`: an offer is `active` the moment it
+                             *     is published, and only becomes `synced` once Stripe has the matching
                              *     Price.
                              *
-                             *     - `not_synced` — never sent to Stripe. The column's default.
+                             *     - `not_synced` — never sent to Stripe. The default.
                              *     - `syncing` — a synchronization is in flight.
                              *     - `synced` — Stripe holds a Product and Price matching this offer
                              *       version.

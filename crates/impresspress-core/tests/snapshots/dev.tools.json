@@ -1822,7 +1822,7 @@
                               },
                               {
                                 "additionalProperties": false,
-                                "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                                "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                                 "properties": {
                                   "input": {
                                     "type": "string"
@@ -1876,7 +1876,7 @@
                               },
                               {
                                 "additionalProperties": false,
-                                "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                                "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                                 "properties": {
                                   "input": {
                                     "type": "string"
@@ -3358,7 +3358,7 @@
                   "type": "object"
                 },
                 "status": {
-                  "description": "Lifecycle state of an offer: the `status` column of\n`impresspress__products__offers`. Every transition and `repo::offers`'\ncompare-and-swap expectations are spelled with this type, so the guard\nand the column cannot drift apart.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
+                  "description": "Lifecycle state of an offer.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
                   "enum": [
                     "draft",
                     "active",
@@ -3371,7 +3371,7 @@
                   "type": "string"
                 },
                 "sync_status": {
-                  "description": "Where an offer stands against its Stripe Product/Price: the\n`sync_status` column of `impresspress__products__offers`.\n\nDistinct from [`OfferStatus`]: an offer is `active` locally the moment\nit is published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The column's default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
+                  "description": "Where an offer stands against its Stripe Product and Price.\n\nDistinct from the offer's `status`: an offer is `active` the moment it\nis published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
                   "enum": [
                     "not_synced",
                     "syncing",
@@ -3666,6 +3666,7 @@
         "additionalProperties": false,
         "properties": {
           "billing_scheme": {
+            "description": "Must be `tiered` when any component's amount is `graduated` or\n`volume`.",
             "enum": [
               "per_unit",
               "tiered"
@@ -3930,7 +3931,7 @@
                     },
                     {
                       "additionalProperties": false,
-                      "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                      "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                       "properties": {
                         "input": {
                           "type": "string"
@@ -3982,7 +3983,7 @@
                     },
                     {
                       "additionalProperties": false,
-                      "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                      "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                       "properties": {
                         "input": {
                           "type": "string"
@@ -5192,7 +5193,7 @@
                 "recurrence": {
                   "additionalProperties": false,
                   "default": null,
-                  "description": "A subscription line's billing interval. Leave it out for a `payment`\noffer; on a `subscription` offer it must match the offer's interval.",
+                  "description": "A subscription line's billing interval. Leave it out for a `payment`\noffer; on a `subscription` offer its `interval` and `interval_count`\nmust equal the offer's `recurring_interval` and `interval_count`.",
                   "properties": {
                     "interval": {
                       "enum": [
@@ -5991,7 +5992,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -6045,7 +6046,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -7527,7 +7528,7 @@
             "type": "object"
           },
           "status": {
-            "description": "Lifecycle state of an offer: the `status` column of\n`impresspress__products__offers`. Every transition and `repo::offers`'\ncompare-and-swap expectations are spelled with this type, so the guard\nand the column cannot drift apart.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
+            "description": "Lifecycle state of an offer.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
             "enum": [
               "draft",
               "active",
@@ -7540,7 +7541,7 @@
             "type": "string"
           },
           "sync_status": {
-            "description": "Where an offer stands against its Stripe Product/Price: the\n`sync_status` column of `impresspress__products__offers`.\n\nDistinct from [`OfferStatus`]: an offer is `active` locally the moment\nit is published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The column's default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
+            "description": "Where an offer stands against its Stripe Product and Price.\n\nDistinct from the offer's `status`: an offer is `active` the moment it\nis published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
             "enum": [
               "not_synced",
               "syncing",
@@ -7827,6 +7828,7 @@
         "additionalProperties": false,
         "properties": {
           "billing_scheme": {
+            "description": "Must be `tiered` when any component's amount is `graduated` or\n`volume`.",
             "enum": [
               "per_unit",
               "tiered"
@@ -8091,7 +8093,7 @@
                     },
                     {
                       "additionalProperties": false,
-                      "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                      "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                       "properties": {
                         "input": {
                           "type": "string"
@@ -8143,7 +8145,7 @@
                     },
                     {
                       "additionalProperties": false,
-                      "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                      "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                       "properties": {
                         "input": {
                           "type": "string"
@@ -9353,7 +9355,7 @@
                 "recurrence": {
                   "additionalProperties": false,
                   "default": null,
-                  "description": "A subscription line's billing interval. Leave it out for a `payment`\noffer; on a `subscription` offer it must match the offer's interval.",
+                  "description": "A subscription line's billing interval. Leave it out for a `payment`\noffer; on a `subscription` offer its `interval` and `interval_count`\nmust equal the offer's `recurring_interval` and `interval_count`.",
                   "properties": {
                     "interval": {
                       "enum": [
@@ -10157,7 +10159,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -10211,7 +10213,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -11693,7 +11695,7 @@
             "type": "object"
           },
           "status": {
-            "description": "Lifecycle state of an offer: the `status` column of\n`impresspress__products__offers`. Every transition and `repo::offers`'\ncompare-and-swap expectations are spelled with this type, so the guard\nand the column cannot drift apart.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
+            "description": "Lifecycle state of an offer.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
             "enum": [
               "draft",
               "active",
@@ -11706,7 +11708,7 @@
             "type": "string"
           },
           "sync_status": {
-            "description": "Where an offer stands against its Stripe Product/Price: the\n`sync_status` column of `impresspress__products__offers`.\n\nDistinct from [`OfferStatus`]: an offer is `active` locally the moment\nit is published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The column's default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
+            "description": "Where an offer stands against its Stripe Product and Price.\n\nDistinct from the offer's `status`: an offer is `active` the moment it\nis published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
             "enum": [
               "not_synced",
               "syncing",
@@ -12303,7 +12305,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -12357,7 +12359,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -13839,7 +13841,7 @@
             "type": "object"
           },
           "status": {
-            "description": "Lifecycle state of an offer: the `status` column of\n`impresspress__products__offers`. Every transition and `repo::offers`'\ncompare-and-swap expectations are spelled with this type, so the guard\nand the column cannot drift apart.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
+            "description": "Lifecycle state of an offer.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
             "enum": [
               "draft",
               "active",
@@ -13852,7 +13854,7 @@
             "type": "string"
           },
           "sync_status": {
-            "description": "Where an offer stands against its Stripe Product/Price: the\n`sync_status` column of `impresspress__products__offers`.\n\nDistinct from [`OfferStatus`]: an offer is `active` locally the moment\nit is published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The column's default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
+            "description": "Where an offer stands against its Stripe Product and Price.\n\nDistinct from the offer's `status`: an offer is `active` the moment it\nis published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
             "enum": [
               "not_synced",
               "syncing",
@@ -14449,7 +14451,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed.",
+                          "description": "Each tier prices only the units of input `input` that fall inside it,\nand the tier totals are summed. Requires the offer's\n`billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -14503,7 +14505,7 @@
                         },
                         {
                           "additionalProperties": false,
-                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit.",
+                          "description": "The one tier that the whole number in input `input` falls in prices\nevery unit. Requires the offer's `billing_scheme: \"tiered\"`.",
                           "properties": {
                             "input": {
                               "type": "string"
@@ -15985,7 +15987,7 @@
             "type": "object"
           },
           "status": {
-            "description": "Lifecycle state of an offer: the `status` column of\n`impresspress__products__offers`. Every transition and `repo::offers`'\ncompare-and-swap expectations are spelled with this type, so the guard\nand the column cannot drift apart.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
+            "description": "Lifecycle state of an offer.\n\n- `draft` — editable; the only state whose definition may still change.\n- `active` — published and purchasable; the definition is immutable.\n- `archived` — withdrawn. Existing orders keep referring to it by\n  version.",
             "enum": [
               "draft",
               "active",
@@ -15998,7 +16000,7 @@
             "type": "string"
           },
           "sync_status": {
-            "description": "Where an offer stands against its Stripe Product/Price: the\n`sync_status` column of `impresspress__products__offers`.\n\nDistinct from [`OfferStatus`]: an offer is `active` locally the moment\nit is published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The column's default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
+            "description": "Where an offer stands against its Stripe Product and Price.\n\nDistinct from the offer's `status`: an offer is `active` the moment it\nis published, and only becomes `synced` once Stripe has the matching\nPrice.\n\n- `not_synced` — never sent to Stripe. The default.\n- `syncing` — a synchronization is in flight.\n- `synced` — Stripe holds a Product and Price matching this offer\n  version.\n- `failed` — the last synchronization failed; `sync_error` says why.",
             "enum": [
               "not_synced",
               "syncing",
