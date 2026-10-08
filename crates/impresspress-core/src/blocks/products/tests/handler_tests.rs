@@ -108,6 +108,49 @@ async fn admin_update_product() {
     assert_eq!(body["name"], "New Name");
 }
 
+/// The admin PATCH is how an admin (and the sandbox agent's
+/// `shop_update_product`) publishes a product, so it stamps `published_at`
+/// the way the seller PATCH and moderation approval do. Another status
+/// leaves the stamp alone.
+#[tokio::test]
+async fn admin_activation_sets_published_at() {
+    let ctx = ctx().await;
+    let (create, input) = admin_create_msg(
+        "/b/products/api/admin/products",
+        serde_json::json!({"name": "Bag"}),
+    );
+    let id = output_to_json(dispatch(&ctx, create, input).await).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let patch = |body: serde_json::Value| {
+        let (mut msg, input) = request_msg(
+            "update",
+            &format!("/b/products/api/admin/products/{id}"),
+            "admin_1",
+            body,
+        );
+        msg.set_meta("auth.user_roles", "admin");
+        (msg, input)
+    };
+
+    let (msg, input) = patch(serde_json::json!({"status": "active"}));
+    let active = output_to_json(dispatch(&ctx, msg, input).await).await;
+    let stamped = active["published_at"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !stamped.is_empty(),
+        "activation must set published_at: {active}"
+    );
+
+    let (msg, input) = patch(serde_json::json!({"status": "archived"}));
+    let archived = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(archived["published_at"], stamped.as_str(), "{archived}");
+}
+
 #[tokio::test]
 async fn admin_delete_product() {
     let ctx = ctx().await;
