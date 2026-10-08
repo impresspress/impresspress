@@ -21,6 +21,11 @@ URL.
 Then open <http://localhost:8000/>. The first load compiles the runtime and
 imports `seed/`, so it takes a few seconds; every load after that is instant.
 
+Open it on `localhost`, as above, or over `https`. Browsers run a service
+worker only on a secure page, so the same folder served at
+`http://192.168.1.20:8000/` on your network shows a page saying so and
+nothing else; put it behind https to share it.
+
 ## What is in here
 
     index.html loader.js sw.js *.js *.wasm snippets/ vendor/

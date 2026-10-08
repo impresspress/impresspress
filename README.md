@@ -67,7 +67,7 @@ other suites.
 Every page Impresspress serves registers its tools with the browser's agent through the WebMCP API. The tools are not hand-written: each block declares typed HTTP endpoints, the runtime projects the ones marked as agent tools into a manifest at `/b/webmcp/manifest.json` (filtered to what the current visitor may call), and a small script turns each manifest entry into a `registerTool` call:
 
 ```javascript
-document.modelContext.registerTool({
+navigator.modelContext.registerTool({
   name: tool.name,                 // e.g. "search_products"
   description: tool.description,   // from the endpoint's doc comment
   inputSchema: tool.inputSchema,   // derived from the endpoint's typed request

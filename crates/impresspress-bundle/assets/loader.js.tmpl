@@ -1225,6 +1225,16 @@ async function enterApp(target, worker, status, waitedMs) {
 
 async function boot() {
     const status = document.getElementById('status');
+    // A service worker (and WebMCP) needs a secure page: https, localhost or
+    // 127.0.0.1. On plain http anywhere else the browser has no
+    // `navigator.serviceWorker` at all, and "not supported in this browser"
+    // would blame the wrong thing.
+    if (!window.isSecureContext) {
+        status.textContent =
+            'This site only runs over https or on localhost: browsers start its ' +
+            'service worker only on a secure page, and ' + window.location.origin + ' is not one.';
+        return;
+    }
     if (!('serviceWorker' in navigator)) {
         status.textContent = 'Service Workers not supported in this browser.';
         return;

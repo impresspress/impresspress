@@ -6,7 +6,7 @@
 //! the bootstrap-admin secrets they pass on.
 //! Every page of this site carries `ui/assets/webmcp.js`, which fetches
 //! `/b/webmcp/manifest.json` (filtered to the visitor's auth level) and
-//! registers each tool with `document.modelContext`. The tools themselves
+//! registers each tool with `navigator.modelContext`. The tools themselves
 //! are the products block's storefront endpoints, annotated with
 //! `.agent_tool(...)` in `impresspress-core/src/blocks/products/mod.rs`.
 

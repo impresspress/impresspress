@@ -122,6 +122,26 @@ function assertBootedNormally(shell) {
 }
 
 // ---------------------------------------------------------------------------
+// An insecure page
+// ---------------------------------------------------------------------------
+
+test('an insecure page says to use https or localhost, and touches nothing', async () => {
+  // A browser offers no service worker to a page that is not a secure
+  // context, so the shell must say that rather than blame the browser — and
+  // must not reach for a worker, a cause or the local data on the way.
+  const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true, secure: false });
+  await shell.booted;
+
+  assert.equal(shell.statusLines.length, 1, String(shell.statusLines));
+  assert.match(shell.statusLines[0], /only runs over https or on localhost/);
+  assert.ok(shell.statusLines[0].includes(`${ORIGIN} is not one`), shell.statusLines[0]);
+  assert.equal(shell.registered(), 0);
+  assert.deepEqual(shell.events, []);
+  assert.deepEqual(shell.probes, []);
+  assert.equal(shell.location.reloads, 0);
+});
+
+// ---------------------------------------------------------------------------
 // The wipe gate
 // ---------------------------------------------------------------------------
 

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
-import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
+import { toolNames, waitForTool } from './fixtures/webmcp-helpers';
 
 /**
  * Lightweight smoke test that doesn't rebuild mid-test. Catches regressions
@@ -200,7 +200,6 @@ test('a cold visitor gets WebMCP tools without a reload', async ({ page }) => {
   // 200, `r.json()` throws, webmcp.js's `.catch` swallows it, and the page
   // ends up with no tools at all and no error. `controller` is the signal
   // that actually means "my fetches reach the worker".
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
   await page.addInitScript(() => {
     if (location.pathname !== '/b/auth/login') return;
     const real = navigator.serviceWorker;
@@ -239,16 +238,41 @@ test('a cold visitor gets WebMCP tools without a reload', async ({ page }) => {
   // so reading it would throw straight into the `.then(load, load)` fallback
   // and register the network's answer.
   await page.waitForTimeout(500);
-  expect(await page.evaluate(() => document.modelContext.__tools().length)).toBe(0);
+  expect(await toolNames(page)).toEqual([]);
 
   // The claim landing (`controllerchange`) lets it proceed — without a
   // reload, and without the test navigating again.
   await page.evaluate(() => (window as unknown as { __releaseWebmcpControl: () => void }).__releaseWebmcpControl());
-  const names = await page.waitForFunction(() => {
-    const t = document.modelContext.__tools();
-    return t.length > 0 ? t.map((x) => x.name) : null;
-  }, null, { timeout: 10_000 });
-  expect(await names.jsonValue()).toContain('list_products');
+  await waitForTool(page, 'list_products');
+});
+
+test.describe('served on plain http at a LAN address', () => {
+  // `lan.test` resolves to the same static server, but `http://lan.test` is
+  // not a secure context (only https, localhost and 127.0.0.1 are), so the
+  // browser offers neither a service worker nor `navigator.modelContext`.
+  //
+  // The mapping is a launch flag, and Playwright refuses `launchOptions` in a
+  // `test.use` inside a describe (it would force a new worker), so the test
+  // launches its own Chromium. Its args carry the suite's WebMCP flag too:
+  // the assertions below need the testing surface present.
+  test('the boot page says to use https or localhost', async ({ playwright, baseURL }) => {
+    const browser = await playwright.chromium.launch({
+      args: ['--enable-features=WebMCPTesting', '--host-resolver-rules=MAP lan.test 127.0.0.1'],
+    });
+    try {
+      const page = await browser.newPage();
+      const port = new URL(baseURL as string).port;
+      await page.goto(`http://lan.test:${port}/`);
+      expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
+      // The spec's F1 secure-context row, against the real browser: the flag
+      // is on, the testing surface is there, the API is not.
+      expect(await page.evaluate(() => 'modelContextTesting' in navigator)).toBe(true);
+      expect(await page.evaluate(() => 'modelContext' in navigator)).toBe(false);
+      await expect(page.locator('#status')).toHaveText(/over https or on localhost/);
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 // ── Migrations across service-worker restarts ───────────────────────────────

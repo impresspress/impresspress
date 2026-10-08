@@ -23,11 +23,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // (6 pixels, locally and in CI); with the flag, 120 repeats of that capture
 // matched. The regen workflow runs this config too, so baselines and
 // comparisons are rasterized the same way.
+//
+// `launchOptions` here replaces the base config's rather than merging with
+// it, so it carries `--enable-features=WebMCPTesting` itself: the WebMCP
+// specs this config runs (`webmcp.spec.ts`) read Chromium's real registry.
 export default defineConfig({
   ...baseConfig,
   globalSetup: join(HERE, 'e2e/fixtures/global-setup.ts'),
   use: {
     ...baseConfig.use,
-    launchOptions: { args: ['--disable-partial-raster'] },
+    launchOptions: { args: ['--disable-partial-raster', '--enable-features=WebMCPTesting'] },
   },
 });

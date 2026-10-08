@@ -16,7 +16,7 @@ itself:
   endpoints annotated with `.agent_tool(...)`.
 - `crates/impresspress-core/src/ui/assets/webmcp.js` — on every page, fetches
   `/b/webmcp/manifest.json` (filtered to the visitor's auth level) and calls
-  `document.modelContext.registerTool` per tool.
+  `navigator.modelContext.registerTool` per tool.
 - `crates/impresspress-core/src/pipeline.rs` — serves that manifest after auth
   resolution, so an anonymous visitor's agent never learns a tool it cannot
   use.
@@ -157,5 +157,6 @@ than a URL — which is the honest answer, and what the e2e spec
 
 - `GET /b/webmcp/manifest.json` — the five Public tools anonymously; six with
   an authenticated session.
-- Open any page in a WebMCP-capable browser and run
-  `await document.modelContext.getTools()`.
+- Open any page in Chrome started with `--enable-features=WebMCPTesting`
+  (over https or on localhost) and run
+  `await navigator.modelContextTesting.listTools()` in the console.

@@ -1,8 +1,7 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 
 import { bootServiceWorker, loginAdmin, loginToWorkspace } from './fixtures/dev-sandbox';
-import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
-import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
+import { execute, registeredTools, structured, toolNames, waitForTool } from './fixtures/webmcp-helpers';
 
 /**
  * The checkpoint: a Rust block written, compiled, served and rolled back
@@ -195,11 +194,6 @@ async function subscriberEmails(page: Page): Promise<string[]> {
   );
 }
 
-/** The tool names `webmcp.js` has registered in this document right now. */
-async function toolNames(page: Page): Promise<string[]> {
-  return (await registeredTools(page, 1)).map((t) => t.name);
-}
-
 test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ page, context }) => {
   // The bill: a cold sandbox boot (wasm compile, OPFS create, migrations, seed
   // import), 75 MiB of toolchain into the page, THREE release builds of the
@@ -219,7 +213,6 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
     return dialog.dismiss();
   });
 
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
   await page.addInitScript(STAGE_PROBE);
   await loginToWorkspace(page);
   await waitForTool(page, 'dev_compile_block');
@@ -324,7 +317,9 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   // --- 5. An anonymous visitor finds the tool and uses it ------------------
   const visitor = await becomeVisitor(context);
 
-  const visitorTools = await toolNames(visitor);
+  // Once `webmcp.js` has registered anything, it has registered everything
+  // this session's manifest carries.
+  const visitorTools = (await registeredTools(visitor, 1)).map((t) => t.name);
   expect(visitorTools).toContain(TOOL);
 
   // …and only the public one. The template's two reads are `Auth::Admin`, so
@@ -474,12 +469,7 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
     (window as unknown as { __impresspressWebmcp: { refresh(): Promise<void> } })
       .__impresspressWebmcp.refresh(),
   );
-  const afterRollback = await visitor.evaluate(
-    () =>
-      (document as unknown as { modelContext: { __tools(): Array<{ name: string }> } }).modelContext
-        .__tools()
-        .map((t) => t.name),
-  );
+  const afterRollback = await toolNames(visitor);
   expect(afterRollback).not.toContain(TOOL);
 
   expect(dialogs).toEqual([]);
@@ -496,14 +486,14 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
  * jar is the context's, so clearing it signs the admin page out too. The
  * caller signs back in when it needs the control plane again.
  *
- * The polyfill goes on before the first navigation, as it must: `webmcp.js`
- * reads `document.modelContext` while the page is loading.
+ * Nothing is installed on it first: the browser's own WebMCP is there from
+ * the first navigation, so `webmcp.js` registers into the real
+ * `navigator.modelContext` as the page loads.
  */
 async function becomeVisitor(context: BrowserContext): Promise<Page> {
   await context.clearCookies();
   const visitor = await context.newPage();
   visitor.on('dialog', (dialog) => dialog.dismiss());
-  await visitor.addInitScript(MODEL_CONTEXT_POLYFILL);
   // Same origin, same service worker, same OPFS — but a document of its own,
   // so `webmcp.js` fetches the manifest for THIS session, which now has no
   // cookie.

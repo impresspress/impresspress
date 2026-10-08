@@ -14,7 +14,6 @@ import {
   WELCOME_HEADING,
   WELCOME_PHRASE,
 } from './fixtures/dev-sandbox';
-import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 import { SHOP_HEADING, SHOP_OFFER, SHOP_PRODUCT, shopPage } from './fixtures/shop-fixture';
 import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
 
@@ -236,10 +235,9 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
     return dialog.dismiss();
   });
 
-  // Before ANY navigation: `dev.js` and `webmcp.js` both read
-  // `document.modelContext` as they run, and a polyfill installed afterwards
-  // would be a page with no agent on it.
-  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
+  // Nothing to install first: the browser is Chromium with its own WebMCP
+  // (`--enable-features=WebMCPTesting`, `playwright.config.ts`), so `dev.js`
+  // and `webmcp.js` register into the real `navigator.modelContext`.
 
   // --- 1. The welcome page, the login, and the tool set -------------------
   //
@@ -265,7 +263,7 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   // "get me into the workspace" one call rather than three copied lines.
   await loginToWorkspace(page);
 
-  // Two registrars share `document.modelContext` on `/b/dev`: `dev.js` adds
+  // Two registrars share `navigator.modelContext` on `/b/dev`: `dev.js` adds
   // the page-scoped allowlist, `webmcp.js` adds the deployment manifest for
   // this caller's tier, and they finish in whichever order their fetches
   // complete. Each is waited for by a name only it publishes — a total would
@@ -428,7 +426,6 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
     dialogs.push(dialog.message());
     return dialog.dismiss();
   });
-  await shop.addInitScript(MODEL_CONTEXT_POLYFILL);
   await bootServiceWorker(shop);
 
   // Anonymous for real. `/b/dev` is an `Admin` extra route; a shopper who
@@ -542,7 +539,6 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
     try {
       const site = await fresh.newPage();
       site.on('dialog', (dialog) => dialog.dismiss());
-      await site.addInitScript(MODEL_CONTEXT_POLYFILL);
       await bootServiceWorker(site);
 
       // The SAME shop, on a different origin with an empty database, from

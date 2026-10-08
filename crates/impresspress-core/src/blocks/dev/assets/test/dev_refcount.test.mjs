@@ -94,9 +94,9 @@ test('a call started after abort executes but is never tracked, and does not res
   assert.equal(handle.isPolling, false, 'a post-abort call must not start a new interval');
 });
 
-test('unregisterPageTools tolerates a browser with no document.modelContext at all', () => {
+test('unregisterPageTools tolerates a browser with no navigator.modelContext at all', () => {
   // `hasModelContext: false` reproduces "this browser has no WebMCP
-  // support" (`'modelContext' in document` is false). `pagehide` and every
+  // support" (`'modelContext' in navigator` is false). `pagehide` and every
   // 401/403 call `unregisterPageTools()` unconditionally regardless of
   // whether registration ever ran, so this must not throw.
   const { handle } = instantiate({ hasModelContext: false });

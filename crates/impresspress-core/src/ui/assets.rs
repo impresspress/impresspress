@@ -249,8 +249,8 @@ pub fn webmcp_js_url() -> String {
 /// The composed WebMCP tool-registration script, served on every page.
 ///
 /// Fetches the auth-filtered manifest at `/b/webmcp/manifest.json` and
-/// registers each tool via `document.modelContext.registerTool` (no-ops on
-/// browsers without WebMCP support). On a service-worker build the first
+/// registers each tool via `navigator.modelContext.registerTool` (no-ops on
+/// browsers without WebMCP, and on insecure pages). On a service-worker build the first
 /// fetch waits for the worker to take control of the page (see
 /// `assets/webmcp.js`); `window.__impresspressWebmcp.refresh()` re-fetches
 /// the manifest and swaps out whatever this script previously registered.

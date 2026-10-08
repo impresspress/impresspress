@@ -14,13 +14,20 @@ import {
  *
  * Both exist because of one visitor's agent — a cloud browser with no WebMCP —
  * that could not get past the login form and, had it done so, would have found
- * no tools. So NOTHING in this file installs the model-context polyfill the
- * other sandbox specs start with: `document.modelContext` does not exist on
- * these pages, which is the browser under test.
+ * no tools. The suite runs Chromium with WebMCP on
+ * (`--enable-features=WebMCPTesting`), so this file pins the browser it is
+ * about: every test here launches Chromium with `--disable-features=WebMCP`
+ * (the `test.use` below), and `navigator.modelContext` does not exist on these
+ * pages. The whole file, not one `describe`: Playwright refuses `launchOptions`
+ * inside a `describe`, because a different browser needs a different worker.
  *
  * Each test gets its own browser context, and so its own origin storage — its
  * own service worker, database and seed import (see `dev-workspace.spec.ts`).
  */
+
+// Pinned off, not left to the default. `test.use` replaces the config's
+// `launchOptions`, so the enable flag is not in this file's worker's args.
+test.use({ launchOptions: { args: ['--disable-features=WebMCP'] } });
 
 /** Every main-frame URL the page visits from here on, as pathnames. */
 function recordNavigations(page: Page): string[] {
@@ -132,7 +139,7 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   await enterFromWelcome(page);
 
   // The browser under test: no WebMCP at all.
-  expect(await page.evaluate(() => 'modelContext' in document)).toBe(false);
+  expect(await page.evaluate(() => 'modelContext' in navigator)).toBe(false);
   // …and the page says so, where an agent reading it looks first.
   await expect(page.locator('#dev-webmcp-status')).toHaveText(
     'This browser has no WebMCP: use the Tool console below, or the file editor.',
