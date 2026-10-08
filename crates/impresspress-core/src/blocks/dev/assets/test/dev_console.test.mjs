@@ -102,10 +102,113 @@ test('with WebMCP the console lists exactly the objects the registrar was handed
   for (const tool of handle.pageTools) {
     assert.equal(tools.get(tool.name), tool, tool.name);
   }
-  assert.match(elements.get('dev-webmcp-status').textContent, /^This browser has WebMCP: 4 tools/);
+  // `webmcp.js` has not run on this page (no `__impresspressWebmcp`), so
+  // the page states its own count and no total.
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    'This browser has WebMCP: the 4 workspace tools are registered for an agent in this tab, ' +
+      "and the Tool console below runs the same tools. The site's own tools are still being " +
+      'registered.'
+  );
   // The log line the workspace e2e reads is still written, with the
   // manifest's own count.
   assert.match(elements.get('dev-log').textContent, /registered 2 workspace tools/);
+});
+
+// The tab's agent has two registrars' tools: this page's and the site's own
+// (`webmcp.js`, on every page). The sentence counts both, whichever script
+// finished first, and follows the site's set when it is refreshed.
+// `count()` is `null` while `webmcp.js` has no completed load to report.
+const site = (count) => ({ count: () => count });
+const BOTH = (total, workspace, own) =>
+  `This browser has WebMCP: ${total} tools are registered for an agent in this tab: the ` +
+  `${workspace} workspace tools, which the Tool console below also runs, and the site's ` +
+  `own ${own}.`;
+
+test('with the site’s tools already registered, the page states both counts and the total', async () => {
+  const { elements } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    siteRegistrar: site(10)
+  });
+  await settle();
+  assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(14, 4, 10));
+});
+
+test('the site’s tools arriving later, or changing, update the sentence', async () => {
+  const registrar = site(null);
+  const { elements, fireWindow } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    siteRegistrar: registrar
+  });
+  await settle();
+  // Present but not yet loaded: no total is claimed.
+  assert.match(elements.get('dev-webmcp-status').textContent, /still being registered\.$/);
+
+  registrar.count = () => 10;
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(14, 4, 10));
+
+  // A refresh after a runtime rebuild (a compiled block's tools).
+  registrar.count = () => 12;
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(16, 4, 12));
+
+  // A load that found none.
+  registrar.count = () => 0;
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    'This browser has WebMCP: the 4 workspace tools are registered for an agent in this tab, ' +
+      'and the Tool console below runs the same tools. The site has registered none of its own.'
+  );
+});
+
+// A refresh of the site's tools empties them before it fetches. The page
+// writing its sentence in that window — its own tools arriving then — must
+// not report the empty moment as the site having none.
+test('while a refresh of the site’s tools is in flight, no count is stated for them', async () => {
+  const { elements } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    siteRegistrar: site(null)
+  });
+  await settle();
+  const sentence = elements.get('dev-webmcp-status').textContent;
+  assert.match(sentence, /The site's own tools are still being registered\.$/);
+  assert.doesNotMatch(sentence, /none of its own/);
+});
+
+test('a site load before this page’s tools arrive, or after they are gone, writes nothing', async () => {
+  const registrar = site(10);
+  const { handle, elements, fireWindow } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    siteRegistrar: registrar
+  });
+  // Before `tools.json` has answered: the sentence is the page's to write
+  // once it knows its own tools.
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(elements.get('dev-webmcp-status').textContent, '');
+  await settle();
+
+  handle.abort.abort();
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    'The session expired and the workspace tools were removed. Sign in again.'
+  );
+});
+
+test('without WebMCP the site’s loads change nothing', async () => {
+  const { elements, fireWindow } = instantiate({ toolsManifest: MANIFEST, siteRegistrar: site(10) });
+  await settle();
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    'This browser has no WebMCP: use the Tool console below, or the file editor.'
+  );
 });
 
 test('selecting a tool pre-fills its required arguments from the input schema', async () => {

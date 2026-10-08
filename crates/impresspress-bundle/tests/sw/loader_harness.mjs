@@ -115,7 +115,9 @@ function element() {
 /// - `eraseFails` — OPFS entries that cannot be removed
 /// - `opfsFiles` — the OPFS entries there are
 /// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
-///                 message to this page), before the probe is answered
+///                 message to this page) and `leave` (a navigation away from
+///                 this page beginning — a link, the address bar, an agent's
+///                 `goto`), before the probe is answered
 /// - `registerFails` — `navigator.serviceWorker.register` rejects with this
 /// - `update`    — what the registration's update check finds: `'installs'`,
 ///                 a newer version that installs and then activates (taking
@@ -235,7 +237,22 @@ export function loadShell({
       this.replaced.push(url);
     }
   };
-  const window = { location, isSecureContext: secure };
+  // The page's own listeners, by event type: `leave` fires `beforeunload`
+  // on them, which is what a browser does the moment a navigation away from
+  // this document begins.
+  const windowListeners = [];
+  const window = {
+    location,
+    isSecureContext: secure,
+    addEventListener: (type, listener) => windowListeners.push({ type, listener })
+  };
+  const leave = () =>
+    windowListeners.filter((l) => l.type === 'beforeunload').forEach((l) => l.listener({}));
+  // This document coming back from the back/forward cache.
+  const comeBack = () =>
+    windowListeners
+      .filter((l) => l.type === 'pageshow')
+      .forEach((l) => l.listener({ persisted: true }));
 
   const messageListeners = [];
   let registered = 0;
@@ -441,7 +458,7 @@ export function loadShell({
   const fetch = async (url, init) => {
     const outOfTime = probeTimesOut(probes.length);
     probes.push({ url, init });
-    if (onProbe) onProbe({ post });
+    if (onProbe) onProbe({ post, leave });
     if (outOfTime) {
       if (!init.signal.aborted) throw new Error('the probe timer did not abort the request');
       throw new DOMException('The operation was aborted.', 'AbortError');
@@ -542,7 +559,11 @@ export function loadShell({
     recoveryRecord: () => cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? [],
     opfs: () => [...opfs],
     /// sw.js posting a message to this page.
-    post
+    post,
+    /// A navigation away from this page beginning.
+    leave,
+    /// This page restored from the back/forward cache.
+    comeBack
   };
 }
 

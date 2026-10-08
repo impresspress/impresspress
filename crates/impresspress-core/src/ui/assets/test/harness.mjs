@@ -70,9 +70,17 @@ export function instantiate({ serviceWorker = undefined, respond } = {}) {
     json: async () => ({ tools: [manifestTool('list_products')] })
   });
 
+  // Every event the tail dispatched on `window`, by type, in order.
+  const windowEvents = [];
   const sandbox = {
     document: {},
-    window: {},
+    window: {
+      dispatchEvent(event) {
+        windowEvents.push(event.type);
+        return true;
+      }
+    },
+    Event,
     navigator: {
       serviceWorker,
       modelContext: {
@@ -120,7 +128,8 @@ return {
     registerCalls,
     unregisterCalls,
     // What the tail published for the rest of the page.
-    published: sandbox.window.__impresspressWebmcp
+    published: sandbox.window.__impresspressWebmcp,
+    windowEvents
   };
 }
 

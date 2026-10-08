@@ -441,6 +441,45 @@ test('a first visit keeps the query and the fragment it came with', async () => 
   assertEntered(shell);
 });
 
+// The shell goes on to the app only while this document is still the one
+// the tab is showing. A navigation that began while the app was starting —
+// the person followed a link, typed an address, an agent opened `/llms.txt`
+// — is where the tab is going: the worker answers it once the app is up, so
+// the shell's own reload would only cancel it and put the tab back here.
+// (Both live runs on 2026-10-08 landed on `/` that way.)
+test('a navigation that began while the app was starting is left to finish', async () => {
+  const shell = loadShell({ onProbe: ({ leave }) => leave(), now: NOW });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 1);
+  assert.equal(shell.location.reloads, 0);
+  assert.deepEqual(shell.location.replaced, []);
+  // The app did answer, so the recovery is over all the same.
+  assert.equal(shell.session.getItem(RECOVERY_DONE), null);
+  assert.match(shell.status.textContent, /If this page stays, reload it\.$/);
+
+  // Back to this page from the back/forward cache: the shell is on screen
+  // again, with nothing left to run — so it goes on to the app now.
+  shell.comeBack();
+  assert.equal(shell.location.reloads, 1);
+});
+
+// …and a probe the runtime died on still leaves its breaker for the next
+// load, which is the navigation under way: the dead worker answers it with
+// this shell, and that shell recovers.
+test('a navigation that began as the probe met a dead runtime still carries the breaker', async () => {
+  const shell = loadShell({
+    onProbe: ({ leave }) => leave(),
+    probe: stoppedResponse(CAUSE, 'initialize'),
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.equal(shell.session.getItem(BREAKER), breaker(CAUSE, 'initialize'));
+  assert.equal(shell.location.reloads, 0);
+  assert.deepEqual(shell.location.replaced, []);
+});
+
 // The loop guard for the return itself: if the page the person was on is
 // what kills the runtime, going back to it kills the replacement too.
 test('a page that traps the replacement as well ends on the stopped screen, not in a loop', async () => {

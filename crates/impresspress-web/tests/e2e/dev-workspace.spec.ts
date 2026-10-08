@@ -173,6 +173,15 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(names, 'the registry holds each registrar\'s names exactly once').toEqual(
     [...manifestNames, ...PAGE_TOOLS].sort(),
   );
+  // …and the guide's sentence about them is what the registry holds: both
+  // registrars, each with its own number, and the total an agent in this
+  // tab lists. (It used to give `dev.js`'s count alone — 27 where Chrome
+  // listed 37.)
+  await expect(page.locator('#dev-webmcp-status')).toHaveText(
+    `This browser has WebMCP: ${names.length} tools are registered for an agent in this tab: ` +
+      `the ${PAGE_TOOLS.length} workspace tools, which the Tool console below also runs, and ` +
+      `the site's own ${manifestNames.length}.`,
+  );
   const generation = await page.evaluate(() =>
     (window as unknown as { __impresspressWebmcp: { generation(): number } }).__impresspressWebmcp.generation(),
   );
@@ -698,7 +707,7 @@ test('an expired session removes the workspace tools from the registry', async (
   // `unregisterPageTools` removing each name.
   await expect.poll(async () => pageScoped(await toolNames(page))).toEqual([]);
   await expect(page.locator('#dev-webmcp-status')).toHaveText(
-    'The session expired and the tools were removed. Sign in again.',
+    'The session expired and the workspace tools were removed. Sign in again.',
   );
 });
 

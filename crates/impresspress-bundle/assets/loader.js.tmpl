@@ -136,6 +136,56 @@ const BOOT_PROBE_TIMEOUT_MS = 60_000;
 // is rendered with too.
 const SHELL_URL = '__SHELL_URL__';
 
+// Whether a navigation away from this document has begun. Every boot ends
+// with the shell navigating itself on to the app (`enterApp`), and that is
+// right only while the shell is still what the tab is going to show.
+//
+// It may not be. Once the worker has taken this page, a navigation from it —
+// a link followed, an address typed, an agent's `goto` — is answered by the
+// worker, which holds it until the runtime has started: the same seconds the
+// shell's own probe is waiting for. Both get their answer at about the same
+// moment, and a reload of the shell requested then CANCELS the navigation
+// under way and puts the tab back here — on `/`, rendered by the app, in
+// place of the page that was asked for. (Both live runs of 2026-10-08 opened
+// `/llms.txt` that way and landed on the sandbox's welcome page.) A
+// navigation under way is where the tab is going — wherever that is — so the
+// shell stands down and lets it finish.
+//
+// `beforeunload` is the signal because desktop browsers fire it at a
+// document as a navigation away from it begins, whoever started it; the
+// Navigation API's `navigate` event is not fired for one started from the
+// browser's own UI. It is not universal: iOS Safari does not fire it
+// reliably, and there the shell reloads as it always did, which can cancel
+// the navigation again. There is no event for a navigation that began and
+// then left the document in place (a download, a 204), so the line the shell
+// shows when it stands down says what to do if the page stays.
+let leaving = false;
+// What the shell would have done when it stood down: run if this document
+// comes back from the back/forward cache, where it would otherwise sit on
+// that line with nothing left to run.
+let stoodDown = null;
+window.addEventListener('beforeunload', () => {
+    leaving = true;
+});
+window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    leaving = false;
+    const go = stoodDown;
+    stoodDown = null;
+    if (go) go();
+});
+
+// Take this page where the boot is going (`navigate`), unless a navigation
+// away from it has begun (`leaving`): that one is left to finish.
+function goOn(status, navigate) {
+    if (!leaving) {
+        navigate();
+        return;
+    }
+    stoodDown = navigate;
+    status.textContent = 'Opening the page you asked for… If this page stays, reload it.';
+}
+
 // Drop Cache Storage. RECOVERED_CACHE is not dropped: it is this script's
 // own record, not the app's state. The runtime binary the worker keeps
 // (`RUNTIME_CACHE` in sw.js) goes with the rest, so the replacement fetches
@@ -1206,8 +1256,11 @@ async function enterApp(target, worker, status, waitedMs) {
     }
     const stopped = probe ? await stoppedCauseOf(probe) : null;
     if (stopped !== null) {
+        // The breaker is in sessionStorage, so a navigation under way carries
+        // it as well as this reload would: the dead worker answers it with
+        // the shell, and that shell recovers.
         setBreaker(stopped);
-        window.location.reload();
+        goOn(status, () => window.location.reload());
         return;
     }
     // The app answered. Whatever the last recovery in this tab was for is
@@ -1216,10 +1269,11 @@ async function enterApp(target, worker, status, waitedMs) {
     // proves nothing and clears nothing.)
     if (probe) sessionStorage.removeItem(RECOVERY_DONE_KEY);
     if (target.href === window.location.href) {
-        // Leave the current navigation task before requesting the reload.
-        setTimeout(() => window.location.reload(), 0);
+        // Leave the current navigation task before requesting the reload —
+        // and decide in that task, since a navigation may begin in between.
+        setTimeout(() => goOn(status, () => window.location.reload()), 0);
     } else {
-        window.location.replace(target.href);
+        goOn(status, () => window.location.replace(target.href));
     }
 }
 

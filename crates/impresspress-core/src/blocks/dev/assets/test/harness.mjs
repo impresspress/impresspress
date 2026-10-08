@@ -86,6 +86,12 @@ const core = fs.readFileSync(
  *   `/b/dev/api/tools.json` answers with. `null` — the default — is a manifest
  *   with nothing in it, which is what every test that is not about the
  *   manifest's tools wants.
+ * @param {{generation(): number, count(): number}|null} [options.siteRegistrar]
+ *   what `webmcp.js` publishes as `window.__impresspressWebmcp` — the other
+ *   registrar on the real page, whose tools sit beside this page's. `null`,
+ *   the default, is a page on which that script has not run yet. A test
+ *   changes what the object answers and fires `impresspress:webmcp-loaded`
+ *   (`fireWindow`) the way the script does when a load settles.
  * @param {number|null} [options.toolsFailure]  when set, `tools.json` is
  *   refused with this status instead of answered.
  * @param {(url: string, init: object|undefined) => ({status?: number,
@@ -149,6 +155,7 @@ export function instantiate({
   // care about the status wants: no `activation`, no `active_generation`.
   status = {},
   toolsManifest = null,
+  siteRegistrar = null,
   toolsFailure = null,
   endpoint = () => undefined,
   statusGate = null,
@@ -319,6 +326,7 @@ export function instantiate({
       addEventListener(type, listener) {
         windowListeners.push({ type, listener });
       },
+      ...(siteRegistrar ? { __impresspressWebmcp: siteRegistrar } : {}),
       confirm,
       prompt
     },

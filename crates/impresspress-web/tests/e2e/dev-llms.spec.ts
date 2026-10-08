@@ -1,10 +1,11 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   bootServiceWorker,
   enterFromWelcome,
+  forwardSandboxDiagnostics,
   LLMS_BOOTSTRAP_PORT,
   runFromConsole,
   serveDirectory,
@@ -237,4 +238,89 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   expect(
     without.result.files.filter((file: { path: string }) => file.path.endsWith('llms.txt')),
   ).toEqual([]);
+});
+
+/**
+ * Open `/llms.txt` the way a person or an agent does — a top-level
+ * navigation, not a `fetch` — and return where the tab ended up, what it
+ * shows, and who answered.
+ */
+async function openLlms(page: Page) {
+  const response = await page.goto('/llms.txt', { waitUntil: 'load' });
+  return {
+    fromWorker: response?.fromServiceWorker() ?? null,
+    type: response?.headers()['content-type'] ?? '',
+  };
+}
+
+/** What the tab is showing: its path, and the text of a plain-text document. */
+async function shown(page: Page) {
+  return {
+    path: new URL(page.url()).pathname,
+    text: await page.locator('body').textContent(),
+  };
+}
+
+test('a navigation to /llms.txt shows the text before, during and after the worker’s install', async ({
+  browser,
+  request,
+  baseURL,
+}) => {
+  test.setTimeout(300_000);
+  const fromStaticHost = await sandboxLlms(request, baseURL!, 'blank');
+
+  // 1. No worker: the static host answers the navigation.
+  const fresh = await browser.newContext();
+  try {
+    const page = await fresh.newPage();
+    forwardSandboxDiagnostics(page);
+    const answer = await openLlms(page);
+    expect(answer.fromWorker).toBe(false);
+    expect(answer.type).toMatch(/^text\/plain/);
+    expect(await shown(page)).toEqual({ path: '/llms.txt', text: fromStaticHost });
+  } finally {
+    await fresh.close();
+  }
+
+  // 2. While the boot shell is still booting: the worker has taken the page,
+  //    the runtime is still starting, and the shell has yet to go on to the
+  //    app. A navigation started now is the reader's, and the shell must not
+  //    replace it with a reload of `/` once the runtime answers — the two
+  //    live runs on 2026-10-08 both landed on the welcome page at `/` that
+  //    way.
+  const booting = await browser.newContext();
+  try {
+    const page = await booting.newPage();
+    forwardSandboxDiagnostics(page);
+    await page.goto('/', { waitUntil: 'commit' });
+    await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, {
+      timeout: 120_000,
+    });
+    const answer = await openLlms(page);
+    expect(answer.fromWorker).toBe(true);
+    expect(answer.type).toMatch(/^text\/plain/);
+    // The runtime is up — the probe the shell was waiting on has its answer
+    // by now — and the tab is still where the reader sent it.
+    await expect
+      .poll(async () => page.evaluate(async () => (await fetch('/b/auth/login')).status), {
+        timeout: 120_000,
+      })
+      .toBe(200);
+    expect(await shown(page)).toEqual({ path: '/llms.txt', text: fromStaticHost });
+  } finally {
+    await booting.close();
+  }
+
+  // 3. A page the worker controls: the runtime answers, with the same text.
+  const controlled = await browser.newContext();
+  try {
+    const page = await controlled.newPage();
+    await bootServiceWorker(page);
+    const answer = await openLlms(page);
+    expect(answer.fromWorker).toBe(true);
+    expect(answer.type).toMatch(/^text\/plain/);
+    expect(await shown(page)).toEqual({ path: '/llms.txt', text: fromStaticHost });
+  } finally {
+    await controlled.close();
+  }
 });
