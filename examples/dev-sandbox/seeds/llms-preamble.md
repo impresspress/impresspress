@@ -9,8 +9,8 @@ This sandbox was seeded from the `{template}` template.
 
 ## What this is
 
-The whole ImpressPress runtime — web server, database, shop, and a Rust
-compiler for backend blocks — runs as WebAssembly inside a service worker on
+The whole ImpressPress runtime -- web server, database, shop, and a Rust
+compiler for backend blocks -- runs as WebAssembly inside a service worker on
 this origin. Every visitor gets a private instance that lives in their own
 browser; nothing you do here leaves it. The host itself serves only a boot
 page and this file.
@@ -21,7 +21,7 @@ Fetching URLs is not enough to build anything. Until the service worker is
 installed, every page of this origin is the boot page, and the sandbox only
 exists once that page's script has run. If you can only fetch documents and
 cannot drive a real browser, say so to your user and ask them to open this
-address in a browser you can control — do not report a site you have not
+address in a browser you can control -- do not report a site you have not
 built.
 
 ## How to start
@@ -33,7 +33,7 @@ built.
    type.
 3. Use the tools the workspace page publishes. A browser with WebMCP sees
    them as tools; a browser without it runs the same tools from the
-   Tool console on the same page — see "If your browser has no WebMCP"
+   Tool console on the same page -- see "If your browser has no WebMCP"
    below.
    Either way they are:
    - to look: `dev_status`, `dev_read_reference`, `dev_list_files`,
@@ -59,5 +59,5 @@ This file describes the sandbox, not the site in it. A site you build may
 carry its own `site/llms.txt`; in this browser that file is then what
 `/llms.txt` serves, and it is the one an export ships.
 
-Everything from here on is the sandbox's site-authoring guide — the text
+Everything from here on is the sandbox's site-authoring guide -- the text
 `dev_read_reference` returns as `site_markdown`.

@@ -96,5 +96,41 @@ class BootTitle(unittest.TestCase):
         self.assertEqual(seedlib.boot_title(seed), "Another title")
 
 
+class LlmsText(unittest.TestCase):
+    """The generated llms.txt is plain ASCII.
+
+    A static host serves `/llms.txt` as `text/plain` with no charset —
+    Cloudflare's asset server and `python3 -m http.server` both do — and a
+    browser opening that address decodes such a document in its locale's
+    legacy encoding, not UTF-8. A dash written as U+2014 then reaches a
+    reader who navigates there (rather than fetching it) as `â€"`. ASCII
+    reads the same under every decoding, on every host.
+    """
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_the_committed_seeds_generate_ascii(self):
+        for seed in seedlib.seed_dirs():
+            with self.subTest(seed=seed.name):
+                text = seedlib.staged_llms(seed)
+                self.assertIsNotNone(text)
+                self.assertTrue(text.isascii())
+
+    def test_a_guide_that_is_not_ascii_is_refused_with_its_line(self):
+        seed = self.tmp / "bootstrap"
+        shutil.copytree(SEEDS / "bootstrap", seed)
+        guide = seed / seedlib.GUIDE_PATH
+        lines = guide.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines.insert(2, "Prices are shown in \u00a5.\n")
+        guide.write_text("".join(lines), encoding="utf-8")
+        problems = check([seed])
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(f"{guide}:3", problems[0])
+        self.assertIn("U+00A5", problems[0])
+        self.assertIn("ASCII", problems[0])
+
+
 if __name__ == "__main__":
     unittest.main()

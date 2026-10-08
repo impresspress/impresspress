@@ -14,7 +14,7 @@ the tool in `#dev-console-tool`, put its arguments as JSON in
 ## How `site/` works
 
 - Every file under `site/` is published verbatim, and every write publishes
-  a new generation immediately — there is no separate deploy.
+  a new generation immediately -- there is no separate deploy.
 - `site/index.html` is the entrypoint, served at `/`. A subdirectory is a
   route: `site/blog/index.html` serves at `/blog/`, `site/about.html` at
   `/about.html`.
@@ -39,7 +39,7 @@ Every page you write carries this `<head>`:
 ```
 
 `/b/webmcp/webmcp.js` gives a visitor's own browser agent the site's public
-tools — the shop's, and any compiled block's agent tools. Without the tag a
+tools -- the shop's, and any compiled block's agent tools. Without the tag a
 visitor's agent sees a plain page.
 
 ## The shop
@@ -52,7 +52,7 @@ through two public pieces:
   record carries `id`, `name`, `slug`, `description`, `image_url`, `tags`,
   `category`, `currency`, `stock`, `metadata` and `fulfillment_kind`. Pass
   `?page=2` for the next page; `?page_size=` goes up to 100.
-- `<impresspress-product product-id="…"></impresspress-product>` renders one
+- `<impresspress-product product-id="..."></impresspress-product>` renders one
   product's price and buy button. Load
   `<script src="/b/products/storefront.js" defer></script>` once per page.
   Attributes: `product-id` (required), `presentation` (`hosted`, `embedded`
@@ -91,7 +91,7 @@ This is a complete `shop_create_offer` argument (`product_id` is the id
 `currency` is a three-letter ISO code. Amounts are integers in the
 currency's minor unit, so their scale follows the currency's decimal places:
 for `nzd`, 1450 is NZ$14.50; for a zero-decimal currency such as `jpy`, 1450
-is ¥1450.
+is 1450 yen.
 
 `shop_create_offer`'s schema lists the other `amount` types, which price
 from a customer input. Changing only `amount` is refused: they need
@@ -117,7 +117,7 @@ CSS; a value set on an ancestor does not reach it.
 ## Calling a backend block from a page
 
 A block you compiled serves under `/b/<name>/`. Call it with
-`fetch('/b/<name>/…')` — same origin, so no CORS or credentials setup — and
+`fetch('/b/<name>/...')` -- same origin, so no CORS or credentials setup -- and
 send and read JSON.
 
 ## What a write refuses
@@ -127,7 +127,7 @@ send and read JSON.
 - A file over 512 KiB; more than 2,000 files; more than 64 MiB of stored
   content in the workspace; more than 16 backend blocks.
 - A site file at a URL the runtime reserves for its own static files, which
-  would never be shown — for example `site/manifest.json` (served at
+  would never be shown -- for example `site/manifest.json` (served at
   `/manifest.json`), `site/sw.js`, `site/loader.js`, the shell's
   `site/vendor/sql-wasm*` files, or anything under `site/snippets/`,
   `site/seed/` or `site/cdn-cgi/`. The refusal names the rule; pick another

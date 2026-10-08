@@ -181,12 +181,14 @@ LLMS_PREAMBLE = SEEDS_DIR / "llms-preamble.md"
 LLMS_TEMPLATE_HOLE = "{template}"
 
 
-def llms_text(template: str, guide: str) -> str:
+def llms_text(template: str, guide: str, guide_path: pathlib.Path) -> str:
     """The seed's llms.txt: the shared preamble, naming the template, then the
     seed's guide verbatim. The guide is the single source of the building
     instructions — the same text `dev_read_reference` serves — so a reader
     that never gets as far as that tool is told exactly what one that does
-    is."""
+    is. `guide_path` is where `guide` was read from, for the refusals.
+
+    Plain ASCII, both halves (`require_ascii` says why)."""
     try:
         preamble = LLMS_PREAMBLE.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
@@ -197,7 +199,31 @@ def llms_text(template: str, guide: str) -> str:
         )
     if not preamble.endswith("\n") or not guide.endswith("\n"):
         raise SeedError(f"{LLMS_PREAMBLE} and the seed's {GUIDE_PATH} must each end with a newline")
+    require_ascii(LLMS_PREAMBLE, preamble)
+    require_ascii(guide_path, guide)
     return preamble.replace(LLMS_TEMPLATE_HOLE, template) + "\n" + guide
+
+
+def require_ascii(path, text: str) -> None:
+    """Refuse a source of llms.txt that is not plain ASCII, naming the line.
+
+    A static host serves `/llms.txt` as `text/plain` with no charset
+    (Cloudflare's asset server and `python3 -m http.server` both do), and a
+    browser that NAVIGATES there decodes such a document in its locale's
+    legacy encoding rather than UTF-8: a U+2014 dash reaches the reader as
+    three characters of noise. The runtime's own answer says
+    `charset=utf-8`, but a reader with no service worker yet gets the host's.
+    ASCII reads the same under every decoding, on every host, so it is the
+    one encoding that needs no host to be configured."""
+    for number, line in enumerate(text.splitlines(), start=1):
+        for char in line:
+            if not char.isascii():
+                raise SeedError(
+                    f"{path}:{number}: U+{ord(char):04X} ({char}) — llms.txt is generated "
+                    "from this file and must be plain ASCII: a static host serves it with no "
+                    "charset, and a browser opening it decodes it as its locale's legacy "
+                    "encoding rather than UTF-8"
+                )
 
 
 def load_sandbox(seed_dir: pathlib.Path):
@@ -287,7 +313,7 @@ def sandbox_block(seed_dir: pathlib.Path):
         guide = data.decode("utf-8")
     except UnicodeDecodeError as e:
         raise SeedError(f"{guide_path}: not valid UTF-8 ({e}); the importer refuses it at boot")
-    llms = llms_text(template, guide).encode("utf-8")
+    llms = llms_text(template, guide, guide_path).encode("utf-8")
     if len(llms) > MAX_LLMS_BYTES:
         raise SeedError(
             f"{seed_dir}: the generated {LLMS_PATH} is {len(llms)} bytes, over the "
@@ -318,8 +344,9 @@ def staged_llms(seed_dir: pathlib.Path):
     if sandbox_block(seed_dir) is None:
         return None
     sandbox = json.loads((seed_dir / "sandbox.json").read_text(encoding="utf-8"))
-    guide = (seed_dir / GUIDE_PATH).read_text(encoding="utf-8")
-    return llms_text(sandbox["template"], guide).encode("utf-8")
+    guide_path = seed_dir / GUIDE_PATH
+    guide = guide_path.read_text(encoding="utf-8")
+    return llms_text(sandbox["template"], guide, guide_path).encode("utf-8")
 
 
 def load_pin(seed_dir: pathlib.Path):
