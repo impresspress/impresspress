@@ -42,6 +42,12 @@ answers with until the service worker is installed) says the same in two
 sentences and links both `/llms.txt` and `/b/dev/enter`. Once the sandbox is
 running, `/llms.txt` is answered by the runtime: the same text until the site
 has an `llms.txt` of its own (`site/llms.txt`), and that file from then on.
+Opening `/llms.txt` in a tab shows the text in every state: before the
+service worker is installed, while the boot page is still starting (the boot
+page lets a navigation that has begun finish rather than reloading itself
+over it), and once the runtime answers. The sandbox's text is plain ASCII
+(`seeds/check-seeds.py` refuses anything else), because a static host serves
+it with no charset and a browser would not decode it as UTF-8.
 A sandbox opened in a browser before this existed picks the text up on its
 next load. An [export](#export) never carries the sandbox's text or its boot
 page wording — the exported boot page is titled with the site's own name —

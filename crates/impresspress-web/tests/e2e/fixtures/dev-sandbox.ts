@@ -162,9 +162,11 @@ export async function bootServiceWorker(page: Page) {
     timeout: 120_000,
   });
   // …and wait for the boot shell to be replaced. `loader.js` reloads the page
-  // once the worker controls it, on a `setTimeout(…, 0)` this function cannot
-  // see; navigating on top of that pending reload is the
-  // `net::ERR_ABORTED at /` a caller would otherwise hit. `#status` is the
+  // once the runtime has answered its probe, on a `setTimeout(…, 0)` this
+  // function cannot see. A navigation a caller starts before that reload
+  // stands the shell down (`goOn` in `loader.js.tmpl`), and one started
+  // after it races the reload already under way; waiting here means a caller
+  // starts from the runtime's own page, with neither. `#status` is the
   // shell's own progress line (`index.html.tmpl`) and exists on no page the
   // runtime serves, so its absence means the reload has landed.
   await page.waitForFunction(() => document.getElementById('status') === null, null, {
