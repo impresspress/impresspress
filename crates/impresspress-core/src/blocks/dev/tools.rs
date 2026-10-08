@@ -121,7 +121,8 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
          limits, the two templates) — read it before writing Rust. `site_markdown` is this \
          sandbox's site-authoring guide (the CSS framework it ships, the page skeleton, the \
          storefront element, the catalog API, what a write refuses) — read it before writing \
-         under `site/`.",
+         under `site/`. `suggested_prompt` is the task the workspace page suggests for this \
+         template, empty when it suggests none.",
     ),
     (
         "impresspress/dev",

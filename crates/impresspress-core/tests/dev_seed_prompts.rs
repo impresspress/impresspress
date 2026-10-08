@@ -206,3 +206,37 @@ fn tool_tokens_splits_names_out_of_prose() {
         tool_tokens("create three with shop_create_product, then dev_status. Any shop_* tool");
     assert_eq!(found, BTreeSet::from(["dev_status", "shop_create_product"]));
 }
+
+/// Every seed guide's "Pricing an offer" example is an argument the create-
+/// offer endpoint accepts: `product_id` goes to the path, and the rest
+/// deserializes into the handler's own type, `deny_unknown_fields` and all.
+#[cfg(feature = "block-products")]
+#[test]
+fn every_guide_offer_example_is_a_valid_create_offer_argument() {
+    use impresspress_core::blocks::products::contracts::OfferDefinitionRequest;
+    for (path, text) in seed_files("guide.md") {
+        let section = text
+            .split("## Pricing an offer")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{}: no \"## Pricing an offer\"", path.display()));
+        let json = section
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .unwrap_or_else(|| panic!("{}: no json block under the heading", path.display()));
+        let mut argument: serde_json::Value =
+            serde_json::from_str(json).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(
+            argument
+                .as_object_mut()
+                .unwrap()
+                .remove("product_id")
+                .is_some(),
+            "{}: the example must say where product_id goes",
+            path.display()
+        );
+        let parsed: OfferDefinitionRequest =
+            serde_json::from_value(argument).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(parsed.components.len(), 1, "{}", path.display());
+    }
+}

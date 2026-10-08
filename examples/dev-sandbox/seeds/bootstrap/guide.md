@@ -108,8 +108,50 @@ through two public pieces:
   `omit` or `include`).
 
 A product appears in the catalog once `shop_update_product` sets
-`status: "active"`; it can be bought once it has a published offer
+`status: "active"`; its widget shows a price once it has a published offer
 (`shop_create_offer`, then `shop_publish_offer`).
+
+Checkout needs a Stripe secret key, which this sandbox's browser runtime
+cannot use. With `presentation` `hosted` or `embedded` the widget still
+prices the product, but says "Checkout isn't available on this site."
+instead of showing a checkout button. With `presentation="payment_link"` it
+opens a Stripe Payment Link the offer already carries, which needs no secret
+key; the `shop_*` tools cannot create one.
+
+## Pricing an offer
+
+An offer's price is a list of `components`. A fixed-price product has one.
+This is a complete `shop_create_offer` argument (`product_id` is the id
+`shop_create_product` returned):
+
+```json
+{"product_id": "<id from shop_create_product>",
+ "name": "250 g bag", "mode": "payment", "currency": "nzd",
+ "pricing_model": "fixed", "usage_type": "licensed",
+ "billing_scheme": "per_unit", "tax_behavior": "unspecified",
+ "components": [{"key": "bag", "label": "250 g bag",
+                 "amount": {"type": "fixed", "unit_amount_minor": 1450}}]}
+```
+
+Amounts are integer minor units (1450 = 14.50). `currency` is a three-letter
+ISO code. `shop_create_offer`'s schema lists the other `amount` types, which
+price from a customer input; a `graduated` or `volume` amount needs
+`billing_scheme: "tiered"`.
+
+## Theming the product widget
+
+`<impresspress-product>` renders in a shadow root and reads five custom
+properties, whose defaults it sets on the element itself. Set them on the
+element, e.g. `impresspress-product { --ip-accent: #0f766e; }` in the page's
+CSS; a value set on an ancestor does not reach it.
+
+| Property | Default | Used for |
+|---|---|---|
+| `--ip-accent` | `#2563eb` | buttons, checkbox accents |
+| `--ip-bg` | `#fff` | the card background |
+| `--ip-border` | `#dbe3ee` | borders and dividers |
+| `--ip-muted` | `#617089` | descriptions, help text, status |
+| `--ip-text` | `#172033` | body text |
 
 ## Calling a backend block from a page
 
