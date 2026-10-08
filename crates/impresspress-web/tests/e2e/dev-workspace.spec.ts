@@ -639,7 +639,7 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // `/b/products/storefront/{id}` — a Public route that refuses a product
   // with no ACTIVE offer. Its shadow-root title carrying the name is
   // therefore the end of the chain: create → price → publish → activate all
-  // landed, and an anonymous browser can see it priced.
+  // landed, and an anonymous browser can see it.
   await expect(shop.locator('impresspress-product').locator('.title')).toHaveText(
     SHOP_PRODUCT.name,
     { timeout: 60_000 },
