@@ -121,7 +121,7 @@ async function setupCommerce(page: Page, fixture: ExampleFixture): Promise<Captu
       await route.fulfill({
         status: 200,
         headers: corsHeaders(),
-        json: { stripe_publishable_key: "pk_test_examples", embedded_checkout_available: true },
+        json: { stripe_publishable_key: "pk_test_examples", checkout_available: true, embedded_checkout_available: true },
       });
       return;
     }

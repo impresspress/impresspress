@@ -1,12 +1,14 @@
 //! Per-block endpoint-surface snapshots.
 //!
-//! One line per `info().endpoints` entry, `METHOD path auth [tool=name]`,
-//! sorted. The OpenAPI snapshot beside this one lists only endpoints that
+//! One line per `info().endpoints` entry,
+//! `METHOD path auth [tool=name] [server_only]`, sorted. The OpenAPI snapshot beside this one lists only endpoints that
 //! carry a schema (`BlockEndpoint::has_schema`), so a page or a schema-less
 //! API can be added, dropped or moved to another auth level without it
 //! noticing. This file is the contract for the part of the surface the
 //! router enforces: which (method, path) pairs a block declares and the
-//! level each requires.
+//! level each requires. `server_only` marks an endpoint the browser
+//! runtime's discovery documents leave out (`pipeline::discoverable_infos`),
+//! so a change to that set is reviewed here too.
 //!
 //! Regenerate with
 //! `UPDATE_OPENAPI_SNAPSHOTS=1 cargo test -p impresspress-core --test endpoint_surface`
@@ -42,6 +44,9 @@ fn surface_lines(info: &BlockInfo) -> Vec<String> {
             let mut line = format!("{} {} {}", ep.method, ep.path, ep.auth);
             if let Some(tool) = &ep.agent_tool {
                 line.push_str(&format!(" tool={}", tool.name));
+            }
+            if ep.server_only {
+                line.push_str(" server_only");
             }
             line
         })
@@ -161,20 +166,21 @@ fn slug_matches_the_openapi_snapshot_stems() {
 }
 
 #[test]
-fn surface_lines_are_sorted_and_carry_the_tool_name() {
+fn surface_lines_are_sorted_and_carry_the_tool_name_and_server_only() {
     use wafer_run::{AuthLevel, BlockEndpoint};
     let info =
         BlockInfo::new("impresspress/probe", "0.0.1", "http-handler@v1", "t").endpoints(vec![
             BlockEndpoint::post("/b/probe/api/things")
                 .auth(AuthLevel::Admin)
-                .agent_tool("make_thing", "Makes a thing"),
+                .agent_tool("make_thing", "Makes a thing")
+                .server_only(),
             BlockEndpoint::get("/b/probe/").auth(AuthLevel::Authenticated),
         ]);
     assert_eq!(
         surface_lines(&info),
         vec![
             "GET /b/probe/ authenticated".to_string(),
-            "POST /b/probe/api/things admin tool=make_thing".to_string(),
+            "POST /b/probe/api/things admin tool=make_thing server_only".to_string(),
         ]
     );
 }

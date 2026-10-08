@@ -286,6 +286,7 @@ test.describe("products complete browser lifecycles", () => {
         paid = true;
         return json(route, { received: true });
       }
+      if (url.pathname.endsWith("/storefront/config")) return json(route, { schema_version: 1, checkout_available: true, embedded_checkout_available: false });
       return json(route, { message: "Unexpected commerce route" }, 404);
     });
     await page.route(`${checkoutOrigin}/**`, (route) =>
@@ -358,6 +359,7 @@ test.describe("products complete browser lifecycles", () => {
         else subscriptionStatus = "active";
         return json(route, { received: true });
       }
+      if (url.pathname.endsWith("/storefront/config")) return json(route, { schema_version: 1, checkout_available: true, embedded_checkout_available: false });
       return json(route, { message: "Unexpected commerce route" }, 404);
     });
     await page.route(`${checkoutOrigin}/**`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: shell("Stripe subscription Checkout", `<section class="card"><p>7 day trial · then NZD 49.00 monthly</p><button type="button" id="subscribe">Start membership</button></section><script>subscribe.onclick=async()=>{await fetch('${apiOrigin}/b/products/webhooks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'customer.subscription.updated'})});location.assign('${adminOrigin}/b/products/admin/purchases/order_1')}</script>`) }));
@@ -536,6 +538,7 @@ test.describe("products complete browser lifecycles", () => {
         previews.push(request.postDataJSON());
         return json(route, pricing("offer_1"));
       }
+      if (url.pathname.endsWith("/storefront/config")) return json(route, { schema_version: 1, checkout_available: true, embedded_checkout_available: false });
       return json(route, { message: "Unexpected booking route" }, 404);
     });
 

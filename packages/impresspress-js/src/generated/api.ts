@@ -20268,6 +20268,14 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
+                            /**
+                             * @description Whether `POST /b/products/checkout` can run here: secret-key
+                             *     operations are allowed in this runtime and a Stripe secret key is
+                             *     configured. False in the browser runtime. `embedded_checkout_available`
+                             *     implies it; it does not imply `embedded_checkout_available`. Payment
+                             *     Links do not need it: they never call checkout.
+                             */
+                            checkout_available: boolean;
                             embedded_checkout_available: boolean;
                             /** Format: uint32 */
                             schema_version: number;

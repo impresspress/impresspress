@@ -65,6 +65,7 @@ pub(crate) async fn handle_storefront_config(ctx: &dyn Context) -> OutputStream 
     let response = StorefrontConfig {
         schema_version: COMMERCE_SCHEMA_VERSION,
         embedded_checkout_available: matching_secret,
+        checkout_available: secret_operations_allowed && !secret.trim().is_empty(),
         stripe_publishable_key: validated.as_ref().map(|(key, _)| key.clone()),
         stripe_mode: validated.map(|(_, mode)| mode),
     };

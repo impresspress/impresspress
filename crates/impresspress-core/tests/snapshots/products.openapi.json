@@ -32536,6 +32536,10 @@
                   "additionalProperties": false,
                   "description": "Browser-safe deployment configuration. The Stripe secret key, webhook\nsecret, account ids, and provider API URL are deliberately absent.",
                   "properties": {
+                    "checkout_available": {
+                      "description": "Whether `POST /b/products/checkout` can run here: secret-key\noperations are allowed in this runtime and a Stripe secret key is\nconfigured. False in the browser runtime. `embedded_checkout_available`\nimplies it; it does not imply `embedded_checkout_available`. Payment\nLinks do not need it: they never call checkout.",
+                      "type": "boolean"
+                    },
                     "embedded_checkout_available": {
                       "type": "boolean"
                     },
@@ -32558,7 +32562,8 @@
                   },
                   "required": [
                     "schema_version",
-                    "embedded_checkout_available"
+                    "embedded_checkout_available",
+                    "checkout_available"
                   ],
                   "title": "StorefrontConfig",
                   "type": "object"

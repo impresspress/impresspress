@@ -81,16 +81,6 @@ use self::config::{
 use super::rate_limit::{apply_route_limit, UserRateLimiter};
 use crate::{blocks::crud, endpoint_match};
 
-/// Adapter-injected runtime identity. The browser service-worker adapter sets
-/// this directly on its in-memory ConfigService after loading persisted
-/// variables, so an admin database value cannot accidentally turn a public
-/// browser runtime into a trusted secret holder. Native and Cloudflare leave
-/// it unset and retain the server default. Double-underscore brackets mark
-/// the key as internal (same convention as `BLOCK_SETTINGS_CONFIG_KEY`) — it
-/// is never set via env var or the variables table, so it must not claim the
-/// admin-writable `WAFER_RUN_SHARED__` prefix.
-pub const RUNTIME_KIND_CONFIG_KEY: &str = "__IMPRESSPRESS_RUNTIME_KIND__";
-
 /// Whether this runtime may hold Stripe secrets: every runtime but the
 /// browser.
 ///
@@ -101,7 +91,7 @@ pub const RUNTIME_KIND_CONFIG_KEY: &str = "__IMPRESSPRESS_RUNTIME_KIND__";
 /// of it — and a refused read answered as the server default is exactly the
 /// browser runtime taking on secret-key operations.
 pub(crate) fn stripe_secret_operations_allowed(ctx: &dyn wafer_run::context::Context) -> bool {
-    ctx.config_get(RUNTIME_KIND_CONFIG_KEY) != Some("browser")
+    !crate::runtime_kind::is_browser(ctx)
 }
 
 /// The products block's own declared config vars. Single source of truth for

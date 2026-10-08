@@ -233,6 +233,8 @@ pub struct EndpointRoute<H> {
     pub deprecated: bool,
     /// `(name, description)` when the endpoint is exposed as a WebMCP tool.
     pub agent_tool: Option<(&'static str, &'static str)>,
+    /// Set by [`Self::server_only`].
+    pub server_only: bool,
 }
 
 impl<H: Copy> EndpointRoute<H> {
@@ -256,6 +258,7 @@ impl<H: Copy> EndpointRoute<H> {
             tags: &[],
             deprecated: false,
             agent_tool: None,
+            server_only: false,
         }
     }
 
@@ -328,6 +331,14 @@ impl<H: Copy> EndpointRoute<H> {
         self.agent_tool = Some((name, description));
         self
     }
+
+    /// The endpoint needs something only a server holds (a secret key) and
+    /// can never succeed in the browser runtime, so browser discovery leaves
+    /// it out. The handler is still the gate.
+    pub const fn server_only(mut self) -> Self {
+        self.server_only = true;
+        self
+    }
 }
 
 /// The `BlockEndpoint`s a table declares, in table order, built through the
@@ -361,6 +372,9 @@ pub fn declare<H: Copy>(table: &[EndpointRoute<H>]) -> Vec<BlockEndpoint> {
             }
             if row.deprecated {
                 ep = ep.deprecated();
+            }
+            if row.server_only {
+                ep = ep.server_only();
             }
             if let Some((name, description)) = row.agent_tool {
                 ep = ep.agent_tool(name, description);
@@ -914,7 +928,8 @@ mod tests {
                     .query_params(probe_schema)
                     .tags(&["x", "things"])
                     .deprecated()
-                    .agent_tool("make_thing", "Makes a thing"),
+                    .agent_tool("make_thing", "Makes a thing")
+                    .server_only(),
             ];
 
         let eps: Vec<BlockEndpoint> = declare(TABLE);
@@ -931,6 +946,7 @@ mod tests {
         assert_eq!(ep.query_params, Some(probe_schema()));
         assert_eq!(ep.tags, vec!["x".to_string(), "things".to_string()]);
         assert!(ep.deprecated);
+        assert!(ep.server_only);
         let tool = ep.agent_tool.as_ref().expect("agent tool declared");
         assert_eq!(tool.name, "make_thing");
         assert_eq!(tool.description, "Makes a thing");
@@ -954,6 +970,7 @@ mod tests {
         assert_eq!(ep.query_params, bare.query_params);
         assert_eq!(ep.tags, bare.tags);
         assert_eq!(ep.deprecated, bare.deprecated);
+        assert_eq!(ep.server_only, bare.server_only);
         assert!(ep.agent_tool.is_none());
     }
 

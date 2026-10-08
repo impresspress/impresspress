@@ -89,10 +89,42 @@ async fn storefront_config_exposes_only_a_valid_matching_publishable_key() {
     assert!(body.get("stripe_mode").is_none());
 }
 
+/// `checkout_available` is true exactly when `POST /b/products/checkout`
+/// gets past its availability guards: secret-key operations allowed in this
+/// runtime, and a Stripe secret key configured.
+#[tokio::test]
+async fn storefront_config_reports_whether_checkout_can_run() {
+    async fn reported(ctx: &crate::test_support::TestContext) -> serde_json::Value {
+        let (msg, input) = get_msg("/b/products/storefront/config", "");
+        output_to_json(dispatch(ctx, msg, input).await).await
+    }
+    let server = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_configured",
+    )])
+    .await;
+    assert_eq!(reported(&server).await["checkout_available"], true);
+
+    let unconfigured = ctx().await;
+    assert_eq!(reported(&unconfigured).await["checkout_available"], false);
+
+    let browser = ctx_with(&[
+        (crate::runtime_kind::RUNTIME_KIND_CONFIG_KEY, "browser"),
+        (
+            "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+            "sk_test_configured",
+        ),
+    ])
+    .await;
+    let body = reported(&browser).await;
+    assert_eq!(body["checkout_available"], false, "{body}");
+    assert_eq!(body["embedded_checkout_available"], false, "{body}");
+}
+
 #[tokio::test]
 async fn browser_runtime_hides_secret_settings_and_rejects_stripe_secret_operations() {
     let ctx = ctx_with(&[
-        (crate::blocks::products::RUNTIME_KIND_CONFIG_KEY, "browser"),
+        (crate::runtime_kind::RUNTIME_KIND_CONFIG_KEY, "browser"),
         (
             "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
             "sk_test_must_not_run",

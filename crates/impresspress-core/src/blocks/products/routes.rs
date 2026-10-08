@@ -627,7 +627,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Synchronize immutable Product and fixed Prices to Stripe")
     .path_params(offer_path_schema)
     .output(response_schema_of::<contracts::ManagedOffer>)
-    .tags(&["products", "admin", "offers", "stripe"]),
+    .tags(&["products", "admin", "offers", "stripe"])
+    .server_only(),
     EndpointRoute::admin(
         HttpMethod::Post,
         "/b/products/api/admin/products/{product_id}/offers/{offer_id}/duplicate",
@@ -711,7 +712,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .path_params(offer_path_schema)
     .input(request_schema_of::<contracts::PaymentLinkCreateRequest>)
     .output(response_schema_of::<contracts::ManagedPaymentLink>)
-    .tags(&["products", "admin", "offers", "payment-links", "stripe"]),
+    .tags(&["products", "admin", "offers", "payment-links", "stripe"])
+    .server_only(),
     EndpointRoute::admin(
         HttpMethod::Delete,
         "/b/products/api/admin/products/{product_id}/offers/{offer_id}/payment-links/{link_id}",
@@ -849,7 +851,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Replay a failed or dead-letter Stripe webhook")
     .path_params(id_path_schema)
     .output(response_schema_of::<contracts::WebhookAck>)
-    .tags(&["products", "admin", "stripe", "webhooks"]),
+    .tags(&["products", "admin", "stripe", "webhooks"])
+    .server_only(),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/products/api/admin/provider-operations",
@@ -1041,7 +1044,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Synchronize own immutable Product and fixed Prices to Stripe")
     .path_params(offer_path_schema)
     .output(response_schema_of::<contracts::ManagedOffer>)
-    .tags(&["products", "seller", "offers", "stripe"]),
+    .tags(&["products", "seller", "offers", "stripe"])
+    .server_only(),
     EndpointRoute::authenticated(
         HttpMethod::Post,
         "/b/products/api/products/{product_id}/offers/{offer_id}/duplicate",
@@ -1125,7 +1129,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .path_params(offer_path_schema)
     .input(request_schema_of::<contracts::PaymentLinkCreateRequest>)
     .output(response_schema_of::<contracts::ManagedPaymentLink>)
-    .tags(&["products", "seller", "offers", "payment-links", "stripe"]),
+    .tags(&["products", "seller", "offers", "payment-links", "stripe"])
+    .server_only(),
     EndpointRoute::authenticated(
         HttpMethod::Delete,
         "/b/products/api/products/{product_id}/offers/{offer_id}/payment-links/{link_id}",
@@ -1249,7 +1254,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Create seller account and Stripe-hosted onboarding link")
     .input(request_schema_of::<contracts::SellerOnboardingRequest>)
     .output(response_schema_of::<contracts::SellerOnboardingResponse>)
-    .tags(&["products", "seller", "stripe-connect"]),
+    .tags(&["products", "seller", "stripe-connect"])
+    .server_only(),
     EndpointRoute::authenticated(
         HttpMethod::Post,
         "/b/products/api/seller/dashboard",
@@ -1257,7 +1263,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Create Stripe Express dashboard login link")
     .output(response_schema_of::<contracts::ProviderRedirect>)
-    .tags(&["products", "seller", "stripe-connect"]),
+    .tags(&["products", "seller", "stripe-connect"])
+    .server_only(),
     // ── Public catalog ── the anonymous surface of this block. Both
     // endpoints publish `contracts::CatalogProductView`, whose field list
     // (not the row) decides what a guest may read.
@@ -1327,7 +1334,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
         .description("Public transport endpoint authenticated by the Stripe-Signature HMAC header. Raw request bytes are verified before parsing or applying any side effect.")
         .input(webhook_event_schema)
         .output(response_schema_of::<contracts::WebhookAck>)
-        .tags(&["products", "stripe", "webhooks"]),
+        .tags(&["products", "stripe", "webhooks"])
+        .server_only(),
     EndpointRoute::public(
         HttpMethod::Post,
         "/b/products/pricing/preview",
@@ -1358,7 +1366,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
              web page can use. This does NOT complete the payment: always give the \
              returned `checkout_url` to the customer so they can confirm and pay \
              themselves.",
-        ),
+        )
+        .server_only(),
     EndpointRoute::public(
         HttpMethod::Get,
         "/b/products/orders/{id}/status",
@@ -1411,7 +1420,8 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Create a Stripe Billing Portal session for an owned customer context")
     .input(request_schema_of::<contracts::BillingPortalRequest>)
     .output(response_schema_of::<contracts::ProviderRedirect>)
-    .tags(&["products", "subscriptions", "stripe"]),
+    .tags(&["products", "subscriptions", "stripe"])
+    .server_only(),
 ];
 
 // ---------------------------------------------------------------------------

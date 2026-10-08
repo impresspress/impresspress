@@ -275,7 +275,7 @@ impl builder::BootHooks for BrowserBootHooks {
             // secret-key operations locally. Static pages may still use a
             // remote trusted commerce API or pre-created Payment Links.
             .both(
-                impresspress_core::blocks::products::RUNTIME_KIND_CONFIG_KEY,
+                impresspress_core::runtime_kind::RUNTIME_KIND_CONFIG_KEY,
                 "browser",
             )
             .both(

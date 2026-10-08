@@ -492,7 +492,7 @@ pub const ENV_PRECEDENCE_TRANSITION_KEY: &str = "IMPRESSPRESS__ADMIN__ENV_PRECED
 /// Bracketed in double underscores, so it is an internal key by
 /// [`crate::config_vars::is_internal_key`]: served only from the boot map, never
 /// stored in this table, and refused by every write surface. Same shape as
-/// `products::RUNTIME_KIND_CONFIG_KEY`.
+/// `runtime_kind::RUNTIME_KIND_CONFIG_KEY`.
 ///
 /// FAIL-CLOSED, and that is the whole reason it is a new key rather than a third
 /// value for `RUNTIME_KIND_CONFIG_KEY`: that one defaults to `"server"`, so a

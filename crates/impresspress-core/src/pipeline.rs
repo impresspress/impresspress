@@ -50,9 +50,8 @@ fn caller_auth_level(msg: &Message) -> AuthLevel {
     AuthLevel::Authenticated
 }
 
-/// The registered blocks the admin feature toggle leaves on — the set every
-/// discovery projection (`/openapi.json`, the agent card and the WebMCP
-/// manifest) is generated from.
+/// The registered blocks every discovery projection (`/openapi.json`, the
+/// agent card and the WebMCP manifest) is generated from, in this runtime.
 ///
 /// `block_infos` is every REGISTERED block, but `route_to_block` 404s any
 /// block the toggle has turned off (routing.rs's feature gate, backed by the
@@ -61,13 +60,29 @@ fn caller_auth_level(msg: &Message) -> AuthLevel {
 /// from the enabled subset only — gated under the same name the router gates
 /// with (`feature_gate_name`; the inspector's `BlockInfo` name and its
 /// route's `block` name differ).
-fn enabled_infos(block_infos: &[BlockInfo], features: &dyn FeatureConfig) -> Vec<BlockInfo> {
+///
+/// In the browser runtime every endpoint declared `server_only` is dropped
+/// as well: it needs something only a server holds and can never succeed
+/// there. Both discovery branches call this one function, so the three
+/// documents agree.
+fn discoverable_infos(
+    ctx: &dyn Context,
+    block_infos: &[BlockInfo],
+    features: &dyn FeatureConfig,
+) -> Vec<BlockInfo> {
+    let browser = crate::runtime_kind::is_browser(ctx);
     block_infos
         .iter()
         .filter(|b| {
             crate::features::is_enabled(features, block_infos, routing::feature_gate_name(&b.name))
         })
         .cloned()
+        .map(|mut info| {
+            if browser {
+                info.endpoints.retain(|ep| !ep.server_only);
+            }
+            info
+        })
         .collect()
 }
 
@@ -319,14 +334,14 @@ pub async fn handle_request(
         // each operation's OpenAPI `security` requirement, so a Public
         // endpoint the router gates as Admin is published with `bearerAuth`.
         let caller = caller_auth_level(&msg);
-        let enabled_infos = enabled_infos(block_infos, features);
+        let discoverable = discoverable_infos(ctx, block_infos, features);
         let effective_auth = |block: &BlockInfo, ep: &BlockEndpoint| {
             routing::effective_access(block, ep, extra_routes)
         };
 
         let body = if is_openapi {
             wafer_core::discovery::generate_openapi(
-                &enabled_infos,
+                &discoverable,
                 caller,
                 effective_auth,
                 &project_name,
@@ -335,7 +350,7 @@ pub async fn handle_request(
             )
         } else {
             wafer_core::discovery::generate_agent_card(
-                &enabled_infos,
+                &discoverable,
                 caller,
                 effective_auth,
                 &project_name,
@@ -378,7 +393,7 @@ pub async fn handle_request(
     // identity, like the discovery documents above.
     if path == "/b/webmcp/manifest.json" {
         let caller = caller_auth_level(&msg);
-        let enabled_infos = enabled_infos(block_infos, features);
+        let discoverable = discoverable_infos(ctx, block_infos, features);
 
         // MUST resolve the auth ceiling with `routing::effective_access`, not
         // the plain `ep.auth`. This router admits on `max(prefix_tier,
@@ -414,7 +429,7 @@ pub async fn handle_request(
         // runs the identical generation and only changes where the refusal
         // list goes. Refusals discarded on purpose — see the comment above.
         let (body, _refused) =
-            wafer_core::discovery::generate_webmcp_report(&enabled_infos, caller, |block, ep| {
+            wafer_core::discovery::generate_webmcp_report(&discoverable, caller, |block, ep| {
                 routing::effective_access(block, ep, extra_routes)
             });
 
@@ -2017,6 +2032,55 @@ mod discovery_tests {
                 "anonymous visitors must get the public purchase path; missing {expected}: {names:?}"
             );
         }
+    }
+
+    /// In the browser runtime a `server_only` endpoint can never succeed
+    /// (checkout needs the Stripe secret key a browser cannot hold), so all
+    /// three discovery documents leave it out. The server-runtime case is
+    /// `anonymous_manifest_exposes_the_storefront_purchase_path` above.
+    #[tokio::test]
+    async fn browser_runtime_discovery_omits_server_only_endpoints() {
+        let mut ctx = TestContext::new().await;
+        ctx.set_config(crate::runtime_kind::RUNTIME_KIND_CONFIG_KEY, "browser");
+        let ctx = ctx.running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let host = "impresspress.example.com";
+
+        let body = webmcp_manifest(&ctx, None, &real_block_infos(), &AllEnabled).await;
+        let names = tool_names(&body);
+        assert!(
+            !names.contains(&"start_checkout"),
+            "browser manifest advertises checkout: {names:?}"
+        );
+        assert!(
+            names.contains(&"preview_price"),
+            "non-server-only tools stay: {names:?}"
+        );
+
+        let openapi = discovery_json_as(&ctx, "/openapi.json", host, None).await;
+        assert!(
+            openapi["paths"]["/b/products/checkout"].is_null(),
+            "openapi still lists checkout"
+        );
+        assert!(
+            !openapi["paths"]["/b/products/storefront/config"].is_null(),
+            "a browser-callable Public endpoint is still described"
+        );
+
+        let card = discovery_json_as(&ctx, "/.well-known/agent.json", host, None).await;
+        let skills: Vec<&str> = card["skills"]
+            .as_array()
+            .expect("agent card skills array")
+            .iter()
+            .map(|s| s["id"].as_str().expect("skill id"))
+            .collect();
+        assert!(
+            !skills.iter().any(|id| id.contains("checkout")),
+            "agent card still lists checkout: {skills:?}"
+        );
+        assert!(
+            skills.iter().any(|id| id.contains("storefront")),
+            "the card keeps the browser-callable skills: {skills:?}"
+        );
     }
 
     /// Pins the producer-to-consumer contract for `invocation` — the object

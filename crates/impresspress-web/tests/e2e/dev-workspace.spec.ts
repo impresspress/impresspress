@@ -639,11 +639,17 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // `/b/products/storefront/{id}` — a Public route that refuses a product
   // with no ACTIVE offer. Its shadow-root title carrying the name is
   // therefore the end of the chain: create → price → publish → activate all
-  // landed, and an anonymous browser can buy from it.
+  // landed, and an anonymous browser can see it priced.
   await expect(shop.locator('impresspress-product').locator('.title')).toHaveText(
     SHOP_PRODUCT.name,
     { timeout: 60_000 },
   );
+  // The browser runtime cannot run Stripe checkout: the widget says so
+  // instead of showing a button that can only fail, and the shopper's agent
+  // is not offered `start_checkout`.
+  const widget = shop.locator('impresspress-product');
+  await expect(widget.getByText("Checkout isn't available in this preview.")).toBeVisible();
+  await expect(widget.getByRole('button', { name: /checkout/i })).toHaveCount(0);
   console.log(`shopper: anonymous page renders the product: ${Date.now() - shopperStart} ms`);
 
   // The shopper's agent gets the site's Public tools and NONE of the
@@ -655,6 +661,7 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   await waitForTool(shop, 'list_products');
   const shopperTools = (await registeredTools(shop, 1)).map((t) => t.name);
   expect(shopperTools).toContain('list_products');
+  expect(shopperTools).not.toContain('start_checkout');
   expect(shopperTools.filter((n) => n.startsWith('dev_') || n.startsWith('shop_'))).toEqual([]);
 
   await shop.close();
