@@ -509,7 +509,18 @@ pub(super) async fn handle_update_product(
     {
         return response;
     }
+    let activates = request.status == Some(ProductStatus::Active);
     let mut data = request.into_columns();
+    // Publishing stamps `published_at` in the same write, as the seller
+    // PATCH and moderation approval do. No read first: this handler's one
+    // write is also its liveness test (below), and both other writers stamp
+    // on every publishing write too.
+    if activates {
+        data.insert(
+            "published_at".to_string(),
+            serde_json::Value::String(now_rfc3339()),
+        );
+    }
     stamp_updated(&mut data);
     // A soft-deleted product must go through `restore` before it is editable
     // again, so the generic PATCH refuses one outright rather than silently

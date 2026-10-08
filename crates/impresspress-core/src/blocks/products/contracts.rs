@@ -1877,7 +1877,12 @@ pub struct ProductView {
     /// moderation, or `null`.
     #[schemars(extend("format" = "date-time"))]
     pub submitted_at: Option<String>,
-    /// RFC 3339 timestamp the product last became active, or `null`.
+    /// RFC 3339 timestamp of the product's latest publishing write, or
+    /// `null` if there is none. Every write that makes the product active
+    /// sets it to now: an update that sends `status: "active"` (even to a
+    /// product that is already active) and a moderation approval. A
+    /// moderation rejection clears it; every other write, archiving
+    /// included, leaves it unchanged.
     #[schemars(extend("format" = "date-time"))]
     pub published_at: Option<String>,
     /// RFC 3339 soft-delete timestamp, or `null` unless the product has been
@@ -1998,7 +2003,12 @@ pub struct CatalogProductView {
     /// How a purchase is fulfilled.
     #[schemars(extend("enum" = ["none", "manual", "download", "entitlement", "webhook"]))]
     pub fulfillment_kind: String,
-    /// RFC 3339 timestamp the product last became active, or `null`.
+    /// RFC 3339 timestamp of the product's latest publishing write, or
+    /// `null` if there is none. Every write that makes the product active
+    /// sets it to now: an update that sends `status: "active"` (even to a
+    /// product that is already active) and a moderation approval. A
+    /// moderation rejection clears it; every other write, archiving
+    /// included, leaves it unchanged.
     #[schemars(extend("format" = "date-time"))]
     pub published_at: Option<String>,
     /// RFC 3339 creation timestamp.

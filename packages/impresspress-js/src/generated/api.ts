@@ -4717,7 +4717,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -4890,7 +4895,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5023,7 +5033,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5211,7 +5226,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5342,7 +5362,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5831,7 +5856,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5967,7 +5997,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -6105,7 +6140,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -11380,7 +11420,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12182,7 +12227,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12355,7 +12405,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12488,7 +12543,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12676,7 +12736,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -13161,7 +13226,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -13300,7 +13370,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -18585,7 +18660,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -18684,7 +18764,12 @@ export interface paths {
                             product_template_id: string;
                             /**
                              * Format: date-time
-                             * @description RFC 3339 timestamp the product last became active, or `null`.
+                             * @description RFC 3339 timestamp of the product's latest publishing write, or
+                             *     `null` if there is none. Every write that makes the product active
+                             *     sets it to now: an update that sends `status: "active"` (even to a
+                             *     product that is already active) and a moderation approval. A
+                             *     moderation rejection clears it; every other write, archiving
+                             *     included, leaves it unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -19318,7 +19403,12 @@ export interface paths {
                                 product_template_id: string;
                                 /**
                                  * Format: date-time
-                                 * @description RFC 3339 timestamp the product last became active, or `null`.
+                                 * @description RFC 3339 timestamp of the product's latest publishing write, or
+                                 *     `null` if there is none. Every write that makes the product active
+                                 *     sets it to now: an update that sends `status: "active"` (even to a
+                                 *     product that is already active) and a moderation approval. A
+                                 *     moderation rejection clears it; every other write, archiving
+                                 *     included, leaves it unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
