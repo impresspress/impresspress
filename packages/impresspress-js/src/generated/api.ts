@@ -4715,10 +4715,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -4893,10 +4896,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5031,10 +5037,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5224,10 +5233,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5360,10 +5372,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5854,10 +5869,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -5995,10 +6013,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -6138,10 +6159,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -11418,10 +11442,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12225,10 +12252,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12403,10 +12433,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12541,10 +12574,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -12734,10 +12770,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -13224,10 +13263,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -13368,10 +13410,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -18658,10 +18703,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -18762,10 +18810,13 @@ export interface paths {
                              * Format: date-time
                              * @description RFC 3339 timestamp of the product's latest publishing write, or
                              *     `null` if there is none. Every write that makes the product active
-                             *     sets it to now: an update that sends `status: "active"` (even to a
-                             *     product that is already active) and a moderation approval. A
-                             *     moderation rejection clears it; every other write, archiving
-                             *     included, leaves it unchanged.
+                             *     sets it to now: an update that sends `status: "active"` and takes
+                             *     effect (even on a product that is already active), and a moderation
+                             *     approval. A seller's update that sends `status: "active"` while
+                             *     moderation is required and the product is not approved moves it to
+                             *     `pending_review` instead and leaves this unchanged. A moderation
+                             *     rejection clears it; every other write, archiving included, leaves it
+                             *     unchanged.
                              */
                             published_at: string | null;
                             /** @description Id of a product the buyer must already own before checkout, or empty. */
@@ -19401,10 +19452,13 @@ export interface paths {
                                  * Format: date-time
                                  * @description RFC 3339 timestamp of the product's latest publishing write, or
                                  *     `null` if there is none. Every write that makes the product active
-                                 *     sets it to now: an update that sends `status: "active"` (even to a
-                                 *     product that is already active) and a moderation approval. A
-                                 *     moderation rejection clears it; every other write, archiving
-                                 *     included, leaves it unchanged.
+                                 *     sets it to now: an update that sends `status: "active"` and takes
+                                 *     effect (even on a product that is already active), and a moderation
+                                 *     approval. A seller's update that sends `status: "active"` while
+                                 *     moderation is required and the product is not approved moves it to
+                                 *     `pending_review` instead and leaves this unchanged. A moderation
+                                 *     rejection clears it; every other write, archiving included, leaves it
+                                 *     unchanged.
                                  */
                                 published_at: string | null;
                                 /** @description Id of a product the buyer must already own before checkout, or empty. */

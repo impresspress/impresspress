@@ -16,9 +16,9 @@
  * and `webmcp.spec.ts` prices it (3 × 1500 = 4500) as its `preview_price`
  * assertion.
  *
- * Field names come from `products/contracts.rs`
- * (`CreateProductRequest`) and the hand-written `offer_definition_schema`
- * in `products/mod.rs`; both are published in
+ * Field names come from `products/contracts.rs`: `CreateProductRequest`
+ * and `OfferDefinitionRequest`, whose derived schemas the create-product and
+ * create-offer rows in `products/routes.rs` declare; both are published in
  * `impresspress-core/tests/snapshots/dev.tools.json` as the `shop_*` tools'
  * `inputSchema`, which is what an agent actually sees.
  */

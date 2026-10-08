@@ -12,8 +12,9 @@ points (`start`, `fetch`, `scheduled`) handing every request to
 `impresspress_cloudflare`. Everything the demo shows lives in impresspress
 itself:
 
-- `crates/impresspress-core/src/blocks/products/mod.rs` — the six storefront
-  endpoints annotated with `.agent_tool(...)`.
+- `crates/impresspress-core/src/blocks/products/routes.rs` — the seven
+  storefront endpoints annotated with `.agent_tool(...)`: six Public, plus
+  `list_my_purchases` for a signed-in buyer.
 - `crates/impresspress-core/src/ui/assets/webmcp.js` — on every page, fetches
   `/b/webmcp/manifest.json` (filtered to the visitor's auth level) and calls
   `navigator.modelContext.registerTool` per tool.
@@ -155,8 +156,9 @@ than a URL — which is the honest answer, and what the e2e spec
 
 ## Try it
 
-- `GET /b/webmcp/manifest.json` — the five Public tools anonymously; six with
-  an authenticated session.
+- `GET /b/webmcp/manifest.json` — the six Public storefront tools
+  anonymously; seven with an authenticated session (`list_my_purchases`
+  added); an admin session also gets the admin block's read tools.
 - Open any page in Chrome started with `--enable-features=WebMCPTesting`
   (over https or on localhost) and run
   `await navigator.modelContextTesting.listTools()` in the console.

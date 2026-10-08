@@ -1879,10 +1879,13 @@ pub struct ProductView {
     pub submitted_at: Option<String>,
     /// RFC 3339 timestamp of the product's latest publishing write, or
     /// `null` if there is none. Every write that makes the product active
-    /// sets it to now: an update that sends `status: "active"` (even to a
-    /// product that is already active) and a moderation approval. A
-    /// moderation rejection clears it; every other write, archiving
-    /// included, leaves it unchanged.
+    /// sets it to now: an update that sends `status: "active"` and takes
+    /// effect (even on a product that is already active), and a moderation
+    /// approval. A seller's update that sends `status: "active"` while
+    /// moderation is required and the product is not approved moves it to
+    /// `pending_review` instead and leaves this unchanged. A moderation
+    /// rejection clears it; every other write, archiving included, leaves it
+    /// unchanged.
     #[schemars(extend("format" = "date-time"))]
     pub published_at: Option<String>,
     /// RFC 3339 soft-delete timestamp, or `null` unless the product has been
@@ -2005,10 +2008,13 @@ pub struct CatalogProductView {
     pub fulfillment_kind: String,
     /// RFC 3339 timestamp of the product's latest publishing write, or
     /// `null` if there is none. Every write that makes the product active
-    /// sets it to now: an update that sends `status: "active"` (even to a
-    /// product that is already active) and a moderation approval. A
-    /// moderation rejection clears it; every other write, archiving
-    /// included, leaves it unchanged.
+    /// sets it to now: an update that sends `status: "active"` and takes
+    /// effect (even on a product that is already active), and a moderation
+    /// approval. A seller's update that sends `status: "active"` while
+    /// moderation is required and the product is not approved moves it to
+    /// `pending_review` instead and leaves this unchanged. A moderation
+    /// rejection clears it; every other write, archiving included, leaves it
+    /// unchanged.
     #[schemars(extend("format" = "date-time"))]
     pub published_at: Option<String>,
     /// RFC 3339 creation timestamp.

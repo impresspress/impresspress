@@ -284,10 +284,11 @@ above `timestamp_field` in `contracts.rs`), and that path is unchanged.
 
 After merge and deploy (production deploy only with the user's explicit
 yes), the subagent harness is run again against
-`https://impresspress.org/build` **with the bridge turned off** (`BRIDGE=0`).
+`https://impresspress.org/build` **with the bridge turned off** (the
+harness default; `BRIDGE=1` turns it on, only for re-testing a pre-fix build).
 The agent builds a shop with priced offers, getting the offer shape right
 first time from the schema. Then:
-- the visitor page lists no `start_checkout`, and the widget shows the
-  preview line in place of the checkout button;
+- the visitor page lists no `start_checkout`, and the widget shows the line
+  "Checkout isn't available on this site." in place of the checkout button;
 - `dev_read_reference` returns the suggested prompt;
 - a product the agent activated has a non-null `published_at`.
