@@ -294,9 +294,11 @@ pub fn guide_url(path: &str) -> String {
 pub const LLMS_PATH: &str = "llms.txt";
 
 /// What the sandbox's `llms.txt` is declared and served as: what
-/// `paths::content_type_for` gives a site's own `llms.txt`, so the path is
+/// [`paths::content_type_for`] gives a site's own `llms.txt`, so the path is
 /// one content type whichever of the two is being served.
-pub const LLMS_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+pub fn llms_content_type() -> &'static str {
+    paths::content_type_for(LLMS_PATH)
+}
 
 /// Largest `llms.txt` a bundle may carry: [`paths::MAX_FILE_BYTES`], because
 /// it is published where a site file of that name would be.
@@ -787,7 +789,8 @@ async fn fetch_llms(fetch: &dyn SeedFetch, declared: &SeedFile) -> Result<String
         ));
     }
     let url = llms_url(&declared.path);
-    let bytes = fetch_and_verify(fetch, &url, declared, LLMS_CONTENT_TYPE, MAX_LLMS_BYTES).await?;
+    let bytes =
+        fetch_and_verify(fetch, &url, declared, llms_content_type(), MAX_LLMS_BYTES).await?;
     String::from_utf8(bytes).map_err(|_| format!("{url}: llms.txt is not valid UTF-8"))
 }
 

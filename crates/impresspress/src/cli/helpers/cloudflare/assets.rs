@@ -128,7 +128,7 @@ pub fn release_manifest_from_staged_dir(assets_root: &Path) -> Result<ReleaseMan
             logical_key: key,
             size: bytes.len() as u64,
             sha256: impresspress_core::util::sha256_hex(&bytes),
-            content_type: mime_for_path(&path).to_string(),
+            content_type: wafer_core::mime::mime_for_ext(&path).to_string(),
         });
     }
 
@@ -261,32 +261,6 @@ fn logical_key(root: &Path, path: &Path) -> Result<String> {
         )
     })?;
     Ok(key.replace('\\', "/"))
-}
-
-/// Returns the MIME type for a file extension. `octet-stream` for unknown.
-pub fn mime_for_path(path: &Path) -> &'static str {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "wasm" => "application/wasm",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "woff2" => "font/woff2",
-        "woff" => "font/woff",
-        "txt" => "text/plain; charset=utf-8",
-        "ico" => "image/x-icon",
-        _ => "application/octet-stream",
-    }
 }
 
 #[cfg(test)]

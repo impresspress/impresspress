@@ -57,17 +57,20 @@ def seed_dirs() -> list:
     return sorted(p for p in SEEDS_DIR.iterdir() if p.is_dir() and SEED_NAME.fullmatch(p.name))
 
 # Mirrors `paths::content_type_for` in
-# crates/impresspress-core/src/blocks/dev/paths.rs (the runtime's own table).
-# The importer checks every declared type against that function, so an entry
-# that disagrees is refused on the first boot — and caught by the e2e job
+# crates/impresspress-core/src/blocks/dev/paths.rs, which is `wafer_core::mime`'s
+# table (wafer-run crates/wafer-core/src/mime.rs), for the extensions a seed may
+# carry. The importer checks every declared type against that function, so an
+# entry that disagrees is refused on the first boot — and caught by the e2e job
 # that boots the seed. Keep the two in step.
 CONTENT_TYPES = {
     "html": "text/html; charset=utf-8",
     "css": "text/css; charset=utf-8",
     "js": "application/javascript; charset=utf-8",
     "mjs": "application/javascript; charset=utf-8",
-    "json": "application/json",
-    "svg": "image/svg+xml",
+    "json": "application/json; charset=utf-8",
+    "map": "application/json; charset=utf-8",
+    "xml": "application/xml; charset=utf-8",
+    "svg": "image/svg+xml; charset=utf-8",
     "png": "image/png",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
@@ -75,7 +78,8 @@ CONTENT_TYPES = {
     "webp": "image/webp",
     "ico": "image/x-icon",
     "txt": "text/plain; charset=utf-8",
-    "md": "text/plain; charset=utf-8",
+    "md": "text/markdown; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
     "rs": "text/plain; charset=utf-8",
     "toml": "text/plain; charset=utf-8",
     "wasm": "application/wasm",
@@ -170,9 +174,9 @@ SANDBOX_KEYS = {"template", "title", "suggested_prompt"}
 MAX_TITLE_BYTES = 120
 
 
-# Mirror seed::LLMS_PATH, seed::LLMS_CONTENT_TYPE and seed::MAX_LLMS_BYTES.
+# Mirror seed::LLMS_PATH, seed::llms_content_type() and seed::MAX_LLMS_BYTES.
 LLMS_PATH = "llms.txt"
-LLMS_CONTENT_TYPE = "text/plain; charset=utf-8"
+LLMS_CONTENT_TYPE = CONTENT_TYPES["txt"]
 MAX_LLMS_BYTES = 512 * 1024
 
 # What every sandbox's llms.txt opens with, whichever seed it was built from.

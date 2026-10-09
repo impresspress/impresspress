@@ -119,7 +119,7 @@ fn llms_file() -> seed::SeedFile {
         path: seed::LLMS_PATH.to_string(),
         sha256: blobs::sha256_hex(LLMS),
         size: LLMS.len() as u64,
-        content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+        content_type: seed::llms_content_type().to_string(),
     }
 }
 
@@ -403,7 +403,7 @@ async fn a_bundle_for_another_template_records_nothing() {
         path: seed::LLMS_PATH.to_string(),
         sha256: blobs::sha256_hex(other_llms),
         size: other_llms.len() as u64,
-        content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+        content_type: seed::llms_content_type().to_string(),
     };
     let redeployed = MapFetch::default()
         .with(

@@ -958,6 +958,23 @@ impl TestContext {
         Ok(bytes)
     }
 
+    /// The content type one object was stored with, read from the store
+    /// directly like [`Self::storage_get`]. For the published site it is the
+    /// type `wafer-run/web` serves the file with.
+    pub async fn storage_content_type(
+        &self,
+        block: &str,
+        folder: &str,
+        key: &str,
+    ) -> Result<String, wafer_core::interfaces::storage::service::StorageError> {
+        use wafer_core::interfaces::storage::service::StorageService as _;
+        let (_bytes, info) = self
+            .storage()
+            .get(&store_folder(block, folder), key)
+            .await?;
+        Ok(info.content_type)
+    }
+
     /// Park the fixture's object store on the next `get` of one object, and
     /// hand back the handle that releases it.
     ///

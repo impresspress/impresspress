@@ -277,7 +277,7 @@ impl SandboxLlms {
                 path: seed::LLMS_PATH.to_string(),
                 sha256: blobs::sha256_hex(&bytes),
                 size: bytes.len() as u64,
-                content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+                content_type: seed::llms_content_type().to_string(),
             },
             bytes,
         }

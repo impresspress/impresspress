@@ -1871,6 +1871,105 @@ async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() 
     );
 }
 
+/// A site's text files, by the one content-type table: published with their
+/// type and `charset=utf-8`, recorded so in the exported seed manifest, and
+/// published the same way by the instance that imports it (the importer
+/// refuses a declared type its own table does not give the path).
+#[tokio::test]
+async fn site_text_files_are_published_exported_and_imported_with_a_utf8_type() {
+    const FILES: [(&str, &str, &str); 4] = [
+        ("llms.txt", "# Caf\u{e9}\n", "text/plain; charset=utf-8"),
+        ("notes.md", "# Caf\u{e9}\n", "text/markdown; charset=utf-8"),
+        (
+            "feed.xml",
+            "<feed>caf\u{e9}</feed>\n",
+            "application/xml; charset=utf-8",
+        ),
+        ("data.csv", "name\ncaf\u{e9}\n", "text/csv; charset=utf-8"),
+    ];
+    let a_control = FakeControl::new();
+    let a = shop_instance(&a_control).await;
+    for (name, content, _) in FILES {
+        let written = output_json(
+            dev_post(
+                &a,
+                "/b/dev/api/files/write",
+                json!({"path": format!("site/{name}"), "content": content, "expected_sha256": null}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(written["path"], format!("site/{name}"), "{written}");
+    }
+    for (name, _, expected) in FILES {
+        assert_eq!(
+            a.storage_content_type("wafer-run/web", "site", name)
+                .await
+                .expect("published"),
+            expected,
+            "{name} is published with its type"
+        );
+    }
+
+    let archive = entries(
+        output_body(
+            a.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    let manifest: SeedManifest =
+        serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");
+    for (name, _, expected) in FILES {
+        let entry = manifest
+            .site
+            .iter()
+            .find(|f| f.path == name)
+            .unwrap_or_else(|| panic!("{name} is in the exported manifest"));
+        assert_eq!(entry.content_type, expected, "{name} in the manifest");
+    }
+
+    let fetch = ArchiveFetch { archive };
+    let b_control = FakeControl::new();
+    b_control.set_validated_info(hello_info("site/hello"));
+    let b = TestContext::with_products()
+        .await
+        .with_auth_added()
+        .await
+        .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
+        .await;
+    let generation = seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
+    activation::request(
+        &b,
+        &b.dev_shared(),
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the imported generation");
+    for (name, _, expected) in FILES {
+        assert_eq!(
+            b.storage_content_type("wafer-run/web", "site", name)
+                .await
+                .expect("published by the importer"),
+            expected,
+            "{name} is published with its type after import"
+        );
+    }
+}
+
 /// UTF-8's byte order mark, as the archive's root text files carry it.
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 

@@ -14,8 +14,16 @@ use anyhow::Result;
 /// Returns an error if the listener fails to bind. Per-connection failures
 /// are logged at debug and dropped; they don't bring down the loop.
 pub async fn serve_static(dir: &Path, port: u16) -> Result<()> {
-    use tokio::net::TcpListener;
-    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    serve_listener(listener, dir).await
+}
+
+/// Serve static files rooted at `dir` on an already-bound `listener`.
+///
+/// # Errors
+///
+/// Returns an error if accepting a connection fails.
+async fn serve_listener(listener: tokio::net::TcpListener, dir: &Path) -> Result<()> {
     let dir = dir.to_path_buf();
     loop {
         let (mut socket, _) = listener.accept().await?;
@@ -69,7 +77,7 @@ pub async fn serve_static(dir: &Path, port: u16) -> Result<()> {
             let body = tokio::fs::read(&file_path).await;
             let resp = match body {
                 Ok(b) => {
-                    let mime = mime_guess(&file_path);
+                    let mime = wafer_core::mime::mime_for_ext(&file_path);
                     let mut out = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\r\n",
                         b.len()
@@ -106,17 +114,6 @@ fn resolve_request_path(dir: &Path, raw_path: &str) -> Option<PathBuf> {
         }
     }
     Some(dir.join(rel_path))
-}
-
-fn mime_guess(p: &Path) -> &'static str {
-    match p.extension().and_then(|s| s.to_str()) {
-        Some("html") => "text/html",
-        Some("js") => "text/javascript",
-        Some("css") => "text/css",
-        Some("wasm") => "application/wasm",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
-    }
 }
 
 #[cfg(test)]
@@ -156,6 +153,67 @@ mod tests {
             resolve_request_path(dir, "/main.js?v=1").unwrap(),
             dir.join("main.js")
         );
+    }
+
+    /// GET `path` from the server on `port`; the response head,
+    /// lowercased, up to the blank line.
+    async fn response_head(port: u16, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8_lossy(&response);
+        response
+            .split("\r\n\r\n")
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    }
+
+    /// The dev server types a file by the one table every server path uses,
+    /// so a site's text files are shown (not downloaded) and declare UTF-8.
+    #[tokio::test]
+    async fn serves_text_files_with_their_type_and_a_utf8_charset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in [
+            "llms.txt",
+            "README.md",
+            "feed.xml",
+            "data.csv",
+            "index.html",
+        ] {
+            std::fs::write(dir.path().join(name), "caf\u{e9}\n").expect("write");
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let root = dir.path().to_path_buf();
+        tokio::spawn(async move { serve_listener(listener, &root).await });
+
+        for (path, expected) in [
+            ("/llms.txt", "text/plain; charset=utf-8"),
+            ("/README.md", "text/markdown; charset=utf-8"),
+            ("/feed.xml", "application/xml; charset=utf-8"),
+            ("/data.csv", "text/csv; charset=utf-8"),
+            ("/", "text/html; charset=utf-8"),
+        ] {
+            let head = response_head(port, path).await;
+            assert!(head.starts_with("http/1.1 200"), "{path}: {head}");
+            assert!(
+                head.contains(&format!("\r\ncontent-type: {expected}\r\n")),
+                "{path} must be served as {expected}: {head}"
+            );
+        }
     }
 
     #[test]
