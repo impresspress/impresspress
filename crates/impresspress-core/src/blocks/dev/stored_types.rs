@@ -14,16 +14,22 @@
 //! leaves no copy behind. It runs in three steps, ordered so that an upgrade
 //! interrupted at any point is finished by the next boot:
 //!
-//! 1. If the active generation's row still stores types, its site is
+//! 1. `workspace.json` is rewritten without the key. This step depends on
+//!    nothing and gates nothing, so it runs first: whatever happens to the
+//!    steps below, the workspace loads, and the files API works.
+//! 2. If the active generation's row still stores types, its site is
 //!    published in full. A publish writes only changed files, and these are
 //!    unchanged, so the folder would otherwise keep serving the stored types.
-//!    This happens before that row is rewritten, so the row is still found
-//!    by the next boot if the publish fails.
-//! 2. `workspace.json` is rewritten without the key.
 //! 3. Every row that still stores types is rewritten without them: the same
 //!    canonical site manifest minus one key per entry, and the hash
-//!    recomputed over the manifest the row now denotes. The rows go last
-//!    because they are what step 1 is gated on.
+//!    recomputed over the manifest the row now denotes. The active row is
+//!    rewritten only once step 2 has succeeded. Its stored types are what
+//!    tells the next boot that the folder still has to be published, so a
+//!    publish that fails (a blob gone missing, say) leaves that one row as it
+//!    was, and the next boot tries again. Every other row is rewritten
+//!    regardless.
+//!
+//! A failed publish is still reported as an error, after step 3 has run.
 //!
 //! # What it costs
 //!
@@ -66,31 +72,52 @@ impl Upgrade {
 
 /// Drop every stored content type and publish the active site with the
 /// derived ones. See the module docs for the order and the cost.
+///
+/// An `Err` from the publish comes back after the workspace and every other
+/// row have been upgraded.
 pub async fn upgrade(ctx: &dyn Context) -> Result<Upgrade, WaferError> {
-    let mut done = Upgrade::default();
-    let rows = generations::list_with_stored_content_types(ctx).await?;
+    // 1. The workspace.
+    let mut done = Upgrade {
+        workspace: upgrade_workspace(ctx).await?,
+        ..Upgrade::default()
+    };
 
-    // 1. The published folder, while the active row still says it is stale.
-    // Looked up by id rather than in `rows`, which is one page.
-    if !rows.is_empty() {
-        let state = repo::runtime_state::read(ctx).await?;
-        if let Some(id) = state.active_generation_id.as_deref() {
-            let active = generations::get(ctx, id).await?;
-            if stores_types(active.site_manifest_json.as_bytes()) {
-                let site = site_without_types(&active)?;
-                publisher::publish_site(ctx, None, &site).await?;
-                done.republished = true;
+    if generations::list_with_stored_content_types(ctx)
+        .await?
+        .is_empty()
+    {
+        return Ok(done);
+    }
+
+    // 2. The published folder, while the active row still says it is stale.
+    let mut republish = Ok(());
+    let mut held = None;
+    let state = repo::runtime_state::read(ctx).await?;
+    if let Some(id) = state.active_generation_id.as_deref() {
+        let active = generations::get(ctx, id).await?;
+        if stores_types(active.site_manifest_json.as_bytes()) {
+            match republish_without_types(ctx, &active).await {
+                Ok(()) => done.republished = true,
+                Err(e) => {
+                    held = Some(active.id);
+                    republish = Err(e);
+                }
             }
         }
     }
 
-    // 2. The workspace.
-    done.workspace = upgrade_workspace(ctx).await?;
-
-    // 3. The rows, a page at a time: each rewritten row stops matching.
-    let mut page = rows;
-    while !page.is_empty() {
-        for row in &page {
+    // 3. The rows, a page at a time: each rewritten row stops matching, and
+    // only the held one can be left.
+    loop {
+        let page = generations::list_with_stored_content_types(ctx).await?;
+        let todo: Vec<_> = page
+            .iter()
+            .filter(|row| Some(&row.id) != held.as_ref())
+            .collect();
+        if todo.is_empty() {
+            break;
+        }
+        for row in todo {
             let site = site_without_types(row)?;
             let site_json = generation::canonical_text(&site)?;
             let mut rewritten = row.clone();
@@ -101,9 +128,18 @@ pub async fn upgrade(ctx: &dyn Context) -> Result<Upgrade, WaferError> {
                 .await?;
             done.generations += 1;
         }
-        page = generations::list_with_stored_content_types(ctx).await?;
     }
-    Ok(done)
+    republish.map(|()| done)
+}
+
+/// Publish `active`'s site in full, with the types its paths derive.
+async fn republish_without_types(
+    ctx: &dyn Context,
+    active: &generations::GenerationRow,
+) -> Result<(), WaferError> {
+    let site = site_without_types(active)?;
+    publisher::publish_site(ctx, None, &site).await?;
+    Ok(())
 }
 
 /// One row's site manifest with the stored types dropped.

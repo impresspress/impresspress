@@ -991,6 +991,20 @@ impl TestContext {
             .await
     }
 
+    /// Delete one object directly, as [`Self::storage_get`] reads it: for a
+    /// test whose store has lost something it still names.
+    pub async fn storage_delete(
+        &self,
+        block: &str,
+        folder: &str,
+        key: &str,
+    ) -> Result<(), wafer_core::interfaces::storage::service::StorageError> {
+        use wafer_core::interfaces::storage::service::StorageService as _;
+        self.storage()
+            .delete(&store_folder(block, folder), key)
+            .await
+    }
+
     /// Park the fixture's object store on the next `get` of one object, and
     /// hand back the handle that releases it.
     ///

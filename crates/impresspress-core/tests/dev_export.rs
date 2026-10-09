@@ -37,7 +37,7 @@ use impresspress_core::{
         },
         seed::{self, SeedManifest},
         stored_types,
-        test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
+        test_support::{dev_get, dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
         workspace, BypassRules, DevShared, WAFER_GUEST_VERSION,
     },
     platform_state::variables,
@@ -2069,6 +2069,92 @@ async fn a_sandbox_that_stored_old_types_serves_exports_and_imports_the_tables()
             "{name} is published with the table's type after import"
         );
     }
+}
+
+/// The republish can fail (here, a blob the active site names is gone).
+/// The workspace must still load, so the files API works, and every other
+/// row is upgraded. Only the active row keeps its stored types, so the
+/// next boot publishes again, and once the blob is back that boot finishes
+/// the upgrade.
+#[tokio::test]
+async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() {
+    let control = FakeControl::new();
+    let ctx = shop_instance(&control).await;
+    for (name, content, ..) in STORED_THE_OLD_WAY {
+        let written = output_json(
+            dev_post(
+                &ctx,
+                "/b/dev/api/files/write",
+                json!({"path": format!("site/{name}"), "content": content, "expected_sha256": null}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(written["path"], format!("site/{name}"), "{written}");
+    }
+    store_the_old_way(&ctx).await;
+    let (name, content, old, table) = STORED_THE_OLD_WAY[0];
+    let sha = blobs::sha256_hex(content.as_bytes());
+    ctx.storage_delete("impresspress/dev", blobs::FOLDER, &sha)
+        .await
+        .expect("lose the blob");
+
+    stored_types::upgrade(&ctx)
+        .await
+        .expect_err("the publish cannot read the lost blob");
+    workspace::load(&ctx)
+        .await
+        .expect("the workspace loads whatever the publish did");
+    let listed = output_json(dev_get(&ctx, "/b/dev/api/files").await).await;
+    assert!(
+        listed["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|f| f["path"] == format!("site/{name}")),
+        "{listed}"
+    );
+    let left: Vec<String> = generations::list_with_stored_content_types(&ctx)
+        .await
+        .expect("rows")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let state = impresspress_core::blocks::dev::repo::runtime_state::read(&ctx)
+        .await
+        .expect("journal");
+    assert_eq!(
+        left,
+        vec![state
+            .active_generation_id
+            .clone()
+            .expect("an active generation")],
+        "only the active row keeps its stored types"
+    );
+    assert_eq!(
+        ctx.storage_content_type("wafer-run/web", "site", name)
+            .await
+            .expect("still published"),
+        old,
+        "the site keeps serving what it served"
+    );
+
+    blobs::put(&ctx, content.as_bytes())
+        .await
+        .expect("the blob is back");
+    let upgrade = stored_types::upgrade(&ctx).await.expect("the next boot");
+    assert!(upgrade.republished, "{upgrade:?}");
+    assert_eq!(upgrade.generations, 1, "{upgrade:?}");
+    assert_eq!(
+        ctx.storage_content_type("wafer-run/web", "site", name)
+            .await
+            .expect("published"),
+        table
+    );
+    assert!(generations::list_with_stored_content_types(&ctx)
+        .await
+        .expect("rows")
+        .is_empty());
 }
 
 /// UTF-8's byte order mark, as the archive's root text files carry it.
