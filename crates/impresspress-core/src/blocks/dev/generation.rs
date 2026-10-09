@@ -358,7 +358,6 @@ mod tests {
             path: path.to_string(),
             sha256: sha.to_string(),
             size: 3,
-            content_type: "text/html; charset=utf-8".to_string(),
         }
     }
 
@@ -400,7 +399,7 @@ mod tests {
         let text = String::from_utf8(canonical_json(&manifest).expect("canonical")).expect("utf8");
         assert_eq!(
             text,
-            r#"{"blocks":[],"generation_id":"g1","parent_id":null,"schema_version":1,"site":{"files":[{"content_type":"text/html; charset=utf-8","path":"index.html","sha256":"aa","size":3}]}}"#
+            r#"{"blocks":[],"generation_id":"g1","parent_id":null,"schema_version":1,"site":{"files":[{"path":"index.html","sha256":"aa","size":3}]}}"#
         );
         // No whitespace *between* tokens — the only space in the output is
         // inside the `text/html; charset=utf-8` value itself.

@@ -975,6 +975,22 @@ impl TestContext {
         Ok(info.content_type)
     }
 
+    /// Store one object directly, as [`Self::storage_get`] reads it: for a
+    /// test that has to set up what an earlier build left in the store.
+    pub async fn storage_put(
+        &self,
+        block: &str,
+        folder: &str,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), wafer_core::interfaces::storage::service::StorageError> {
+        use wafer_core::interfaces::storage::service::StorageService as _;
+        self.storage()
+            .put(&store_folder(block, folder), key, bytes, content_type)
+            .await
+    }
+
     /// Park the fixture's object store on the next `get` of one object, and
     /// hand back the handle that releases it.
     ///

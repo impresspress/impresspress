@@ -41,7 +41,7 @@ const core = fs.readFileSync(
  *   is the only way to see the page learn about a block BEFORE it learns it
  *   has a compiler.
  * @param {Array<{path: string, sha256: string, content: string,
- *                encoding?: string, size?: number, content_type?: string}>}
+ *                encoding?: string, size?: number}>}
  *   [options.workspace]  the files `/b/dev/api/files` lists and
  *   `/b/dev/api/files/read` answers with. `encoding` defaults to `utf8`;
  *   `base64` is how the real endpoint reports a file that is not text, which
@@ -299,8 +299,7 @@ export function instantiate({
   const entry = (file) => ({
     path: file.path,
     sha256: file.sha256,
-    size: file.size ?? file.content.length,
-    content_type: file.content_type ?? 'text/plain; charset=utf-8'
+    size: file.size ?? file.content.length
   });
 
   const sandbox = {
@@ -381,8 +380,7 @@ export function instantiate({
         if (!file) {
           return answer({ error: 'not_found', message: `no file at ${wanted}` }, 404);
         }
-        // `FileReadResponse`'s own five fields — no `content_type`, which
-        // only the listing carries.
+        // `FileReadResponse`'s own five fields.
         return answer({
           path: file.path,
           sha256: file.sha256,

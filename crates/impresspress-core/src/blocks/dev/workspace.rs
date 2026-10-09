@@ -33,8 +33,11 @@ pub const SITE_PREFIX: &str = "site/";
 /// The `blocks/` area's path prefix, including its separator.
 pub const BLOCKS_PREFIX: &str = "blocks/";
 
-/// One file in the workspace: where it is, which blob holds it, how big it is
-/// and what it is served as.
+// What a file is served as is not recorded here: it is a function of the
+// path (`FileEntry::content_type`), so there is no stored copy to fall out of
+// step with the one content-type table.
+/// One file in the workspace: where it is, which blob holds it and how big
+/// it is.
 ///
 /// The same type is what a generation's site manifest is made of — a
 /// generation *is* the workspace's `site/` entries, frozen — so there is one
@@ -51,8 +54,14 @@ pub struct FileEntry {
     pub sha256: String,
     /// Size in bytes.
     pub size: u64,
-    /// Content type the file is served with.
-    pub content_type: String,
+}
+
+impl FileEntry {
+    /// The content type the file is served, exported and read back with:
+    /// [`content_type_for`] of its path.
+    pub fn content_type(&self) -> &'static str {
+        content_type_for(&self.path)
+    }
 }
 
 /// Every file the workspace holds, plus what its blob store has cost.
@@ -96,8 +105,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Record `sha256`/`size` at `path`, deriving the content type from the
-    /// path, and return the entry as stored.
+    /// Record `sha256`/`size` at `path` and return the entry as stored.
     ///
     /// The single writer of `files`, which is what keeps the map key and
     /// [`FileEntry::path`] from drifting apart.
@@ -106,7 +114,6 @@ impl Workspace {
             path: path.to_string(),
             sha256,
             size,
-            content_type: content_type_for(path).to_string(),
         };
         self.files.insert(path.to_string(), entry.clone());
         entry
@@ -338,10 +345,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_derives_the_content_type_and_keys_by_path() {
+    fn insert_keys_by_path_and_the_type_follows_the_path() {
         let mut ws = Workspace::default();
         let entry = ws.insert("site/index.html", "abc".to_string(), 11);
-        assert_eq!(entry.content_type, "text/html; charset=utf-8");
+        assert_eq!(entry.content_type(), "text/html; charset=utf-8");
         assert_eq!(ws.get("site/index.html"), Some(&entry));
         // The map key and the entry's own path can never disagree.
         for (key, entry) in &ws.files {
@@ -358,7 +365,7 @@ mod tests {
         // Everything else on the entry survives the projection.
         assert_eq!(files[0].sha256, "a");
         assert_eq!(files[0].size, 5);
-        assert_eq!(files[0].content_type, "text/css; charset=utf-8");
+        assert_eq!(files[0].content_type(), "text/css; charset=utf-8");
     }
 
     #[test]
@@ -404,7 +411,7 @@ mod tests {
         let json = serde_json::to_string(&ws).expect("serialize");
         assert_eq!(
             json,
-            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2,"content_type":"text/css; charset=utf-8"},"site/z.css":{"path":"site/z.css","sha256":"z","size":1,"content_type":"text/css; charset=utf-8"}},"blob_bytes":3,"blob_count":2}"#
+            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2},"site/z.css":{"path":"site/z.css","sha256":"z","size":1}},"blob_bytes":3,"blob_count":2}"#
         );
         assert!(!json.contains('\n'));
     }
@@ -414,7 +421,7 @@ mod tests {
     #[test]
     fn a_manifest_without_the_blob_counters_loads_with_them_at_zero() {
         let ws: Workspace = serde_json::from_str(
-            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2,"content_type":"text/css; charset=utf-8"}}}"#,
+            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2}}}"#,
         )
         .expect("deserialize");
         assert_eq!(ws.files.len(), 1);

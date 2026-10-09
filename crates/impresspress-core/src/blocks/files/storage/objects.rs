@@ -269,7 +269,7 @@ pub(in crate::blocks::files) async fn handle_upload_object(
             return err_bad_request("Invalid object key");
         }
         // The part's own Content-Type wins; fall back to extension-based
-        // detection on the key (which itself falls back to octet-stream).
+        // detection on the key (which itself falls back to `mime::UNKNOWN`).
         let content_type = file
             .content_type
             .filter(|ct| !ct.is_empty())
@@ -279,7 +279,7 @@ pub(in crate::blocks::files) async fn handle_upload_object(
         (file.content, key, content_type)
     } else {
         let content_type = if request_content_type.is_empty() {
-            "application/octet-stream".to_string()
+            wafer_core::mime::UNKNOWN.to_string()
         } else {
             request_content_type
         };

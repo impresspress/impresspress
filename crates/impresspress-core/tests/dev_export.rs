@@ -30,14 +30,15 @@ use impresspress_core::{
         blobs,
         contracts::ExportManifest,
         data_snapshot::DataSnapshot,
-        export,
+        export, generation,
         repo::{
-            generations::GenerationCause,
+            generations::{self, GenerationCause},
             seed_info::{self, SeedInfo},
         },
         seed::{self, SeedManifest},
+        stored_types,
         test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
-        BypassRules, DevShared, WAFER_GUEST_VERSION,
+        workspace, BypassRules, DevShared, WAFER_GUEST_VERSION,
     },
     platform_state::variables,
     test_support::{
@@ -404,7 +405,6 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
     // data snapshot is a `SeedFile` like the rest, not a bare path.
     let data = manifest.data.as_ref().expect("the bundle carries data");
     assert_eq!(data.path, "data.json");
-    assert_eq!(data.content_type, "application/json");
     let data_bytes = entries.get("seed/data.json").expect("seed/data.json");
     assert_eq!(data.sha256, blobs::sha256_hex(data_bytes));
     assert_eq!(data.size, data_bytes.len() as u64);
@@ -1871,25 +1871,93 @@ async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() 
     );
 }
 
-/// A site's text files, by the one content-type table: published with their
-/// type and `charset=utf-8`, recorded so in the exported seed manifest, and
-/// published the same way by the instance that imports it (the importer
-/// refuses a declared type its own table does not give the path).
+/// What a build before the type was derived stored for each file:
+/// `(site path, content, the type that build stored, the table's type)`.
+const STORED_THE_OLD_WAY: [(&str, &str, &str, &str); 4] = [
+    (
+        "notes.md",
+        "# Caf\u{e9}\n",
+        "text/plain; charset=utf-8",
+        "text/markdown; charset=utf-8",
+    ),
+    (
+        "data.json",
+        "{\"name\":\"caf\u{e9}\"}\n",
+        "application/json",
+        "application/json; charset=utf-8",
+    ),
+    (
+        "feed.xml",
+        "<feed>caf\u{e9}</feed>\n",
+        "application/octet-stream",
+        "application/xml; charset=utf-8",
+    ),
+    (
+        "data.csv",
+        "name\ncaf\u{e9}\n",
+        "application/octet-stream",
+        "text/csv; charset=utf-8",
+    ),
+];
+
+/// Put back what an earlier build left: a `content_type` on every stored
+/// entry (the generation rows and `workspace.json`) and every published file
+/// stored with that type.
+async fn store_the_old_way(ctx: &TestContext) {
+    let old_type = |path: &str| {
+        STORED_THE_OLD_WAY
+            .iter()
+            .find(|(name, ..)| path.ends_with(name))
+            .map_or("text/html; charset=utf-8", |(_, _, old, _)| old)
+    };
+    let with_types = |files: &mut Vec<serde_json::Value>| {
+        for entry in files {
+            let path = entry["path"].as_str().expect("path").to_string();
+            entry["content_type"] = json!(old_type(&path));
+        }
+    };
+
+    for row in generations::list_recent(ctx, 200).await.expect("rows") {
+        let mut site: serde_json::Value =
+            serde_json::from_str(&row.site_manifest_json).expect("site manifest");
+        with_types(site["files"].as_array_mut().expect("files"));
+        generations::replace_site_manifest(ctx, &row.id, &site.to_string(), &row.manifest_sha256)
+            .await
+            .expect("store the row the old way");
+    }
+
+    let ws = workspace::load(ctx).await.expect("workspace");
+    let mut value = serde_json::to_value(&ws).expect("workspace json");
+    for entry in value["files"].as_object_mut().expect("files").values_mut() {
+        let path = entry["path"].as_str().expect("path").to_string();
+        entry["content_type"] = json!(old_type(&path));
+    }
+    ctx.storage_put(
+        "impresspress/dev",
+        "",
+        workspace::KEY,
+        value.to_string().as_bytes(),
+        "application/json",
+    )
+    .await
+    .expect("store the workspace the old way");
+
+    for (name, content, old, _) in STORED_THE_OLD_WAY {
+        ctx.storage_put("wafer-run/web", "site", name, content.as_bytes(), old)
+            .await
+            .expect("publish the file the old way");
+    }
+}
+
+/// A sandbox an earlier build stored types for. Its next boot's upgrade
+/// serves every file with the table's type though no content changed, leaves
+/// no stored type behind, and the sandbox then exports a bundle that a fresh
+/// instance imports and publishes with the table's types.
 #[tokio::test]
-async fn site_text_files_are_published_exported_and_imported_with_a_utf8_type() {
-    const FILES: [(&str, &str, &str); 4] = [
-        ("llms.txt", "# Caf\u{e9}\n", "text/plain; charset=utf-8"),
-        ("notes.md", "# Caf\u{e9}\n", "text/markdown; charset=utf-8"),
-        (
-            "feed.xml",
-            "<feed>caf\u{e9}</feed>\n",
-            "application/xml; charset=utf-8",
-        ),
-        ("data.csv", "name\ncaf\u{e9}\n", "text/csv; charset=utf-8"),
-    ];
+async fn a_sandbox_that_stored_old_types_serves_exports_and_imports_the_tables() {
     let a_control = FakeControl::new();
     let a = shop_instance(&a_control).await;
-    for (name, content, _) in FILES {
+    for (name, content, ..) in STORED_THE_OLD_WAY {
         let written = output_json(
             dev_post(
                 &a,
@@ -1901,15 +1969,53 @@ async fn site_text_files_are_published_exported_and_imported_with_a_utf8_type() 
         .await;
         assert_eq!(written["path"], format!("site/{name}"), "{written}");
     }
-    for (name, _, expected) in FILES {
+    store_the_old_way(&a).await;
+    assert!(
+        workspace::load(&a).await.is_err(),
+        "a stored type is not this build's workspace"
+    );
+
+    let upgrade = stored_types::upgrade(&a).await.expect("upgrade");
+    assert!(upgrade.republished, "{upgrade:?}");
+    assert!(upgrade.workspace, "{upgrade:?}");
+    assert!(upgrade.generations > 0, "{upgrade:?}");
+    for (name, content, _, table) in STORED_THE_OLD_WAY {
         assert_eq!(
             a.storage_content_type("wafer-run/web", "site", name)
                 .await
                 .expect("published"),
-            expected,
-            "{name} is published with its type"
+            table,
+            "{name} is served with the table's type"
+        );
+        assert_eq!(
+            a.storage_get("wafer-run/web", "site", name)
+                .await
+                .expect("published"),
+            content.as_bytes(),
+            "{name} keeps its content"
         );
     }
+    workspace::load(&a).await.expect("the workspace loads");
+    for row in generations::list_recent(&a, 200).await.expect("rows") {
+        assert!(
+            !row.site_manifest_json.contains("content_type"),
+            "{}",
+            row.id
+        );
+        let manifest = generation::from_row(&row).expect("the row loads");
+        assert_eq!(
+            generation::manifest_sha256(&manifest).expect("hash"),
+            row.manifest_sha256,
+            "the stored hash covers the manifest the row now holds"
+        );
+    }
+    assert!(
+        !stored_types::upgrade(&a)
+            .await
+            .expect("again")
+            .changed_anything(),
+        "a second boot has nothing to upgrade"
+    );
 
     let archive = entries(
         output_body(
@@ -1918,17 +2024,12 @@ async fn site_text_files_are_published_exported_and_imported_with_a_utf8_type() 
         )
         .await,
     );
+    assert!(
+        !text(&archive, "seed/manifest.json").contains("content_type"),
+        "a bundle declares no content type"
+    );
     let manifest: SeedManifest =
         serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");
-    for (name, _, expected) in FILES {
-        let entry = manifest
-            .site
-            .iter()
-            .find(|f| f.path == name)
-            .unwrap_or_else(|| panic!("{name} is in the exported manifest"));
-        assert_eq!(entry.content_type, expected, "{name} in the manifest");
-    }
-
     let fetch = ArchiveFetch { archive };
     let b_control = FakeControl::new();
     b_control.set_validated_info(hello_info("site/hello"));
@@ -1959,13 +2060,13 @@ async fn site_text_files_are_published_exported_and_imported_with_a_utf8_type() 
     )
     .await
     .expect("activate the imported generation");
-    for (name, _, expected) in FILES {
+    for (name, _, _, table) in STORED_THE_OLD_WAY {
         assert_eq!(
             b.storage_content_type("wafer-run/web", "site", name)
                 .await
                 .expect("published by the importer"),
-            expected,
-            "{name} is published with its type after import"
+            table,
+            "{name} is published with the table's type after import"
         );
     }
 }

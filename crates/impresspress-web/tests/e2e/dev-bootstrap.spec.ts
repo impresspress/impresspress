@@ -57,21 +57,30 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
     await expect(page.locator('h1')).toHaveText('Build a website with your browser agent');
     await expect(page.locator('body')).toContainText('Open workspace');
 
-    // The vendored files serve from generation 0 with the types and sizes the
-    // bundle's own seed manifest declares (sizes in bytes, so compared as bytes).
+    // The vendored files serve from generation 0 with the sizes the bundle's own
+    // seed manifest declares (in bytes, so compared as bytes) and the type the
+    // one content-type table gives their extension. A manifest declares no type.
     const manifest = JSON.parse(readFileSync(path.join(BOOTSTRAP_DIST, 'seed', 'manifest.json'), 'utf8'));
-    const vendored: { path: string; size: number; content_type: string }[] = manifest.site.filter(
+    const vendored: { path: string; size: number }[] = manifest.site.filter(
       (entry: { path: string }) => entry.path.startsWith('vendor/bootstrap/'),
     );
     expect(vendored.map((entry) => entry.path)).toEqual(
       expect.arrayContaining(['vendor/bootstrap/bootstrap.min.css', 'vendor/bootstrap/bootstrap.bundle.min.js']),
     );
+    const vendoredType: Record<string, string> = {
+      '.css': 'text/css; charset=utf-8',
+      '.js': 'application/javascript; charset=utf-8',
+      '.txt': 'text/plain; charset=utf-8',
+    };
     for (const entry of vendored) {
       const served = await page.evaluate(async (url) => {
         const r = await fetch(url);
         return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
       }, `/${entry.path}`);
-      expect(served, entry.path).toEqual({ status: 200, type: entry.content_type, bytes: entry.size });
+      expect(entry, entry.path).not.toHaveProperty('content_type');
+      const type = vendoredType[path.extname(entry.path)];
+      expect(type, `a vendored ${path.extname(entry.path)} file`).toBeDefined();
+      expect(served, entry.path).toEqual({ status: 200, type, bytes: entry.size });
     }
 
     // The seed's sandbox block reached the runtime: status names the template,

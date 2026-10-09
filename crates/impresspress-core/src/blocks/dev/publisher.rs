@@ -277,7 +277,6 @@ impl SandboxLlms {
                 path: seed::LLMS_PATH.to_string(),
                 sha256: blobs::sha256_hex(&bytes),
                 size: bytes.len() as u64,
-                content_type: seed::llms_content_type().to_string(),
             },
             bytes,
         }
@@ -337,7 +336,7 @@ async fn write(ctx: &dyn Context, file: Published<'_>) -> Result<(), WaferError>
         }
         Published::Sandbox(llms) => &llms.bytes,
     };
-    storage::put(ctx, SITE_FOLDER, &entry.path, bytes, &entry.content_type).await
+    storage::put(ctx, SITE_FOLDER, &entry.path, bytes, entry.content_type()).await
 }
 
 /// Remove one path from the published folder.
@@ -369,7 +368,6 @@ mod tests {
             path: path.to_string(),
             sha256: sha,
             size: content.len() as u64,
-            content_type: crate::blocks::dev::paths::content_type_for(path).to_string(),
         }
     }
 
@@ -825,7 +823,6 @@ mod tests {
                 path: "a.css".to_string(),
                 sha256: blobs::sha256_hex(b"never stored"),
                 size: 3,
-                content_type: "text/css; charset=utf-8".to_string(),
             }],
         };
         assert_eq!(

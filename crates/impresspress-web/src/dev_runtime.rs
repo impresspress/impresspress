@@ -59,7 +59,7 @@ use impresspress_core::blocks::dev::{
     },
     repo::generations::GenerationCause,
     seed::{self, SeedManifest},
-    BypassRules, DevShared, BLOCK_NAME,
+    stored_types, BypassRules, DevShared, BLOCK_NAME,
 };
 use wafer_run::{
     context::Context, wasm::WasmiBlock, Block, BlockInfo, BlockRuntime, ErrorCode, FuelLimit,
@@ -951,6 +951,11 @@ pub fn attach(
 /// archive ships beside the shell, and steps 2–3 are what put its blocks in
 /// the runtime.
 ///
+/// Before anything else, [`stored_types::upgrade`] drops the content types an
+/// earlier build stored beside each file and republishes the active site
+/// with the derived ones. On a boot with nothing to upgrade that is one
+/// query that matches no row and one read of `workspace.json`.
+///
 /// In order:
 ///
 /// 1. **Seed**, when this instance has never published anything. A bundle with
@@ -997,6 +1002,28 @@ pub async fn install(sandbox: &Sandbox) {
     };
     let ctx = BootContext { wafer };
     let shared = &sandbox.shared;
+
+    // First: a sandbox an earlier build stored content types for does not
+    // load until they are gone, and serves the stored types until its site
+    // is published again.
+    match stored_types::upgrade(&ctx).await {
+        Ok(upgrade) if upgrade.changed_anything() => web_sys::console::log_1(
+            &format!(
+                "impresspress: dev sandbox dropped its stored content types ({} generation(s) \
+                 rewritten, site republished: {})",
+                upgrade.generations, upgrade.republished
+            )
+            .into(),
+        ),
+        Ok(_) => {}
+        Err(e) => web_sys::console::error_1(
+            &format!(
+                "impresspress: dev sandbox could not drop its stored content types ({e}); the \
+                 next boot tries again"
+            )
+            .into(),
+        ),
+    }
 
     if let Err(e) = seed_on_boot(&ctx, shared).await {
         // What happened, and what to do about it. This is the whole of the

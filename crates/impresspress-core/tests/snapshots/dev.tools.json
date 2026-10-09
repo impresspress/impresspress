@@ -9455,12 +9455,8 @@
             "description": "Matching files, in path order.",
             "items": {
               "additionalProperties": false,
-              "description": "One file in the workspace: where it is, which blob holds it, how big it is\nand what it is served as.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
+              "description": "One file in the workspace: where it is, which blob holds it and how big\nit is.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
               "properties": {
-                "content_type": {
-                  "description": "Content type the file is served with.",
-                  "type": "string"
-                },
                 "path": {
                   "description": "Where the file lives. Workspace-relative (`site/index.html`) in the\nfiles API; relative to its area's root (`index.html`) in a\ngeneration's site manifest and in a block's source listing.",
                   "type": "string"
@@ -9479,8 +9475,7 @@
               "required": [
                 "path",
                 "sha256",
-                "size",
-                "content_type"
+                "size"
               ],
               "type": "object"
             },
@@ -9925,12 +9920,8 @@
             "description": "Every file written, in path order, each with the hash to pass as its\nnext `expected_sha256`.",
             "items": {
               "additionalProperties": false,
-              "description": "One file in the workspace: where it is, which blob holds it, how big it is\nand what it is served as.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
+              "description": "One file in the workspace: where it is, which blob holds it and how big\nit is.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
               "properties": {
-                "content_type": {
-                  "description": "Content type the file is served with.",
-                  "type": "string"
-                },
                 "path": {
                   "description": "Where the file lives. Workspace-relative (`site/index.html`) in the\nfiles API; relative to its area's root (`index.html`) in a\ngeneration's site manifest and in a block's source listing.",
                   "type": "string"
@@ -9949,8 +9940,7 @@
               "required": [
                 "path",
                 "sha256",
-                "size",
-                "content_type"
+                "size"
               ],
               "type": "object"
             },
@@ -10773,12 +10763,8 @@
                     "description": "Every file the generation publishes, path relative to the site root.",
                     "items": {
                       "additionalProperties": false,
-                      "description": "One file in the workspace: where it is, which blob holds it, how big it is\nand what it is served as.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
+                      "description": "One file in the workspace: where it is, which blob holds it and how big\nit is.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
                       "properties": {
-                        "content_type": {
-                          "description": "Content type the file is served with.",
-                          "type": "string"
-                        },
                         "path": {
                           "description": "Where the file lives. Workspace-relative (`site/index.html`) in the\nfiles API; relative to its area's root (`index.html`) in a\ngeneration's site manifest and in a block's source listing.",
                           "type": "string"
@@ -10797,8 +10783,7 @@
                       "required": [
                         "path",
                         "sha256",
-                        "size",
-                        "content_type"
+                        "size"
                       ],
                       "type": "object"
                     },
@@ -11246,12 +11231,8 @@
             "description": "The files that were written, in path order. Read or edit them through\nthe files API; the block does not serve until it is compiled.",
             "items": {
               "additionalProperties": false,
-              "description": "One file in the workspace: where it is, which blob holds it, how big it is\nand what it is served as.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
+              "description": "One file in the workspace: where it is, which blob holds it and how big\nit is.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
               "properties": {
-                "content_type": {
-                  "description": "Content type the file is served with.",
-                  "type": "string"
-                },
                 "path": {
                   "description": "Where the file lives. Workspace-relative (`site/index.html`) in the\nfiles API; relative to its area's root (`index.html`) in a\ngeneration's site manifest and in a block's source listing.",
                   "type": "string"
@@ -11270,8 +11251,7 @@
               "required": [
                 "path",
                 "sha256",
-                "size",
-                "content_type"
+                "size"
               ],
               "type": "object"
             },

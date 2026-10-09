@@ -3,6 +3,11 @@
 //! Append-only: a generation is never edited back into a previous shape.
 //! Rolling back publishes a *new* generation that copies an old one's
 //! manifests (design §7.2), so the history stays a straight line.
+//!
+//! The one rewrite is a storage upgrade, not an edit:
+//! [`replace_site_manifest`] drops the `content_type` that site entries
+//! stored before the type became a function of the path
+//! (`super::super::stored_types`). Every path, hash and size is kept.
 
 use wafer_block::{
     db::{Filter, FilterOp, FilterTree, ListOptions, SortField},
@@ -378,6 +383,60 @@ pub async fn find_active(ctx: &dyn Context) -> Result<Option<GenerationRow>, Waf
     list.records.first().map(decode).transpose()
 }
 
+/// A page of the rows whose site manifest still stores a `content_type` on
+/// its entries, oldest first.
+///
+/// The text `"content_type":` cannot occur in a manifest written since the
+/// field was dropped: a key is the only place a JSON string is followed by
+/// `:`, and no other key of a stored manifest has that name. So a boot with
+/// nothing to upgrade pays one query that matches no row.
+pub async fn list_with_stored_content_types(
+    ctx: &dyn Context,
+) -> Result<Vec<GenerationRow>, WaferError> {
+    let list = db::list(
+        ctx,
+        TABLE,
+        &ListOptions {
+            filters: vec![Filter {
+                field: "site_manifest_json".into(),
+                operator: FilterOp::ContainsIgnoreCase,
+                value: serde_json::json!("\"content_type\":"),
+            }],
+            sort: newest_first()
+                .into_iter()
+                .map(|field| SortField {
+                    desc: false,
+                    ..field
+                })
+                .collect(),
+            limit: Some(MAX_LIST_LIMIT),
+            skip_count: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    list.records.iter().map(decode).collect()
+}
+
+/// Replace one row's site manifest and the hash taken over its manifest.
+///
+/// Only for [`super::super::stored_types`]: the caller passes the same
+/// manifest with the stored `content_type` dropped, canonical, and the hash
+/// of the whole manifest rebuilt from it.
+pub async fn replace_site_manifest(
+    ctx: &dyn Context,
+    id: &str,
+    site_manifest_json: &str,
+    manifest_sha256: &str,
+) -> Result<(), WaferError> {
+    let data = crate::util::json_map(serde_json::json!({
+        "site_manifest_json": site_manifest_json,
+        "manifest_sha256": manifest_sha256,
+    }));
+    db::update(ctx, TABLE, id, data).await?;
+    Ok(())
+}
+
 /// Every generation an activation has not finished with, newest first.
 ///
 /// Staged, validating or activating: rows the journal may be converging on,
@@ -562,7 +621,7 @@ mod tests {
     /// pins that the repo's reads keep them byte-exact. `repo::json_text`
     /// re-encodes canonically, so the round trip is byte-exact only for
     /// canonical input — see its own tests for the non-canonical case.
-    const SITE_MANIFEST: &str = r#"{"files":[{"content_type":"text/html; charset=utf-8","path":"index.html","sha256":"aa","size":5}]}"#;
+    const SITE_MANIFEST: &str = r#"{"files":[{"path":"index.html","sha256":"aa","size":5}]}"#;
     const BLOCK_MANIFEST: &str = r#"[{"artifact_sha256":"bb","capabilities":{},"name":"site/newsletter","routes":[{"access":"Public","prefix":"/b/newsletter/"}],"wafer_guest_version":1}]"#;
 
     fn new_generation(cause: GenerationCause) -> NewGeneration {

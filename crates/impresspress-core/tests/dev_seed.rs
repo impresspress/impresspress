@@ -108,7 +108,6 @@ fn guide_file() -> seed::SeedFile {
         path: seed::GUIDE_PATH.to_string(),
         sha256: blobs::sha256_hex(GUIDE),
         size: GUIDE.len() as u64,
-        content_type: seed::GUIDE_CONTENT_TYPE.to_string(),
     }
 }
 
@@ -119,7 +118,6 @@ fn llms_file() -> seed::SeedFile {
         path: seed::LLMS_PATH.to_string(),
         sha256: blobs::sha256_hex(LLMS),
         size: LLMS.len() as u64,
-        content_type: seed::llms_content_type().to_string(),
     }
 }
 
@@ -403,7 +401,6 @@ async fn a_bundle_for_another_template_records_nothing() {
         path: seed::LLMS_PATH.to_string(),
         sha256: blobs::sha256_hex(other_llms),
         size: other_llms.len() as u64,
-        content_type: seed::llms_content_type().to_string(),
     };
     let redeployed = MapFetch::default()
         .with(
@@ -514,14 +511,6 @@ async fn an_llms_txt_under_another_name_is_refused() {
 }
 
 #[tokio::test]
-async fn an_llms_txt_declared_with_another_content_type_is_refused() {
-    let mut declared = sandbox();
-    declared.llms.content_type = "text/markdown; charset=utf-8".to_string();
-    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
-    assert!(err.contains("content type"), "{err}");
-}
-
-#[tokio::test]
 async fn a_bundle_without_a_sandbox_block_records_nothing() {
     let (ctx, control) = fixture().await;
     seed::import(
@@ -549,7 +538,6 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
         path: "data.json".to_string(),
         sha256: blobs::sha256_hex(b"some other snapshot"),
         size: data.len() as u64,
-        content_type: seed::DATA_CONTENT_TYPE.to_string(),
     };
     let manifest = SeedManifest {
         data: Some(declared),
@@ -614,14 +602,6 @@ async fn a_prompt_over_the_limit_is_refused() {
 }
 
 #[tokio::test]
-async fn a_guide_declared_with_another_content_type_is_refused() {
-    let mut declared = sandbox();
-    declared.guide.content_type = "text/plain; charset=utf-8".to_string();
-    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
-    assert!(err.contains("content type"), "{err}");
-}
-
-#[tokio::test]
 async fn a_guide_not_named_guide_md_is_refused() {
     let mut declared = sandbox();
     declared.guide.path = "README.md".to_string();
@@ -675,11 +655,6 @@ async fn a_seed_bundle_becomes_the_workspace_and_generation_zero() {
             "site/assets/app.js",
             "site/index.html",
         ]
-    );
-    // Content types are derived by the workspace, not copied from the bundle.
-    assert_eq!(
-        ws.get("site/index.html").expect("entry").content_type,
-        "text/html; charset=utf-8"
     );
     assert_eq!(ws.blob_count, 3);
     assert_eq!(
@@ -988,25 +963,16 @@ async fn a_size_that_does_not_match_the_content_is_refused() {
     );
 }
 
-/// The served type is derived from the path, so a bundle claiming a different
-/// one was produced by an exporter that does not agree with this build about
-/// how the file is served.
-#[tokio::test]
-async fn a_content_type_that_is_not_what_the_path_is_served_as_is_refused() {
-    let (ctx, control) = fixture().await;
-    let mut manifest = manifest();
-    manifest.site[0].content_type = "text/plain".to_string();
-
-    let error = seed::import(
-        &ctx,
-        control.as_ref(),
-        &fake_bypass_rules(),
-        &manifest,
-        &bundle(),
-    )
-    .await
-    .expect_err("a content-type mismatch must refuse the import");
-    assert!(error.contains("content type"), "{error}");
+/// A manifest declares no content type: what a file is served as is a
+/// function of its path, so a bundle has nothing to say about it. An entry
+/// that still declares one is not this build's manifest, and is refused
+/// when it is parsed rather than half-read.
+#[test]
+fn a_manifest_entry_that_declares_a_content_type_does_not_parse() {
+    let mut value = serde_json::to_value(manifest()).expect("serialize");
+    value["site"][0]["content_type"] = serde_json::json!("text/html; charset=utf-8");
+    let err = serde_json::from_value::<SeedManifest>(value).expect_err("an unknown field");
+    assert!(err.to_string().contains("content_type"), "{err}");
 }
 
 /// The path check runs before the fetch, so a traversing entry is refused for

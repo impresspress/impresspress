@@ -50,6 +50,7 @@ pub mod retention;
 pub mod scaffold;
 pub mod seed;
 pub mod status;
+pub mod stored_types;
 pub mod tools;
 pub mod validation;
 pub mod workspace;

@@ -100,7 +100,6 @@ async fn write_then_list_then_read_round_trips_with_hashes() {
     assert_eq!(l["files"][0]["path"], "site/index.html");
     assert_eq!(l["files"][0]["sha256"], serde_json::json!(sha));
     assert_eq!(l["files"][0]["size"], 11);
-    assert_eq!(l["files"][0]["content_type"], "text/html; charset=utf-8");
 
     let r = output_json(
         dev_post(
@@ -896,10 +895,9 @@ async fn an_oversized_body_is_refused_in_both_encodings() {
 // ---------------------------------------------------------------------------
 
 /// `.gitignore`, `README` and `LICENSE` are text a user edits, and the
-/// extension table cannot say so. They are stored as
-/// `application/octet-stream` — that is what the site publisher serves — but
-/// read back as `utf8`, because an unknown type is not a claim that the bytes
-/// are binary.
+/// extension table cannot say so. Their type is `application/octet-stream` —
+/// that is what the site publisher serves — but they read back as `utf8`,
+/// because an unknown type is not a claim that the bytes are binary.
 #[tokio::test]
 async fn a_file_with_no_known_extension_reads_back_as_text() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
@@ -910,10 +908,10 @@ async fn a_file_with_no_known_extension_reads_back_as_text() {
     ] {
         write_new(&ctx, path, body).await;
 
-        let listed = output_json(ctx.dispatch_resolved(list_msg(Some(path))).await).await;
         assert_eq!(
-            listed["files"][0]["content_type"], "application/octet-stream",
-            "{path} stores as octet-stream"
+            impresspress_core::blocks::dev::paths::content_type_for(path),
+            wafer_core::mime::UNKNOWN,
+            "{path} is served as octet-stream"
         );
 
         let r =
@@ -1371,7 +1369,6 @@ async fn a_batch_of_site_files_publishes_one_generation() {
         body["files"][1]["sha256"],
         json!(blobs::sha256_hex(b"<h1>hi</h1>"))
     );
-    assert_eq!(body["files"][1]["content_type"], "text/html; charset=utf-8");
     assert_eq!(body["generation"]["site_files"], 3, "{body}");
     // The one activation's phases, in the shape a single site write returns.
     let phases: Vec<&str> = body["progress"]

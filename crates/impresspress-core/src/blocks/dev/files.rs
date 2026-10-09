@@ -197,7 +197,7 @@ pub async fn handle_read(
         // lock this can no longer mean "a mutation moved underneath the read".
         Err(e) => return no_store_db_error_internal(e, "dev workspace blob read"),
     };
-    let (encoding, content) = encode_content(&entry.content_type, bytes);
+    let (encoding, content) = encode_content(entry.content_type(), bytes);
     no_store().json(&FileReadResponse {
         path: entry.path.clone(),
         sha256: entry.sha256.clone(),
@@ -945,7 +945,6 @@ mod tests {
             path: "site/a.css".to_string(),
             sha256: sha.to_string(),
             size,
-            content_type: "text/css; charset=utf-8".to_string(),
         }
     }
 

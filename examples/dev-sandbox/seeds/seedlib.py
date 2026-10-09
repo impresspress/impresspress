@@ -56,46 +56,7 @@ def seed_dirs() -> list:
     with or without a manifest, so a seed that has none is reported, not skipped."""
     return sorted(p for p in SEEDS_DIR.iterdir() if p.is_dir() and SEED_NAME.fullmatch(p.name))
 
-# Mirrors `paths::content_type_for` in
-# crates/impresspress-core/src/blocks/dev/paths.rs, which is `wafer_core::mime`'s
-# table (wafer-run crates/wafer-core/src/mime.rs), for the extensions a seed may
-# carry. The importer checks every declared type against that function, so an
-# entry that disagrees is refused on the first boot — and caught by the e2e job
-# that boots the seed. Keep the two in step.
-CONTENT_TYPES = {
-    "html": "text/html; charset=utf-8",
-    "css": "text/css; charset=utf-8",
-    "js": "application/javascript; charset=utf-8",
-    "mjs": "application/javascript; charset=utf-8",
-    "json": "application/json; charset=utf-8",
-    "map": "application/json; charset=utf-8",
-    "xml": "application/xml; charset=utf-8",
-    "svg": "image/svg+xml; charset=utf-8",
-    "png": "image/png",
-    "jpg": "image/jpeg",
-    "jpeg": "image/jpeg",
-    "gif": "image/gif",
-    "webp": "image/webp",
-    "ico": "image/x-icon",
-    "txt": "text/plain; charset=utf-8",
-    "md": "text/markdown; charset=utf-8",
-    "csv": "text/csv; charset=utf-8",
-    "rs": "text/plain; charset=utf-8",
-    "toml": "text/plain; charset=utf-8",
-    "wasm": "application/wasm",
-    "woff2": "font/woff2",
-}
-
 SCHEMA_VERSION = 1
-
-
-def extension_of(name: str) -> str:
-    """The lowercase extension of a file name, or "" — a leading dot does not
-    start an extension (`.gitignore` has none), as `paths::extension_of`."""
-    dot = name.rfind(".")
-    if dot <= 0:
-        return ""
-    return name[dot + 1 :].lower()
 
 
 def sha256_hex(data: bytes) -> str:
@@ -110,13 +71,6 @@ def site_entries(site_dir: pathlib.Path) -> list:
     entries = []
     for file in files:
         rel = file.relative_to(site_dir).as_posix()
-        ext = extension_of(file.name)
-        if ext not in CONTENT_TYPES:
-            raise SeedError(
-                f"{file}: no content type for extension {ext!r} — the runtime would serve it as "
-                f"application/octet-stream. Rename the file, or extend CONTENT_TYPES in step with "
-                f"paths::content_type_for."
-            )
         if file.is_symlink():
             raise SeedError(f"{file}: is a symlink; a seed carries real files")
         data = file.read_bytes()
@@ -130,7 +84,6 @@ def site_entries(site_dir: pathlib.Path) -> list:
                 "path": rel,
                 "sha256": sha256_hex(data),
                 "size": len(data),
-                "content_type": CONTENT_TYPES[ext],
             }
         )
     return entries
@@ -161,10 +114,9 @@ def render(manifest: dict) -> str:
     return json.dumps(manifest, indent=2) + "\n"
 
 
-# Mirror seed::GUIDE_PATH, seed::GUIDE_CONTENT_TYPE, seed::MAX_GUIDE_BYTES and
+# Mirror seed::GUIDE_PATH, seed::MAX_GUIDE_BYTES and
 # seed::MAX_PROMPT_BYTES: the importer refuses a sandbox block outside them.
 GUIDE_PATH = "guide.md"
-GUIDE_CONTENT_TYPE = "text/markdown; charset=utf-8"
 MAX_GUIDE_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 4 * 1024
 
@@ -174,9 +126,8 @@ SANDBOX_KEYS = {"template", "title", "suggested_prompt"}
 MAX_TITLE_BYTES = 120
 
 
-# Mirror seed::LLMS_PATH, seed::llms_content_type() and seed::MAX_LLMS_BYTES.
+# Mirror seed::LLMS_PATH and seed::MAX_LLMS_BYTES.
 LLMS_PATH = "llms.txt"
-LLMS_CONTENT_TYPE = CONTENT_TYPES["txt"]
 MAX_LLMS_BYTES = 512 * 1024
 
 # What every sandbox's llms.txt opens with, whichever seed it was built from.
@@ -330,13 +281,11 @@ def sandbox_block(seed_dir: pathlib.Path):
             "path": GUIDE_PATH,
             "sha256": sha256_hex(data),
             "size": len(data),
-            "content_type": GUIDE_CONTENT_TYPE,
         },
         "llms": {
             "path": LLMS_PATH,
             "sha256": sha256_hex(llms),
             "size": len(llms),
-            "content_type": LLMS_CONTENT_TYPE,
         },
     }
 

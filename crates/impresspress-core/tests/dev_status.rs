@@ -34,7 +34,7 @@ use wafer_run::Block as _;
 /// The one site file the fixture generation publishes, in the canonical form
 /// design §11.3 mandates (sorted keys, no whitespace — the bytes
 /// `manifest_sha256` is a hash over).
-const SITE_MANIFEST: &str = r#"{"files":[{"content_type":"text/html; charset=utf-8","path":"index.html","sha256":"aa","size":5}]}"#;
+const SITE_MANIFEST: &str = r#"{"files":[{"path":"index.html","sha256":"aa","size":5}]}"#;
 
 /// The fixture's block manifest, built from the real [`DynamicBlockSpec`]
 /// rather than a hand-written string.

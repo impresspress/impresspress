@@ -1161,7 +1161,6 @@ fn data_file(path: &str, bytes: &[u8]) -> seed::SeedFile {
         path: path.to_string(),
         sha256: impresspress_core::blocks::dev::blobs::sha256_hex(bytes),
         size: bytes.len() as u64,
-        content_type: "application/json".to_string(),
     }
 }
 
