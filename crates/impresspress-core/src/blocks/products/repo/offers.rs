@@ -135,6 +135,10 @@ fn variable_from_record(record: &Record) -> Result<VariableDefinition, WaferErro
 /// unique keys and non-empty select choices that `validate_offer` applies to
 /// every offer create and update.
 ///
+/// The bundle's rows are the offer's whole variable set: the import replaces
+/// the destination's rows for every offer it carries rather than merging
+/// into them, so these rows are exactly what the offer will hold.
+///
 /// Import is the one write to the variables table that does not go through
 /// [`build_offer`], so without this an offer whose key is `kilo-grams` would
 /// land, and every preview and checkout of it would then be refused.
@@ -147,7 +151,8 @@ pub(crate) fn validate_imported_variables<'a>(
         WaferError::new(
             ErrorCode::InvalidArgument,
             format!(
-                "the data snapshot carries a variable of offer {offer_id:?} that this build                  refuses, so nothing was imported: {message}"
+                "the data snapshot carries a variable of offer {offer_id:?} that this build \
+                 refuses, so nothing was imported: {message}"
             ),
         )
     };

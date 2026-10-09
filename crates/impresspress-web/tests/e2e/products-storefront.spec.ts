@@ -382,10 +382,14 @@ test.describe("products static storefront widget", () => {
   });
 
   test("a runtime that cannot check out shows a line instead of the checkout button", async ({ page }) => {
+    const previewQuantities: unknown[] = [];
     await page.route(`${apiOrigin}/**`, async (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path === "/b/products/storefront/product_static") return json(route, product());
-      if (path === "/b/products/pricing/preview") return json(route, quote());
+      if (path === "/b/products/pricing/preview") {
+        previewQuantities.push((route.request().postDataJSON() || {}).quantity);
+        return json(route, quote());
+      }
       if (path === "/b/products/storefront/config") return json(route, BROWSER_RUNTIME_CONFIG);
       return json(route, { error: "unexpected route" }, 404);
     });
@@ -396,6 +400,11 @@ test.describe("products static storefront widget", () => {
     await expect(widget.getByRole("button", { name: /checkout/i })).toHaveCount(0);
     // The price still previews: only the purchase step is unavailable.
     await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+    // Email is sent only by checkout, so it goes with the button. Quantity
+    // prices the preview, so it stays and still drives it.
+    await expect(widget.locator(".email-wrap")).toBeHidden();
+    await widget.getByLabel("Quantity").fill("4");
+    await expect.poll(() => previewQuantities.at(-1)).toBe(4);
   });
 
   test("a failed config read keeps the product and price, hides checkout and says why", async ({ page }) => {
@@ -417,7 +426,144 @@ test.describe("products static storefront widget", () => {
     // The widget does not know checkout is unavailable, only that it could
     // not ask: the "not available" line stays hidden.
     await expect(widget.getByText("Checkout isn't available on this site.")).toBeHidden();
+    // Without checkout there is nothing to send an email to.
+    await expect(widget.locator(".email-wrap")).toBeHidden();
+    await expect(widget.getByLabel("Quantity")).toBeVisible();
   });
+
+  test("a cancel return keeps its notice once the price has rendered", async ({ page }) => {
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/storefront/config") return json(route, SERVER_CONFIG);
+      if (path === "/b/products/pricing/preview") return json(route, quote());
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page, "/product?impresspress_checkout=cancel");
+    const widget = await mount(page, "hosted");
+    await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+    await expect(widget.locator(".status")).toHaveText(
+      "Checkout was canceled. You can review your choices and try again.",
+    );
+  });
+
+  test("a failed config read outranks the cancel notice", async ({ page }) => {
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/storefront/config") return json(route, { error: "config store offline" }, 500);
+      if (path === "/b/products/pricing/preview") return json(route, quote());
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page, "/product?impresspress_checkout=cancel");
+    const widget = await mount(page, "hosted");
+    // "Try again" would be an invitation the widget cannot keep: checkout is
+    // hidden because it could not ask whether checkout runs here.
+    await expect(widget.locator(".status")).toHaveText(
+      "Could not check whether checkout is available: config store offline",
+    );
+    await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+    await expect(widget.locator(".status")).toHaveText(
+      "Could not check whether checkout is available: config store offline",
+    );
+  });
+
+  test("a failed preview outranks a failed config read", async ({ page }) => {
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/storefront/config") return json(route, { error: "config store offline" }, 500);
+      if (path === "/b/products/pricing/preview") return json(route, { error: "seats: at most 10" }, 400);
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page);
+    const widget = await mount(page, "hosted");
+    // The buyer's own last action failed, and that is what they can act on.
+    await expect(widget.locator(".status")).toHaveText("seats: at most 10");
+    await expect(widget.locator(".status")).toHaveClass(/error/);
+  });
+
+  test("work in progress shows over a notice, which returns when it is done", async ({ page }) => {
+    let releasePreview: () => void = () => {};
+    const previewHeld = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/storefront/config") return json(route, SERVER_CONFIG);
+      if (path === "/b/products/pricing/preview") {
+        await previewHeld;
+        return json(route, quote());
+      }
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page, "/product?impresspress_checkout=cancel");
+    const widget = await mount(page, "hosted");
+    await expect(widget.locator(".status")).toHaveText("Calculating…");
+    releasePreview();
+    await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+    await expect(widget.locator(".status")).toHaveText(
+      "Checkout was canceled. You can review your choices and try again.",
+    );
+  });
+
+  for (const slower of ["preview", "order status"] as const) {
+    test(`a payment outcome outranks a failed config read when the ${slower} answers last`, async ({ page }) => {
+      const delay = (which: typeof slower) => new Promise((resolve) => setTimeout(resolve, which === slower ? 600 : 0));
+      await page.route(`${apiOrigin}/**`, async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (path === "/b/products/storefront/product_static") return json(route, product());
+        if (path === "/b/products/storefront/config") return json(route, { error: "config store offline" }, 500);
+        if (path === "/b/products/pricing/preview") {
+          await delay("preview");
+          return json(route, quote());
+        }
+        if (path === "/b/products/orders/order_returned/status") {
+          await delay("order status");
+          return json(route, {
+            schema_version: 1,
+            order_id: "order_returned",
+            status: "completed",
+            reconciliation_status: "reconciled",
+            amounts: quote().amounts,
+            subscription_cancel_at_period_end: false,
+            paid_at: "2026-07-19T04:05:06Z",
+          });
+        }
+        return json(route, { error: "unexpected route" }, 404);
+      });
+
+      await openStaticPage(page, "/product?impresspress_checkout=success&session_id=untrusted");
+      await page.evaluate(() => {
+        sessionStorage.setItem(
+          "impresspress:receipt:https://api.example:product_static",
+          JSON.stringify({
+            order_id: "order_returned",
+            receipt_token: "receipt_capability",
+            expires_at: "2026-07-26T00:00:00Z",
+          }),
+        );
+      });
+      const widget = await mount(page, "hosted");
+      // Both requests have answered once the price is shown and the receipt
+      // is consumed; the line must then report the payment, not the config.
+      await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            sessionStorage.getItem("impresspress:receipt:https://api.example:product_static"),
+          ),
+        )
+        .toBeNull();
+      await expect(widget.locator(".status")).toHaveText("Payment confirmed — NZD 64.00.");
+      await expect(widget.locator(".status")).toHaveClass(/success/);
+    });
+  }
 
   test("a Payment Link still sells where checkout cannot run", async ({ page }) => {
     const apiPaths: string[] = [];

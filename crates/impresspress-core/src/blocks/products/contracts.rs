@@ -32,24 +32,24 @@ use crate::util::{enum_column, json_map, RecordExt};
 
 pub const COMMERCE_SCHEMA_VERSION: u32 = 1;
 
-/// Moderation state of a **product**: the `approval_status` column of
-/// `impresspress__products__products`.
-///
-/// The five variants describe the product moderation ladder a seller
-/// listing walks — `draft` before submission, `pending` while an
-/// administrator has it, then `approved`, `rejected` or `suspended`. It was
-/// also the declared type of `SellerAccount.approval_status`, where only
-/// two of the five could ever be produced (`repo::seller_accounts` derives
-/// that field from one boolean); a seller account has never had a `draft`
-/// or a `rejected` state, and publishing three unreachable values as part
-/// of that contract said it did. The field is [`SellerApproval`] now.
-///
-/// Not to be confused with [`ProductStatus`], the *publication* state on
-/// the same table's `status` column. They are two columns and two
-/// vocabularies: a submitted listing is `status = pending_review` and
-/// `approval_status = pending` at the same time, which review bug B11 read
-/// as one value spelled two ways. `products::tests::status_enum_tests`
-/// pins that they are not.
+/// Moderation state of a product: `draft` before submission, `pending`
+/// while an administrator reviews it, then `approved`, `rejected` or
+/// `suspended`.
+//
+// The `approval_status` column of `impresspress__products__products`.
+//
+// It was also the declared type of `SellerAccount.approval_status`, where
+// only two of the five could ever be produced (`repo::seller_accounts`
+// derives that field from one boolean); a seller account has never had a
+// `draft` or a `rejected` state, and publishing three unreachable values as
+// part of that contract said it did. The field is [`SellerApproval`] now.
+//
+// Not to be confused with [`ProductStatus`], the *publication* state on the
+// same table's `status` column. They are two columns and two vocabularies: a
+// submitted listing is `status = pending_review` and
+// `approval_status = pending` at the same time, which review bug B11 read as
+// one value spelled two ways. `products::tests::status_enum_tests` pins that
+// they are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
@@ -60,25 +60,25 @@ pub enum ApprovalStatus {
     Suspended,
 }
 
-/// Whether a seller account may sell: the two-valued projection
-/// `SellerAccount.approval_status` publishes.
-///
-/// `repo::seller_accounts::to_contract` computes this from one fact —
-/// whether the row's `status` is `suspended` — so `approved` and
-/// `suspended` are the only values that have ever reached a client. This
-/// type is that sentence; the five-variant [`ApprovalStatus`] it replaces
-/// on this field describes a different column entirely.
+/// Whether a seller account may sell.
 ///
 /// - `approved` — not suspended. Whether the account can actually take
-///   money is [`SellerStatus`] and [`SellerCapabilities`], not this.
+///   money is the account's `status` and `capabilities`, not this.
 /// - `suspended` — an administrator has suspended the account.
-///
-/// The variants carry no doc comments of their own, here or in any of this
-/// module's other published status enums, and that is deliberate: schemars
-/// renders a unit-variant enum as one flat `{"enum": [...]}` only while
-/// every variant is undocumented. Describing one splits the published field
-/// into a `oneOf` of `const` subschemas — a change to the schema every SDK
-/// generator reads, for prose that belongs on the type anyway.
+//
+// The two-valued projection `SellerAccount.approval_status` publishes.
+// `repo::seller_accounts::to_contract` computes it from one fact — whether
+// the row's `status` is `suspended` — so `approved` and `suspended` are the
+// only values that have ever reached a client. This type is that sentence;
+// the five-variant [`ApprovalStatus`] it replaces on this field describes a
+// different column entirely.
+//
+// The variants carry no doc comments of their own, here or in any of this
+// module's other published status enums, and that is deliberate: schemars
+// renders a unit-variant enum as one flat `{"enum": [...]}` only while every
+// variant is undocumented. Describing one splits the published field into a
+// `oneOf` of `const` subschemas — a change to the schema every SDK generator
+// reads, for prose that belongs on the type anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SellerApproval {
@@ -86,14 +86,7 @@ pub enum SellerApproval {
     Suspended,
 }
 
-/// How far a seller account has got with Stripe Connect: the `status`
-/// column of `impresspress__products__seller_accounts`.
-///
-/// A ladder, and it was computed by hand in three places
-/// (`set_admin_suspended`, `sync_account`, `sync_account_event`) from the
-/// same three booleans, plus a fourth literal in `ensure_for_user` and a
-/// fifth in `stripe_provider`. `repo::seller_accounts::ladder` is the one
-/// computation now; this is the one vocabulary.
+/// How far a seller account has got with Stripe Connect.
 ///
 /// - `not_started` — the row exists because the user asked to sell; no
 ///   Connect account has been created yet.
@@ -105,6 +98,14 @@ pub enum SellerApproval {
 /// - `suspended` — an administrator has suspended the account. Outranks
 ///   every capability state: a suspended account stays suspended however
 ///   its Stripe capabilities move.
+//
+// The `status` column of `impresspress__products__seller_accounts`.
+//
+// A ladder, and it was computed by hand in three places
+// (`set_admin_suspended`, `sync_account`, `sync_account_event`) from the
+// same three booleans, plus a fourth literal in `ensure_for_user` and a
+// fifth in `stripe_provider`. `repo::seller_accounts::ladder` is the one
+// computation now; this is the one vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SellerStatus {
@@ -815,9 +816,10 @@ pub struct CheckoutResponse {
     ///
     /// A bearer capability: whoever holds it can read the order's status.
     /// Treat it like a session token — never log it, never put it in a URL
-    /// that gets shared. This response is its only delivery, which is why it
-    /// is not `writeOnly`: that keyword claims a field is never present in a
-    /// response, and this one is always present in this one.
+    /// that gets shared. This response is its only delivery.
+    // Not `writeOnly`, despite being a credential: that keyword claims a
+    // field is never present in a response, and this one is always present
+    // in this one.
     pub receipt_token: String,
     #[schemars(extend("format" = "date-time"))]
     pub receipt_token_expires_at: String,
@@ -837,20 +839,19 @@ pub struct CheckoutResponse {
     pub amounts: MoneyBreakdown,
 }
 
-/// Lifecycle state of an order: the `status` column of
-/// `impresspress__products__purchases`.
-///
-/// This is the one definition of the column's value set. `repo::purchases`
-/// stores these variants and filters on them, and the order views parse the
-/// column back through [`Self::from_record`], so a stored value outside the
-/// set is reported as a data-integrity error rather than published or
-/// defaulted.
+/// Lifecycle state of an order.
 ///
 /// `pending`: created, checkout not yet claimed. `checkout_started`: a
 /// provider Checkout Session was claimed for the order. `completed`: paid.
 /// `partially_refunded` / `refunded`: paid, then refunded in part or in
 /// full. `failed`: checkout or reconciliation failed; `reconciliation_error`
 /// says why.
+//
+// The `status` column of `impresspress__products__purchases`, and the one
+// definition of its value set. `repo::purchases` stores these variants and
+// filters on them, and the order views parse the column back through
+// [`Self::from_record`], so a stored value outside the set is reported as a
+// data-integrity error rather than published or defaulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
@@ -909,13 +910,7 @@ impl OrderStatus {
     }
 }
 
-/// Where an order stands against the payment provider's view of it: the
-/// `reconciliation_status` column of `impresspress__products__purchases`.
-///
-/// This is the one definition of the column's value set. `repo::purchases`
-/// and `stripe` store these variants, and the order views parse the column
-/// back through [`Self::from_record`], so a stored value outside the set is
-/// reported as a data-integrity error rather than published or defaulted.
+/// Where an order stands against the payment provider's view of it.
 ///
 /// `pending`: row created, no provider session yet. `awaiting_payment`: a
 /// Checkout Session exists and the customer has not paid. `reconciled`: the
@@ -923,6 +918,12 @@ impl OrderStatus {
 /// provider's answer was unusable or contradicted the snapshot;
 /// `reconciliation_error` says why. The `payment_*` values mirror the last
 /// PaymentIntent event received before Checkout completion.
+//
+// The `reconciliation_status` column of `impresspress__products__purchases`,
+// and the one definition of its value set. `repo::purchases` and `stripe`
+// store these variants, and the order views parse the column back through
+// [`Self::from_record`], so a stored value outside the set is reported as a
+// data-integrity error rather than published or defaulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationStatus {
@@ -944,20 +945,22 @@ impl ReconciliationStatus {
     }
 }
 
-/// The provider's own view of the order's payment: the
-/// `provider_payment_status` column of
-/// `impresspress__products__purchases`.
-///
-/// Stripe's PaymentIntent vocabulary, owned here because it is our column.
-/// It is not [`ReconciliationStatus`], which is *our* reading of the same
-/// events; both live on the same row and the two were both bare strings.
-///
-/// [`Self::Unset`] is a real state, not a null stand-in: the column is
-/// `TEXT NOT NULL DEFAULT ''` (`016_payment_intent_state.sqlite.sql`) and
-/// every order carries it until a PaymentIntent event arrives, which is
-/// why `""` has always been the first entry in this field's published
-/// value list. Modelling it as a variant is what keeps that list — and
-/// every stored row — exactly as it is.
+/// The payment provider's own state for the order's payment, in Stripe's
+/// PaymentIntent vocabulary: empty (`""`) until the first PaymentIntent
+/// event arrives.
+//
+// The `provider_payment_status` column of
+// `impresspress__products__purchases`. Stripe's vocabulary, owned here
+// because it is our column. It is not [`ReconciliationStatus`], which is
+// *our* reading of the same events; both live on the same row and the two
+// were both bare strings.
+//
+// [`Self::Unset`] is a real state, not a null stand-in: the column is
+// `TEXT NOT NULL DEFAULT ''` (`016_payment_intent_state.sqlite.sql`) and
+// every order carries it until a PaymentIntent event arrives, which is why
+// `""` has always been the first entry in this field's published value
+// list. Modelling it as a variant is what keeps that list — and every
+// stored row — exactly as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPaymentStatus {
@@ -970,23 +973,24 @@ pub enum ProviderPaymentStatus {
     Canceled,
 }
 
-/// A subscription's lifecycle state, as Stripe reports it: the
-/// `subscription_status` column of `impresspress__products__purchases`.
-///
-/// The complete Stripe set, not the subset the repo happens to write
-/// today. `sync_commerce_subscription` copies `data.object.status` from a
-/// `customer.subscription.*` delivery straight into the column, so any
-/// status Stripe can emit can be stored — including `incomplete`, which
-/// the phase spec's variant list omits. Typing the column with a narrower
-/// set than its writer accepts would turn a legitimate Stripe state into a
-/// decode failure on the order view, so the type carries all of them.
-///
-/// [`Self::Unset`] is the state of every non-subscription order: the
-/// column is `TEXT NOT NULL DEFAULT ''`
-/// (`009_commerce_subscription_state.sqlite.sql`).
-///
-/// The same vocabulary is the `status` column of the platform-billing
-/// projection (`impresspress__products__subscriptions`).
+/// A subscription's lifecycle state, as Stripe reports it: every status
+/// Stripe can emit. Empty (`""`) on an order that is not a subscription.
+//
+// The `subscription_status` column of `impresspress__products__purchases`.
+//
+// The complete Stripe set, not the subset the repo happens to write today.
+// `sync_commerce_subscription` copies `data.object.status` from a
+// `customer.subscription.*` delivery straight into the column, so any status
+// Stripe can emit can be stored — including `incomplete`, which the phase
+// spec's variant list omits. Typing the column with a narrower set than its
+// writer accepts would turn a legitimate Stripe state into a decode failure
+// on the order view, so the type carries all of them.
+//
+// [`Self::Unset`] is the state of every non-subscription order: the column
+// is `TEXT NOT NULL DEFAULT ''` (`009_commerce_subscription_state.sqlite.sql`).
+//
+// The same vocabulary is the `status` column of the platform-billing
+// projection (`impresspress__products__subscriptions`).
 //
 // Each variant has exactly one spelling, Stripe's, and it is the only one
 // either column stores: every write serialises a variant, and migration
@@ -1236,8 +1240,8 @@ pub struct SellerAccount {
 #[serde(deny_unknown_fields)]
 pub struct SellerAccountList {
     pub sellers: Vec<SellerAccount>,
-    /// How many seller accounts exist, which is not `sellers.len()` when the
-    /// listing is showing a prefix.
+    /// How many seller accounts exist, which is more than `sellers` lists
+    /// when `truncated` is true.
     pub total_count: i64,
     /// Whether more seller accounts exist than `sellers` lists.
     pub truncated: bool,
@@ -1365,22 +1369,23 @@ pub enum RefundResultStatus {
     Failed,
 }
 
-/// Ledger state of a refund row: the `status` column of
-/// `impresspress__products__refunds`.
-///
-/// Not the same set as [`RefundResultStatus`], which is the answer one
-/// refund *request* gets, and not the same as the row's `provider_status`,
-/// which is Stripe's own state for the refund. The distinguishing variant
-/// is [`Self::ProviderSucceeded`]: the provider has paid the money back but
-/// the order's refunded total has not been settled yet, a local-only state
-/// with no counterpart at Stripe. It is why the column needs its own type
-/// rather than reusing either neighbour.
+/// Where a refund stands on the platform's ledger.
 ///
 /// - `pending` — recorded; the provider has not answered.
 /// - `provider_succeeded` — the provider refunded; the order total has not
 ///   been settled yet.
 /// - `succeeded` — settled against the order's refunded total.
 /// - `failed` — the provider refused or canceled the refund.
+//
+// The `status` column of `impresspress__products__refunds`.
+//
+// Not the same set as [`RefundResultStatus`], which is the answer one refund
+// *request* gets, and not the same as the row's `provider_status`, which is
+// Stripe's own state for the refund. The distinguishing variant is
+// [`Self::ProviderSucceeded`]: the provider has paid the money back but the
+// order's refunded total has not been settled yet, a local-only state with
+// no counterpart at Stripe. It is why the column needs its own type rather
+// than reusing either neighbour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefundStatus {
@@ -1603,19 +1608,7 @@ impl StripeEventType {
     }
 }
 
-/// Where a received Stripe event is in the block's own processing queue:
-/// the `status` column of `impresspress__products__stripe_events`.
-///
-/// The five values were five `const &str` in `stripe.rs`, used both as
-/// written values and as match patterns against `record.str_field`, and
-/// re-spelled a second time in the admin filter and a third in this
-/// module's schema. `stripe.rs` matches this type now, so a variant added
-/// here stops the lease state machine compiling rather than falling
-/// through one of its arms.
-///
-/// Deliberately NOT merged with [`OperationStatus`], which differs in
-/// exactly one variant (`processed` here, `succeeded` there): reconciling
-/// them changes stored values, and this phase does not.
+/// Where a received Stripe event is in the block's processing queue.
 ///
 /// - `pending` — recorded, not yet leased.
 /// - `processing` — a delivery holds the processing lease.
@@ -1623,6 +1616,19 @@ impl StripeEventType {
 /// - `processed` — handled; further deliveries of the same event id are
 ///   ignored.
 /// - `dead_letter` — out of attempts. Only a replay moves it.
+//
+// The `status` column of `impresspress__products__stripe_events`.
+//
+// The five values were five `const &str` in `stripe.rs`, used both as
+// written values and as match patterns against `record.str_field`, and
+// re-spelled a second time in the admin filter and a third in this module's
+// schema. `stripe.rs` matches this type now, so a variant added here stops
+// the lease state machine compiling rather than falling through one of its
+// arms.
+//
+// Deliberately NOT merged with [`OperationStatus`], which differs in exactly
+// one variant (`processed` here, `succeeded` there): reconciling them
+// changes stored values, and this phase does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventStatus {
@@ -1679,14 +1685,7 @@ pub struct WebhookEventList {
     pub page_size: i64,
 }
 
-/// Where a durable provider operation is in its retry schedule: the
-/// `status` column of `impresspress__products__provider_operations`.
-///
-/// One variant apart from [`EventStatus`] — a completed operation is
-/// `succeeded`, a handled event is `processed` — and the two were both
-/// written as bare strings against columns named `status` on tables read
-/// by the same admin page. Merging the vocabularies would change stored
-/// values, so they stay two types and the difference is stated here.
+/// Where a durable provider operation is in its retry schedule.
 ///
 /// - `pending` — enqueued, not yet leased.
 /// - `processing` — a worker holds the lease.
@@ -1694,6 +1693,14 @@ pub struct WebhookEventList {
 ///   another.
 /// - `succeeded` — completed.
 /// - `dead_letter` — out of attempts.
+//
+// The `status` column of `impresspress__products__provider_operations`.
+//
+// One variant apart from [`EventStatus`] — a completed operation is
+// `succeeded`, a handled event is `processed` — and the two were both
+// written as bare strings against columns named `status` on tables read by
+// the same admin page. Merging the vocabularies would change stored values,
+// so they stay two types and the difference is stated here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
@@ -1835,8 +1842,8 @@ pub enum ProductStatus {
     Archived,
 }
 
-/// A product row as published to its owner and to administrators: every
-/// column of the products table.
+/// A product, as its owner and administrators see it.
+// Every column of `impresspress__products__products`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProductView {
     /// Stable product identifier.
@@ -1868,7 +1875,7 @@ pub struct ProductView {
     pub product_template_id: String,
     /// Id of a product the buyer must already own before checkout, or empty.
     pub requires: String,
-    /// Id of the user who created the row.
+    /// Id of the user who created the product.
     pub created_by: String,
     /// `platform` for an administrator-owned product, `user` for a seller's.
     #[schemars(extend("enum" = ["platform", "user"]))]
@@ -1878,9 +1885,9 @@ pub struct ProductView {
     /// Seller account the product sells through; empty for platform products.
     pub seller_account_id: String,
     /// Moderation state: `draft`, `pending` (submitted for review), `approved`,
-    /// `rejected` or `suspended`. A different column and a different
-    /// vocabulary from `status` — a listing awaiting review is
-    /// `status = pending_review` and `approval_status = pending` at once.
+    /// `rejected` or `suspended`. A separate field from `status`, with its
+    /// own values — a listing awaiting review is `status = pending_review`
+    /// and `approval_status = pending` at once.
     pub approval_status: ApprovalStatus,
     /// How a purchase is fulfilled.
     #[schemars(extend("enum" = ["none", "manual", "download", "entitlement", "webhook"]))]
@@ -2198,7 +2205,8 @@ pub struct ProductListQuery {
     pub group_id: Option<String>,
     /// Exact-match filter on the publication state.
     pub status: Option<String>,
-    /// `LIKE '%…%'` filter on the product name.
+    /// Substring filter on the product name.
+    // An escaped `name LIKE '%…%'` (`handlers::product::name_like_filter`).
     pub search: Option<String>,
 }
 
@@ -2276,7 +2284,7 @@ pub fn slug_from(value: &str, max_len: usize) -> String {
 // gets the same answer it always did on update: the row, unchanged in that
 // column.
 /// `POST /b/products/api/admin/products` and `POST /b/products/api/products`
-/// request body. Ownership, moderation and provider columns are set by the
+/// request body. Ownership, moderation and provider fields are set by the
 /// server and cannot be supplied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreateProductRequest {
@@ -2337,7 +2345,7 @@ impl CreateProductRequest {
 /// `PATCH /b/products/api/admin/products/{id}` and
 /// `PATCH /b/products/api/products/{id}` request body. Every field is
 /// optional and only the ones present are applied. Ownership, moderation and
-/// provider columns are set by the server and cannot be supplied.
+/// provider fields are set by the server and cannot be supplied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UpdateProductRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2399,7 +2407,8 @@ pub struct ProductDuplicateResponse {
     pub offers: Vec<ManagedOffer>,
 }
 
-/// A product group row: every column of `impresspress__products__groups`.
+/// A product group.
+// Every column of `impresspress__products__groups`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GroupView {
     /// Stable group identifier.
@@ -2408,13 +2417,14 @@ pub struct GroupView {
     pub description: String,
     /// Group template the group was created from.
     pub group_template_id: String,
-    /// Id of the user who owns the group. The owner tier lists and edits
-    /// only groups whose `user_id` is the caller.
+    /// Id of the user who owns the group. `/b/products/groups` lists and
+    /// edits only the caller's own groups.
     pub user_id: String,
     /// `active` unless the group has been retired.
     pub status: String,
-    /// Id of the user who created the row: the administrator on the admin
-    /// tier (the owner is `user_id`), the owner on the owner tier.
+    /// Id of the user who created the group: the administrator, for a group
+    /// created through `/b/products/api/admin/groups` (its owner is then
+    /// `user_id`); otherwise the owner.
     pub created_by: String,
     /// RFC 3339 creation timestamp.
     #[schemars(extend("format" = "date-time"))]
@@ -2554,16 +2564,15 @@ impl UpdateOwnGroupRequest {
     }
 }
 
-/// A product type (taxonomy) row: every column of
-/// `impresspress__products__types`.
+/// A product type (taxonomy).
+// Every column of `impresspress__products__types`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProductTypeView {
     /// Stable type identifier.
     pub id: String,
     pub name: String,
     pub description: String,
-    /// Whether the type is built in. System types are seeded by the block
-    /// rather than created through the API.
+    /// Whether the type was marked as built in when it was created.
     pub is_system: bool,
     /// RFC 3339 creation timestamp.
     #[schemars(extend("format" = "date-time"))]
@@ -2647,8 +2656,8 @@ impl CreateProductTypeRequest {
     }
 }
 
-/// A group template row: every column of
-/// `impresspress__products__group_templates`.
+/// A group template.
+// Every column of `impresspress__products__group_templates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GroupTemplateView {
     /// Stable template identifier.
@@ -2726,8 +2735,9 @@ impl GroupTemplateListResponse {
 //   echoed the whole row.
 // * `receipt_token_expires_at` — the capability's expiry, meaningful only
 //   beside the digest.
-/// An order row: `impresspress__products__purchases`, as published to the
-/// buyer, the seller and administrators.
+/// An order, as administrators see it.
+// The admin projection of `impresspress__products__purchases`: the buyer and
+// the seller read the narrower `BuyerOrderView` and `SellerOrderView`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PurchaseView {
     /// Stable order identifier.
@@ -2737,8 +2747,7 @@ pub struct PurchaseView {
     // row put two answers to one question on the wire. `buyer_user_id` is
     // the one per-row ownership is decided on, so it is the one published.
     // The column stays; it is simply not a field.
-    /// Signed-in buyer's user id, or empty for a guest order. The order's
-    /// single buyer identity.
+    /// Signed-in buyer's user id, or empty for a guest order.
     pub buyer_user_id: String,
     /// Buyer's email address as captured at checkout, or empty.
     pub buyer_email: String,
@@ -2777,7 +2786,7 @@ pub struct PurchaseView {
     // one writer sets both — and this view used to publish it too, under a
     // field whose own description said to prefer this one. The column stays;
     // it is simply not a field.
-    /// Final charged amount in minor units. The order's single amount.
+    /// Final charged amount in minor units.
     pub total_cents: i64,
     /// Sum of succeeded refunds in minor units.
     pub refunded_total_cents: i64,
@@ -2844,18 +2853,18 @@ pub struct PurchaseView {
 }
 
 /// One order as its **buyer** may read it.
-///
-/// The narrowest of the three order projections, and the one that matters
-/// most: `GET /b/products/purchases` is opted in as the `list_my_purchases`
-/// WebMCP tool, so every field here is handed to whatever agent runs in the
-/// buyer's page.
-///
-/// Withheld, deliberately: the platform's economics (`platform_fee_cents`),
-/// the seller's identity and Stripe account, the buyer's own provider handles
-/// (`stripe_customer_id`, the PaymentIntent and Checkout Session ids — a
-/// buyer never needs to quote one, and they are the provider's namespace, not
-/// ours), and the reconciliation and payment-error diagnostics, which describe
-/// our integration rather than their purchase.
+//
+// The narrowest of the three order projections, and the one that matters
+// most: `GET /b/products/purchases` is opted in as the `list_my_purchases`
+// WebMCP tool, so every field here is handed to whatever agent runs in the
+// buyer's page.
+//
+// Withheld, deliberately: the platform's economics (`platform_fee_cents`),
+// the seller's identity and Stripe account, the buyer's own provider handles
+// (`stripe_customer_id`, the PaymentIntent and Checkout Session ids — a
+// buyer never needs to quote one, and they are the provider's namespace, not
+// ours), and the reconciliation and payment-error diagnostics, which describe
+// our integration rather than their purchase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BuyerOrderView {
     /// Stable order identifier.
@@ -2949,11 +2958,11 @@ impl BuyerOrderView {
 
 /// One refund as its **buyer** may read it: how much came back, in what
 /// currency, and whether it has landed.
-///
-/// The provider handles (`provider_refund_id`, `payment_intent_id`,
-/// `stripe_account_id`), the operator fields (`refunded_by`, `note`,
-/// `provider_reason`) and the failure diagnostics (`last_error`) belong to
-/// whoever issued the refund, not to whoever received it.
+//
+// The provider handles (`provider_refund_id`, `payment_intent_id`,
+// `stripe_account_id`), the operator fields (`refunded_by`, `note`,
+// `provider_reason`) and the failure diagnostics (`last_error`) belong to
+// whoever issued the refund, not to whoever received it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BuyerRefundView {
     /// Stable refund identifier.
@@ -2963,10 +2972,10 @@ pub struct BuyerRefundView {
     pub currency: String,
     /// Ledger state.
     pub status: RefundStatus,
+    // Kept for the buyer because "has my money actually gone back" is the
+    // question this endpoint exists to answer — it is a state, not a handle.
     /// The provider's own state for the refund. Empty until the provider
-    /// answers; `succeeded` for a refund recorded without a provider. Kept
-    /// for the buyer because "has my money actually gone back" is the
-    /// question this endpoint exists to answer — it is a state, not a handle.
+    /// answers; `succeeded` for a refund recorded without a provider.
     pub provider_status: String,
     /// RFC 3339 timestamp the refund reached a terminal state, or `null`.
     #[schemars(extend("format" = "date-time"))]
@@ -3039,20 +3048,20 @@ pub struct BuyerOrderDetailResponse {
     pub purchase: BuyerOrderView,
     pub line_items: Vec<LineItemView>,
     pub refunds: Vec<BuyerRefundView>,
-    /// Disputes raised against this order. Kept because the SSR order page
-    /// already shows a buyer their own disputes, and this endpoint is not
-    /// opted into the WebMCP manifest — only the list above is, and it
-    /// carries no nested rows.
+    // Kept because the SSR order page already shows a buyer their own
+    // disputes, and this endpoint is not opted into the WebMCP manifest —
+    // only the list above is, and it carries no nested rows.
+    /// Disputes raised against this order.
     pub disputes: Vec<DisputeView>,
 }
 
 /// One order as the **seller** who fulfils it may read it.
-///
-/// Wider than the buyer's: a seller needs the fee that was taken, their own
-/// connected account, the provider handles for their own charge, and the
-/// buyer's email in order to fulfil. It still withholds the buyer's platform
-/// identity (`user_id` / `buyer_user_id`) and their Stripe customer id, none
-/// of which a seller needs to ship an order.
+//
+// Wider than the buyer's: a seller needs the fee that was taken, their own
+// connected account, the provider handles for their own charge, and the
+// buyer's email in order to fulfil. It still withholds the buyer's platform
+// identity (`user_id` / `buyer_user_id`) and their Stripe customer id, none
+// of which a seller needs to ship an order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SellerOrderView {
     /// Stable order identifier.
@@ -3338,7 +3347,10 @@ pub struct AdminPurchaseListQuery {
     pub page_size: u32,
     /// Exact-match filter on the order state.
     pub status: Option<String>,
-    /// Exact-match filter on the legacy owner column `user_id`.
+    /// Exact-match filter on the buyer's user id.
+    // The filter runs on the row's `user_id` column, which every writer sets
+    // to the buyer (`buyer_user_id`, published by `PurchaseView`, carries the
+    // same value) and which orders older than that column carry alone.
     pub user_id: Option<String>,
 }
 
@@ -3385,7 +3397,8 @@ impl SellerOrderListQuery {
     }
 }
 
-/// One line of an order: `impresspress__products__line_items`.
+/// One line of an order.
+// A row of `impresspress__products__line_items`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LineItemView {
     /// Stable line identifier.
@@ -3459,7 +3472,8 @@ impl LineItemView {
 // same stored text). Still withheld — a provider's own view of a refund is
 // not part of the order contract — but withheld as bookkeeping, not as a
 // payload that might carry anything of Stripe's.
-/// One refund on an order: `impresspress__products__refunds`.
+/// One refund on an order.
+// A row of `impresspress__products__refunds`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RefundView {
     /// Stable refund identifier.
@@ -3532,14 +3546,14 @@ impl RefundView {
     }
 }
 
-/// Where a dispute stands with the card network: the `status` column of
-/// `impresspress__products__disputes`.
-///
-/// Stripe's eight dispute states. They were a `matches!` list in
-/// `repo::disputes::supported_status`, a second `matches!` in `is_closed`
-/// and a third spelling in this module's schema; the three could drift and
-/// nothing would notice, because the validator and the schema were read by
-/// different people.
+/// Where a dispute stands with the card network: one of Stripe's eight
+/// dispute states.
+//
+// The `status` column of `impresspress__products__disputes`. The states were
+// a `matches!` list in `repo::disputes::supported_status`, a second
+// `matches!` in `is_closed` and a third spelling in this module's schema;
+// the three could drift and nothing would notice, because the validator and
+// the schema were read by different people.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DisputeStatus {
@@ -3564,8 +3578,9 @@ impl DisputeStatus {
     }
 }
 
-/// One payment dispute on an order: `impresspress__products__disputes`, the
-/// durable projection of the provider's dispute events.
+/// One payment dispute on an order, as recorded from the provider's dispute
+/// events.
+// A row of `impresspress__products__disputes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DisputeView {
     /// Stable dispute identifier.
@@ -3578,10 +3593,6 @@ pub struct DisputeView {
     /// Stripe Charge id the dispute was raised against, or empty.
     pub provider_charge_id: String,
     pub payment_intent_id: String,
-    // A doc comment where there was none, deliberately: schemars inlines the
-    // *type's* doc as the published `description` when the field has none,
-    // and this module's enum docs carry the reasoning that produced them,
-    // which is not what belongs in a published schema.
     /// Where the dispute stands with the card network.
     pub status: DisputeStatus,
     pub amount_minor: i64,
@@ -3631,8 +3642,8 @@ impl DisputeView {
     }
 }
 
-/// Response body of the order detail endpoints: the order with its lines,
-/// refunds and disputes.
+/// Response body of the admin order detail endpoint: the order with its
+/// lines, refunds and disputes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PurchaseDetailResponse {
     pub purchase: PurchaseView,
@@ -3647,7 +3658,8 @@ pub struct PurchaseDetailResponse {
 // `user_id` (the caller already is that user) and `stripe_customer_id`,
 // the provider Customer id, which the hand-curated projection this type
 // replaces had always kept out of the response.
-/// The caller's platform subscription: `impresspress__products__subscriptions`.
+/// The caller's platform subscription.
+// A row of `impresspress__products__subscriptions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubscriptionView {
     /// Stable subscription identifier.

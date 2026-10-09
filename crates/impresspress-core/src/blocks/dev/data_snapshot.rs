@@ -43,7 +43,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wafer_block::wire::database::{BatchWrite, OnConflict, UpsertRequest};
+use wafer_block::{
+    db::{Filter, FilterOp},
+    wire::database::{BatchWrite, OnConflict, UpsertRequest},
+};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
@@ -101,6 +104,10 @@ pub struct DataSnapshot {
 /// identifies it, and two instances never mint the same one.
 pub const BY_ID: &[&str] = &["id"];
 
+/// Owner ids per `DeleteWhere` that clears a [`Mode::OwnedSet`] table: under
+/// D1's cap of 100 bound parameters per statement.
+const OWNER_IDS_PER_DELETE: usize = 50;
+
 /// How [`import`] applies one allowlisted table's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -133,6 +140,29 @@ pub enum Mode {
     /// role assignment, and its local credentials) must be gone once someone
     /// else's account is imported, not merged alongside it.
     Replace,
+    /// The table's rows are a SET owned by a row of another table — an
+    /// offer's variables, an offer's priced components — and every writer of
+    /// the owner replaces that set whole (`variables::replace_for_offer`,
+    /// `offer_components::replace_for_offer`). [`import`] does the same: for
+    /// every owner id the snapshot carries (a row of `owner`, or a non-empty
+    /// `owner_column` on one of this table's rows), the destination's rows
+    /// for that owner are deleted, and then the snapshot's rows are upserted
+    /// by `id`, in the import's one batch.
+    ///
+    /// Upserting such rows by id alone was wrong in both directions: a row
+    /// the source removed survived at the destination (a dropped component
+    /// stayed priced), and a key removed and added again at the source — a
+    /// fresh id under the same key — met the destination's old row, giving
+    /// an offer two variables of one key, or tripping the components'
+    /// `UNIQUE (offer_id, component_key)` and failing the whole import.
+    /// Owners the snapshot does not carry are untouched, and an empty owner
+    /// id (a variable row that predates offers) is never treated as one.
+    OwnedSet {
+        /// The column naming the owner, e.g. `offer_id`.
+        owner_column: &'static str,
+        /// The owner's table, e.g. the offers table.
+        owner: &'static str,
+    },
 }
 
 /// Every table this build exports, and how [`import`] applies its rows.
@@ -163,8 +193,31 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     // sits here rather than beside the other product-shaped tables for
     // exactly that reason. [`OWNED_TABLES`], and
     // `every_owned_table_is_listed_after_its_owner`, are what keep it true.
-    (PRODUCTS_VARIABLES_TABLE, Mode::Upsert(BY_ID)),
-    (OFFER_COMPONENTS_TABLE, Mode::Upsert(BY_ID)),
+    // An offer's variables and components are part of the offer — see
+    // [`Mode::OwnedSet`].
+    (
+        PRODUCTS_VARIABLES_TABLE,
+        Mode::OwnedSet {
+            owner_column: "offer_id",
+            owner: OFFERS_TABLE,
+        },
+    ),
+    (
+        OFFER_COMPONENTS_TABLE,
+        Mode::OwnedSet {
+            owner_column: "offer_id",
+            owner: OFFERS_TABLE,
+        },
+    ),
+    // Checkout presets hang off an offer too, but they are NOT a set the
+    // offer owns: each is a separately identified object (`preset_id` on a
+    // checkout request and on a Payment Link, its own `slug`) that the offer's
+    // writers never replace wholesale — presets are created and retired one
+    // by one. A preset the destination made for itself, or one a Payment
+    // Link there still points at, must survive an import that does not
+    // mention it, so they stay upserted by id. A stale preset cannot change
+    // a price: it is a set of inputs evaluated against the offer's own
+    // definition at checkout.
     (CHECKOUT_PRESETS_TABLE, Mode::Upsert(BY_ID)),
     // --- admin: IAM catalog plus config. `variables::TABLE` is filtered row
     // by row at export time (`variable_is_exportable`) rather than excluded
@@ -808,8 +861,10 @@ mod replace_order_tests {
 /// The whole import is ONE `db::batch`, so one transaction: all of its
 /// writes or none, and one OPFS flush in the browser. Each `Replace` table is
 /// a filtered delete of every row (`BatchWrite::DeleteWhere` with no filters)
-/// followed by a `Create` per snapshot row, in [`REPLACE_ORDER`]; then every
-/// `Upsert` row of every other table. A write that fails (a duplicate key, a
+/// followed by a `Create` per snapshot row, in [`REPLACE_ORDER`]; then, for
+/// each [`Mode::OwnedSet`] table, a `DeleteWhere` of the rows of every owner
+/// the snapshot carries; then every `Upsert` and `OwnedSet` row. A write that
+/// fails (a duplicate key, a
 /// bad row) rolls all of it back, so a failed import leaves the users, their
 /// credentials and every other table as they were.
 ///
@@ -821,8 +876,9 @@ mod replace_order_tests {
 /// raised `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` on a plan that allows it,
 /// is the fix, not a retry.
 ///
-/// Every write is keyed on the snapshot's own row ids, so importing the same
-/// snapshot again converges to the same end state —
+/// Every write is keyed on the snapshot's own row ids, and every owned set is
+/// replaced rather than merged, so importing the same snapshot again — or a
+/// later export of the same shop — converges to the snapshot's state —
 /// `tests/dev_data_snapshot.rs`'s
 /// `import_replaces_users_and_upserts_products_so_ownership_survives` test
 /// re-imports and asserts no duplication.
@@ -910,7 +966,10 @@ pub async fn import(
 
     // Fourth pre-flight pass: an offer's variables meet the rules every offer
     // write applies (`repo::offers::validate_imported_variables`), so a
-    // bundle cannot plant an offer no preview or checkout could price.
+    // bundle cannot plant an offer no preview or checkout could price. The
+    // bundle's rows are each offer's whole set — the destination's are
+    // replaced, see [`Mode::OwnedSet`] — so checking them alone is checking
+    // what the offer will hold.
     if let Some(rows) = snapshot.tables.get(PRODUCTS_VARIABLES_TABLE) {
         validate_imported_variables(rows)?;
     }
@@ -943,6 +1002,42 @@ pub async fn import(
             });
         }
     }
+    // `OwnedSet` tables: clear each carried owner's destination rows before
+    // any row is written, so the upserts below land on an empty set.
+    for &(table, mode) in TABLE_ALLOWLIST {
+        let Mode::OwnedSet {
+            owner_column,
+            owner,
+        } = mode
+        else {
+            continue;
+        };
+        let owned_by = |rows: Option<&Vec<serde_json::Map<String, Value>>>, column: &str| {
+            rows.into_iter()
+                .flatten()
+                .filter_map(|row| row.get(column).and_then(Value::as_str))
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let owners: BTreeSet<String> = owned_by(snapshot.tables.get(owner), "id")
+            .into_iter()
+            .chain(owned_by(snapshot.tables.get(table), owner_column))
+            .collect();
+        let owners: Vec<String> = owners.into_iter().collect();
+        // One statement per chunk rather than per owner, and chunked because
+        // D1 binds at most 100 parameters to one statement.
+        for chunk in owners.chunks(OWNER_IDS_PER_DELETE) {
+            writes.push(BatchWrite::DeleteWhere {
+                collection: table.to_string(),
+                filters: crate::util::to_wire_filters(&[Filter {
+                    field: owner_column.to_string(),
+                    operator: FilterOp::In,
+                    value: Value::from(chunk.to_vec()),
+                }]),
+            });
+        }
+    }
     for (table, rows) in &snapshot.tables {
         if REPLACE_ORDER.contains(&table.as_str()) {
             continue; // already queued above, in dependency order
@@ -954,9 +1049,13 @@ pub async fn import(
         // the list, so a lookup miss here is unreachable — and is reported
         // rather than defaulted, because defaulting to `BY_ID` is precisely
         // the assumption this field exists to stop making.
-        let Some((_, Mode::Upsert(conflict))) =
-            TABLE_ALLOWLIST.iter().find(|(name, _)| name == table)
-        else {
+        let conflict = match TABLE_ALLOWLIST.iter().find(|(name, _)| name == table) {
+            Some((_, Mode::Upsert(conflict))) => Some(*conflict),
+            // The set was cleared above; its rows keep their own ids.
+            Some((_, Mode::OwnedSet { .. })) => Some(BY_ID),
+            _ => None,
+        };
+        let Some(conflict) = conflict else {
             return Err(WaferError::new(
                 ErrorCode::Internal,
                 format!("{table:?} passed the allowlist check but has no upsert conflict target"),
@@ -1099,7 +1198,8 @@ fn canonical_imported_currency(
         WaferError::new(
             ErrorCode::InvalidArgument,
             format!(
-                "the data snapshot carries a {table} row whose currency this build refuses, so                  nothing was imported: {message}"
+                "the data snapshot carries a {table} row whose currency this build refuses, so \
+                 nothing was imported: {message}"
             ),
         )
     };

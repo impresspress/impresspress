@@ -233,7 +233,8 @@ impl D1ConfigSource {
         if snapshot.is_empty() && returned_rows > 0 {
             tracing::warn!(
                 rows = returned_rows,
-                "variables rows carry no usable `block` column (pre-migration-002?);                  re-reading rather than caching an empty snapshot"
+                "variables rows carry no usable `block` column (pre-migration-002?); \
+                 re-reading rather than caching an empty snapshot"
             );
             return Ok(snapshot);
         }
