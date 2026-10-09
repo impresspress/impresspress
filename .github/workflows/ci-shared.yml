@@ -888,10 +888,13 @@ jobs:
       # (a static host with no fallback) and, for its slow-start test, one of
       # its own on 8094 over the same `pkg/`. `insecure-origin.spec.ts` is
       # the boot page on plain http at a LAN address, against this server;
-      # it is a file of its own for its launch flag.
+      # it is a file of its own for its launch flag. `boot-navigation.spec.ts`
+      # serves `pkg/`'s boot shell with a stand-in worker on 8091; its WebKit
+      # half is local-only (`E2E_WEBKIT`), since this job installs Chromium
+      # alone.
       - name: Run smoke tests (browser WASM, port 8080)
         working-directory: crates/impresspress-web
-        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/insecure-origin.spec.ts tests/e2e/recovery-wipe.spec.ts
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/insecure-origin.spec.ts tests/e2e/recovery-wipe.spec.ts tests/e2e/boot-navigation.spec.ts
 
       - name: Stop server
         if: always()
