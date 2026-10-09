@@ -85,7 +85,10 @@ function element() {
 /// - `stop`      — the body sw.js left in Cache Storage (any JSON value), or
 ///                 `undefined` for no entry
 /// - `probe`     — `fetch`'s answer to the boot probe: a `Response`, or a
-///                 function returning one / throwing
+///                 function returning one / throwing. A throw is a request
+///                 the browser would not make or finish: WebKit rejects every
+///                 request a document makes once a navigation away from it
+///                 has begun, the request under way included
 /// - `wipe`      — the `opfs_wipe_on_recovery` rendering
 /// - `now`       — what `Date.now()` returns
 /// - `path`      — the path the shell was loaded at; `/` is its own, anything
@@ -489,7 +492,17 @@ export function loadShell({
   // out of time, real otherwise — but never holding the process open.
   // The 10 s wait for control runs out at once for a worker that never
   // claims.
+  //
+  // The pause before a probe that could not be made is asked again runs in
+  // the next turn: a probe that keeps failing is asked again and again, as
+  // in a browser, and a test ends that by running the deadline out
+  // (`deadline`).
+  //
+  // A 60 s timer that is not fired at once is kept, so a test can run it out
+  // when it chooses (`deadline`); `clearTimeout` forgets it.
+  const deadlines = [];
   const setTimeoutStub = (fn, ms) => {
+    if (ms === 1_000) return setTimeout(fn, 0);
     const now =
       ms === 0 ||
       (ms === 10_000
@@ -497,7 +510,15 @@ export function loadShell({
         : ms === 2_000
           ? !answersRuntime
           : probeTimesOut(probes.length));
-    return now ? (fn(), 0) : setTimeout(fn, ms).unref();
+    if (now) return (fn(), 0);
+    const handle = setTimeout(fn, ms).unref();
+    if (ms === 60_000) deadlines.push({ handle, fn });
+    return handle;
+  };
+  const clearTimeoutStub = (handle) => {
+    const kept = deadlines.findIndex((d) => d.handle === handle);
+    if (kept !== -1) deadlines.splice(kept, 1);
+    clearTimeout(handle);
   };
   const DateStub = { now: () => now };
   const consoleStub = { log() {}, warn() {}, error() {} };
@@ -511,6 +532,7 @@ export function loadShell({
     'caches',
     'fetch',
     'setTimeout',
+    'clearTimeout',
     'Date',
     'console',
     SOURCES[wipe ? 'wipe' : 'plain']
@@ -524,6 +546,7 @@ export function loadShell({
     caches,
     fetch,
     setTimeoutStub,
+    clearTimeoutStub,
     DateStub,
     consoleStub
   );
@@ -580,7 +603,15 @@ export function loadShell({
     /// A navigation away from this page beginning.
     leave,
     /// This page restored from the back/forward cache.
-    comeBack
+    comeBack,
+    /// The 60 s the shell gives the app to answer running out now: the
+    /// pending timer fires. Throws if none is pending.
+    deadline: () => {
+      const pending = deadlines.pop();
+      if (!pending) throw new Error('no 60 s timer is pending');
+      clearTimeout(pending.handle);
+      pending.fn();
+    }
   };
 }
 

@@ -113,9 +113,11 @@ const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
 // the seed. Its other stages — the wasm module could not be loaded, a started
 // runtime died on a request — say nothing about the stored data.
 const STAGE_INITIALIZE = 'initialize';
-// How long one boot probe waits for the app to answer. A pending Service
-// Worker response has no browser-level deadline, so without this a boot that
-// never answers leaves the shell on "Loading..." forever.
+// How long the shell waits for the app to answer, each time it asks
+// (`askApp`) — however many probes that takes. A pending Service Worker
+// response has no browser-level deadline, and a probe that could not be made
+// is made again, so without this a boot that never answers leaves the shell
+// on "Loading..." forever.
 //
 // This is everything the number means: after it, the shell stops waiting
 // SILENTLY. It is not a verdict on the app. A probe that has not answered
@@ -127,6 +129,10 @@ const STAGE_INITIALIZE = 'initialize';
 // shell says so and probes the same worker again; the second time it shows
 // the choice (`renderWaitingUI`) and the person decides.
 const BOOT_PROBE_TIMEOUT_MS = 60_000;
+// How long the shell pauses before it makes a probe again that could not be
+// made (`askApp`). While a navigation away from this document is under way,
+// WebKit refuses each one at once, so this is how often it asks then.
+const PROBE_RETRY_MS = 1_000;
 // The boot shell's own URL: the address a first visit starts at. A shell
 // standing THERE is the app being opened, and goes on to the boot URL; a
 // shell standing anywhere else is a page of the app that was asked for (a
@@ -151,14 +157,24 @@ const SHELL_URL = '__SHELL_URL__';
 // navigation under way is where the tab is going — wherever that is — so the
 // shell stands down and lets it finish.
 //
-// `beforeunload` is the signal because desktop browsers fire it at a
-// document as a navigation away from it begins, whoever started it; the
-// Navigation API's `navigate` event is not fired for one started from the
-// browser's own UI. It is not universal: iOS Safari does not fire it
-// reliably, and there the shell reloads as it always did, which can cancel
-// the navigation again. There is no event for a navigation that began and
-// then left the document in place (a download, a 204), so the line the shell
-// shows when it stands down says what to do if the page stays.
+// Two things tell the shell a navigation has begun, one per engine:
+//
+// - `beforeunload`, which desktop browsers fire at a document as a
+//   navigation away from it begins, whoever started it (the Navigation
+//   API's `navigate` event is not fired for one started from the browser's
+//   own UI). Chromium lets the probe under way finish, so this flag is how
+//   it knows.
+// - In WebKit the probe itself: once a navigation away from a document has
+//   begun, WebKit rejects the request under way and every request the
+//   document makes after it ("Load failed"; measured in Playwright's
+//   WebKit). iOS Safari does not fire `beforeunload` reliably, so there
+//   this is the only signal — and the shell needs no other, because it goes
+//   on to the app only on the app's ANSWER (`askApp`): a probe that could
+//   not be made is made again, not taken for one.
+//
+// There is no event for a navigation that began and then left the document
+// in place (a download, a 204), so the line the shell shows when it stands
+// down says what to do if the page stays.
 let leaving = false;
 // What the shell would have done when it stood down: run if this document
 // comes back from the back/forward cache, where it would otherwise sit on
@@ -1180,26 +1196,44 @@ function takeControl(worker) {
     });
 }
 
-// One probe of `target`: its response (`null` if the request threw), and
-// whether it ran out of BOOT_PROBE_TIMEOUT_MS.
-async function probeOnce(target) {
+// Ask the app for `target` until it answers: its response, or `timedOut`
+// once BOOT_PROBE_TIMEOUT_MS have passed with no answer — or `null`, with
+// no timeout, when the worker has reported its death meanwhile (it is
+// navigating this page itself; `enterApp` stands down).
+//
+// A probe that throws is a request that could not be made or finished: a
+// navigation away from this page has begun (WebKit refuses every request
+// then — `leaving` says why that matters), the worker went away under it,
+// the network failed. None of them is the app answering, so the shell does
+// not go on to the app on it: it pauses (PROBE_RETRY_MS) and makes the probe
+// again, within the same deadline. While a navigation is under way the
+// probes keep failing until it replaces this document; a failure that
+// passes is followed by the answer. Nothing that throws is acted on, so
+// nothing that throws erases anything.
+async function askApp(target) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), BOOT_PROBE_TIMEOUT_MS);
     try {
-        const probe = await fetch(target.href, {
-            cache: 'no-store',
-            credentials: 'same-origin',
-            signal: controller.signal,
-        });
-        return { probe, timedOut: false };
-    } catch (error) {
-        // Only the timer aborts this request, so an aborted probe is one
-        // that ran out of time. Anything else that throws is a request that
-        // could not be made (the network, or a worker that went away under
-        // it): it carries no cause, is not acted on, and erases nothing.
-        if (controller.signal.aborted) return { probe: null, timedOut: true };
-        console.warn('[__APP_NAME__] Boot probe failed:', error);
-        return { probe: null, timedOut: false };
+        for (;;) {
+            try {
+                const probe = await fetch(target.href, {
+                    cache: 'no-store',
+                    credentials: 'same-origin',
+                    signal: controller.signal,
+                });
+                return { probe, timedOut: false };
+            } catch (error) {
+                // Only the timer aborts these requests, so an aborted probe
+                // is one that ran out of time.
+                if (controller.signal.aborted) return { probe: null, timedOut: true };
+                console.warn('[__APP_NAME__] Boot probe failed:', error);
+            }
+            if (sessionStorage.getItem(SW_RECOVER_KEY) !== null) {
+                return { probe: null, timedOut: false };
+            }
+            await new Promise((resume) => setTimeout(resume, PROBE_RETRY_MS));
+            if (controller.signal.aborted) return { probe: null, timedOut: true };
+        }
     } finally {
         clearTimeout(timer);
     }
@@ -1224,7 +1258,7 @@ async function enterApp(target, worker, status, waitedMs) {
         renderWaitingUI(target, worker, status, waitedMs + CONTROL_WAIT_MS);
         return;
     }
-    const { probe, timedOut } = await probeOnce(target);
+    const { probe, timedOut } = await askApp(target);
     // A probe the runtime could not START for self-destructs the worker,
     // which sets the breaker and re-navigates this client itself.
     // Navigating on top of that would be a second, uncoordinated
@@ -1246,7 +1280,8 @@ async function enterApp(target, worker, status, waitedMs) {
         renderWaitingUI(target, worker, status, waited);
         return;
     }
-    // A probe a STARTED runtime died on is a request from a page like any
+    // From here on the app has answered `probe` (`askApp` returns no other
+    // way). A probe a STARTED runtime died on is a request from a page like any
     // other: sw.js answers it with the cause and navigates nobody. Going on
     // as if it had worked would land on the shell again, probe again and get
     // the same answer, forever — so take the same road as a self-destruct
@@ -1259,7 +1294,7 @@ async function enterApp(target, worker, status, waitedMs) {
     // the erase to be over — this page can wait for its lock, a worker may
     // not (sw.js's `eraseSettled`) — and for the version the erase is for
     // to be in place, then ask again.
-    if (probe && (await isBeingReset(probe))) {
+    if (await isBeingReset(probe)) {
         status.textContent = 'The app is being reset…';
         if (navigator.locks && navigator.locks.request) {
             await navigator.locks.request(ERASE_LOCK, () => {});
@@ -1276,7 +1311,7 @@ async function enterApp(target, worker, status, waitedMs) {
         );
         return;
     }
-    const stopped = probe ? await stoppedCauseOf(probe) : null;
+    const stopped = await stoppedCauseOf(probe);
     if (stopped !== null) {
         // The breaker is in sessionStorage, so a navigation under way carries
         // it as well as this reload would: the dead worker answers it with
@@ -1287,9 +1322,8 @@ async function enterApp(target, worker, status, waitedMs) {
     }
     // The app answered. Whatever the last recovery in this tab was for is
     // over, so the next failure — hours later, unrelated — gets its own
-    // automatic recovery instead of the stopped screen. (A probe that threw
-    // proves nothing and clears nothing.)
-    if (probe) sessionStorage.removeItem(RECOVERY_DONE_KEY);
+    // automatic recovery instead of the stopped screen.
+    sessionStorage.removeItem(RECOVERY_DONE_KEY);
     if (target.href === window.location.href) {
         // Leave the current navigation task before requesting the reload —
         // and decide in that task, since a navigation may begin in between.
