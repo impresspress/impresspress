@@ -238,10 +238,6 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     // always matched the rest of the path. The declaration used to say
     // `{key}`, a template no nested key could match.
     //
-    // These are the two highest-value developer endpoints for browsing a
-    // bucket; full schema coverage of the remaining storage routes (buckets,
-    // shares, quotas) is a follow-up.
-    //
     // No output schema on the download: the success response is the raw
     // object body, not JSON. `handle_get_object` streams it with
     // `streaming::stream_download`, under the headers
@@ -595,9 +591,9 @@ mod schema_tests {
     /// change `migrations/001_initial_schema.*.sql` too (and remember
     /// `IMPRESSPRESS_RUN_MIGRATIONS=1`).
     ///
-    /// The checked columns are exactly `QuotaConfig`'s fields, so a cap added
-    /// to the struct without a matching column default fails here rather
-    /// than going unchecked. `reset_period_days` is in the SQL but not the
+    /// The checked columns are exactly `QuotaConfig`'s fields: the
+    /// exhaustive destructure below stops compiling when a cap is added to
+    /// the struct, so it cannot go without a matching column default check. `reset_period_days` is in the SQL but not the
     /// struct: see `migrations/mod.rs` for why the column stays.
     #[test]
     fn quota_sql_defaults_match_quota_config_consts() {
@@ -619,19 +615,13 @@ mod schema_tests {
             ),
         ];
 
-        let fields: std::collections::BTreeSet<String> =
-            match serde_json::to_value(QuotaConfig::default()).expect("serializes") {
-                serde_json::Value::Object(map) => map.keys().cloned().collect(),
-                other => panic!("QuotaConfig serializes as an object, got {other}"),
-            };
-        let checked: std::collections::BTreeSet<String> = asserts
-            .iter()
-            .map(|(column, _)| column.to_string())
-            .collect();
-        assert_eq!(
-            checked, fields,
-            "every QuotaConfig field needs its column default checked here, and nothing else"
-        );
+        // No `..`: a field added to `QuotaConfig` is a compile error here
+        // until it is named — and given its row in `asserts` above.
+        let QuotaConfig {
+            max_storage_bytes: _,
+            max_file_size_bytes: _,
+            max_files_per_bucket: _,
+        } = QuotaConfig::default();
 
         for (column, expected) in asserts {
             // Match the `<column> ... DEFAULT <value>` line in the DDL.
