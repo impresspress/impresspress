@@ -78,9 +78,20 @@
 //! is not a path the worker leaves to the static host (the
 //! shadowed-site-file refusal below is about exactly those paths, and a
 //! site file at one of them is refused), so the root copy shadows nothing:
-//! it answers only where the runtime cannot. The two cannot differ in the
-//! archive — they are the same bytes written in the same assembly — and the
-//! exported instance has no workspace to edit the site with afterwards.
+//! it answers only where the runtime cannot. The two cannot say different
+//! things in the archive — they are one read written in the same assembly —
+//! and the exported instance has no workspace to edit the site with
+//! afterwards.
+//!
+//! They are not always the same BYTES. The root copy, like the README, is
+//! read through the static host, which may serve it with no charset
+//! (Cloudflare's asset server and `python3 -m http.server` do), and a
+//! browser decodes a charset-less `text/plain` in a legacy encoding. A root
+//! text file that is UTF-8 and not ASCII therefore starts with a byte order
+//! mark ([`for_a_charsetless_host`]), which a browser honours ahead of the
+//! Content-Type (the WHATWG encoding standard's BOM sniff). The seed copy is the site's file byte for byte: the
+//! importer verifies its hash, and the exported runtime serves it with
+//! `charset=utf-8`.
 
 use std::collections::BTreeMap;
 
@@ -177,6 +188,34 @@ const README_TEMPLATE: &str = include_str!("templates/export-readme.md");
 
 /// Where the README lands in the archive.
 const README_PATH: &str = "README.md";
+
+/// UTF-8's byte order mark: U+FEFF, encoded.
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// A text file the archive writes at its root, as a static host must be
+/// handed it for a browser to read it as UTF-8.
+///
+/// The static host serves the root, and it types a file by its own table:
+/// Cloudflare's asset server and `python3 -m http.server` both send `.txt`
+/// as `text/plain` with no charset, and the latter sends `.md` as
+/// `text/markdown` the same way. A browser
+/// decodes such a document in a legacy encoding (windows-1252 in Chromium),
+/// so `—` shows as `â€”`. What overrides that on every host, with no header
+/// config the bundle cannot carry, is a byte order mark: the WHATWG
+/// encoding sniff honours a BOM ahead of any Content-Type, and `fetch`'s
+/// `text()` strips one.
+///
+/// Only for a file that needs it: one that is UTF-8 and not ASCII. ASCII
+/// decodes the same in every encoding a host could imply, so it is left as
+/// it is. Bytes that are not UTF-8 are left as they are too, because a
+/// UTF-8 BOM would claim an encoding they are not in. A file that already
+/// starts with a BOM keeps the one it has.
+fn for_a_charsetless_host(bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.is_ascii() || bytes.starts_with(UTF8_BOM) || std::str::from_utf8(&bytes).is_err() {
+        return bytes;
+    }
+    [UTF8_BOM, &bytes].concat()
+}
 
 /// One entry of the archive, with its bytes.
 struct Entry {
@@ -376,8 +415,9 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     for entry in &manifest.site.files {
         let bytes = blobs::get(ctx, &entry.sha256).await.map_err(content_gone)?;
         // The site's own `llms.txt` also goes to the root, for the static
-        // host to serve where there is no worker — the same bytes as the
-        // entry below, from this one read (see the module docs). It takes
+        // host to serve where there is no worker — the entry below's bytes,
+        // from this one read, with a byte order mark if the static host
+        // needs one to be read as UTF-8 (see the module docs). It takes
         // the place of a shell file of that name: once the worker runs, the
         // site's is what `/llms.txt` answers, and the static host must not
         // say something else to a reader without one.
@@ -385,7 +425,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             shell.retain(|shell_entry| shell_entry.path != seed::LLMS_PATH);
             shell.push(Entry {
                 path: seed::LLMS_PATH.to_string(),
-                bytes: bytes.clone(),
+                bytes: for_a_charsetless_host(bytes.clone()),
             });
         }
         seed_entries.push(Entry {
@@ -504,7 +544,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let mut entries = Vec::with_capacity(shell.len() + seed_entries.len() + 3);
     entries.push(Entry {
         path: README_PATH.to_string(),
-        bytes: readme.into_bytes(),
+        bytes: for_a_charsetless_host(readme.into_bytes()),
     });
     entries.extend(shell);
     entries.push(Entry {
@@ -1229,6 +1269,25 @@ mod tests {
             README_TEMPLATE.contains("/b/userportal/security"),
             "…and where: the account's Security page, which holds the change-password form"
         );
+    }
+
+    /// A byte order mark only where a charset-less host needs one.
+    #[test]
+    fn a_root_text_file_gets_a_byte_order_mark_only_when_it_is_non_ascii_utf8() {
+        // ASCII reads the same in any encoding a host implies.
+        assert_eq!(for_a_charsetless_host(b"# Kiln\n".to_vec()), b"# Kiln\n");
+        // UTF-8 beyond ASCII gets exactly one.
+        assert_eq!(
+            for_a_charsetless_host("caf\u{e9} \u{2014}".as_bytes().to_vec()),
+            [UTF8_BOM, "caf\u{e9} \u{2014}".as_bytes()].concat()
+        );
+        // A file that already has one keeps it, and only it.
+        let marked = [UTF8_BOM, "caf\u{e9}".as_bytes()].concat();
+        assert_eq!(for_a_charsetless_host(marked.clone()), marked);
+        // Bytes that are not UTF-8 get no UTF-8 BOM: it would be a false
+        // claim about their encoding.
+        assert_eq!(for_a_charsetless_host(b"caf\xe9".to_vec()), b"caf\xe9");
+        assert_eq!(for_a_charsetless_host(Vec::new()), b"");
     }
 
     /// The one thing this must never do is pass a shell through unchanged.

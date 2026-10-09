@@ -1871,6 +1871,79 @@ async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() 
     );
 }
 
+/// UTF-8's byte order mark, as the archive's root text files carry it.
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// A site's `llms.txt` in any language. The static host serves the root copy
+/// with whatever type its own table gives `.txt` — `text/plain` with no
+/// charset on Cloudflare's asset server and `python3 -m http.server` — and a
+/// browser decodes such a file as windows-1252 unless it starts with a byte
+/// order mark. So the ROOT copy carries one; the seed copy is the site's file
+/// byte for byte, because the importer verifies its hash and the exported
+/// runtime serves it with `charset=utf-8`.
+#[tokio::test]
+async fn a_non_ascii_llms_txt_is_exported_with_a_byte_order_mark_at_the_root() {
+    const OWN: &str = "# Töpferei Kiln & Co — 窯\n\n> Handgemachte Keramik…\n";
+    let control = FakeControl::new();
+    let ctx = shop_instance(&control).await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/llms.txt", "content": OWN, "expected_sha256": null}),
+    )
+    .await;
+    let archive = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(archive["seed/site/llms.txt"], OWN.as_bytes());
+    assert_eq!(archive["llms.txt"], [UTF8_BOM, OWN.as_bytes()].concat());
+
+    // The preview counts the bytes the archive carries.
+    let preview: ExportManifest = serde_json::from_value(
+        output_json(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export/manifest"))
+                .await,
+        )
+        .await,
+    )
+    .expect("manifest");
+    let root = preview
+        .files
+        .iter()
+        .find(|file| file.path == "llms.txt")
+        .expect("the root copy is listed");
+    assert_eq!(root.bytes, (UTF8_BOM.len() + OWN.len()) as u64);
+}
+
+/// The README is the archive's other root text file — the static host serves
+/// it too — and it is never ASCII: the template's own dashes, and the site's
+/// name and admin address, which can be in any language.
+#[tokio::test]
+async fn the_readme_starts_with_a_byte_order_mark() {
+    let control = FakeControl::new();
+    let ctx = shop_instance(&control).await;
+    let archive = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    let readme = &archive["README.md"];
+    assert!(
+        readme.starts_with(UTF8_BOM),
+        "the README must start with a BOM"
+    );
+    assert!(
+        !readme[UTF8_BOM.len()..].starts_with(UTF8_BOM),
+        "and with exactly one"
+    );
+}
+
 /// A boot page with no notice region has nothing to remove and is exported
 /// byte for byte — a deployment may overlay its own.
 #[tokio::test]

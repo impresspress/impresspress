@@ -53,7 +53,11 @@ next load. An [export](#export) never carries the sandbox's text or its boot
 page wording — the exported boot page is titled with the site's own name —
 and a site's own `llms.txt` is exported twice: for the exported runtime, and
 at the folder's root so a static host serves it to readers that run no
-JavaScript.
+JavaScript. A site's text can be in any language, so the root copy (and the
+export's `README.md`, also served from the root) starts with a UTF-8 byte
+order mark when it is not plain ASCII: the static host sends it with no
+charset, and the mark is what makes a browser read it as UTF-8 on any host.
+The runtime serves the site's copy, unmarked, as `text/plain; charset=utf-8`.
 
 *Changed 2026-10-02: the link used to lead to the login form, and the visitor
 or their agent typed the credentials. One-click entry exists only in the
