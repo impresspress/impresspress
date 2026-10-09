@@ -363,8 +363,8 @@ pub async fn paginated(
     if !path_search.is_empty() {
         filters.push(Filter {
             field: "path".into(),
-            operator: FilterOp::Like,
-            value: json!(format!("%{path_search}%")),
+            operator: FilterOp::ContainsIgnoreCase,
+            value: json!(path_search),
         });
     }
     filters.extend(errors.filters());
@@ -492,15 +492,16 @@ pub async fn list_for_path(
         .collect())
 }
 
-/// The `path LIKE %search%` filter, or nothing for an empty search.
+/// The `path` contains-`search` filter (literal, ASCII case ignored), or
+/// nothing for an empty search.
 fn path_search(search: &str) -> Vec<wire::FilterNode> {
     if search.is_empty() {
         return vec![];
     }
     to_wire_filters(&[Filter {
         field: "path".into(),
-        operator: FilterOp::Like,
-        value: json!(format!("%{search}%")),
+        operator: FilterOp::ContainsIgnoreCase,
+        value: json!(search),
     }])
 }
 
@@ -850,6 +851,40 @@ mod tests {
             .expect("filtered");
         assert_eq!(probes.total_count, 2);
         assert!(probes.rows.iter().all(|r| r.path == "/probe"));
+    }
+
+    /// The path search is literal text with ASCII case ignored: `_` and `%`
+    /// in it are not LIKE wildcards. `paginated` and the route reads share
+    /// one filter, so the route totals answer the same way.
+    #[tokio::test]
+    async fn the_path_search_is_literal_and_ignores_ascii_case() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for (id, path) in [("u", "/a_b"), ("x", "/axb"), ("p", "/100%"), ("z", "/1000")] {
+            let mut row = probe(200, 1);
+            row.path = path;
+            seed_at(&ctx, id, row, "2026-01-01T00:00:00Z").await;
+        }
+        let ids = |search: &'static str| {
+            let ctx = &ctx;
+            async move {
+                paginated(ctx, 1, 20, search, ErrorFilter::NONE)
+                    .await
+                    .expect("paginated")
+                    .rows
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(ids("a_b").await, ["u"], "`_` is literal");
+        assert_eq!(ids("0%").await, ["p"], "`%` is literal");
+        assert_eq!(ids("/A_B").await, ["u"], "ASCII case is ignored");
+
+        let totals = block_totals(&ctx, "a_b").await.expect("block totals");
+        let requests: i64 = totals.iter().map(|t| t.requests).sum();
+        assert_eq!(requests, 1, "the route reads search the same way");
     }
 
     /// The two error filters narrow the list by `status_code` — server

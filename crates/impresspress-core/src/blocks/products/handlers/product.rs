@@ -206,41 +206,25 @@ pub(in crate::blocks::products) fn product_json(record: &db::Record) -> OutputSt
     }
 }
 
-/// Escape SQL LIKE wildcards (`%`, `_`) and the escape char (`\`) in user
-/// input so a user searching for `100% off` doesn't also match arbitrary
-/// characters.
-fn escape_like(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        match c {
-            '\\' | '%' | '_' => {
-                out.push('\\');
-                out.push(c);
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Build a `name LIKE %search%` filter with LIKE wildcards escaped.
-/// Returns `None` for an empty search term.
+/// The product-name search: `name` contains `search` as literal text, ASCII
+/// case ignored (`FilterOp::ContainsIgnoreCase`), so a user searching for
+/// `100% off` matches only that text. Returns `None` for an empty search term.
 ///
 /// Also called from `pages::manage_products` (admin search box), hence the
 /// wider-than-`handlers` visibility.
-pub(in crate::blocks::products) fn name_like_filter(search: &str) -> Option<Filter> {
+pub(in crate::blocks::products) fn name_search_filter(search: &str) -> Option<Filter> {
     if search.is_empty() {
         return None;
     }
     Some(Filter {
         field: "name".to_string(),
-        operator: FilterOp::Like,
-        value: serde_json::Value::String(format!("%{}%", escape_like(search))),
+        operator: FilterOp::ContainsIgnoreCase,
+        value: serde_json::Value::String(search.to_string()),
     })
 }
 
 /// The shared product list filters: `group_id` / `status` equality plus an
-/// escaped `search` LIKE on `name`.
+/// [`name_search_filter`] on `search`.
 fn product_filters(query: &ProductListQuery) -> Vec<Filter> {
     let mut filters = Vec::new();
     if let Some(group_id) = &query.group_id {
@@ -257,7 +241,7 @@ fn product_filters(query: &ProductListQuery) -> Vec<Filter> {
             value: serde_json::Value::String(status.clone()),
         });
     }
-    if let Some(search) = query.search.as_deref().and_then(name_like_filter) {
+    if let Some(search) = query.search.as_deref().and_then(name_search_filter) {
         filters.push(search);
     }
     filters

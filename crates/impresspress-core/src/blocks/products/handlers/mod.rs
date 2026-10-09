@@ -37,7 +37,7 @@ mod types;
 
 pub(in crate::blocks::products) use dispatch::{run, user_products_enabled};
 pub(in crate::blocks::products) use product::{
-    is_owned_by, name_like_filter, product_json, write_error,
+    is_owned_by, name_search_filter, product_json, write_error,
 };
 
 // The four table constants that used to live here (`GROUPS_TABLE`,

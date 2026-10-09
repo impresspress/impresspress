@@ -137,14 +137,12 @@ pub struct AdminUserListQuery {
     /// Items per page, capped at 100.
     #[serde(default = "default_user_page_size")]
     pub page_size: u32,
-    // `users::list_active_page` runs `email LIKE '%…%' OR id LIKE '%…%'` with
-    // the text unescaped, under wafer-sql-utils' `ESCAPE '\'`; LIKE folds
-    // ASCII case on SQLite/D1 and does not on Postgres.
+    // `users::list_active_page` filters `email` OR `id` with
+    // `FilterOp::ContainsIgnoreCase` (wafer-sql-utils renders
+    // `LOWER(col) LIKE LOWER(?) ESCAPE '\'` with the text LIKE-escaped).
     /// Substring filter: keeps the accounts whose email address or user id
-    /// contains this text. `%` and `_` in it are wildcards (any run of
-    /// characters, any one character) and `\` escapes them. Letter case is
-    /// ignored for ASCII letters on SQLite and D1 deployments and must match
-    /// on Postgres.
+    /// contains this text, ignoring the case of ASCII letters. Characters are
+    /// literal: `%`, `_` and `\` match only themselves.
     pub search: Option<String>,
 }
 
@@ -440,13 +438,12 @@ pub struct AdminAuditLogListQuery {
     pub user_id: Option<String>,
     /// Exact-match filter on the action name.
     pub action: Option<String>,
-    // `logs::handle_list` runs `resource LIKE '%…%'` with the text unescaped, under
-    // wafer-sql-utils' `ESCAPE '\'`; LIKE folds ASCII case on SQLite/D1 and
-    // does not on Postgres.
+    // `logs::handle_list` filters `resource` with
+    // `FilterOp::ContainsIgnoreCase` (wafer-sql-utils renders
+    // `LOWER(col) LIKE LOWER(?) ESCAPE '\'` with the text LIKE-escaped).
     /// Substring filter: keeps the entries whose affected resource contains
-    /// this text. `%` and `_` in it are wildcards (any run of characters, any
-    /// one character) and `\` escapes them. Letter case is ignored for ASCII
-    /// letters on SQLite and D1 deployments and must match on Postgres.
+    /// this text, ignoring the case of ASCII letters. Characters are literal:
+    /// `%`, `_` and `\` match only themselves.
     pub resource: Option<String>,
 }
 
@@ -620,7 +617,8 @@ fn default_log_page_size() -> u32 {
 
 /// An absent query parameter and an empty one mean the same thing to every
 /// admin filter (`msg.query` returns `""` for both), so collapse them onto
-/// `None` rather than letting `Some("")` reach a `LIKE '%%'`.
+/// `None` rather than letting `Some("")` reach a filter: an empty substring
+/// filter would match every row, an empty equality filter only empty values.
 fn non_empty(value: &str) -> Option<String> {
     if value.is_empty() {
         None

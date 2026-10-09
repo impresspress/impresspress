@@ -557,7 +557,7 @@
             "name": "resource",
             "required": false,
             "schema": {
-              "description": "Substring filter: keeps the entries whose affected resource contains\nthis text. `%` and `_` in it are wildcards (any run of characters, any\none character) and `\\` escapes them. Letter case is ignored for ASCII\nletters on SQLite and D1 deployments and must match on Postgres.",
+              "description": "Substring filter: keeps the entries whose affected resource contains\nthis text, ignoring the case of ASCII letters. Characters are literal:\n`%`, `_` and `\\` match only themselves.",
               "type": [
                 "string",
                 "null"
@@ -756,7 +756,7 @@
             "name": "search",
             "required": false,
             "schema": {
-              "description": "Substring filter: keeps the accounts whose email address or user id\ncontains this text. `%` and `_` in it are wildcards (any run of\ncharacters, any one character) and `\\` escapes them. Letter case is\nignored for ASCII letters on SQLite and D1 deployments and must match\non Postgres.",
+              "description": "Substring filter: keeps the accounts whose email address or user id\ncontains this text, ignoring the case of ASCII letters. Characters are\nliteral: `%`, `_` and `\\` match only themselves.",
               "type": [
                 "string",
                 "null"

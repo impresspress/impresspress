@@ -83,12 +83,12 @@ mod integration_tests {
             .unwrap_or_default()
     }
 
-    /// Regression test for SB-5. [`escape_like`] backslash-escapes `_`/`%`/`\`
-    /// in the search term, but that escaping is only *effective* because
-    /// `handle_search`'s `FilterOp::Like` filter now renders an explicit
-    /// `ESCAPE '\'` clause (`wafer-sql-utils`, SB-5A) — SQLite's `LIKE` has NO
-    /// default escape character, so a bare `\` in the pattern is just an
-    /// ordinary literal byte without that clause.
+    /// Regression test for SB-5. The search term is literal text:
+    /// `handle_search` filters with `FilterOp::ContainsIgnoreCase`, which
+    /// wafer-sql-utils LIKE-escapes and renders under an explicit
+    /// `ESCAPE '\'` clause — SQLite's `LIKE` has NO default escape character,
+    /// so a bare `\` in the pattern is just an ordinary literal byte without
+    /// that clause.
     ///
     /// Seeds a file whose name contains `_` (`my_report.pdf`) alongside a
     /// decoy that an *unescaped* `_` wildcard would also match
@@ -97,8 +97,8 @@ mod integration_tests {
     /// (2026-07-11) against wafer-run main (543e788, pre-ESCAPE): the pattern
     /// becomes `%my\_report%` with a literal backslash that appears in no
     /// real filename, so the query actually matched **zero** rows — worse
-    /// than "underscore still wildcards", `escape_like`'s output broke search
-    /// entirely on SQLite/D1. Against wafer-run `fix/sb5a-sql-like-escape`
+    /// than "underscore still wildcards", the block-side escaping of that time
+    /// broke search entirely on SQLite/D1. Against wafer-run `fix/sb5a-sql-like-escape`
     /// (b1e6c68, ESCAPE `'\'` present) this passes.
     #[tokio::test]
     async fn search_escapes_underscore_as_literal_not_wildcard() {

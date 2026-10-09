@@ -1805,7 +1805,8 @@ fn timestamp_field(record: &Record, key: &str) -> Option<String> {
 
 /// An absent query parameter and an empty one mean the same thing to every
 /// filter here (`msg.query` returns `""` for both), so collapse them onto
-/// `None` rather than letting `Some("")` reach a `LIKE '%%'`.
+/// `None` rather than letting `Some("")` reach a filter: an empty substring
+/// filter would match every row, an empty equality filter only empty values.
 fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
@@ -2205,8 +2206,11 @@ pub struct ProductListQuery {
     pub group_id: Option<String>,
     /// Exact-match filter on the publication state.
     pub status: Option<String>,
-    /// Substring filter on the product name.
-    // An escaped `name LIKE '%…%'` (`handlers::product::name_like_filter`).
+    /// Substring filter: keeps the products whose name contains this text,
+    /// ignoring the case of ASCII letters. Characters are literal: `%`, `_`
+    /// and `\` match only themselves.
+    // `FilterOp::ContainsIgnoreCase` on `name`
+    // (`handlers::product::name_search_filter`).
     pub search: Option<String>,
 }
 

@@ -557,7 +557,7 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let mut filters = Vec::new();
-    if let Some(search) = super::handlers::name_like_filter(&search) {
+    if let Some(search) = super::handlers::name_search_filter(&search) {
         filters.push(search);
     }
 

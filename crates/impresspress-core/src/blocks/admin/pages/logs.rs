@@ -223,8 +223,8 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
     if !search.is_empty() {
         filters.push(Filter {
             field: "resource".into(),
-            operator: FilterOp::Like,
-            value: serde_json::Value::String(format!("%{search}%")),
+            operator: FilterOp::ContainsIgnoreCase,
+            value: serde_json::Value::String(search.clone()),
         });
     }
 
