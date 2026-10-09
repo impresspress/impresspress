@@ -909,10 +909,11 @@ pub async fn import(
     }
 
     // Fourth pre-flight pass: an offer's variables meet the rules every offer
-    // write applies (`repo::offers::validate_imported_variables`), so a
-    // bundle cannot plant an offer no preview or checkout could price.
+    // write applies, and do not duplicate a key the offer already has here
+    // (`repo::offers::validate_imported_variables`), so a bundle cannot plant
+    // an offer no preview or checkout could price.
     if let Some(rows) = snapshot.tables.get(PRODUCTS_VARIABLES_TABLE) {
-        validate_imported_variables(rows)?;
+        validate_imported_variables(ctx, rows).await?;
     }
 
     let mut report = ImportReport::default();
@@ -1099,7 +1100,8 @@ fn canonical_imported_currency(
         WaferError::new(
             ErrorCode::InvalidArgument,
             format!(
-                "the data snapshot carries a {table} row whose currency this build refuses, so                  nothing was imported: {message}"
+                "the data snapshot carries a {table} row whose currency this build refuses, so \
+                 nothing was imported: {message}"
             ),
         )
     };

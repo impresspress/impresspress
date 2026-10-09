@@ -2016,10 +2016,16 @@ async fn import_refuses_a_malformed_product_or_offer_currency() {
             .await
             .unwrap_err();
         assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument, "{table}");
-        assert!(
-            err.message.contains("three-letter ISO code"),
-            "{table}: {}",
-            err.message
+        // The whole sentence, not a fragment of it: a dropped `\` line
+        // continuation once left a run of spaces in the middle of this
+        // message, and a `contains` check let it through.
+        assert_eq!(
+            err.message,
+            format!(
+                "the data snapshot carries a {table} row whose currency this build refuses, \
+                 so nothing was imported: currency must be a three-letter ISO code"
+            ),
+            "{table}"
         );
         assert!(
             db::list_all(&ctx, table, Vec::new())
@@ -2049,11 +2055,12 @@ async fn import_refuses_an_offer_variable_the_offer_writers_refuse() {
         .await
         .unwrap_err();
     assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
-    assert!(
-        err.message.contains("kilo-grams")
-            && err.message.contains("letters, numbers, and underscores"),
-        "{}",
-        err.message
+    // The whole sentence, for the reason the currency test gives.
+    assert_eq!(
+        err.message,
+        "the data snapshot carries a variable of offer \"offer_imported\" that this build \
+         refuses, so nothing was imported: kilo-grams: variable key may contain only letters, \
+         numbers, and underscores"
     );
     assert!(db::list_all(&ctx, OFFERS_TABLE, Vec::new())
         .await
@@ -2071,5 +2078,78 @@ async fn import_refuses_an_offer_variable_the_offer_writers_refuse() {
             vec![variable_row("var_good", "kilo_grams"), other],
         ),
     ]);
+    data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
+}
+
+/// Variables are rows of their own, upserted by id, so an offer's variable
+/// set after an import is the destination's rows for it overlaid with the
+/// bundle's. A bundle row with a fresh id and a key the offer already has
+/// here — the offer re-exported after its variable was removed and added
+/// again, or edited on this instance since the last import — would give the
+/// offer two variables of one key, and every preview and checkout of it would
+/// then be refused. The import refuses it instead, and writes nothing.
+#[tokio::test]
+async fn import_refuses_a_variable_key_the_offer_already_has_here() {
+    let ctx = TestContext::with_products().await.fixture();
+    seed_row(
+        &ctx,
+        OFFERS_TABLE,
+        "offer_imported",
+        serde_json::Value::Object(offer_row("NZD")),
+    )
+    .await;
+    seed_row(
+        &ctx,
+        PRODUCTS_VARIABLES_TABLE,
+        "var_local",
+        serde_json::Value::Object(variable_row("var_local", "kilo_grams")),
+    )
+    .await;
+
+    let snap = snapshot_of(vec![(
+        PRODUCTS_VARIABLES_TABLE,
+        vec![variable_row("var_new", "kilo_grams")],
+    )]);
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
+    assert_eq!(
+        err.message,
+        "the data snapshot carries a variable of offer \"offer_imported\" with the key \
+         \"kilo_grams\", which the offer already has on this instance, so nothing was imported"
+    );
+    let ids: Vec<String> = db::list_all(&ctx, PRODUCTS_VARIABLES_TABLE, Vec::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["var_local".to_string()],
+        "a refused import writes nothing"
+    );
+
+    // The same key under the row's own id is that row coming back - a
+    // re-import - and it lands: the bundle's row replaces the local one.
+    let mut returning = variable_row("var_local", "kilo_grams");
+    returning.insert("label".to_string(), json!("Weight in kilograms"));
+    let snap = snapshot_of(vec![(PRODUCTS_VARIABLES_TABLE, vec![returning])]);
+    data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
+    let rows = db::list_all(&ctx, PRODUCTS_VARIABLES_TABLE, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].data["label"], json!("Weight in kilograms"));
+
+    // A local row the bundle moves to another offer frees its key here, so
+    // a new row taking that key on this offer is no duplicate.
+    let mut moved = variable_row("var_local", "kilo_grams");
+    moved.insert("offer_id".to_string(), json!("offer_other"));
+    let snap = snapshot_of(vec![(
+        PRODUCTS_VARIABLES_TABLE,
+        vec![moved, variable_row("var_new", "kilo_grams")],
+    )]);
     data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
 }

@@ -259,7 +259,8 @@ async fn the_session_row_expires_when_the_refresh_token_does() {
         chrono::Utc::now().timestamp() + i64::from(SESSION_LIFETIME_DAYS_DEFAULT) * 86_400;
     assert!(
         (token_exp - expected).abs() <= 5,
-        "refresh validity is SESSION_LIFETIME_DAYS ({SESSION_LIFETIME_DAYS_DEFAULT}) days:          got {token_exp}, expected about {expected}"
+        "refresh validity is SESSION_LIFETIME_DAYS ({SESSION_LIFETIME_DAYS_DEFAULT}) days: \
+         got {token_exp}, expected about {expected}"
     );
 }
 

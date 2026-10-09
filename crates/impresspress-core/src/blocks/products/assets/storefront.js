@@ -61,6 +61,26 @@
     return `${negative ? "-" : ""}${code} ${amount}`;
   }
 
+  // The status line shows one message, and several things write one: the
+  // product load, the price preview, checkout, the storefront config read
+  // and a return from Stripe. Each writes its own slot; the line shows the
+  // first filled slot in this order, so what it says never depends on which
+  // request finished last.
+  //
+  // - payment: the outcome of a payment the buyer just made (the success
+  //   return). It is about money that has already moved, so nothing outranks
+  //   it — a config read that failed afterwards says nothing about that
+  //   payment.
+  // - error: the last load, preview or checkout attempt failed.
+  // - config: the storefront config could not be read, so the widget cannot
+  //   say whether checkout runs here. It outranks the cancel notice: that
+  //   notice invites the buyer to try again, and with checkout hidden they
+  //   could not.
+  // - activity: work in progress (loading, calculating, preparing checkout).
+  // - notice: standing information — the buyer canceled checkout, or the
+  //   offer has no Payment Link.
+  const STATUS_SLOTS = ["payment", "error", "config", "activity", "notice"];
+
   function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -84,6 +104,7 @@
       this.embeddedCheckout = null;
       this.storefrontConfig = null;
       this.configError = null;
+      this.statusSlots = {};
       this.renderShell();
     }
 
@@ -223,9 +244,13 @@
 
     async load() {
       this.card.setAttribute("aria-busy", "true");
-      this.setStatus("Loading product…");
+      // A (re)load starts from a clean line: every slot describes the
+      // product, config and return this load is about to read.
+      this.statusSlots = {};
+      this.setStatus("activity", "Loading product…");
       this.checkoutNode.disabled = true;
       if (!this.productId) {
+        this.setStatus("activity", "");
         this.fail(new Error("The product-id attribute is required"));
         return;
       }
@@ -248,11 +273,13 @@
         ]);
         this.product = product;
         this.storefrontConfig = storefrontConfig;
+        this.setStatus("activity", "");
         this.renderProduct();
-        if (this.configError) this.fail(this.configError);
+        if (this.configError) this.fail(this.configError, "config");
         await this.resumeReceipt();
         this.dispatchEvent(new CustomEvent("impresspress:ready", { detail: this.product }));
       } catch (error) {
+        this.setStatus("activity", "");
         this.fail(error);
       } finally {
         this.card.setAttribute("aria-busy", "false");
@@ -294,7 +321,11 @@
       [...(this.offer.variables || [])]
         .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
         .forEach((variable) => this.renderVariable(variable));
-      this.emailWrap.hidden = this.presentation === "payment_link";
+      // Quantity and the offer's inputs price the preview, so they stay
+      // whenever a preview runs; only a Payment Link, whose price is fixed
+      // when the link is made, has no use for them. Email is sent only by
+      // checkout, so it is shown only where checkout can run.
+      this.emailWrap.hidden = this.presentation === "payment_link" || !this.checkoutAvailable();
       this.quantityWrap.hidden = this.presentation === "payment_link";
       this.variablesNode.hidden = this.presentation === "payment_link";
       this.checkoutNode.textContent = this.presentation === "payment_link"
@@ -309,7 +340,7 @@
         this.checkoutNode.disabled = !link;
         this.checkoutNode.hidden = false;
         this.unavailableNode.hidden = true;
-        this.setStatus(link ? "" : "No reusable Payment Link is available for this offer.");
+        this.setStatus("notice", link ? "" : "No reusable Payment Link is available for this offer.");
       } else {
         // `POST /b/products/checkout` cannot succeed here (the browser
         // runtime, or no Stripe secret key): say so rather than offer a
@@ -408,7 +439,8 @@
       if (!this.offer || !this.form.reportValidity()) return;
       if (this.previewRequest) this.previewRequest.abort();
       this.previewRequest = new AbortController();
-      this.setStatus("Calculating…");
+      this.setStatus("error", "");
+      this.setStatus("activity", "Calculating…");
       try {
         const quantity = Number(this.quantityNode.value);
         const quote = await this.request("/b/products/pricing/preview", {
@@ -421,17 +453,18 @@
         this.checkoutNode.disabled = this.presentation === "payment_link"
           ? !this.paymentLink()
           : false;
-        if (this.presentation === "payment_link" && !this.paymentLink()) {
-          this.setStatus("No reusable Payment Link is available for this offer.");
-        } else if (this.configError) {
-          // Keep the config failure visible once the price has rendered.
-          this.setStatus(this.configError.message, "error");
-        } else {
-          this.setStatus("");
+        this.setStatus("activity", "");
+        if (this.presentation === "payment_link") {
+          this.setStatus("notice", this.paymentLink() ? "" : "No reusable Payment Link is available for this offer.");
         }
         this.dispatchEvent(new CustomEvent("impresspress:quote", { detail: quote }));
       } catch (error) {
-        if (error.name !== "AbortError") this.fail(error);
+        // An aborted preview was replaced by a newer one, which owns the
+        // activity slot now.
+        if (error.name !== "AbortError") {
+          this.setStatus("activity", "");
+          this.fail(error);
+        }
       }
     }
 
@@ -508,7 +541,12 @@
       if (!this.checkoutAvailable()) return;
 
       this.checkoutNode.disabled = true;
-      this.setStatus("Preparing secure checkout…");
+      // A new checkout supersedes the last one's outcome and the notice that
+      // it was canceled.
+      this.setStatus("payment", "");
+      this.setStatus("notice", "");
+      this.setStatus("error", "");
+      this.setStatus("activity", "Preparing secure checkout…");
       try {
         let Stripe;
         let storefrontConfig;
@@ -547,7 +585,9 @@
         this.form.hidden = true;
         this.embeddedNode.hidden = false;
         this.embeddedCheckout.mount(this.embeddedNode);
+        this.setStatus("activity", "");
       } catch (error) {
+        this.setStatus("activity", "");
         this.fail(error);
         this.checkoutNode.disabled = false;
       }
@@ -556,7 +596,7 @@
     async resumeReceipt() {
       const marker = new URL(window.location.href).searchParams.get("impresspress_checkout");
       if (marker === "cancel") {
-        this.setStatus("Checkout was canceled. You can review your choices and try again.");
+        this.setStatus("notice", "Checkout was canceled. You can review your choices and try again.");
         return;
       }
       if (marker !== "success") return;
@@ -567,10 +607,10 @@
         receipt = null;
       }
       if (!receipt || !receipt.order_id || !receipt.receipt_token) {
-        this.setStatus("Payment is returning from Stripe. Sign in to view the order if confirmation does not appear.");
+        this.setStatus("payment", "Payment is returning from Stripe. Sign in to view the order if confirmation does not appear.");
         return;
       }
-      this.setStatus("Confirming payment with Stripe…");
+      this.setStatus("payment", "Confirming payment with Stripe…");
       for (let attempt = 0; attempt < 15; attempt += 1) {
         try {
           const status = await this.request(
@@ -580,6 +620,7 @@
           if (["completed", "refunded", "failed"].includes(status.status)) {
             const successful = status.status === "completed" || status.status === "refunded";
             this.setStatus(
+              "payment",
               successful
                 ? `Payment confirmed — ${money(status.amounts.total_minor, status.amounts.currency)}.`
                 : "Payment could not be confirmed. Please try again or contact support.",
@@ -591,21 +632,24 @@
             return;
           }
         } catch (error) {
-          if (attempt === 14) return this.fail(error);
+          if (attempt === 14) return this.fail(error, "payment");
         }
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
-      this.setStatus("Payment is still processing. Check your order page shortly.");
+      this.setStatus("payment", "Payment is still processing. Check your order page shortly.");
     }
 
-    setStatus(message, kind) {
-      this.statusNode.textContent = message || "";
-      this.statusNode.className = `status${kind ? ` ${kind}` : ""}`;
+    /** Fill (or, with an empty message, clear) one slot of the status line. */
+    setStatus(slot, message, kind) {
+      this.statusSlots[slot] = message ? { message, kind } : null;
+      const shown = STATUS_SLOTS.map((name) => this.statusSlots[name]).find(Boolean);
+      this.statusNode.textContent = shown ? shown.message : "";
+      this.statusNode.className = `status${shown && shown.kind ? ` ${shown.kind}` : ""}`;
     }
 
-    fail(error) {
+    fail(error, slot) {
       const message = error && error.message ? error.message : "Something went wrong";
-      this.setStatus(message, "error");
+      this.setStatus(slot || "error", message, "error");
       this.dispatchEvent(new CustomEvent("impresspress:error", { detail: { message } }));
     }
   }

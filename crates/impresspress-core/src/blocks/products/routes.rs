@@ -555,7 +555,7 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminRestoreProduct,
     )
     .summary("Restore a soft-deleted product")
-    .description("Clears `deleted_at`, undoing `soft_delete`. A soft-deleted product is not editable through the normal admin PATCH until it is restored.")
+    .description("Clears `deleted_at`, undoing a product delete. A soft-deleted product is not editable through the normal admin PATCH until it is restored.")
     .path_params(id_path_schema)
     // Typed like every other product row: it hands back the same product
     // view every other product endpoint does.

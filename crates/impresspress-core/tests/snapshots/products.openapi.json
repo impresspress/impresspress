@@ -313,7 +313,7 @@
                     "records": {
                       "description": "Groups on this page.",
                       "items": {
-                        "description": "A product group row: every column of `impresspress__products__groups`.",
+                        "description": "A product group.",
                         "properties": {
                           "created_at": {
                             "description": "RFC 3339 creation timestamp.",
@@ -321,7 +321,7 @@
                             "type": "string"
                           },
                           "created_by": {
-                            "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                            "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                             "type": "string"
                           },
                           "description": {
@@ -348,7 +348,7 @@
                             "type": "string"
                           },
                           "user_id": {
-                            "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                            "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                             "type": "string"
                           }
                         },
@@ -450,7 +450,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product group row: every column of `impresspress__products__groups`.",
+                  "description": "A product group.",
                   "properties": {
                     "created_at": {
                       "description": "RFC 3339 creation timestamp.",
@@ -458,7 +458,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                      "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                       "type": "string"
                     },
                     "description": {
@@ -485,7 +485,7 @@
                       "type": "string"
                     },
                     "user_id": {
-                      "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                      "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                       "type": "string"
                     }
                   },
@@ -629,7 +629,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product group row: every column of `impresspress__products__groups`.",
+                  "description": "A product group.",
                   "properties": {
                     "created_at": {
                       "description": "RFC 3339 creation timestamp.",
@@ -637,7 +637,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                      "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                       "type": "string"
                     },
                     "description": {
@@ -664,7 +664,7 @@
                       "type": "string"
                     },
                     "user_id": {
-                      "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                      "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                       "type": "string"
                     }
                   },
@@ -745,7 +745,7 @@
             "name": "search",
             "required": false,
             "schema": {
-              "description": "`LIKE '%…%'` filter on the product name.",
+              "description": "Substring filter on the product name.",
               "type": [
                 "string",
                 "null"
@@ -785,10 +785,10 @@
                     "records": {
                       "description": "Products on this page, newest first.",
                       "items": {
-                        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                        "description": "A product, as its owner and administrators see it.",
                         "properties": {
                           "approval_status": {
-                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                             "enum": [
                               "draft",
                               "pending",
@@ -807,7 +807,7 @@
                             "type": "string"
                           },
                           "created_by": {
-                            "description": "Id of the user who created the row.",
+                            "description": "Id of the user who created the product.",
                             "type": "string"
                           },
                           "currency": {
@@ -1014,7 +1014,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "`POST /b/products/api/admin/products` and `POST /b/products/api/products`\nrequest body. Ownership, moderation and provider columns are set by the\nserver and cannot be supplied.",
+                "description": "`POST /b/products/api/admin/products` and `POST /b/products/api/products`\nrequest body. Ownership, moderation and provider fields are set by the\nserver and cannot be supplied.",
                 "properties": {
                   "category": {
                     "type": [
@@ -1154,10 +1154,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -1176,7 +1176,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -1425,10 +1425,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -1447,7 +1447,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -1648,7 +1648,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "`PATCH /b/products/api/admin/products/{id}` and\n`PATCH /b/products/api/products/{id}` request body. Every field is\noptional and only the ones present are applied. Ownership, moderation and\nprovider columns are set by the server and cannot be supplied.",
+                "description": "`PATCH /b/products/api/admin/products/{id}` and\n`PATCH /b/products/api/products/{id}` request body. Every field is\noptional and only the ones present are applied. Ownership, moderation and\nprovider fields are set by the server and cannot be supplied.",
                 "properties": {
                   "category": {
                     "type": [
@@ -1787,10 +1787,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -1809,7 +1809,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -2013,10 +2013,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -2035,7 +2035,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -3073,10 +3073,10 @@
                       "type": "array"
                     },
                     "product": {
-                      "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                      "description": "A product, as its owner and administrators see it.",
                       "properties": {
                         "approval_status": {
-                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                           "enum": [
                             "draft",
                             "pending",
@@ -3095,7 +3095,7 @@
                           "type": "string"
                         },
                         "created_by": {
-                          "description": "Id of the user who created the row.",
+                          "description": "Id of the user who created the product.",
                           "type": "string"
                         },
                         "currency": {
@@ -3306,10 +3306,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -3328,7 +3328,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -3518,7 +3518,7 @@
     },
     "/b/products/api/admin/products/{id}/restore": {
       "post": {
-        "description": "Clears `deleted_at`, undoing `soft_delete`. A soft-deleted product is not editable through the normal admin PATCH until it is restored.",
+        "description": "Clears `deleted_at`, undoing a product delete. A soft-deleted product is not editable through the normal admin PATCH until it is restored.",
         "parameters": [
           {
             "in": "path",
@@ -3534,10 +3534,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -3556,7 +3556,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -13485,7 +13485,7 @@
             "name": "user_id",
             "required": false,
             "schema": {
-              "description": "Exact-match filter on the legacy owner column `user_id`.",
+              "description": "Exact-match filter on the buyer's user id.",
               "type": [
                 "string",
                 "null"
@@ -13513,7 +13513,7 @@
                     "records": {
                       "description": "Orders on this page, newest first.",
                       "items": {
-                        "description": "An order row: `impresspress__products__purchases`, as published to the\nbuyer, the seller and administrators.",
+                        "description": "An order, as administrators see it.",
                         "properties": {
                           "approved_at": {
                             "description": "RFC 3339 timestamp the order was approved, or `null`.",
@@ -13528,7 +13528,7 @@
                             "type": "string"
                           },
                           "buyer_user_id": {
-                            "description": "Signed-in buyer's user id, or empty for a guest order. The order's\nsingle buyer identity.",
+                            "description": "Signed-in buyer's user id, or empty for a guest order.",
                             "type": "string"
                           },
                           "checkout_mode": {
@@ -13744,7 +13744,7 @@
                             "type": "integer"
                           },
                           "total_cents": {
-                            "description": "Final charged amount in minor units. The order's single amount.",
+                            "description": "Final charged amount in minor units.",
                             "format": "int64",
                             "type": "integer"
                           },
@@ -13852,12 +13852,12 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Response body of the order detail endpoints: the order with its lines,\nrefunds and disputes.",
+                  "description": "Response body of the admin order detail endpoint: the order with its\nlines, refunds and disputes.",
                   "properties": {
                     "disputes": {
                       "description": "Disputes, newest first.",
                       "items": {
-                        "description": "One payment dispute on an order: `impresspress__products__disputes`, the\ndurable projection of the provider's dispute events.",
+                        "description": "One payment dispute on an order, as recorded from the provider's dispute\nevents.",
                         "properties": {
                           "amount_minor": {
                             "format": "int64",
@@ -13968,7 +13968,7 @@
                     },
                     "line_items": {
                       "items": {
-                        "description": "One line of an order: `impresspress__products__line_items`.",
+                        "description": "One line of an order.",
                         "properties": {
                           "component_id": {
                             "description": "Offer component the line resolved, or empty for a whole-offer line.",
@@ -14075,7 +14075,7 @@
                       "type": "array"
                     },
                     "purchase": {
-                      "description": "An order row: `impresspress__products__purchases`, as published to the\nbuyer, the seller and administrators.",
+                      "description": "An order, as administrators see it.",
                       "properties": {
                         "approved_at": {
                           "description": "RFC 3339 timestamp the order was approved, or `null`.",
@@ -14090,7 +14090,7 @@
                           "type": "string"
                         },
                         "buyer_user_id": {
-                          "description": "Signed-in buyer's user id, or empty for a guest order. The order's\nsingle buyer identity.",
+                          "description": "Signed-in buyer's user id, or empty for a guest order.",
                           "type": "string"
                         },
                         "checkout_mode": {
@@ -14306,7 +14306,7 @@
                           "type": "integer"
                         },
                         "total_cents": {
-                          "description": "Final charged amount in minor units. The order's single amount.",
+                          "description": "Final charged amount in minor units.",
                           "format": "int64",
                           "type": "integer"
                         },
@@ -14365,7 +14365,7 @@
                     "refunds": {
                       "description": "Refunds, newest first.",
                       "items": {
-                        "description": "One refund on an order: `impresspress__products__refunds`.",
+                        "description": "One refund on an order.",
                         "properties": {
                           "amount_minor": {
                             "format": "int64",
@@ -14785,7 +14785,7 @@
                       "type": "array"
                     },
                     "total_count": {
-                      "description": "How many seller accounts exist, which is not `sellers.len()` when the\nlisting is showing a prefix.",
+                      "description": "How many seller accounts exist, which is more than `sellers` lists\nwhen `truncated` is true.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -14843,10 +14843,10 @@
                     "products": {
                       "description": "The seller's live catalog — products the seller's user owns that have\nnot been soft-deleted, in any publication state.",
                       "items": {
-                        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                        "description": "A product, as its owner and administrators see it.",
                         "properties": {
                           "approval_status": {
-                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                             "enum": [
                               "draft",
                               "pending",
@@ -14865,7 +14865,7 @@
                             "type": "string"
                           },
                           "created_by": {
-                            "description": "Id of the user who created the row.",
+                            "description": "Id of the user who created the product.",
                             "type": "string"
                           },
                           "currency": {
@@ -15831,7 +15831,7 @@
                     "records": {
                       "description": "Types on this page, newest first.",
                       "items": {
-                        "description": "A product type (taxonomy) row: every column of\n`impresspress__products__types`.",
+                        "description": "A product type (taxonomy).",
                         "properties": {
                           "created_at": {
                             "description": "RFC 3339 creation timestamp.",
@@ -15846,7 +15846,7 @@
                             "type": "string"
                           },
                           "is_system": {
-                            "description": "Whether the type is built in. System types are seeded by the block\nrather than created through the API.",
+                            "description": "Whether the type was marked as built in when it was created.",
                             "type": "boolean"
                           },
                           "name": {
@@ -15941,7 +15941,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product type (taxonomy) row: every column of\n`impresspress__products__types`.",
+                  "description": "A product type (taxonomy).",
                   "properties": {
                     "created_at": {
                       "description": "RFC 3339 creation timestamp.",
@@ -15956,7 +15956,7 @@
                       "type": "string"
                     },
                     "is_system": {
-                      "description": "Whether the type is built in. System types are seeded by the block\nrather than created through the API.",
+                      "description": "Whether the type was marked as built in when it was created.",
                       "type": "boolean"
                     },
                     "name": {
@@ -16310,7 +16310,7 @@
             "name": "search",
             "required": false,
             "schema": {
-              "description": "`LIKE '%…%'` filter on the product name.",
+              "description": "Substring filter on the product name.",
               "type": [
                 "string",
                 "null"
@@ -16350,10 +16350,10 @@
                     "records": {
                       "description": "Products on this page, newest first.",
                       "items": {
-                        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                        "description": "A product, as its owner and administrators see it.",
                         "properties": {
                           "approval_status": {
-                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                             "enum": [
                               "draft",
                               "pending",
@@ -16372,7 +16372,7 @@
                             "type": "string"
                           },
                           "created_by": {
-                            "description": "Id of the user who created the row.",
+                            "description": "Id of the user who created the product.",
                             "type": "string"
                           },
                           "currency": {
@@ -16579,7 +16579,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "`POST /b/products/api/admin/products` and `POST /b/products/api/products`\nrequest body. Ownership, moderation and provider columns are set by the\nserver and cannot be supplied.",
+                "description": "`POST /b/products/api/admin/products` and `POST /b/products/api/products`\nrequest body. Ownership, moderation and provider fields are set by the\nserver and cannot be supplied.",
                 "properties": {
                   "category": {
                     "type": [
@@ -16719,10 +16719,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -16741,7 +16741,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -16990,10 +16990,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -17012,7 +17012,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -17213,7 +17213,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "`PATCH /b/products/api/admin/products/{id}` and\n`PATCH /b/products/api/products/{id}` request body. Every field is\noptional and only the ones present are applied. Ownership, moderation and\nprovider columns are set by the server and cannot be supplied.",
+                "description": "`PATCH /b/products/api/admin/products/{id}` and\n`PATCH /b/products/api/products/{id}` request body. Every field is\noptional and only the ones present are applied. Ownership, moderation and\nprovider fields are set by the server and cannot be supplied.",
                 "properties": {
                   "category": {
                     "type": [
@@ -17352,10 +17352,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -17374,7 +17374,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -18411,10 +18411,10 @@
                       "type": "array"
                     },
                     "product": {
-                      "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                      "description": "A product, as its owner and administrators see it.",
                       "properties": {
                         "approval_status": {
-                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                           "enum": [
                             "draft",
                             "pending",
@@ -18433,7 +18433,7 @@
                           "type": "string"
                         },
                         "created_by": {
-                          "description": "Id of the user who created the row.",
+                          "description": "Id of the user who created the product.",
                           "type": "string"
                         },
                         "currency": {
@@ -18645,10 +18645,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                  "description": "A product, as its owner and administrators see it.",
                   "properties": {
                     "approval_status": {
-                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                      "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                       "enum": [
                         "draft",
                         "pending",
@@ -18667,7 +18667,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row.",
+                      "description": "Id of the user who created the product.",
                       "type": "string"
                     },
                     "currency": {
@@ -28722,7 +28722,7 @@
                     },
                     "records": {
                       "items": {
-                        "description": "One order as the **seller** who fulfils it may read it.\n\nWider than the buyer's: a seller needs the fee that was taken, their own\nconnected account, the provider handles for their own charge, and the\nbuyer's email in order to fulfil. It still withholds the buyer's platform\nidentity (`user_id` / `buyer_user_id`) and their Stripe customer id, none\nof which a seller needs to ship an order.",
+                        "description": "One order as the **seller** who fulfils it may read it.",
                         "properties": {
                           "buyer_email": {
                             "description": "Buyer's email address as captured at checkout, or empty.",
@@ -29002,7 +29002,7 @@
                   "properties": {
                     "disputes": {
                       "items": {
-                        "description": "One payment dispute on an order: `impresspress__products__disputes`, the\ndurable projection of the provider's dispute events.",
+                        "description": "One payment dispute on an order, as recorded from the provider's dispute\nevents.",
                         "properties": {
                           "amount_minor": {
                             "format": "int64",
@@ -29113,7 +29113,7 @@
                     },
                     "line_items": {
                       "items": {
-                        "description": "One line of an order: `impresspress__products__line_items`.",
+                        "description": "One line of an order.",
                         "properties": {
                           "component_id": {
                             "description": "Offer component the line resolved, or empty for a whole-offer line.",
@@ -29220,7 +29220,7 @@
                       "type": "array"
                     },
                     "purchase": {
-                      "description": "One order as the **seller** who fulfils it may read it.\n\nWider than the buyer's: a seller needs the fee that was taken, their own\nconnected account, the provider handles for their own charge, and the\nbuyer's email in order to fulfil. It still withholds the buyer's platform\nidentity (`user_id` / `buyer_user_id`) and their Stripe customer id, none\nof which a seller needs to ship an order.",
+                      "description": "One order as the **seller** who fulfils it may read it.",
                       "properties": {
                         "buyer_email": {
                           "description": "Buyer's email address as captured at checkout, or empty.",
@@ -29446,7 +29446,7 @@
                     },
                     "refunds": {
                       "items": {
-                        "description": "One refund on an order: `impresspress__products__refunds`.",
+                        "description": "One refund on an order.",
                         "properties": {
                           "amount_minor": {
                             "format": "int64",
@@ -30544,7 +30544,7 @@
                       "type": "string"
                     },
                     "receipt_token": {
-                      "description": "Returned once and never persisted in plaintext. Static storefronts use\nit to poll the minimal guest order-status endpoint after Stripe returns.\n\nA bearer capability: whoever holds it can read the order's status.\nTreat it like a session token — never log it, never put it in a URL\nthat gets shared. This response is its only delivery, which is why it\nis not `writeOnly`: that keyword claims a field is never present in a\nresponse, and this one is always present in this one.",
+                      "description": "Returned once and never persisted in plaintext. Static storefronts use\nit to poll the minimal guest order-status endpoint after Stripe returns.\n\nA bearer capability: whoever holds it can read the order's status.\nTreat it like a session token — never log it, never put it in a URL\nthat gets shared. This response is its only delivery.",
                       "type": "string"
                     },
                     "receipt_token_expires_at": {
@@ -30599,7 +30599,7 @@
                     "records": {
                       "description": "Templates, sorted by name.",
                       "items": {
-                        "description": "A group template row: every column of\n`impresspress__products__group_templates`.",
+                        "description": "A group template.",
                         "properties": {
                           "created_at": {
                             "description": "RFC 3339 creation timestamp.",
@@ -30689,7 +30689,7 @@
                     "records": {
                       "description": "Groups on this page.",
                       "items": {
-                        "description": "A product group row: every column of `impresspress__products__groups`.",
+                        "description": "A product group.",
                         "properties": {
                           "created_at": {
                             "description": "RFC 3339 creation timestamp.",
@@ -30697,7 +30697,7 @@
                             "type": "string"
                           },
                           "created_by": {
-                            "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                            "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                             "type": "string"
                           },
                           "description": {
@@ -30724,7 +30724,7 @@
                             "type": "string"
                           },
                           "user_id": {
-                            "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                            "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                             "type": "string"
                           }
                         },
@@ -30819,7 +30819,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product group row: every column of `impresspress__products__groups`.",
+                  "description": "A product group.",
                   "properties": {
                     "created_at": {
                       "description": "RFC 3339 creation timestamp.",
@@ -30827,7 +30827,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                      "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                       "type": "string"
                     },
                     "description": {
@@ -30854,7 +30854,7 @@
                       "type": "string"
                     },
                     "user_id": {
-                      "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                      "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                       "type": "string"
                     }
                   },
@@ -30951,7 +30951,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product group row: every column of `impresspress__products__groups`.",
+                  "description": "A product group.",
                   "properties": {
                     "created_at": {
                       "description": "RFC 3339 creation timestamp.",
@@ -30959,7 +30959,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                      "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                       "type": "string"
                     },
                     "description": {
@@ -30986,7 +30986,7 @@
                       "type": "string"
                     },
                     "user_id": {
-                      "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                      "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                       "type": "string"
                     }
                   },
@@ -31074,7 +31074,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "A product group row: every column of `impresspress__products__groups`.",
+                  "description": "A product group.",
                   "properties": {
                     "created_at": {
                       "description": "RFC 3339 creation timestamp.",
@@ -31082,7 +31082,7 @@
                       "type": "string"
                     },
                     "created_by": {
-                      "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                      "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                       "type": "string"
                     },
                     "description": {
@@ -31109,7 +31109,7 @@
                       "type": "string"
                     },
                     "user_id": {
-                      "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                      "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                       "type": "string"
                     }
                   },
@@ -31201,10 +31201,10 @@
                     "records": {
                       "description": "Products on this page, newest first.",
                       "items": {
-                        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+                        "description": "A product, as its owner and administrators see it.",
                         "properties": {
                           "approval_status": {
-                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                             "enum": [
                               "draft",
                               "pending",
@@ -31223,7 +31223,7 @@
                             "type": "string"
                           },
                           "created_by": {
-                            "description": "Id of the user who created the row.",
+                            "description": "Id of the user who created the product.",
                             "type": "string"
                           },
                           "currency": {
@@ -31816,7 +31816,7 @@
                     },
                     "records": {
                       "items": {
-                        "description": "One order as its **buyer** may read it.\n\nThe narrowest of the three order projections, and the one that matters\nmost: `GET /b/products/purchases` is opted in as the `list_my_purchases`\nWebMCP tool, so every field here is handed to whatever agent runs in the\nbuyer's page.\n\nWithheld, deliberately: the platform's economics (`platform_fee_cents`),\nthe seller's identity and Stripe account, the buyer's own provider handles\n(`stripe_customer_id`, the PaymentIntent and Checkout Session ids — a\nbuyer never needs to quote one, and they are the provider's namespace, not\nours), and the reconciliation and payment-error diagnostics, which describe\nour integration rather than their purchase.",
+                        "description": "One order as its **buyer** may read it.",
                         "properties": {
                           "buyer_email": {
                             "description": "Email captured at checkout, or empty.",
@@ -32055,9 +32055,9 @@
                   "description": "One of the caller's own orders with the lines it was made of and the\nrefunds against it.",
                   "properties": {
                     "disputes": {
-                      "description": "Disputes raised against this order. Kept because the SSR order page\nalready shows a buyer their own disputes, and this endpoint is not\nopted into the WebMCP manifest — only the list above is, and it\ncarries no nested rows.",
+                      "description": "Disputes raised against this order.",
                       "items": {
-                        "description": "One payment dispute on an order: `impresspress__products__disputes`, the\ndurable projection of the provider's dispute events.",
+                        "description": "One payment dispute on an order, as recorded from the provider's dispute\nevents.",
                         "properties": {
                           "amount_minor": {
                             "format": "int64",
@@ -32168,7 +32168,7 @@
                     },
                     "line_items": {
                       "items": {
-                        "description": "One line of an order: `impresspress__products__line_items`.",
+                        "description": "One line of an order.",
                         "properties": {
                           "component_id": {
                             "description": "Offer component the line resolved, or empty for a whole-offer line.",
@@ -32275,7 +32275,7 @@
                       "type": "array"
                     },
                     "purchase": {
-                      "description": "One order as its **buyer** may read it.\n\nThe narrowest of the three order projections, and the one that matters\nmost: `GET /b/products/purchases` is opted in as the `list_my_purchases`\nWebMCP tool, so every field here is handed to whatever agent runs in the\nbuyer's page.\n\nWithheld, deliberately: the platform's economics (`platform_fee_cents`),\nthe seller's identity and Stripe account, the buyer's own provider handles\n(`stripe_customer_id`, the PaymentIntent and Checkout Session ids — a\nbuyer never needs to quote one, and they are the provider's namespace, not\nours), and the reconciliation and payment-error diagnostics, which describe\nour integration rather than their purchase.",
+                      "description": "One order as its **buyer** may read it.",
                       "properties": {
                         "buyer_email": {
                           "description": "Email captured at checkout, or empty.",
@@ -32462,7 +32462,7 @@
                     },
                     "refunds": {
                       "items": {
-                        "description": "One refund as its **buyer** may read it: how much came back, in what\ncurrency, and whether it has landed.\n\nThe provider handles (`provider_refund_id`, `payment_intent_id`,\n`stripe_account_id`), the operator fields (`refunded_by`, `note`,\n`provider_reason`) and the failure diagnostics (`last_error`) belong to\nwhoever issued the refund, not to whoever received it.",
+                        "description": "One refund as its **buyer** may read it: how much came back, in what\ncurrency, and whether it has landed.",
                         "properties": {
                           "amount_minor": {
                             "format": "int64",
@@ -32489,7 +32489,7 @@
                             "type": "string"
                           },
                           "provider_status": {
-                            "description": "The provider's own state for the refund. Empty until the provider\nanswers; `succeeded` for a refund recorded without a provider. Kept\nfor the buyer because \"has my money actually gone back\" is the\nquestion this endpoint exists to answer — it is a state, not a handle.",
+                            "description": "The provider's own state for the refund. Empty until the provider\nanswers; `succeeded` for a refund recorded without a provider.",
                             "type": "string"
                           },
                           "purchase_id": {
@@ -33349,7 +33349,7 @@
                     "records": {
                       "description": "Types on this page, newest first.",
                       "items": {
-                        "description": "A product type (taxonomy) row: every column of\n`impresspress__products__types`.",
+                        "description": "A product type (taxonomy).",
                         "properties": {
                           "created_at": {
                             "description": "RFC 3339 creation timestamp.",
@@ -33364,7 +33364,7 @@
                             "type": "string"
                           },
                           "is_system": {
-                            "description": "Whether the type is built in. System types are seeded by the block\nrather than created through the API.",
+                            "description": "Whether the type was marked as built in when it was created.",
                             "type": "boolean"
                           },
                           "name": {

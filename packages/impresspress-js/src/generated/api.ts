@@ -4410,8 +4410,9 @@ export interface paths {
                                  */
                                 created_at: string;
                                 /**
-                                 * @description Id of the user who created the row: the administrator on the admin
-                                 *     tier (the owner is `user_id`), the owner on the owner tier.
+                                 * @description Id of the user who created the group: the administrator, for a group
+                                 *     created through `/b/products/api/admin/groups` (its owner is then
+                                 *     `user_id`); otherwise the owner.
                                  */
                                 created_by: string;
                                 description: string;
@@ -4428,8 +4429,8 @@ export interface paths {
                                  */
                                 updated_at: string;
                                 /**
-                                 * @description Id of the user who owns the group. The owner tier lists and edits
-                                 *     only groups whose `user_id` is the caller.
+                                 * @description Id of the user who owns the group. `/b/products/groups` lists and
+                                 *     edits only the caller's own groups.
                                  */
                                 user_id: string;
                             }[];
@@ -4478,8 +4479,9 @@ export interface paths {
                              */
                             created_at: string;
                             /**
-                             * @description Id of the user who created the row: the administrator on the admin
-                             *     tier (the owner is `user_id`), the owner on the owner tier.
+                             * @description Id of the user who created the group: the administrator, for a group
+                             *     created through `/b/products/api/admin/groups` (its owner is then
+                             *     `user_id`); otherwise the owner.
                              */
                             created_by: string;
                             description: string;
@@ -4496,8 +4498,8 @@ export interface paths {
                              */
                             updated_at: string;
                             /**
-                             * @description Id of the user who owns the group. The owner tier lists and edits
-                             *     only groups whose `user_id` is the caller.
+                             * @description Id of the user who owns the group. `/b/products/groups` lists and
+                             *     edits only the caller's own groups.
                              */
                             user_id: string;
                         };
@@ -4585,8 +4587,9 @@ export interface paths {
                              */
                             created_at: string;
                             /**
-                             * @description Id of the user who created the row: the administrator on the admin
-                             *     tier (the owner is `user_id`), the owner on the owner tier.
+                             * @description Id of the user who created the group: the administrator, for a group
+                             *     created through `/b/products/api/admin/groups` (its owner is then
+                             *     `user_id`); otherwise the owner.
                              */
                             created_by: string;
                             description: string;
@@ -4603,8 +4606,8 @@ export interface paths {
                              */
                             updated_at: string;
                             /**
-                             * @description Id of the user who owns the group. The owner tier lists and edits
-                             *     only groups whose `user_id` is the caller.
+                             * @description Id of the user who owns the group. `/b/products/groups` lists and
+                             *     edits only the caller's own groups.
                              */
                             user_id: string;
                         };
@@ -4658,9 +4661,9 @@ export interface paths {
                             records: {
                                 /**
                                  * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                                 *     `rejected` or `suspended`. A different column and a different
-                                 *     vocabulary from `status` — a listing awaiting review is
-                                 *     `status = pending_review` and `approval_status = pending` at once.
+                                 *     `rejected` or `suspended`. A separate field from `status`, with its
+                                 *     own values — a listing awaiting review is `status = pending_review`
+                                 *     and `approval_status = pending` at once.
                                  * @enum {string}
                                  */
                                 approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -4670,7 +4673,7 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description Id of the user who created the row. */
+                                /** @description Id of the user who created the product. */
                                 created_by: string;
                                 /**
                                  * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -4843,9 +4846,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -4855,7 +4858,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -4987,9 +4990,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -4999,7 +5002,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -5189,9 +5192,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -5201,7 +5204,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -5331,9 +5334,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -5343,7 +5346,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -5825,16 +5828,13 @@ export interface paths {
                                  */
                                 sync_status: "not_synced" | "syncing" | "synced" | "failed";
                             }[];
-                            /**
-                             * @description A product row as published to its owner and to administrators: every
-                             *     column of the products table.
-                             */
+                            /** @description A product, as its owner and administrators see it. */
                             product: {
                                 /**
                                  * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                                 *     `rejected` or `suspended`. A different column and a different
-                                 *     vocabulary from `status` — a listing awaiting review is
-                                 *     `status = pending_review` and `approval_status = pending` at once.
+                                 *     `rejected` or `suspended`. A separate field from `status`, with its
+                                 *     own values — a listing awaiting review is `status = pending_review`
+                                 *     and `approval_status = pending` at once.
                                  * @enum {string}
                                  */
                                 approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -5844,7 +5844,7 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description Id of the user who created the row. */
+                                /** @description Id of the user who created the product. */
                                 created_by: string;
                                 /**
                                  * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -5979,9 +5979,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -5991,7 +5991,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -6106,7 +6106,7 @@ export interface paths {
         put?: never;
         /**
          * Restore a soft-deleted product
-         * @description Clears `deleted_at`, undoing `soft_delete`. A soft-deleted product is not editable through the normal admin PATCH until it is restored.
+         * @description Clears `deleted_at`, undoing a product delete. A soft-deleted product is not editable through the normal admin PATCH until it is restored.
          */
         post: {
             parameters: {
@@ -6128,9 +6128,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -6140,7 +6140,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -10677,10 +10677,7 @@ export interface paths {
                                 approved_at: string | null;
                                 /** @description Buyer's email address as captured at checkout, or empty. */
                                 buyer_email: string;
-                                /**
-                                 * @description Signed-in buyer's user id, or empty for a guest order. The order's
-                                 *     single buyer identity.
-                                 */
+                                /** @description Signed-in buyer's user id, or empty for a guest order. */
                                 buyer_user_id: string;
                                 /**
                                  * @description Checkout presentation the order was started with.
@@ -10823,7 +10820,7 @@ export interface paths {
                                 tax_cents: number;
                                 /**
                                  * Format: int64
-                                 * @description Final charged amount in minor units. The order's single amount.
+                                 * @description Final charged amount in minor units.
                                  */
                                 total_cents: number;
                                 /**
@@ -10976,10 +10973,7 @@ export interface paths {
                                  */
                                 updated_at: string;
                             }[];
-                            /**
-                             * @description An order row: `impresspress__products__purchases`, as published to the
-                             *     buyer, the seller and administrators.
-                             */
+                            /** @description An order, as administrators see it. */
                             purchase: {
                                 /**
                                  * Format: date-time
@@ -10988,10 +10982,7 @@ export interface paths {
                                 approved_at: string | null;
                                 /** @description Buyer's email address as captured at checkout, or empty. */
                                 buyer_email: string;
-                                /**
-                                 * @description Signed-in buyer's user id, or empty for a guest order. The order's
-                                 *     single buyer identity.
-                                 */
+                                /** @description Signed-in buyer's user id, or empty for a guest order. */
                                 buyer_user_id: string;
                                 /**
                                  * @description Checkout presentation the order was started with.
@@ -11134,7 +11125,7 @@ export interface paths {
                                 tax_cents: number;
                                 /**
                                  * Format: int64
-                                 * @description Final charged amount in minor units. The order's single amount.
+                                 * @description Final charged amount in minor units.
                                  */
                                 total_cents: number;
                                 /**
@@ -11374,8 +11365,8 @@ export interface paths {
                             }[];
                             /**
                              * Format: int64
-                             * @description How many seller accounts exist, which is not `sellers.len()` when the
-                             *     listing is showing a prefix.
+                             * @description How many seller accounts exist, which is more than `sellers` lists
+                             *     when `truncated` is true.
                              */
                             total_count: number;
                             /** @description Whether more seller accounts exist than `sellers` lists. */
@@ -11426,9 +11417,9 @@ export interface paths {
                             products: {
                                 /**
                                  * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                                 *     `rejected` or `suspended`. A different column and a different
-                                 *     vocabulary from `status` — a listing awaiting review is
-                                 *     `status = pending_review` and `approval_status = pending` at once.
+                                 *     `rejected` or `suspended`. A separate field from `status`, with its
+                                 *     own values — a listing awaiting review is `status = pending_review`
+                                 *     and `approval_status = pending` at once.
                                  * @enum {string}
                                  */
                                 approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -11438,7 +11429,7 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description Id of the user who created the row. */
+                                /** @description Id of the user who created the product. */
                                 created_by: string;
                                 /**
                                  * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -11953,10 +11944,7 @@ export interface paths {
                                 description: string;
                                 /** @description Stable type identifier. */
                                 id: string;
-                                /**
-                                 * @description Whether the type is built in. System types are seeded by the block
-                                 *     rather than created through the API.
-                                 */
+                                /** @description Whether the type was marked as built in when it was created. */
                                 is_system: boolean;
                                 name: string;
                                 /**
@@ -12010,10 +11998,7 @@ export interface paths {
                             description: string;
                             /** @description Stable type identifier. */
                             id: string;
-                            /**
-                             * @description Whether the type is built in. System types are seeded by the block
-                             *     rather than created through the API.
-                             */
+                            /** @description Whether the type was marked as built in when it was created. */
                             is_system: boolean;
                             name: string;
                             /**
@@ -12239,9 +12224,9 @@ export interface paths {
                             records: {
                                 /**
                                  * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                                 *     `rejected` or `suspended`. A different column and a different
-                                 *     vocabulary from `status` — a listing awaiting review is
-                                 *     `status = pending_review` and `approval_status = pending` at once.
+                                 *     `rejected` or `suspended`. A separate field from `status`, with its
+                                 *     own values — a listing awaiting review is `status = pending_review`
+                                 *     and `approval_status = pending` at once.
                                  * @enum {string}
                                  */
                                 approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -12251,7 +12236,7 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description Id of the user who created the row. */
+                                /** @description Id of the user who created the product. */
                                 created_by: string;
                                 /**
                                  * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -12424,9 +12409,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -12436,7 +12421,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -12568,9 +12553,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -12580,7 +12565,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -12770,9 +12755,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -12782,7 +12767,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -13260,16 +13245,13 @@ export interface paths {
                                  */
                                 sync_status: "not_synced" | "syncing" | "synced" | "failed";
                             }[];
-                            /**
-                             * @description A product row as published to its owner and to administrators: every
-                             *     column of the products table.
-                             */
+                            /** @description A product, as its owner and administrators see it. */
                             product: {
                                 /**
                                  * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                                 *     `rejected` or `suspended`. A different column and a different
-                                 *     vocabulary from `status` — a listing awaiting review is
-                                 *     `status = pending_review` and `approval_status = pending` at once.
+                                 *     `rejected` or `suspended`. A separate field from `status`, with its
+                                 *     own values — a listing awaiting review is `status = pending_review`
+                                 *     and `approval_status = pending` at once.
                                  * @enum {string}
                                  */
                                 approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -13279,7 +13261,7 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description Id of the user who created the row. */
+                                /** @description Id of the user who created the product. */
                                 created_by: string;
                                 /**
                                  * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -13417,9 +13399,9 @@ export interface paths {
                         "application/json": {
                             /**
                              * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                             *     `rejected` or `suspended`. A different column and a different
-                             *     vocabulary from `status` — a listing awaiting review is
-                             *     `status = pending_review` and `approval_status = pending` at once.
+                             *     `rejected` or `suspended`. A separate field from `status`, with its
+                             *     own values — a listing awaiting review is `status = pending_review`
+                             *     and `approval_status = pending` at once.
                              * @enum {string}
                              */
                             approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -13429,7 +13411,7 @@ export interface paths {
                              * @description RFC 3339 creation timestamp.
                              */
                             created_at: string;
-                            /** @description Id of the user who created the row. */
+                            /** @description Id of the user who created the product. */
                             created_by: string;
                             /**
                              * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -18284,15 +18266,7 @@ export interface paths {
                                  */
                                 updated_at: string;
                             }[];
-                            /**
-                             * @description One order as the **seller** who fulfils it may read it.
-                             *
-                             *     Wider than the buyer's: a seller needs the fee that was taken, their own
-                             *     connected account, the provider handles for their own charge, and the
-                             *     buyer's email in order to fulfil. It still withholds the buyer's platform
-                             *     identity (`user_id` / `buyer_user_id`) and their Stripe customer id, none
-                             *     of which a seller needs to ship an order.
-                             */
+                            /** @description One order as the **seller** who fulfils it may read it. */
                             purchase: {
                                 /** @description Buyer's email address as captured at checkout, or empty. */
                                 buyer_email: string;
@@ -19050,9 +19024,7 @@ export interface paths {
                              *
                              *     A bearer capability: whoever holds it can read the order's status.
                              *     Treat it like a session token — never log it, never put it in a URL
-                             *     that gets shared. This response is its only delivery, which is why it
-                             *     is not `writeOnly`: that keyword claims a field is never present in a
-                             *     response, and this one is always present in this one.
+                             *     that gets shared. This response is its only delivery.
                              */
                             receipt_token: string;
                             /** Format: date-time */
@@ -19182,8 +19154,9 @@ export interface paths {
                                  */
                                 created_at: string;
                                 /**
-                                 * @description Id of the user who created the row: the administrator on the admin
-                                 *     tier (the owner is `user_id`), the owner on the owner tier.
+                                 * @description Id of the user who created the group: the administrator, for a group
+                                 *     created through `/b/products/api/admin/groups` (its owner is then
+                                 *     `user_id`); otherwise the owner.
                                  */
                                 created_by: string;
                                 description: string;
@@ -19200,8 +19173,8 @@ export interface paths {
                                  */
                                 updated_at: string;
                                 /**
-                                 * @description Id of the user who owns the group. The owner tier lists and edits
-                                 *     only groups whose `user_id` is the caller.
+                                 * @description Id of the user who owns the group. `/b/products/groups` lists and
+                                 *     edits only the caller's own groups.
                                  */
                                 user_id: string;
                             }[];
@@ -19252,8 +19225,9 @@ export interface paths {
                              */
                             created_at: string;
                             /**
-                             * @description Id of the user who created the row: the administrator on the admin
-                             *     tier (the owner is `user_id`), the owner on the owner tier.
+                             * @description Id of the user who created the group: the administrator, for a group
+                             *     created through `/b/products/api/admin/groups` (its owner is then
+                             *     `user_id`); otherwise the owner.
                              */
                             created_by: string;
                             description: string;
@@ -19270,8 +19244,8 @@ export interface paths {
                              */
                             updated_at: string;
                             /**
-                             * @description Id of the user who owns the group. The owner tier lists and edits
-                             *     only groups whose `user_id` is the caller.
+                             * @description Id of the user who owns the group. `/b/products/groups` lists and
+                             *     edits only the caller's own groups.
                              */
                             user_id: string;
                         };
@@ -19317,8 +19291,9 @@ export interface paths {
                              */
                             created_at: string;
                             /**
-                             * @description Id of the user who created the row: the administrator on the admin
-                             *     tier (the owner is `user_id`), the owner on the owner tier.
+                             * @description Id of the user who created the group: the administrator, for a group
+                             *     created through `/b/products/api/admin/groups` (its owner is then
+                             *     `user_id`); otherwise the owner.
                              */
                             created_by: string;
                             description: string;
@@ -19335,8 +19310,8 @@ export interface paths {
                              */
                             updated_at: string;
                             /**
-                             * @description Id of the user who owns the group. The owner tier lists and edits
-                             *     only groups whose `user_id` is the caller.
+                             * @description Id of the user who owns the group. `/b/products/groups` lists and
+                             *     edits only the caller's own groups.
                              */
                             user_id: string;
                         };
@@ -19408,8 +19383,9 @@ export interface paths {
                              */
                             created_at: string;
                             /**
-                             * @description Id of the user who created the row: the administrator on the admin
-                             *     tier (the owner is `user_id`), the owner on the owner tier.
+                             * @description Id of the user who created the group: the administrator, for a group
+                             *     created through `/b/products/api/admin/groups` (its owner is then
+                             *     `user_id`); otherwise the owner.
                              */
                             created_by: string;
                             description: string;
@@ -19426,8 +19402,8 @@ export interface paths {
                              */
                             updated_at: string;
                             /**
-                             * @description Id of the user who owns the group. The owner tier lists and edits
-                             *     only groups whose `user_id` is the caller.
+                             * @description Id of the user who owns the group. `/b/products/groups` lists and
+                             *     edits only the caller's own groups.
                              */
                             user_id: string;
                         };
@@ -19480,9 +19456,9 @@ export interface paths {
                             records: {
                                 /**
                                  * @description Moderation state: `draft`, `pending` (submitted for review), `approved`,
-                                 *     `rejected` or `suspended`. A different column and a different
-                                 *     vocabulary from `status` — a listing awaiting review is
-                                 *     `status = pending_review` and `approval_status = pending` at once.
+                                 *     `rejected` or `suspended`. A separate field from `status`, with its
+                                 *     own values — a listing awaiting review is `status = pending_review`
+                                 *     and `approval_status = pending` at once.
                                  * @enum {string}
                                  */
                                 approval_status: "draft" | "pending" | "approved" | "rejected" | "suspended";
@@ -19492,7 +19468,7 @@ export interface paths {
                                  * @description RFC 3339 creation timestamp.
                                  */
                                 created_at: string;
-                                /** @description Id of the user who created the row. */
+                                /** @description Id of the user who created the product. */
                                 created_by: string;
                                 /**
                                  * @description ISO 4217 presentment currency, upper-case (e.g. `"NZD"`), as on
@@ -19962,12 +19938,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /**
-                             * @description Disputes raised against this order. Kept because the SSR order page
-                             *     already shows a buyer their own disputes, and this endpoint is not
-                             *     opted into the WebMCP manifest — only the list above is, and it
-                             *     carries no nested rows.
-                             */
+                            /** @description Disputes raised against this order. */
                             disputes: {
                                 /** Format: int64 */
                                 amount_minor: number;
@@ -20067,21 +20038,7 @@ export interface paths {
                                  */
                                 updated_at: string;
                             }[];
-                            /**
-                             * @description One order as its **buyer** may read it.
-                             *
-                             *     The narrowest of the three order projections, and the one that matters
-                             *     most: `GET /b/products/purchases` is opted in as the `list_my_purchases`
-                             *     WebMCP tool, so every field here is handed to whatever agent runs in the
-                             *     buyer's page.
-                             *
-                             *     Withheld, deliberately: the platform's economics (`platform_fee_cents`),
-                             *     the seller's identity and Stripe account, the buyer's own provider handles
-                             *     (`stripe_customer_id`, the PaymentIntent and Checkout Session ids — a
-                             *     buyer never needs to quote one, and they are the provider's namespace, not
-                             *     ours), and the reconciliation and payment-error diagnostics, which describe
-                             *     our integration rather than their purchase.
-                             */
+                            /** @description One order as its **buyer** may read it. */
                             purchase: {
                                 /** @description Email captured at checkout, or empty. */
                                 buyer_email: string;
@@ -20193,9 +20150,7 @@ export interface paths {
                                 id: string;
                                 /**
                                  * @description The provider's own state for the refund. Empty until the provider
-                                 *     answers; `succeeded` for a refund recorded without a provider. Kept
-                                 *     for the buyer because "has my money actually gone back" is the
-                                 *     question this endpoint exists to answer — it is a state, not a handle.
+                                 *     answers; `succeeded` for a refund recorded without a provider.
                                  */
                                 provider_status: string;
                                 purchase_id: string;
@@ -20651,10 +20606,7 @@ export interface paths {
                                 description: string;
                                 /** @description Stable type identifier. */
                                 id: string;
-                                /**
-                                 * @description Whether the type is built in. System types are seeded by the block
-                                 *     rather than created through the API.
-                                 */
+                                /** @description Whether the type was marked as built in when it was created. */
                                 is_system: boolean;
                                 name: string;
                                 /**

@@ -692,6 +692,80 @@ async fn products_refund_rows_describe_provider_status_truthfully() {
     }
 }
 
+/// A `///` line on a products contract type or field is published: it becomes
+/// the schema's `description` in this document, in the generated SDK types
+/// and in the agent tool schemas built from both. Notes written for the
+/// maintainer — which table backs a view, which SQL a filter runs, why a
+/// keyword was or was not used, which other surface a field is kept for —
+/// belong in `//` comments beside the code. This walks every description the
+/// products block publishes (its paths and every component they reach) and
+/// refuses the markers of storage and implementation detail.
+#[tokio::test]
+async fn products_descriptions_carry_no_maintainer_notes() {
+    let ctx = impresspress_core::test_support::TestContext::new().await;
+    let doc = impresspress_core::test_support::openapi_document(&ctx).await;
+    let block: serde_json::Value =
+        serde_json::from_str(&block_openapi(&doc, &["/b/products"]).text)
+            .expect("block openapi parses");
+
+    fn descriptions<'a>(node: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(text)) = map.get("description") {
+                    out.push(text);
+                }
+                for value in map.values() {
+                    descriptions(value, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    descriptions(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut published = Vec::new();
+    descriptions(&block, &mut published);
+    assert!(
+        published.len() > 100,
+        "the products block publishes hundreds of descriptions; found {} - the walk \
+         is looking in the wrong place and this test would pass forever",
+        published.len()
+    );
+
+    // Each marker names storage or implementation, never caller meaning: a
+    // table name, a SQL operator, the word for a stored column, a Rust path,
+    // a JSON Schema keyword discussed as a design choice, and the internal
+    // surfaces (server-rendered pages, the WebMCP manifest) a field was
+    // justified by.
+    const MARKERS: &[&str] = &[
+        "impresspress__",
+        "LIKE",
+        "column",
+        "::",
+        "writeOnly",
+        "WebMCP",
+        "SSR",
+    ];
+    let mut leaks = Vec::new();
+    for text in &published {
+        for marker in MARKERS {
+            if text.contains(marker) {
+                leaks.push(format!("[{marker}] {text}"));
+            }
+        }
+    }
+    leaks.sort();
+    leaks.dedup();
+    assert!(
+        leaks.is_empty(),
+        "products descriptions carry maintainer notes:\n{}",
+        leaks.join("\n---\n")
+    );
+}
+
 /// Every field name `block` publishes: the keys of every `properties` object
 /// anywhere in its schemas, plus the `name` of every declared parameter.
 ///

@@ -529,7 +529,10 @@ pub fn validate_static(
         found.push(Diagnostic::error(
             ENDPOINTS_EMPTY,
             format!(
-                "the guest declares no endpoints; a block serves {prefix:?} through the endpoints                  it declares in `BlockInfo::endpoints`, and one with none is unreachable —                  declare at least one, with the `auth` level each path is meant to have (a                  genuinely public page must say `Public` explicitly)"
+                "the guest declares no endpoints; a block serves {prefix:?} through the endpoints \
+                 it declares in `BlockInfo::endpoints`, and one with none is unreachable — \
+                 declare at least one, with the `auth` level each path is meant to have (a \
+                 genuinely public page must say `Public` explicitly)"
             ),
         ));
     }
@@ -682,7 +685,8 @@ pub fn validate_spec(
         return Err(vec![Diagnostic::error(
             NAME_MISMATCH,
             format!(
-                "the block is registered as {:?}; a dynamically-registered block must be named                  `site/{{name}}`",
+                "the block is registered as {:?}; a dynamically-registered block must be named \
+                 `site/{{name}}`",
                 spec.name
             ),
         )]);

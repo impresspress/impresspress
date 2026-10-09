@@ -129,29 +129,44 @@ fn variable_from_record(record: &Record) -> Result<VariableDefinition, WaferErro
 }
 
 /// Refuse offer variable rows a data-snapshot import carries that no offer
-/// writer would store: each offer's rows, decoded exactly as an offer read
-/// decodes them, must pass
-/// [`offer_pricing::validate_variable_definitions`] — the key grammar,
-/// unique keys and non-empty select choices that `validate_offer` applies to
-/// every offer create and update.
+/// writer would store, and `InvalidArgument`, naming the offer, for the
+/// first violation.
+///
+/// Two checks, because the import writes variable rows one by one, upserted
+/// by id, rather than as an offer's whole set:
+///
+/// - each offer's rows in the bundle, decoded exactly as an offer read
+///   decodes them, must pass [`offer_pricing::validate_variable_definitions`]
+///   — the key grammar, unique keys and non-empty select choices that
+///   `validate_offer` applies to every offer create and update;
+/// - no bundle row may give an offer a key that one of the offer's rows
+///   already on this instance holds, unless the bundle row *is* that row
+///   (same id, so the upsert replaces it) or the bundle moves that row
+///   elsewhere. [`variables::replace_for_offer`] mints a fresh id for a key
+///   removed and later added back, and an offer edited here since the last
+///   import has ids the bundle has never seen, so without this the upsert
+///   would leave the offer with two variables of one key.
 ///
 /// Import is the one write to the variables table that does not go through
-/// [`build_offer`], so without this an offer whose key is `kilo-grams` would
-/// land, and every preview and checkout of it would then be refused.
-/// `InvalidArgument`, naming the offer, for the first violation.
+/// [`build_offer`], so without these an offer whose key is `kilo-grams`, or
+/// whose `kilo_grams` is declared twice, would land, and every preview and
+/// checkout of it would then be refused.
 #[cfg(feature = "block-dev")]
-pub(crate) fn validate_imported_variables<'a>(
-    rows: impl IntoIterator<Item = &'a serde_json::Map<String, Value>>,
+pub(crate) async fn validate_imported_variables(
+    ctx: &dyn Context,
+    rows: &[serde_json::Map<String, Value>],
 ) -> Result<(), WaferError> {
     let refuse = |offer_id: &str, message: &dyn std::fmt::Display| {
         WaferError::new(
             ErrorCode::InvalidArgument,
             format!(
-                "the data snapshot carries a variable of offer {offer_id:?} that this build                  refuses, so nothing was imported: {message}"
+                "the data snapshot carries a variable of offer {offer_id:?} that this build \
+                 refuses, so nothing was imported: {message}"
             ),
         )
     };
     let mut by_offer: BTreeMap<String, Vec<VariableDefinition>> = BTreeMap::new();
+    let mut bundle_ids = std::collections::HashSet::new();
     for row in rows {
         let record = Record {
             id: row
@@ -164,11 +179,36 @@ pub(crate) fn validate_imported_variables<'a>(
         let offer_id = record.str_field("offer_id").to_string();
         let definition =
             variable_from_record(&record).map_err(|error| refuse(&offer_id, &error.message))?;
+        bundle_ids.insert(record.id);
         by_offer.entry(offer_id).or_default().push(definition);
     }
     for (offer_id, definitions) in &by_offer {
         offer_pricing::validate_variable_definitions(definitions)
             .map_err(|error| refuse(offer_id, &error))?;
+    }
+
+    // One pass over the whole table (a round-trip per thousand rows) rather
+    // than a read per offer: the variables table is catalog-sized, and a
+    // per-offer read would cost the import a query per offer.
+    for record in variables::list_every_row(ctx).await? {
+        if bundle_ids.contains(&record.id) {
+            continue; // the bundle replaces or moves this row
+        }
+        let offer_id = record.str_field("offer_id");
+        let key = record.str_field("name");
+        let collides = by_offer
+            .get(offer_id)
+            .is_some_and(|definitions| definitions.iter().any(|definition| definition.key == key));
+        if collides {
+            return Err(WaferError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "the data snapshot carries a variable of offer {offer_id:?} with the key \
+                     {key:?}, which the offer already has on this instance, so nothing was \
+                     imported"
+                ),
+            ));
+        }
     }
     Ok(())
 }

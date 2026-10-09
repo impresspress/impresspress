@@ -916,7 +916,8 @@ mod middleware_blocks_tests {
         for name in impresspress_core::builder::MIDDLEWARE_BLOCKS {
             assert!(
                 !wafer.has_block(name),
-                "{name} was already registered before                  `register_middleware_blocks` ran — this test would be vacuous"
+                "{name} was already registered before \
+                 `register_middleware_blocks` ran — this test would be vacuous"
             );
         }
 

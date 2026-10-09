@@ -28,7 +28,7 @@
             "type": "integer"
           },
           "search": {
-            "description": "`LIKE '%…%'` filter on the product name.",
+            "description": "Substring filter on the product name.",
             "type": [
               "string",
               "null"
@@ -74,10 +74,10 @@
           "records": {
             "description": "Products on this page, newest first.",
             "items": {
-              "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+              "description": "A product, as its owner and administrators see it.",
               "properties": {
                 "approval_status": {
-                  "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+                  "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
                   "enum": [
                     "draft",
                     "pending",
@@ -96,7 +96,7 @@
                   "type": "string"
                 },
                 "created_by": {
-                  "description": "Id of the user who created the row.",
+                  "description": "Id of the user who created the product.",
                   "type": "string"
                 },
                 "currency": {
@@ -440,10 +440,10 @@
       },
       "name": "shop_create_product",
       "outputSchema": {
-        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+        "description": "A product, as its owner and administrators see it.",
         "properties": {
           "approval_status": {
-            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
             "enum": [
               "draft",
               "pending",
@@ -462,7 +462,7 @@
             "type": "string"
           },
           "created_by": {
-            "description": "Id of the user who created the row.",
+            "description": "Id of the user who created the product.",
             "type": "string"
           },
           "currency": {
@@ -797,10 +797,10 @@
       },
       "name": "shop_update_product",
       "outputSchema": {
-        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+        "description": "A product, as its owner and administrators see it.",
         "properties": {
           "approval_status": {
-            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
             "enum": [
               "draft",
               "pending",
@@ -819,7 +819,7 @@
             "type": "string"
           },
           "created_by": {
-            "description": "Id of the user who created the row.",
+            "description": "Id of the user who created the product.",
             "type": "string"
           },
           "currency": {
@@ -1052,10 +1052,10 @@
       },
       "name": "shop_restore_product",
       "outputSchema": {
-        "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
+        "description": "A product, as its owner and administrators see it.",
         "properties": {
           "approval_status": {
-            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
+            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A separate field from `status`, with its\nown values — a listing awaiting review is `status = pending_review`\nand `approval_status = pending` at once.",
             "enum": [
               "draft",
               "pending",
@@ -1074,7 +1074,7 @@
             "type": "string"
           },
           "created_by": {
-            "description": "Id of the user who created the row.",
+            "description": "Id of the user who created the product.",
             "type": "string"
           },
           "currency": {
@@ -8881,7 +8881,7 @@
           "records": {
             "description": "Groups on this page.",
             "items": {
-              "description": "A product group row: every column of `impresspress__products__groups`.",
+              "description": "A product group.",
               "properties": {
                 "created_at": {
                   "description": "RFC 3339 creation timestamp.",
@@ -8889,7 +8889,7 @@
                   "type": "string"
                 },
                 "created_by": {
-                  "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+                  "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
                   "type": "string"
                 },
                 "description": {
@@ -8916,7 +8916,7 @@
                   "type": "string"
                 },
                 "user_id": {
-                  "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+                  "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
                   "type": "string"
                 }
               },
@@ -9003,7 +9003,7 @@
       },
       "name": "shop_create_group",
       "outputSchema": {
-        "description": "A product group row: every column of `impresspress__products__groups`.",
+        "description": "A product group.",
         "properties": {
           "created_at": {
             "description": "RFC 3339 creation timestamp.",
@@ -9011,7 +9011,7 @@
             "type": "string"
           },
           "created_by": {
-            "description": "Id of the user who created the row: the administrator on the admin\ntier (the owner is `user_id`), the owner on the owner tier.",
+            "description": "Id of the user who created the group: the administrator, for a group\ncreated through `/b/products/api/admin/groups` (its owner is then\n`user_id`); otherwise the owner.",
             "type": "string"
           },
           "description": {
@@ -9038,7 +9038,7 @@
             "type": "string"
           },
           "user_id": {
-            "description": "Id of the user who owns the group. The owner tier lists and edits\nonly groups whose `user_id` is the caller.",
+            "description": "Id of the user who owns the group. `/b/products/groups` lists and\nedits only the caller's own groups.",
             "type": "string"
           }
         },

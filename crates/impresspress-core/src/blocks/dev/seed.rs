@@ -1104,7 +1104,8 @@ async fn store(
     // a bundle that got in would wedge this instance's publisher for good.
     if let Some(clash) = ws.path_collision(workspace_path) {
         return Err(format!(
-            "the seed bundle carries both {workspace_path:?} and {clash:?}; one name cannot be              a file in one entry and a directory in the other"
+            "the seed bundle carries both {workspace_path:?} and {clash:?}; one name cannot be \
+             a file in one entry and a directory in the other"
         ));
     }
     let sha = blobs::sha256_hex(bytes);

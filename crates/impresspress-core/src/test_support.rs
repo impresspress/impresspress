@@ -5199,7 +5199,8 @@ mod tests {
         let ctx = TestContext::new().await;
         db::exec_raw(
             &ctx.fixture(),
-            "CREATE TABLE filtered_writes (id TEXT PRIMARY KEY, name TEXT, hits INTEGER              DEFAULT 0, created_at TEXT, updated_at TEXT)",
+            "CREATE TABLE filtered_writes (id TEXT PRIMARY KEY, name TEXT, hits INTEGER \
+             DEFAULT 0, created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await
