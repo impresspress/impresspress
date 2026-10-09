@@ -89,9 +89,9 @@
 //! browser decodes a charset-less `text/plain` in a legacy encoding. A root
 //! text file that is UTF-8 and not ASCII therefore starts with a byte order
 //! mark ([`for_a_charsetless_host`]), which a browser honours ahead of the
-//! Content-Type (the WHATWG encoding standard's BOM sniff). The seed copy is the site's file byte for byte: the
-//! importer verifies its hash, and the exported runtime serves it with
-//! `charset=utf-8`.
+//! Content-Type (the WHATWG encoding standard's BOM sniff). The seed copy is
+//! the site's file byte for byte: the importer verifies its hash, and the
+//! exported runtime serves it with `charset=utf-8`.
 
 use std::collections::BTreeMap;
 
@@ -196,20 +196,29 @@ const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 /// handed it for a browser to read it as UTF-8.
 ///
 /// The static host serves the root, and it types a file by its own table:
-/// Cloudflare's asset server and `python3 -m http.server` both send `.txt`
-/// as `text/plain` with no charset, and the latter sends `.md` as
-/// `text/markdown` the same way. A browser
-/// decodes such a document in a legacy encoding (windows-1252 in Chromium),
-/// so `—` shows as `â€”`. What overrides that on every host, with no header
-/// config the bundle cannot carry, is a byte order mark: the WHATWG
-/// encoding sniff honours a BOM ahead of any Content-Type, and `fetch`'s
-/// `text()` strips one.
+/// Cloudflare's asset server (checked with curl on `dev.impresspress.org`
+/// and `build-bootstrap.impresspress.org`) and `python3 -m http.server`
+/// both send `.txt` as `text/plain` with no charset, and the latter sends
+/// `.md` as `text/markdown` the same way. A browser decodes such a document
+/// in a legacy encoding (windows-1252 in Chromium), so `—` shows as `â€”`.
+/// What overrides that on every host, with no header config the bundle
+/// cannot carry, is a byte order mark: the WHATWG encoding sniff honours a
+/// BOM ahead of any Content-Type, and `fetch`'s `text()` strips one.
 ///
 /// Only for a file that needs it: one that is UTF-8 and not ASCII. ASCII
 /// decodes the same in every encoding a host could imply, so it is left as
 /// it is. Bytes that are not UTF-8 are left as they are too, because a
 /// UTF-8 BOM would claim an encoding they are not in. A file that already
 /// starts with a BOM keeps the one it has.
+///
+/// The cost falls on a reader that decodes UTF-8 but does not strip a BOM:
+/// httpx, Go, Rust's `String::from_utf8`, Python's `.decode("utf-8")`
+/// without `utf-8-sig`. That reader gets a leading U+FEFF, so both files'
+/// first line reads `\u{FEFF}# …` and a strict `^# ` match, or a Markdown
+/// parser that does not strip the mark, misses the H1. A host that can set
+/// headers should still serve these files as `text/plain; charset=utf-8`
+/// (or `text/markdown; charset=utf-8`): a browser then decodes them as
+/// UTF-8 either way, and the README says so to whoever deploys the folder.
 fn for_a_charsetless_host(bytes: Vec<u8>) -> Vec<u8> {
     if bytes.is_ascii() || bytes.starts_with(UTF8_BOM) || std::str::from_utf8(&bytes).is_err() {
         return bytes;

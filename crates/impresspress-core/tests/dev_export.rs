@@ -1924,6 +1924,12 @@ async fn a_non_ascii_llms_txt_is_exported_with_a_byte_order_mark_at_the_root() {
 /// name and admin address, which can be in any language.
 #[tokio::test]
 async fn the_readme_starts_with_a_byte_order_mark() {
+    // The mark is added only to a file that is not ASCII, so this test means
+    // something only while the template is not — as its dashes make it.
+    assert!(
+        !include_str!("../src/blocks/dev/templates/export-readme.md").is_ascii(),
+        "the README template is ASCII now: this test no longer pins the BOM path"
+    );
     let control = FakeControl::new();
     let ctx = shop_instance(&control).await;
     let archive = entries(
