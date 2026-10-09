@@ -158,9 +158,17 @@ export async function bootServiceWorker(page: Page) {
   // its first fetch. One round trip through a route only the runtime can
   // answer (the static host would 404 it) is what makes the wait mean "the
   // sandbox is up" — and it is what the timings the specs print measure.
-  await page.waitForFunction(async () => (await fetch('/b/auth/login')).status === 200, null, {
-    timeout: 120_000,
-  });
+  //
+  // Polled from the test side: `page.waitForFunction` does not await its
+  // predicate, so an async one returns a promise, which is truthy — the wait
+  // ends on the first call, resolved with whatever that one fetch answered
+  // (`false` for the static host's 404) and never asks again. A request the
+  // page's reload interrupts throws, and `expect.poll` asks again.
+  await expect
+    .poll(() => page.evaluate(async () => (await fetch('/b/auth/login')).status), {
+      timeout: 120_000,
+    })
+    .toBe(200);
   // …and wait for the boot shell to be replaced. `loader.js` reloads the page
   // once the runtime has answered its probe, on a `setTimeout(…, 0)` this
   // function cannot see. A navigation a caller starts before that reload

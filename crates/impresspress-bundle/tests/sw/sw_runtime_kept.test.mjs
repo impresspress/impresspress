@@ -144,6 +144,32 @@ test('…and where neither has it, the worker dies at stage load and sends the p
 // binary it no longer has with a 200 and an HTML page. Kept, it would be a
 // version that can never load — and its `activate` would drop the binary of
 // the version that worked.
+// Two versions can ask the host for the same runtime binary at once: a
+// recovery's replacement installing while the browser restarts the old worker
+// for another tab, its kept copy dropped by that recovery. Chromium's HTTP
+// cache lets one request for a URL write its entry and holds a second request
+// for that URL until the first has its response headers — giving up only
+// after 20 seconds — so the restarted worker's start waited 20 s behind the
+// install (`recovery-wipe.spec.ts` measured it). The HTTP cache has nothing to
+// give these requests: the worker keeps the binary itself, in RUNTIME_CACHE,
+// and a recovery's replacement is to fetch its own afresh. So neither goes
+// through it.
+test('the runtime binary is fetched past the HTTP cache, at install and when the kept copy has gone', async (t) => {
+  captureConsole(t);
+  const installing = await loadWorker({ kept: false });
+  await installing.lifecycle('install');
+  const restarted = await loadWorker({ kept: false, init: compiles });
+  await restarted.request(LOGIN, { method: 'POST' });
+
+  for (const worker of [installing, restarted]) {
+    assert.deepEqual(worker.network, [RUNTIME_URL]);
+    assert.deepEqual(
+      worker.networkInits.map((init) => init?.cache),
+      ['no-store']
+    );
+  }
+});
+
 test('a 200 that is not a WebAssembly module is not kept, and the version does not install', async (t) => {
   captureConsole(t);
   const worker = await loadWorker({

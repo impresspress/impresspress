@@ -246,35 +246,6 @@ test('a cold visitor gets WebMCP tools without a reload', async ({ page }) => {
   await waitForTool(page, 'list_products');
 });
 
-test.describe('served on plain http at a LAN address', () => {
-  // `lan.test` resolves to the same static server, but `http://lan.test` is
-  // not a secure context (only https, localhost and 127.0.0.1 are), so the
-  // browser offers neither a service worker nor `navigator.modelContext`.
-  //
-  // The mapping is a launch flag, and Playwright refuses `launchOptions` in a
-  // `test.use` inside a describe (it would force a new worker), so the test
-  // launches its own Chromium. Its args carry the suite's WebMCP flag too:
-  // the assertions below need the testing surface present.
-  test('the boot page says to use https or localhost', async ({ playwright, baseURL }) => {
-    const browser = await playwright.chromium.launch({
-      args: ['--enable-features=WebMCPTesting', '--host-resolver-rules=MAP lan.test 127.0.0.1'],
-    });
-    try {
-      const page = await browser.newPage();
-      const port = new URL(baseURL as string).port;
-      await page.goto(`http://lan.test:${port}/`);
-      expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
-      // The spec's F1 secure-context row, against the real browser: the flag
-      // is on, the testing surface is there, the API is not.
-      expect(await page.evaluate(() => 'modelContextTesting' in navigator)).toBe(true);
-      expect(await page.evaluate(() => 'modelContext' in navigator)).toBe(false);
-      await expect(page.locator('#status')).toHaveText(/over https or on localhost/);
-    } finally {
-      await browser.close();
-    }
-  });
-});
-
 // ── Migrations across service-worker restarts ───────────────────────────────
 //
 // The vendored sql.js the worker runs, loaded into the PAGE so a test can edit

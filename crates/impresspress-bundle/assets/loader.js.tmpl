@@ -572,6 +572,7 @@ async function whenActivated(registration, status, go, fail, leave = () => {}) {
             renderNotStartedUI(
                 status,
                 waited,
+                newest(registration),
                 () => ask(waited),
                 () => {
                     abandoned = true;
@@ -695,7 +696,14 @@ function runtimeOf(worker) {
 // on its next flush — and an erase after it would be undone. A version
 // still installing or waiting has loaded nothing, and the erase lock the
 // button holds keeps it from loading until the erase is done.
-async function updateUnderway(registration, failure, status, { alreadyIn = true } = {}) {
+//
+// `notStarting` is a version coming in that does NOT count: the one a
+// button on the not-started screen (`renderNotStartedUI`) was pressed about,
+// because it has not activated. Leaving the transition to it would be one
+// more wait for that same activation, which Chromium can lose for good;
+// registering a replacement over it is what gives the browser a new install
+// to activate.
+async function updateUnderway(registration, failure, status, { alreadyIn = true, notStarting = null } = {}) {
     status.textContent = 'Checking for a new version…';
     try {
         await registration.update();
@@ -704,7 +712,7 @@ async function updateUnderway(registration, failure, status, { alreadyIn = true 
     }
     for (;;) {
         const incoming = registration.installing || registration.waiting;
-        if (!incoming) break;
+        if (!incoming || incoming === notStarting) break;
         status.textContent = 'Updating the app…';
         if (await hasInstalled(incoming)) return true;
         if ((registration.installing || registration.waiting) === incoming) break;
@@ -740,8 +748,11 @@ async function replaceWorker({ failure }) {
 // A recovery started from a button, then the app from its boot URL — on this
 // same document. `erase` says whether it takes the local data with it;
 // `forget` (the reset) also clears what else this browser keeps for the
-// app. If another tab has meanwhile recovered from the same death, nothing
-// is replaced or erased again: this tab boots onto what that tab left.
+// app; `notStarting` is the version a button on the not-started screen was
+// pressed about, which is replaced, never waited for again
+// (`updateUnderway`). If another tab has meanwhile recovered from the same
+// death, nothing is replaced or erased again: this tab boots onto what that
+// tab left.
 //
 // When it erases, the erase has two runtimes to stay clear of, and each
 // holds the database in memory and writes it back when it flushes:
@@ -769,7 +780,7 @@ async function replaceWorker({ failure }) {
 // (`renderNotStartedUI`), and the locks are let go only if they start over.
 // Holding them blocks no other tab's boot: an automatic recovery that would
 // erase sees RESET_LOCK held and leaves the transition to this reset.
-async function recoverFromButton({ erase, forget, failure }, status) {
+async function recoverFromButton({ erase, forget, failure, notStarting = null }, status) {
     // The erase's locks, while this button holds them (see below).
     let release = () => {};
     const letGo = () => {
@@ -791,7 +802,10 @@ async function recoverFromButton({ erase, forget, failure }, status) {
             // An update already bringing a new worker in is that
             // replacement: registering another over it would discard it.
             const current = await navigator.serviceWorker.getRegistration();
-            if (current && (await updateUnderway(current, failure, status, { alreadyIn: !erase }))) {
+            if (
+                current &&
+                (await updateUnderway(current, failure, status, { alreadyIn: !erase, notStarting }))
+            ) {
                 sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
                 if (failure !== null) await recordRecovered(failure);
                 return current;
@@ -1019,13 +1033,15 @@ function renderWaitingUI(target, worker, status, waitedMs) {
 // usually a moment, sometimes, in Chromium, much longer. The wait goes on
 // underneath whatever is chosen here; "Keep waiting" only asks to be told
 // again later (`resume`). "Restart it" and the reset register a replacement
-// over it, as on the waiting screen.
+// over it — `notStarting`, the version waited for — and never wait for that
+// version again (`updateUnderway`): a wait Chromium has lost the activation
+// of is what they are the way out of.
 //
 // `leave` ends the wait and lets go of what it was holding — a reset's erase
 // locks — before "Restart it" or the reset starts over: a reset held up
 // behind its own predecessor's locks would wait for ever. "Keep waiting"
 // keeps them.
-function renderNotStartedUI(status, waitedMs, resume, leave) {
+function renderNotStartedUI(status, waitedMs, notStarting, resume, leave) {
     const name = appTitle();
     const STOPPING = 'Waiting for the app to stop…';
     renderChoices({
@@ -1047,14 +1063,20 @@ function renderNotStartedUI(status, waitedMs, resume, leave) {
                 style: 'plain',
                 act: () => {
                     leave();
-                    return recoverFromButton({ erase: false, forget: false, failure: null }, status);
+                    return recoverFromButton(
+                        { erase: false, forget: false, failure: null, notStarting },
+                        status,
+                    );
                 },
             },
             {
                 ...resetButton(null, status, STOPPING),
                 act: () => {
                     leave();
-                    return recoverFromButton({ erase: true, forget: true, failure: null }, status);
+                    return recoverFromButton(
+                        { erase: true, forget: true, failure: null, notStarting },
+                        status,
+                    );
                 },
             },
         ],
