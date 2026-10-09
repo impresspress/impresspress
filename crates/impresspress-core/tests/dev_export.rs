@@ -1970,10 +1970,9 @@ async fn a_sandbox_that_stored_old_types_serves_exports_and_imports_the_tables()
         assert_eq!(written["path"], format!("site/{name}"), "{written}");
     }
     store_the_old_way(&a).await;
-    assert!(
-        workspace::load(&a).await.is_err(),
-        "a stored type is not this build's workspace"
-    );
+    workspace::load(&a)
+        .await
+        .expect("a stored type is read and dropped");
 
     let upgrade = stored_types::upgrade(&a).await.expect("upgrade");
     assert!(upgrade.republished, "{upgrade:?}");
@@ -2072,10 +2071,12 @@ async fn a_sandbox_that_stored_old_types_serves_exports_and_imports_the_tables()
 }
 
 /// The republish can fail (here, a blob the active site names is gone).
-/// The workspace must still load, so the files API works, and every other
-/// row is upgraded. Only the active row keeps its stored types, so the
-/// next boot publishes again, and once the blob is back that boot finishes
-/// the upgrade.
+/// The rest of that boot (the journal convergence that decides what is
+/// active) must keep the active generation and its blocks, whose row still
+/// stores types; the workspace must load, so the files API works; and every
+/// other row is upgraded. Only the active row keeps its stored types, so
+/// the next boot publishes again, and once the blob is back that boot
+/// finishes the upgrade.
 #[tokio::test]
 async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() {
     let control = FakeControl::new();
@@ -2092,6 +2093,22 @@ async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() 
         .await;
         assert_eq!(written["path"], format!("site/{name}"), "{written}");
     }
+    let before = impresspress_core::blocks::dev::repo::runtime_state::read(&ctx)
+        .await
+        .expect("journal");
+    let active_id = before
+        .active_generation_id
+        .clone()
+        .expect("an active generation");
+    let active_blocks: Vec<String> = generation::load(&ctx, &active_id)
+        .await
+        .expect("the active generation")
+        .1
+        .blocks
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
+    assert!(!active_blocks.is_empty(), "the shop serves a block");
     store_the_old_way(&ctx).await;
     let (name, content, old, table) = STORED_THE_OLD_WAY[0];
     let sha = blobs::sha256_hex(content.as_bytes());
@@ -2102,6 +2119,15 @@ async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() 
     stored_types::upgrade(&ctx)
         .await
         .expect_err("the publish cannot read the lost blob");
+    // The rest of this boot: the journal is converged on, and the active
+    // generation, whose row still stores types, stays active with its blocks.
+    let blocks: Vec<String> = activation::converge_on_boot(&ctx, &ctx.dev_shared())
+        .await
+        .expect("the boot converges")
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
+    assert_eq!(blocks, active_blocks, "the boot keeps the active blocks");
     workspace::load(&ctx)
         .await
         .expect("the workspace loads whatever the publish did");
@@ -2124,11 +2150,13 @@ async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() 
         .await
         .expect("journal");
     assert_eq!(
+        state.active_generation_id.as_deref(),
+        Some(active_id.as_str()),
+        "the generation stays active"
+    );
+    assert_eq!(
         left,
-        vec![state
-            .active_generation_id
-            .clone()
-            .expect("an active generation")],
+        vec![active_id.clone()],
         "only the active row keeps its stored types"
     );
     assert_eq!(
@@ -2155,6 +2183,21 @@ async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() 
         .await
         .expect("rows")
         .is_empty());
+    let blocks: Vec<String> = activation::converge_on_boot(&ctx, &ctx.dev_shared())
+        .await
+        .expect("the boot converges")
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
+    assert_eq!(blocks, active_blocks, "still the same blocks");
+    assert_eq!(
+        impresspress_core::blocks::dev::repo::runtime_state::read(&ctx)
+            .await
+            .expect("journal")
+            .active_generation_id
+            .as_deref(),
+        Some(active_id.as_str())
+    );
 }
 
 /// UTF-8's byte order mark, as the archive's root text files carry it.

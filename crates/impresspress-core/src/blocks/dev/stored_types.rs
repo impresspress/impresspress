@@ -6,17 +6,20 @@
 //! stored a copy on every entry, in `workspace.json` and in each generation's
 //! site manifest, and published each file with that copy. Once the table
 //! changed (`.md` became `text/markdown`, `.json` and `.svg` gained a
-//! charset, `.xml` and `.csv` were typed), the copies were stale. Such a
-//! sandbox would also no longer load at all: a file entry refuses a key it
-//! does not know.
+//! charset, `.xml` and `.csv` were typed), the copies were stale.
+//!
+//! Reading such data works whether or not this upgrade has run: a file
+//! entry reads the legacy key and drops it, so no stored copy is ever used
+//! (see `StoredFileEntry` in `super::workspace`). What the upgrade fixes is
+//! what reading cannot: the published folder still holds every file with
+//! the stored type, and the stores still carry a key that means nothing.
 //!
 //! [`upgrade`] runs on every boot, before anything reads either store, and
 //! leaves no copy behind. It runs in three steps, ordered so that an upgrade
 //! interrupted at any point is finished by the next boot:
 //!
 //! 1. `workspace.json` is rewritten without the key. This step depends on
-//!    nothing and gates nothing, so it runs first: whatever happens to the
-//!    steps below, the workspace loads, and the files API works.
+//!    nothing and gates nothing, so it runs first.
 //! 2. If the active generation's row still stores types, its site is
 //!    published in full. A publish writes only changed files, and these are
 //!    unchanged, so the folder would otherwise keep serving the stored types.
@@ -26,8 +29,9 @@
 //!    rewritten only once step 2 has succeeded. Its stored types are what
 //!    tells the next boot that the folder still has to be published, so a
 //!    publish that fails (a blob gone missing, say) leaves that one row as it
-//!    was, and the next boot tries again. Every other row is rewritten
-//!    regardless.
+//!    was, and the next boot tries again. That row still reads (the key is
+//!    dropped on the way in), so the boot that follows keeps it active and
+//!    keeps its blocks. Every other row is rewritten regardless.
 //!
 //! A failed publish is still reported as an error, after step 3 has run.
 //!
@@ -38,7 +42,6 @@
 //! `workspace.json`, checked as bytes before anything is parsed. The
 //! journal and the active row are read only when some row matched.
 
-use serde_json::Value;
 use wafer_core::clients::storage;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
@@ -46,7 +49,7 @@ use super::{
     contracts::SiteManifest,
     generation, publisher,
     repo::{self, generations},
-    workspace::{self, Workspace},
+    workspace,
 };
 
 /// The key every stored entry used to carry.
@@ -142,17 +145,22 @@ async fn republish_without_types(
     Ok(())
 }
 
-/// One row's site manifest with the stored types dropped.
+/// One row's site manifest, read: the stored types are dropped on the way
+/// in.
 fn site_without_types(row: &generations::GenerationRow) -> Result<SiteManifest, WaferError> {
-    let mut value: Value = serde_json::from_str(&row.site_manifest_json)
-        .map_err(|e| unreadable(&format!("generation {}", row.id), &e))?;
-    if let Some(Value::Array(files)) = value.get_mut("files") {
-        drop_types(files.iter_mut());
-    }
-    serde_json::from_value(value).map_err(|e| unreadable(&format!("generation {}", row.id), &e))
+    serde_json::from_str(&row.site_manifest_json).map_err(|e| {
+        WaferError::new(
+            ErrorCode::Internal,
+            format!(
+                "dropping the stored content types: generation {} did not parse: {e}",
+                row.id
+            ),
+        )
+    })
 }
 
-/// Rewrite `workspace.json` without stored types, when it has any.
+/// Rewrite `workspace.json` without stored types, when it has any: read it
+/// (which drops them) and save what was read.
 async fn upgrade_workspace(ctx: &dyn Context) -> Result<bool, WaferError> {
     let bytes = match storage::get(ctx, workspace::FOLDER, workspace::KEY).await {
         Ok((bytes, _info)) => bytes,
@@ -162,13 +170,7 @@ async fn upgrade_workspace(ctx: &dyn Context) -> Result<bool, WaferError> {
     if !stores_types(&bytes) {
         return Ok(false);
     }
-    let mut value: Value =
-        serde_json::from_slice(&bytes).map_err(|e| unreadable(workspace::KEY, &e))?;
-    if let Some(Value::Object(files)) = value.get_mut("files") {
-        drop_types(files.values_mut());
-    }
-    let ws: Workspace =
-        serde_json::from_value(value).map_err(|e| unreadable(workspace::KEY, &e))?;
+    let ws = workspace::load(ctx).await?;
     workspace::save(ctx, &ws).await?;
     Ok(true)
 }
@@ -180,20 +182,4 @@ fn stores_types(bytes: &[u8]) -> bool {
     bytes
         .windows(needle.len())
         .any(|window| window == needle.as_bytes())
-}
-
-/// Remove the key from every entry object.
-fn drop_types<'a>(entries: impl Iterator<Item = &'a mut Value>) {
-    for entry in entries {
-        if let Value::Object(fields) = entry {
-            fields.remove(KEY);
-        }
-    }
-}
-
-fn unreadable(what: &str, e: &serde_json::Error) -> WaferError {
-    WaferError::new(
-        ErrorCode::Internal,
-        format!("dropping the stored content types: {what} did not parse: {e}"),
-    )
 }

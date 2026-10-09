@@ -43,7 +43,7 @@ pub const BLOCKS_PREFIX: &str = "blocks/";
 /// generation *is* the workspace's `site/` entries, frozen — so there is one
 /// definition rather than a wire type and a stored type that have to be kept
 /// in step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileEntry {
     /// Where the file lives. Workspace-relative (`site/index.html`) in the
@@ -61,6 +61,38 @@ impl FileEntry {
     /// [`content_type_for`] of its path.
     pub fn content_type(&self) -> &'static str {
         content_type_for(&self.path)
+    }
+}
+
+/// What a [`FileEntry`] is read from: its three fields and nothing else, bar
+/// one legacy key.
+///
+/// Builds before the type was derived stored a `content_type` on every
+/// entry. It is read and dropped here, never kept, never written and never
+/// served: [`FileEntry::content_type`] is a function of the path whatever an
+/// entry once said. Reading it rather than refusing it is what keeps a
+/// sandbox whose upgrade has not finished working. A failed republish holds
+/// back the active generation's row with its stored types
+/// (`super::stored_types`), and a row that did not parse would read as a
+/// dangling generation, which the boot would abandon, dropping the very
+/// site the next boot is meant to republish. It also lets a seed bundle
+/// exported before the change import into this build.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFileEntry {
+    path: String,
+    sha256: String,
+    size: u64,
+    #[serde(default, rename = "content_type")]
+    _legacy_content_type: Option<serde::de::IgnoredAny>,
+}
+
+impl<'de> Deserialize<'de> for FileEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let StoredFileEntry {
+            path, sha256, size, ..
+        } = StoredFileEntry::deserialize(deserializer)?;
+        Ok(Self { path, sha256, size })
     }
 }
 
@@ -414,6 +446,27 @@ mod tests {
             r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2},"site/z.css":{"path":"site/z.css","sha256":"z","size":1}},"blob_bytes":3,"blob_count":2}"#
         );
         assert!(!json.contains('\n'));
+    }
+
+    /// An entry an earlier build stored with a `content_type` reads, and the
+    /// stored type is dropped: whatever it said, even a type that disagrees
+    /// with the table, the entry is served with the type its path derives,
+    /// and it is never written back. Any other unknown key is still refused.
+    #[test]
+    fn a_stored_content_type_is_read_and_never_used() {
+        let entry: FileEntry = serde_json::from_str(
+            r#"{"path":"site/notes.md","sha256":"a","size":2,"content_type":"image/png"}"#,
+        )
+        .expect("a legacy entry reads");
+        assert_eq!(entry.content_type(), "text/markdown; charset=utf-8");
+        assert_eq!(
+            serde_json::to_string(&entry).expect("serialize"),
+            r#"{"path":"site/notes.md","sha256":"a","size":2}"#
+        );
+        assert!(serde_json::from_str::<FileEntry>(
+            r#"{"path":"site/notes.md","sha256":"a","size":2,"kind":"x"}"#
+        )
+        .is_err());
     }
 
     /// A manifest written before the blob counters existed must still load —

@@ -964,15 +964,32 @@ async fn a_size_that_does_not_match_the_content_is_refused() {
 }
 
 /// A manifest declares no content type: what a file is served as is a
-/// function of its path, so a bundle has nothing to say about it. An entry
-/// that still declares one is not this build's manifest, and is refused
-/// when it is parsed rather than half-read.
-#[test]
-fn a_manifest_entry_that_declares_a_content_type_does_not_parse() {
+/// function of its path. A bundle exported before that change declares one
+/// on every entry; it is read and dropped, so the bundle imports, and the
+/// files land with the types their paths derive whatever it declared.
+#[tokio::test]
+async fn a_declared_content_type_is_ignored() {
+    let (ctx, control) = fixture().await;
     let mut value = serde_json::to_value(manifest()).expect("serialize");
-    value["site"][0]["content_type"] = serde_json::json!("text/html; charset=utf-8");
-    let err = serde_json::from_value::<SeedManifest>(value).expect_err("an unknown field");
-    assert!(err.to_string().contains("content_type"), "{err}");
+    for entry in value["site"].as_array_mut().expect("site") {
+        entry["content_type"] = serde_json::json!("image/png");
+    }
+    let manifest: SeedManifest = serde_json::from_value(value).expect("a legacy manifest reads");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    let ws = workspace::load(&ctx).await.expect("workspace");
+    assert_eq!(
+        ws.get("site/index.html").expect("entry").content_type(),
+        "text/html; charset=utf-8"
+    );
 }
 
 /// The path check runs before the fetch, so a traversing entry is refused for

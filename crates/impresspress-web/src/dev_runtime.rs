@@ -1003,9 +1003,8 @@ pub async fn install(sandbox: &Sandbox) {
     let ctx = BootContext { wafer };
     let shared = &sandbox.shared;
 
-    // First: a sandbox an earlier build stored content types for does not
-    // load until they are gone, and serves the stored types until its site
-    // is published again.
+    // First: a sandbox an earlier build stored content types for serves the
+    // stored types until its site is published again.
     match stored_types::upgrade(&ctx).await {
         Ok(upgrade) if upgrade.changed_anything() => web_sys::console::log_1(
             &format!(

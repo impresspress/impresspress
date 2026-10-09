@@ -28,27 +28,26 @@ sandbox publisher and its export, `impresspress serve --target web` and the
 Cloudflare release-asset upload. Types that change: `.md` is `text/markdown;
 charset=utf-8` (the sandbox published it as `text/plain`), `.json`, `.map`
 and `.svg` gain the charset, `.xml` and `.csv` are typed (they were
-`application/octet-stream`), and `impresspress serve --target web` no longer sends
-`.txt`, `.md` and other text files as `application/octet-stream`.
+`application/octet-stream`), and `impresspress serve --target web` no longer
+sends `.txt`, `.md` and other text files as `application/octet-stream`.
 
 **Dev sandbox API, breaking.** A file's type is no longer stored: it follows
 from its path. `GET /b/dev/api/files`, `POST /b/dev/api/files/write-batch`
 and `POST /b/dev/api/blocks` no longer carry `content_type` on each file,
 and the generations API's manifests do not either. A seed bundle's
-`manifest.json` declares no `content_type`. A manifest that still does is
-not this version's, and does not parse. An exported folder ships the
-runtime that made it, so a bundle exported by an earlier version still
-boots with that version.
+`manifest.json` declares no `content_type`. One that a bundle exported by an
+earlier version still declares is ignored: the file gets the type its path
+derives.
 
 **Dev sandbox data, one-way.** The first boot of this version rewrites what
 an existing browser sandbox stored. `workspace.json` and every generation
-loses the `content_type` on each file, and the live site is published again
-so each file carries its new type. An older runtime cannot read the
-rewritten data, so rolling the runtime back breaks a sandbox this version
-has booted. The recovery is a fresh sandbox: clear the site's data in the
+lose the `content_type` on each file, and the live site is published again
+so each file carries its new type. Until then a stored type is read and
+ignored. An older runtime cannot read the rewritten data, so rolling the
+runtime back breaks a sandbox this version has booted. The recovery is a fresh sandbox: clear the site's data in the
 browser, or open it in a new profile. If the republish fails, the browser
-console says so. The workspace is still usable, and the next boot tries
-again.
+console says so. The sandbox keeps working, with its active site and blocks,
+and the next boot tries again.
 
 ### Storage: the object listing's `prefix` is case-sensitive everywhere
 
