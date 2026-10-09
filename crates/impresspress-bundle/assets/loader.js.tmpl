@@ -1209,10 +1209,17 @@ function takeControl(worker) {
 // again, within the same deadline. While a navigation is under way the
 // probes keep failing until it replaces this document; a failure that
 // passes is followed by the answer. Nothing that throws is acted on, so
-// nothing that throws erases anything.
+// nothing that throws erases anything. The first failure of an ask is
+// logged; the ones after it, which a navigation under way repeats every
+// PROBE_RETRY_MS, are not.
+//
+// The worker's death is looked for after every failure and after every
+// pause, so no probe is made once it has been reported.
 async function askApp(target) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), BOOT_PROBE_TIMEOUT_MS);
+    const deathReported = () => sessionStorage.getItem(SW_RECOVER_KEY) !== null;
+    let logged = false;
     try {
         for (;;) {
             try {
@@ -1226,13 +1233,15 @@ async function askApp(target) {
                 // Only the timer aborts these requests, so an aborted probe
                 // is one that ran out of time.
                 if (controller.signal.aborted) return { probe: null, timedOut: true };
-                console.warn('[__APP_NAME__] Boot probe failed:', error);
+                if (!logged) {
+                    logged = true;
+                    console.warn('[__APP_NAME__] Boot probe failed; asking again until the app answers:', error);
+                }
             }
-            if (sessionStorage.getItem(SW_RECOVER_KEY) !== null) {
-                return { probe: null, timedOut: false };
-            }
+            if (deathReported()) return { probe: null, timedOut: false };
             await new Promise((resume) => setTimeout(resume, PROBE_RETRY_MS));
             if (controller.signal.aborted) return { probe: null, timedOut: true };
+            if (deathReported()) return { probe: null, timedOut: false };
         }
     } finally {
         clearTimeout(timer);
@@ -1248,8 +1257,9 @@ async function askApp(target) {
 // static loader twice — and this page learns whether the app answers at all,
 // which is what everything below turns on. Whether `target` is this page's
 // own address (a reload) or another (a redirect) makes no difference, so the
-// probe runs for both. `target` is therefore requested TWICE — this probe,
-// then the navigation — and has to be an idempotent GET.
+// probe runs for both. `target` is therefore requested at least twice — the
+// probe (made again if it could not be made, `askApp`), then the
+// navigation — and has to be an idempotent GET.
 async function enterApp(target, worker, status, waitedMs) {
     // A page the worker does not control cannot probe it: its requests go to
     // the static host. Not being taken is, like a probe with no answer, a

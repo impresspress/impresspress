@@ -807,29 +807,55 @@ test('a probe that threw proves nothing, clears nothing and erases nothing', asy
 // shell that went on to the app on that would reload over the navigation:
 // the tab would land back here, on `/`, instead of where it was sent.
 // Reproduced in Playwright's WebKit with `beforeunload` withheld.
-test('a navigation that cut the probe off is left to finish, with no beforeunload', async () => {
-  const shell = loadShell({
-    probe: () => {
+//
+// Here the navigation is under way for the first three probes and then ends
+// without replacing the document (a download, a 204): the shell must do
+// nothing while it is under way, and the app's answer decides after.
+function navigationUnderWay(underWay, during) {
+  let calls = 0;
+  return () => {
+    calls += 1;
+    if (calls <= underWay) {
+      during(calls);
       throw new TypeError('Load failed');
-    },
-    now: NOW
-  });
-  await until(() => shell.probes.length >= 3, 'the probe is asked again');
+    }
+    return new Response('<html>', { status: 200 });
+  };
+}
 
+test('a navigation that cut the probe off is not reloaded over, with no beforeunload', async () => {
+  const whileUnderWay = [];
+  const shell = loadShell({
+    now: NOW,
+    probe: navigationUnderWay(3, () =>
+      whileUnderWay.push([shell.location.reloads, shell.location.replaced.length])
+    )
+  });
+  await shell.booted;
+
+  assert.deepEqual(whileUnderWay, [[0, 0], [0, 0], [0, 0]], 'nothing navigated while it was under way');
+  assert.equal(shell.probes.length, 4);
+  // No `beforeunload` came, and the navigation left this document in
+  // place: the shell is still what the tab shows, so it goes on to the app.
+  assert.equal(shell.location.reloads, 1);
+  // One line in the console for the whole ask, not one a second.
+  assert.equal(shell.warnings.filter((w) => w.includes('Boot probe failed')).length, 1);
+});
+
+// Desktop WebKit fires `beforeunload` as well: once the navigation ends and
+// the app answers, the shell stands down as in Chromium.
+test('a navigation that cut the probe off and fired beforeunload is stood down from', async () => {
+  const shell = loadShell({
+    now: NOW,
+    onProbe: ({ leave }) => leave(),
+    probe: navigationUnderWay(3, () => {})
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 4);
   assert.equal(shell.location.reloads, 0);
   assert.deepEqual(shell.location.replaced, []);
-  assert.equal(shell.stuck('impresspress-stopped-cause'), null);
-
-  // The navigation is where the tab is going; when it commits, this
-  // document is gone. Until then the shell keeps asking — and ends, if it
-  // never commits, on the choice above.
-  shell.deadline();
-  await until(() => shell.statusLines.some((l) => l.startsWith('The app has not answered')), 'first 60 s');
-  const asked = shell.probes.length;
-  await until(() => shell.probes.length > asked, 'asked again');
-  shell.deadline();
-  await shell.booted;
-  assert.equal(shell.location.reloads, 0);
+  assert.match(shell.status.textContent, /If this page stays, reload it\.$/);
 });
 
 // A probe that failed for a reason that passes — the worker was stopped
@@ -869,6 +895,25 @@ test('a probe asked again that meets a dead runtime sets the breaker', async () 
   assert.equal(shell.probes.length, 2);
   assert.equal(shell.session.getItem(BREAKER), breaker(CAUSE, 'initialize'));
   assert.equal(shell.location.reloads, 1);
+});
+
+// …and one whose notice arrives while the shell pauses between probes:
+// looked for again after the pause, so no further probe is made.
+test('a worker that reports its death during the pause is not asked again', async () => {
+  const shell = loadShell({
+    now: NOW,
+    probe: () => {
+      // Delivered in the next turn: after the shell has looked once, during
+      // its pause.
+      setTimeout(() => shell.post({ type: 'sw-self-destruct', reason: CAUSE, stage: 'initialize' }), 0);
+      throw new TypeError('Failed to fetch');
+    }
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 1);
+  assert.equal(shell.session.getItem(BREAKER), breaker(CAUSE, 'initialize'));
+  assertUntouched(shell);
 });
 
 // A worker that posts its self-destruct notice is navigating this page
