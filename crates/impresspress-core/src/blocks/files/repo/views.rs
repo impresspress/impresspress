@@ -15,9 +15,9 @@ use crate::util::RecordExt;
 /// Object-view audit table.
 pub const TABLE: &str = "impresspress__files__views";
 
-// One object-view audit row, decoded.
-/// One recorded view of an object.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+/// One object-view audit row, decoded. Not a response body: callers see
+/// [`ViewedObjectView`](crate::blocks::files::contracts::ViewedObjectView).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewRow {
     pub id: String,
     /// Bucket holding the viewed object.

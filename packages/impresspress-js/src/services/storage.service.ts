@@ -65,9 +65,9 @@ export interface UploadFileOptions extends TransferOptions {
 }
 
 /**
- * One row of the `impresspress__files__objects` metadata table (see
- * `crates/impresspress-core/src/blocks/files/repo/objects.rs`), flattened
- * from the wire `Record { id, data }` shape (`id` + the row's columns).
+ * One file a search matched: the server's `ObjectView` (see
+ * `crates/impresspress-core/src/blocks/files/contracts.rs`), flattened from
+ * the wire `Record { id, data }` shape (`id` + the view's fields).
  */
 export interface FileMetadataRecord {
   id: string;
@@ -80,8 +80,8 @@ export interface FileMetadataRecord {
    * storage. The two values the server's `ObjectStatus` enum defines — it is
    * the type of the column now, so a row can hold nothing else.
    *
-   * Search and recent listings only ever return `complete` rows; `pending`
-   * reaches a client only through a listing that does not filter on status.
+   * Search only ever returns `complete` files; `pending` is an upload still
+   * in flight, which search leaves out.
    */
   status: 'pending' | 'complete';
   uploaded_by: string;
@@ -89,14 +89,14 @@ export interface FileMetadataRecord {
 }
 
 /**
- * One row of the `impresspress__files__views` object-view audit table (see
- * `crates/impresspress-core/src/blocks/files/repo/views.rs`), flattened from
- * the wire `Record { id, data }` shape (`id` + the row's columns).
+ * One recorded download of an object: the server's `ViewedObjectView` (see
+ * `crates/impresspress-core/src/blocks/files/contracts.rs`), flattened from
+ * the wire `Record { id, data }` shape (`id` + the view's fields).
  *
  * This — not [`FileMetadataRecord`] — is what `/b/storage/api/recent`
- * returns: `handle_recent` pages `repo::views::list_recent_for_user`, one row
- * per tracked download, so the response carries the viewer and the view
- * instant rather than the object's size, type or upload state.
+ * returns: `handle_recent` pages `repo::views::list_recent_for_user`, one
+ * entry per tracked download, so the response carries the viewer and the
+ * view instant rather than the object's size, type or upload state.
  */
 export interface FileViewRecord {
   id: string;
@@ -108,28 +108,25 @@ export interface FileViewRecord {
   user_id: string;
   /** RFC 3339 instant of the view. */
   viewed_at: string;
-  created_at: string;
-  updated_at: string;
 }
 
-/** The flattened form of the server's `RecordList` envelope. */
+/** The flattened form of the server's record-list envelope. */
 export interface RecordListResult<T> {
   items: T[];
   total: number;
 }
 
-/** `search`'s result: object-metadata rows. */
+/** `search`'s result: the files a search matched. */
 export type SearchResult = RecordListResult<FileMetadataRecord>;
 
-/** `getRecentFiles`'s result: object-view audit rows. */
+/** `getRecentFiles`'s result: recorded downloads. */
 export type RecentViewsResult = RecordListResult<FileViewRecord>;
 
 /**
- * Wire shape of wafer-core's `RecordList` (see
- * `wafer-block/src/wire/database.rs`): `{ records, total_count, page,
- * page_size }`. `/b/storage/api/search` and `/b/storage/api/recent` both
- * serialize a `RecordList` directly (`ok_json(&result)`), NOT a `{ data,
- * total }` envelope.
+ * Wire shape of the files block's `RecordListView` envelope (see
+ * `crates/impresspress-core/src/blocks/files/contracts.rs`): `{ records,
+ * total_count, page, page_size }`. `/b/storage/api/search` and
+ * `/b/storage/api/recent` both answer it, NOT a `{ data, total }` envelope.
  */
 interface RecordListWire<T> {
   records: Array<{ id: string; data: T }>;

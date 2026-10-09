@@ -105,41 +105,18 @@ pub(in crate::blocks::files) async fn handle_list_objects(
         Ok(page) => page,
         Err(e) => return crud::db_error_internal(e, "Object listing failed"),
     };
-    let objects = match page.rows.into_iter().map(object_info).collect() {
+    let objects = match page
+        .rows
+        .into_iter()
+        .map(ObjectInfoResponse::try_from)
+        .collect()
+    {
         Ok(objects) => objects,
         Err(e) => return crud::db_error_internal(e, "Object listing failed"),
     };
     ok_json(&ObjectListResponse {
         objects,
         total_count: page.total,
-    })
-}
-
-/// One listed object, as its row records it. `last_modified` is when the
-/// upload that stored it began (`uploaded_at`), the instant the SSR object
-/// browser shows as "modified"; a row with none — the column is nullable in
-/// migration 001 — falls back to the row's own `updated_at`, which every
-/// write stamps. A row with neither readable is reported, naming it.
-fn object_info(row: repo::objects::ObjectRow) -> Result<ObjectInfoResponse, wafer_run::WaferError> {
-    let parse = |stamp: &str| {
-        chrono::DateTime::parse_from_rfc3339(stamp)
-            .ok()
-            .map(|t| t.with_timezone(&chrono::Utc))
-    };
-    let Some(last_modified) = parse(&row.uploaded_at).or_else(|| parse(&row.updated_at)) else {
-        return Err(wafer_run::WaferError::new(
-            ErrorCode::Internal,
-            format!(
-                "object row {} has no readable uploaded_at or updated_at ({:?}, {:?})",
-                row.id, row.uploaded_at, row.updated_at
-            ),
-        ));
-    };
-    Ok(ObjectInfoResponse {
-        key: row.key,
-        size: row.size,
-        content_type: row.content_type,
-        last_modified,
     })
 }
 

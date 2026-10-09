@@ -42,9 +42,10 @@ use crate::{
 /// uploader and timestamps.
 pub const TABLE: &str = "impresspress__files__objects";
 
-// One object-metadata row, decoded.
-/// One stored object's metadata.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+/// One object-metadata row, decoded. Not a response body: callers see
+/// [`ObjectView`](crate::blocks::files::contracts::ObjectView) and
+/// [`ObjectInfoResponse`](crate::blocks::files::contracts::ObjectInfoResponse).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRow {
     pub id: String,
     /// Bucket name; `(bucket, key)` is unique.

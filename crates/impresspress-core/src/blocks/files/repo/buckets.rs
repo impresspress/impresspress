@@ -21,7 +21,7 @@ use crate::{
 pub const TABLE: &str = "impresspress__files__buckets";
 
 /// One bucket row, decoded.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketRow {
     pub id: String,
     /// Bucket name, and the blob-namespace folder name in `wafer-run/storage`.

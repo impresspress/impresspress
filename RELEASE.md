@@ -19,6 +19,27 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Files API: listings publish views, not stored rows — a breaking change for API clients
+
+**What changes.** The files block's record listings answered the stored
+row, so its bookkeeping stamps went out with it. They now answer a view of
+what the record means to the caller. The `{ records: [{ id, data }],
+total_count, page, page_size }` envelope is unchanged, and so is every field
+the SDK reads. These fields are no longer in `data`:
+
+- `GET /b/storage/api/search`: `created_at` and `updated_at` (`uploaded_at`
+  already says when).
+- `GET /b/storage/api/recent`: `created_at` and `updated_at` (`viewed_at`
+  is the instant; an entry is never modified).
+- `GET /b/cloudstorage/shares` and `GET /b/cloudstorage/admin/shares`:
+  `updated_at` (a share is never modified; `created_at` stays).
+- `GET /b/cloudstorage/admin/access-logs`: `created_at` and `updated_at`
+  (`accessed_at` is the instant).
+
+The quota listings and the quota update answer the same fields as before.
+The SDK's `FileViewRecord` no longer has `created_at` or `updated_at`. Drop
+those fields from anything that reads them. No migration is involved.
+
 ### Search: the text is literal and ASCII case is ignored everywhere
 
 **What changes.** The admin user search, the audit-log resource filter, the

@@ -67,9 +67,9 @@ export class ExtensionsService extends BaseService {
 }
 
 /**
- * One row of the `impresspress__files__cloud_shares` table (see
- * `crates/impresspress-core/src/blocks/files/repo/shares.rs`), flattened
- * from the wire `Record { id, data }` shape (`id` + the row's columns).
+ * One share link: the server's `ShareView` (see
+ * `crates/impresspress-core/src/blocks/files/contracts.rs`), flattened from
+ * the wire `Record { id, data }` shape (`id` + the view's fields).
  */
 export interface ShareRecord {
   id: string;
@@ -80,12 +80,12 @@ export interface ShareRecord {
   created_at: string;
   access_count: number;
   /**
-   * Absolute expiry, or `null` for a share that never expires.
+   * Absolute expiry (RFC 3339), or `null` for a share that records none.
+   * `null` is NOT "never expires": every share link has an end, and the
+   * server refuses the public link of a share that records none.
    *
-   * `null`, not absent. `ShareRow.expires_at` is an `Option<String>` with no
-   * `skip_serializing_if`, so the key is always present and carries JSON
-   * `null` when there is no expiry — this was declared `expires_at?: string`
-   * until `files.openapi.json` started describing the row and said otherwise.
+   * `null`, not absent. `ShareView.expires_at` is an `Option<String>` with
+   * no `skip_serializing_if`, so the key is always present.
    */
   expires_at: string | null;
   /** Access cap, or `null` for unlimited. Always present — see `expires_at`. */
@@ -128,10 +128,10 @@ export class CloudStorageExtension extends ExtensionsService {
   /**
    * List the current user's shares. `GET /b/cloudstorage/shares`.
    *
-   * The handler serializes wafer-core's `RecordList` directly
-   * (`ok_json(&result)` over `repo::shares::list_for_user`) — `{ records,
-   * total_count, page, page_size }`, NOT a `{ data, total }` envelope. See
-   * `wafer-block/src/wire/database.rs`.
+   * The handler answers the files block's `RecordListView` envelope over
+   * `ShareView` records — `{ records, total_count, page, page_size }`, NOT a
+   * `{ data, total }` envelope. See
+   * `crates/impresspress-core/src/blocks/files/contracts.rs`.
    */
   async listShares(): Promise<ListSharesResult> {
     const result = await this.call<{
