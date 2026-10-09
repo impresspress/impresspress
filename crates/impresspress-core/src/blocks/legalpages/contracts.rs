@@ -68,7 +68,7 @@ pub enum DocumentStatus {
 
 /// Body of `PATCH /b/legalpages/api/documents/{id}`: a document's text.
 ///
-/// `title` and `content` are the only columns this endpoint can reach, and
+/// `title` and `content` are the only fields this endpoint can change, and
 /// any other field is refused by name. A document's `status` and `version`
 /// change only through a publish.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]

@@ -29,7 +29,9 @@ pub enum GenerationStatus {
     Activating,
     /// Currently serving.
     Active,
-    /// Abandoned; `failure_message` says why.
+    // The reason is stored in the row's `failure_message`, which no view
+    // publishes.
+    /// Abandoned: validation or activation failed.
     Failed,
     /// No longer serving — replaced by a later generation.
     ///

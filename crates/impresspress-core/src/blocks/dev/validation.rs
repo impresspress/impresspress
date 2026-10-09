@@ -181,13 +181,14 @@ pub struct Diagnostic {
     /// in the guest's `Init`. Match on this rather than on `message`.
     ///
     /// `null` when whoever produced the diagnostic had no code for it. Every
-    /// diagnostic this crate produces has one — they are the constants above
-    /// — but a *compiler* diagnostic forwarded by `/b/dev` need not: rustc
-    /// numbers some of what it says (`E0425`) and not the rest, and the page
-    /// forwards what the compiler gave it. This field is optional for the
-    /// same reason `file`/`line`/`column` are: "when the compiler reported
-    /// one". Inventing a placeholder on the way in would put a value in the
-    /// build's stored record that nothing ever said.
+    /// diagnostic the sandbox's own validator produces has one, but a
+    /// *compiler* diagnostic need not: rustc numbers some of what it says
+    /// (`E0425`) and not the rest, and the page forwards what the compiler
+    /// gave it.
+    // The validator's codes are the constants above. This field is optional
+    // for the same reason `file`/`line`/`column` are: "when the compiler
+    // reported one". Inventing a placeholder on the way in would put a value
+    // in the build's stored record that nothing ever said.
     #[serde(default)]
     pub code: Option<String>,
     /// What is wrong, and what to change.

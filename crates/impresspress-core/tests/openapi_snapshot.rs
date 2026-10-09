@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 
 mod baselines;
+mod descriptions;
 
 /// Blocks under migration, mapped to the URL prefixes they actually serve.
 ///
@@ -692,117 +693,75 @@ async fn products_refund_rows_describe_provider_status_truthfully() {
     }
 }
 
-/// A `///` line on a products contract type or field is published: it becomes
-/// the schema's `description` in this document, in the generated SDK types
-/// and in the agent tool schemas built from both. Notes written for the
-/// maintainer — which table backs a view, which SQL a filter runs, why a
-/// keyword was or was not used, which other surface a field is kept for —
-/// belong in `//` comments beside the code. This walks every description the
-/// products block publishes (its paths and every component they reach) and
-/// refuses the markers of storage and implementation detail.
+/// No published description carries a maintainer note — in any block's
+/// slice of `/openapi.json` or in the global WebMCP manifest.
+///
+/// `tests/descriptions/` holds the markers and the reviewed exceptions. This
+/// checked the products block alone until the admin block was found
+/// publishing `LIKE '%…%'` as the meaning of a search parameter; every block
+/// compiled into this run is checked now, under its own scope, so a new block
+/// is covered the day it is added to [`SNAPSHOTTED_BLOCKS`].
 #[tokio::test]
-async fn products_descriptions_carry_no_maintainer_notes() {
+async fn descriptions_carry_no_maintainer_notes() {
     let ctx = impresspress_core::test_support::TestContext::new().await;
     let doc = impresspress_core::test_support::openapi_document(&ctx).await;
-    let block: serde_json::Value =
-        serde_json::from_str(&block_openapi(&doc, &["/b/products"]).text)
-            .expect("block openapi parses");
+    // As `admin`, the manifest lists every tool any caller can be offered.
+    let manifest = impresspress_core::test_support::discovery_json_as(
+        &ctx,
+        "/b/webmcp/manifest.json",
+        "impresspress.example.com",
+        Some(&["admin"]),
+    )
+    .await;
 
-    fn descriptions<'a>(node: &'a serde_json::Value, out: &mut Vec<&'a str>) {
-        match node {
-            serde_json::Value::Object(map) => {
-                if let Some(serde_json::Value::String(text)) = map.get("description") {
-                    out.push(text);
-                }
-                for value in map.values() {
-                    descriptions(value, out);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    descriptions(item, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut published = Vec::new();
-    descriptions(&block, &mut published);
-    assert!(
-        published.len() > 100,
-        "the products block publishes hundreds of descriptions; found {} - the walk \
-         is looking in the wrong place and this test would pass forever",
-        published.len()
+    let mut names = std::collections::BTreeSet::new();
+    descriptions::vocabulary(&doc, &mut names);
+    descriptions::vocabulary(&manifest, &mut names);
+    // The dev block's prose names the sandbox's agent tools, which
+    // `tools.json` publishes rather than either document above.
+    #[cfg(feature = "block-dev")]
+    names.extend(
+        impresspress_core::blocks::dev::tools::SELECTIONS
+            .iter()
+            .map(|selection| selection.3.to_string()),
     );
 
-    // Each marker names storage or implementation, never caller meaning: a
-    // table name or the words for stored tables and columns, a SQL operator,
-    // a migration file, a Rust path, a JSON Schema keyword discussed as a
-    // design choice, and the internal surfaces (server-rendered pages, the
-    // WebMCP manifest) a field was justified by. Matched case-insensitively,
-    // as words where a bare substring would hit ordinary prose.
-    let markers = regex::Regex::new(
-        r"(?i)impresspress__|\blike\s+'|\bcolumns?\b|\btables?\b|\.sql\b|::|\bwriteonly\b|\bwebmcp\b|\bssr\b",
-    )
-    .expect("marker pattern compiles");
+    let mut scopes: Vec<(&str, Vec<String>)> = SNAPSHOTTED_BLOCKS
+        .iter()
+        .map(|(block, prefixes)| (*block, *prefixes))
+        .chain(
+            FEATURE_GATED_BLOCKS
+                .iter()
+                .filter(|(_, _, compiled)| *compiled)
+                .map(|(block, prefixes, _)| (*block, *prefixes)),
+        )
+        .map(|(block, prefixes)| {
+            let slice: serde_json::Value =
+                serde_json::from_str(&block_openapi(&doc, prefixes).text)
+                    .expect("block openapi parses");
+            (block, descriptions::published_text(&slice))
+        })
+        .collect();
+    scopes.push(("webmcp", descriptions::published_text(&manifest)));
 
-    // A backticked snake_case name a caller can use is one the document
-    // itself publishes — a property, a parameter, an enum or const value.
-    // Any other (`soft_delete`, `replace_for_offer`) is the name of code.
-    fn vocabulary(node: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
-        match node {
-            serde_json::Value::Object(map) => {
-                if let Some(serde_json::Value::Object(props)) = map.get("properties") {
-                    out.extend(props.keys().cloned());
-                }
-                if let Some(serde_json::Value::String(name)) = map.get("name") {
-                    out.insert(name.clone());
-                }
-                for key in ["enum", "const"] {
-                    match map.get(key) {
-                        Some(serde_json::Value::Array(values)) => {
-                            out.extend(values.iter().filter_map(|v| v.as_str().map(str::to_string)))
-                        }
-                        Some(serde_json::Value::String(value)) => {
-                            out.insert(value.clone());
-                        }
-                        _ => {}
-                    }
-                }
-                for value in map.values() {
-                    vocabulary(value, out);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    vocabulary(item, out);
-                }
-            }
-            _ => {}
+    let mut failures = Vec::new();
+    let mut used = std::collections::BTreeSet::new();
+    for (scope, texts) in &scopes {
+        if texts.is_empty() {
+            failures.push(format!(
+                "[{scope}] publishes no descriptions - the walk is looking in the wrong \
+                 place and this test would pass forever"
+            ));
         }
+        failures.extend(descriptions::leaks(scope, texts, &names, &mut used));
     }
-    let mut published_names = std::collections::BTreeSet::new();
-    vocabulary(&block, &mut published_names);
-    let backticked_snake =
-        regex::Regex::new(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").expect("snake pattern compiles");
-
-    let mut leaks = Vec::new();
-    for text in &published {
-        for found in markers.find_iter(text) {
-            leaks.push(format!("[{}] {text}", found.as_str()));
-        }
-        for name in backticked_snake.captures_iter(text) {
-            if !published_names.contains(&name[1]) {
-                leaks.push(format!("[`{}` is not a published name] {text}", &name[1]));
-            }
-        }
-    }
-    leaks.sort();
-    leaks.dedup();
+    let checked: Vec<&str> = scopes.iter().map(|(scope, _)| *scope).collect();
+    failures.extend(descriptions::stale(&checked, &used));
     assert!(
-        leaks.is_empty(),
-        "products descriptions carry maintainer notes:\n{}",
-        leaks.join("\n---\n")
+        failures.is_empty(),
+        "published descriptions carry maintainer notes - keep the caller-facing meaning in \
+         `///`, move the rest to a `//` comment beside the code:\n{}",
+        failures.join("\n---\n")
     );
 }
 

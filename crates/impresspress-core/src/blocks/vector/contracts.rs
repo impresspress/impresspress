@@ -38,8 +38,8 @@ use wafer_core::clients::vector as wire;
 // Mirrors
 // ---------------------------------------------------------------------------
 
-/// Distance metric a vector index is built with. Mirrors
-/// `wafer_core::clients::vector::DistanceMetric`.
+// Mirrors `wafer_core::clients::vector::DistanceMetric`.
+/// Distance metric a vector index is built with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DistanceMetric {
@@ -71,7 +71,8 @@ impl From<wire::DistanceMetric> for DistanceMetric {
     }
 }
 
-/// Search modality. Mirrors `wafer_core::clients::vector::SearchMode`.
+// Mirrors `wafer_core::clients::vector::SearchMode`.
+/// Search modality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
@@ -93,7 +94,8 @@ impl From<SearchMode> for wire::SearchMode {
     }
 }
 
-/// One row to upsert. Mirrors `wafer_core::clients::vector::VectorEntry`.
+// Mirrors `wafer_core::clients::vector::VectorEntry`.
+/// One row to upsert.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorEntryInput {
     /// Caller-supplied row id. Upserting the same id again replaces the row.
@@ -139,7 +141,8 @@ impl From<MetadataFilterInput> for wire::MetadataFilter {
     }
 }
 
-/// One query hit. Mirrors `wafer_core::clients::vector::VectorMatch`.
+// Mirrors `wafer_core::clients::vector::VectorMatch`.
+/// One query hit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorMatchView {
     /// Matched row id.
@@ -335,8 +338,10 @@ pub struct IngestRequest {
     pub document_id: String,
     /// The document text.
     pub text: String,
-    /// Arbitrary JSON stored on every chunk as `user_metadata`, beside the
-    /// `document_id` and `chunk_index` the block adds.
+    // `pages::ingest` builds each chunk's metadata object.
+    /// Arbitrary JSON stored with every chunk. A chunk's metadata — what a
+    /// query hit answers as `metadata` — is
+    /// `{"document_id": …, "chunk_index": n, "user_metadata": <this value>}`.
     pub metadata: Option<serde_json::Value>,
     /// Prepend an LLM-written one-paragraph summary of the document to every
     /// chunk before embedding. Silently skipped when no default LLM is

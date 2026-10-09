@@ -180,13 +180,14 @@ pub enum SignupResponse {
 /// `/change-password` answers it to JSON callers; that one endpoint answers a
 /// browser form with HTML instead.
 ///
-/// One type because it is one shape. The *text* differs per endpoint and is
-/// deliberately constant per endpoint rather than per outcome — the
-/// password-reset and verification pair answer the same sentence whatever
-/// the address's state, so nothing about an account can be learned from the
-/// response (`api::verify::resend_tests` pins that). A per-endpoint copy of
-/// this struct would publish five schemas that must be kept identical by
-/// hand.
+/// The text differs per endpoint and is constant per endpoint rather than
+/// per outcome — the password-reset and verification pair answer the same
+/// sentence whatever the address's state, so nothing about an account can be
+/// learned from the response.
+// One type because it is one shape: a per-endpoint copy of this struct would
+// publish five schemas that must be kept identical by hand. That the text
+// reveals nothing about the account is pinned by `api::verify::resend_tests`.
+//
 // Which HTML, and where the branch is: `api::change_password`'s
 // `changed_response` and `refused` answer an htmx caller with markup — a
 // refusal for the Security form's result slot, a success in place of the

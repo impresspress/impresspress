@@ -92,9 +92,10 @@ pub struct ChatResponse {
     /// The assistant's reply: every text delta the model produced,
     /// concatenated.
     pub content: String,
+    // The 500 on a refused store is `routes::chat::handle_chat`'s.
     /// Id of the assistant entry persisted in the messages block. Always
     /// populated: a reply the store refused is answered with a 500, not a
-    /// body (see `routes::chat::handle_chat`).
+    /// body.
     pub message_id: String,
     /// The model the request was served by, after per-thread and default
     /// resolution.
@@ -285,8 +286,8 @@ pub struct DiscoveredModelsResponse {
 // /b/llm/api/models
 // ---------------------------------------------------------------------------
 
-/// A model one of the registered backends can serve. Mirrors
-/// `wafer_core::clients::llm::ModelInfo`.
+// Mirrors `wafer_core::clients::llm::ModelInfo`.
+/// A model one of the registered backends can serve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelInfoView {
     /// Backend (provider name) the model is hosted in.
@@ -356,8 +357,8 @@ pub struct ModelStatusResponse {
     pub status: ModelStatusView,
 }
 
-/// Lifecycle status of one model on one backend. Mirrors
-/// `wafer_core::clients::llm::ModelStatus`.
+// Mirrors `wafer_core::clients::llm::ModelStatus`.
+/// Lifecycle status of one model on one backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelStatusView {
     /// High-level state.

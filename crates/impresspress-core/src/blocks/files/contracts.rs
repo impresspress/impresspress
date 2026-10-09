@@ -29,27 +29,30 @@ use super::repo::Page;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStatus {
-    /// Reserved: the row exists and counts against quota, the blob may not.
+    // The row exists and counts against quota; the blob may not.
+    /// Reserved: the upload is in flight. Counts against quota; not listed
+    /// as a file.
     Pending,
-    /// Uploaded: the blob is in storage and the object is listable.
+    /// Uploaded: the file is stored and listable.
     Complete,
 }
 
-/// One record in the [`RecordListView`] envelope: the row's `id` beside the
-/// row's columns, exactly as `wafer_core::clients::database::Record`
-/// serializes. The backends put `id` in BOTH places (`row_to_record` inserts
-/// every column into `data` and copies `id` out to the envelope), and
-/// `packages/impresspress-js` reads the envelope one
-/// (`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.
-///
-/// Generic in the row type rather than carrying an untyped
-/// `serde_json::Map<String, Value>`. The SDK reads *named columns* out of
-/// `data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in
-/// `extensions.service.ts` — so an untyped `data` would publish a schema
-/// that says nothing about the fields those interfaces rely on, and the
-/// SDK's type-freshness gate would report green on exactly the columns that
-/// can drift. `T` is the row struct the handler already had in hand, so the
-/// bytes are unchanged.
+// The row's `id` beside the row's columns, exactly as
+// `wafer_core::clients::database::Record` serializes. The backends put `id` in
+// BOTH places (`row_to_record` inserts every column into `data` and copies
+// `id` out to the envelope), and `packages/impresspress-js` reads the envelope
+// one (`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.
+//
+// Generic in the row type rather than carrying an untyped
+// `serde_json::Map<String, Value>`. The SDK reads *named columns* out of
+// `data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in
+// `extensions.service.ts` — so an untyped `data` would publish a schema that
+// says nothing about the fields those interfaces rely on, and the SDK's
+// type-freshness gate would report green on exactly the columns that can
+// drift. `T` is the row struct the handler already had in hand, so the bytes
+// are unchanged.
+/// One record of a list: its `id`, and the record itself under `data`, which
+/// carries the same `id`.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RecordView<T> {
     pub id: String,
@@ -78,19 +81,18 @@ impl<T: Serialize> RecordView<T> {
     }
 }
 
-/// The `RecordList` envelope the block's JSON list endpoints publish:
-/// `{ records, total_count, page, page_size }`.
-///
-/// This is a *published contract*, not an implementation detail. The repo
-/// returns [`Page`], which is not `Serialize`; this view is the single place
-/// a page becomes a response body, so the envelope cannot drift one endpoint
-/// at a time. `packages/impresspress-js/src/services/storage.service.ts`
-/// declares the matching `RecordListWire<T>` and names
-/// `/b/storage/api/search` and `/b/storage/api/recent` in its doc comment;
-/// that SDK has its own CI job and is the reason this shape is preserved
-/// rather than modernised here. Changing it is a deliberate, separate
-/// change that moves the SDK in lockstep — see the follow-up in the PR that
-/// introduced this type.
+// This is a *published contract*, not an implementation detail. The repo
+// returns [`Page`], which is not `Serialize`; this view is the single place a
+// page becomes a response body, so the envelope cannot drift one endpoint at a
+// time. `packages/impresspress-js/src/services/storage.service.ts` declares
+// the matching `RecordListWire<T>` and names `/b/storage/api/search` and
+// `/b/storage/api/recent` in its doc comment; that SDK has its own CI job and
+// is the reason this shape is preserved rather than modernised here. Changing
+// it is a deliberate, separate change that moves the SDK in lockstep — see the
+// follow-up in the PR that introduced this type.
+/// The envelope the block's JSON list endpoints answer: one page of
+/// `records`, the page's `page` and `page_size`, and `total_count` across all
+/// pages.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RecordListView<T> {
     pub records: Vec<RecordView<T>>,
@@ -133,14 +135,17 @@ pub struct ObjectListResponse {
     pub total_count: i64,
 }
 
+// Both routes reach the same handler
+// ([`super::storage::buckets::handle_list_buckets`]), which differs only in
+// whether it scopes the read to the caller.
 /// `GET /b/storage/api/buckets` and `GET /b/storage/admin/api/buckets`
-/// response body — both routes reach the same handler
-/// ([`super::storage::buckets::handle_list_buckets`]), which differs only in
-/// whether it scopes the read to the caller.
+/// response body. The two answer the same shape; they differ only in whether
+/// the list is scoped to the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BucketListResponse {
-    /// Bucket names, from `repo::buckets::TABLE` — the single source of
-    /// truth for bucket existence. Not the blob namespace's folder list.
+    // From `repo::buckets::TABLE` — the single source of truth for bucket
+    // existence — not the blob namespace's folder list.
+    /// Bucket names.
     pub buckets: Vec<String>,
     /// Whether more buckets are visible to the caller than `buckets` names.
     ///
@@ -155,8 +160,8 @@ pub struct BucketListResponse {
 pub struct BucketCreatedResponse {
     /// The bucket that now exists, echoed back from the request.
     pub name: String,
-    /// Always `true` — the handler answers this body only after both the
-    /// folder and the metadata row are in place.
+    // Answered only after both the folder and the metadata row are in place.
+    /// Always `true` — this body is answered only once the bucket exists.
     pub created: bool,
 }
 
@@ -184,11 +189,13 @@ pub struct ObjectUploadedResponse {
 /// `GET /b/storage/admin/api/stats` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StorageStatsResponse {
-    /// Objects in `Complete` status. A `Pending` reservation is not a file.
+    /// Objects whose upload completed. A `pending` reservation, whose upload
+    /// is still in flight, is not a file.
     pub total_objects: i64,
     /// Sum of `size` over the same set.
     pub total_size_bytes: i64,
-    /// Rows in `repo::buckets::TABLE`, not folders in the blob namespace.
+    // Rows in `repo::buckets::TABLE`, not folders in the blob namespace.
+    /// Number of buckets.
     pub bucket_count: i64,
 }
 
@@ -206,13 +213,16 @@ pub struct ShareCreatedResponse {
     pub direct_url: String,
 }
 
-/// The `usage` half of [`QuotaResponse`]. Both numbers are computed over the
-/// caller's object rows, not read from a counter column.
+// Both numbers are computed over the caller's object rows, not read from a
+// counter column.
+/// The `usage` half of the quota response, counted from the caller's objects
+/// when it is asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaUsageView {
-    /// `SUM(size)` over the caller's rows, `Pending` reservations included.
+    /// Total `size` of the caller's objects, `pending` reservations
+    /// included.
     pub total_bytes: i64,
-    /// Objects the caller owns across all buckets, `Pending` included; not
+    /// Objects the caller owns across all buckets, `pending` included; not
     /// what the per-bucket `max_files_per_bucket` cap is checked against.
     pub file_count: i64,
 }
@@ -220,8 +230,8 @@ pub struct QuotaUsageView {
 /// `GET /b/cloudstorage/quota` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaResponse {
-    /// The caller's effective caps: their override row if they have one,
-    /// otherwise the block defaults.
+    /// The caller's effective caps: their per-user override if they have
+    /// one, otherwise the block defaults.
     pub quota: super::models::QuotaConfig,
     pub usage: QuotaUsageView,
 }

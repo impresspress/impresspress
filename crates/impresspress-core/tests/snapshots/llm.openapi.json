@@ -66,7 +66,7 @@
                       "type": "string"
                     },
                     "message_id": {
-                      "description": "Id of the assistant entry persisted in the messages block. Always\npopulated: a reply the store refused is answered with a 500, not a\nbody (see `routes::chat::handle_chat`).",
+                      "description": "Id of the assistant entry persisted in the messages block. Always\npopulated: a reply the store refused is answered with a 500, not a\nbody.",
                       "type": "string"
                     },
                     "model": {
@@ -380,7 +380,7 @@
                   "properties": {
                     "models": {
                       "items": {
-                        "description": "A model one of the registered backends can serve. Mirrors\n`wafer_core::clients::llm::ModelInfo`.",
+                        "description": "A model one of the registered backends can serve.",
                         "properties": {
                           "backend_id": {
                             "description": "Backend (provider name) the model is hosted in.",
@@ -538,7 +538,7 @@
                   "description": "`GET /b/llm/api/models/{backend_id}/{model_id}/status` response body.",
                   "properties": {
                     "status": {
-                      "description": "Lifecycle status of one model on one backend. Mirrors\n`wafer_core::clients::llm::ModelStatus`.",
+                      "description": "Lifecycle status of one model on one backend.",
                       "properties": {
                         "progress": {
                           "description": "Load progress in `0.0..=1.0`. Present only while `state` is\n`Loading`.",

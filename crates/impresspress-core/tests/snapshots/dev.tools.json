@@ -9230,7 +9230,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -9325,7 +9325,7 @@
             "type": "integer"
           },
           "seed_error": {
-            "description": "Why this instance's seed import was refused, if it was.\n\n`None` on every healthy instance — including one that never had a seed\nbundle to import. A sandbox whose seed was refused boots with an empty\nsite and no other sign of it (`dev_runtime::install` logs and carries\non, because a sandbox that refuses to boot is one whose `/b/dev` page\n— the only thing that could fix it — never comes up), so this is what\nmakes the cause readable through `dev_status` instead of only through\nthe service worker's console. Read from the same row an admin sees on\n`/b/admin/settings/variables`, which is the only surface an exported\nsite has (it has no `/b/dev`). `dev.js` does not render it: the page\npolls this endpoint several times a second, so a log line would need\nits own \"said this already\" state, and the agent that would act on a\nrefused seed reads `dev_status` rather than the log.",
+            "description": "Why this instance's seed import was refused, if it was.\n\n`null` on every healthy instance — including one that never had a\nseed bundle to import. A sandbox whose seed was refused boots with an\nempty site and no other sign of it, so this is where the cause is\nread. An admin sees the same text on `/b/admin/settings/variables`.",
             "type": [
               "string",
               "null"
@@ -9709,7 +9709,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -9743,7 +9743,7 @@
             "description": "One entry per phase the write's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
             "items": {
               "additionalProperties": false,
-              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
               "properties": {
                 "detail": {
                   "description": "Human-readable detail for the progress panel.",
@@ -10026,7 +10026,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -10056,7 +10056,7 @@
             "description": "One entry per phase the batch's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
             "items": {
               "additionalProperties": false,
-              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
               "properties": {
                 "detail": {
                   "description": "Human-readable detail for the progress panel.",
@@ -10254,7 +10254,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -10288,7 +10288,7 @@
             "description": "One entry per phase the delete's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
             "items": {
               "additionalProperties": false,
-              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
               "properties": {
                 "detail": {
                   "description": "Human-readable detail for the progress panel.",
@@ -10484,7 +10484,7 @@
                     },
                     {
                       "const": "failed",
-                      "description": "Abandoned; `failure_message` says why.",
+                      "description": "Abandoned: validation or activation failed.",
                       "type": "string"
                     },
                     {
@@ -10608,14 +10608,14 @@
               "blocks": {
                 "description": "The blocks the generation's runtime is built from.",
                 "items": {
-                  "description": "Everything the host needs to put one compiled guest into a runtime.\n\nThis is also the block entry of the generation manifest (design §11.3), so\na stored `block_manifest_json` decodes straight into `Vec<DynamicBlockSpec>`\nwith no intermediate shape.",
+                  "description": "Everything the host needs to put one compiled guest into a runtime.",
                   "properties": {
                     "artifact_sha256": {
                       "description": "SHA-256 of the `wasm32-wasip1` artifact, hex-encoded.",
                       "type": "string"
                     },
                     "capabilities": {
-                      "description": "Capabilities the guest is loaded under. Deny-by-default; the caller\nvalidates the declared set against the block's own namespace before\nthis ever reaches [`RuntimeControl`].\n\n`BlockCapabilities` is a producer type that derives neither\n`JsonSchema` nor `PartialEq`. It is published as a free-form object\nhere, and compared field-by-field in the `PartialEq` impl below."
+                      "description": "Capabilities the guest is loaded under, deny-by-default: what the\nblock declared, checked against the block's own namespace before it\nis loaded."
                     },
                     "name": {
                       "description": "Registered block name (`site/{name}`).",
@@ -10848,7 +10848,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -11006,7 +11006,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -11033,7 +11033,7 @@
             "description": "One entry per phase the activation passed through, with how long it\ntook. The last is always `active`.",
             "items": {
               "additionalProperties": false,
-              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
               "properties": {
                 "detail": {
                   "description": "Human-readable detail for the progress panel.",
@@ -11318,7 +11318,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned; `failure_message` says why.",
+                    "description": "Abandoned: validation or activation failed.",
                     "type": "string"
                   },
                   {
@@ -11345,7 +11345,7 @@
             "description": "One entry per phase the activation passed through, with how long it\ntook. The last is always `active`.",
             "items": {
               "additionalProperties": false,
-              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+              "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
               "properties": {
                 "detail": {
                   "description": "Human-readable detail for the progress panel.",

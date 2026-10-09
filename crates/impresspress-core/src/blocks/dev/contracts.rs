@@ -39,20 +39,21 @@ pub struct StatusResponse {
     /// `WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves
     /// (`GET /b/dev/api/guest`) and compiles blocks against.
     pub wafer_guest_version: u32,
+    // `dev_runtime::install` logs a refused seed and carries on, because a
+    // sandbox that refuses to boot is one whose `/b/dev` page — the only thing
+    // that could fix it — never comes up; this field is what makes the cause
+    // readable without the service worker's console. Read from the same
+    // variables row an admin sees, which is the only surface an exported site
+    // has (it has no `/b/dev`). `dev.js` does not render it: the page polls
+    // this endpoint several times a second, so a log line would need its own
+    // "said this already" state, and the agent that would act on a refused
+    // seed reads `dev_status` rather than the log.
     /// Why this instance's seed import was refused, if it was.
     ///
-    /// `None` on every healthy instance — including one that never had a seed
-    /// bundle to import. A sandbox whose seed was refused boots with an empty
-    /// site and no other sign of it (`dev_runtime::install` logs and carries
-    /// on, because a sandbox that refuses to boot is one whose `/b/dev` page
-    /// — the only thing that could fix it — never comes up), so this is what
-    /// makes the cause readable through `dev_status` instead of only through
-    /// the service worker's console. Read from the same row an admin sees on
-    /// `/b/admin/settings/variables`, which is the only surface an exported
-    /// site has (it has no `/b/dev`). `dev.js` does not render it: the page
-    /// polls this endpoint several times a second, so a log line would need
-    /// its own "said this already" state, and the agent that would act on a
-    /// refused seed reads `dev_status` rather than the log.
+    /// `null` on every healthy instance — including one that never had a
+    /// seed bundle to import. A sandbox whose seed was refused boots with an
+    /// empty site and no other sign of it, so this is where the cause is
+    /// read. An admin sees the same text on `/b/admin/settings/variables`.
     pub seed_error: Option<String>,
     /// The template this sandbox was seeded from, or null when the seed
     /// carried no sandbox block. What an agent reads to know which guide

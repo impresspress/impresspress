@@ -19,11 +19,12 @@ use crate::{blocks::files::models::QuotaConfig, util::RecordExt};
 /// Per-user quota override table.
 pub const TABLE: &str = "impresspress__files__cloud_quotas";
 
-/// One quota-override row, decoded.
+// One quota-override row, decoded.
+/// One user's quota override.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct QuotaRow {
     pub id: String,
-    /// The user this override applies to. Unique across the table.
+    /// The user this override applies to. A user has at most one override.
     pub user_id: String,
     /// The effective caps: each column that is present overrides the block
     /// default, field by field.

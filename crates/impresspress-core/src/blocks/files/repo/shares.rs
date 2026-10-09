@@ -22,38 +22,41 @@ pub const TABLE: &str = "impresspress__files__cloud_shares";
 /// Access log table — one row per recorded share access (audit trail).
 pub const ACCESS_LOGS_TABLE: &str = "impresspress__files__cloud_access_logs";
 
-/// One share row, decoded.
+// One share row, decoded.
+/// One share link to an object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ShareRow {
     pub id: String,
+    // Unique across the table.
     /// The opaque token embedded in the public `/b/storage/direct/{token}`
     /// URL: random bytes, hex-encoded, asserting nothing about the share.
-    /// This row is what it addresses, and what decides whether the link
-    /// still works. Unique across the table.
+    /// This share is what it addresses, and what decides whether the link
+    /// still works. No two shares have the same token.
     pub token: String,
     pub bucket: String,
     pub key: String,
-    /// User id of the share's creator — the ownership key
-    /// `handle_delete_share` checks.
+    // The ownership key `handle_delete_share` checks.
+    /// User id of the share's creator — besides an admin, the only user who
+    /// can delete it.
     pub created_by: String,
     /// RFC 3339 creation instant.
     pub created_at: String,
-    /// The end this share link records, as an RFC 3339 stamp.
+    // `None` is a SQL `NULL` or a stored empty string — one meaning, since
+    // the column is nullable and every caller treated `""` as unset. Creating
+    // a share cannot produce one — `NewShare` takes a non-optional expiry —
+    // and migration 003 gave every historical row an end, so a `None` here is
+    // a row that reached the table some other way.
+    /// When this share link stops working, as an RFC 3339 stamp.
     ///
-    /// `None` is a SQL `NULL` or a stored empty string — one meaning, since
-    /// the column is nullable and every caller treated `""` as unset. It is
-    /// NOT "never expires": every share link has an end, and a row that
-    /// records none cannot be shown to be live, so the public link refuses
-    /// it. Creating a share cannot produce one — `NewShare` takes a
-    /// non-optional expiry — and migration 003 gave every historical row an
-    /// end, so a `None` here is a row that reached the table some other
-    /// way.
+    /// `null` is NOT "never expires": every share link has an end, and a
+    /// share that records none cannot be shown to be live, so its public
+    /// link is refused.
     pub expires_at: Option<String>,
     pub access_count: i64,
-    /// Access cap, or `None` for unlimited. A non-positive stored value is
-    /// `None` too, which is the meaning [`NewShare::max_access_count`]
-    /// documents and the meaning
-    /// [`increment_access_count_capped`] enforces.
+    // A non-positive stored value is `None` too, which is the meaning
+    // [`NewShare::max_access_count`] documents and the meaning
+    // [`increment_access_count_capped`] enforces.
+    /// How many times the public link may be opened, or `null` for no limit.
     pub max_access_count: Option<i64>,
     pub updated_at: String,
 }
@@ -76,9 +79,9 @@ impl ShareRow {
     }
 }
 
-/// One access-log row, decoded. The child audit table of a share: a log row
-/// is meaningless without the share it points at, which is why both tables
-/// live behind this one module.
+// The child audit table of a share: a log row is meaningless without the
+// share it points at, which is why both tables live behind this one module.
+/// One recorded opening of a share's public link.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct AccessLogRow {
     pub id: String,

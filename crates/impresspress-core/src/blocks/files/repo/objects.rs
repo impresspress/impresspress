@@ -42,7 +42,8 @@ use crate::{
 /// uploader and timestamps.
 pub const TABLE: &str = "impresspress__files__objects";
 
-/// One object-metadata row, decoded.
+// One object-metadata row, decoded.
+/// One stored object's metadata.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ObjectRow {
     pub id: String,
@@ -50,17 +51,19 @@ pub struct ObjectRow {
     pub bucket: String,
     /// Object key within the bucket.
     pub key: String,
-    /// Size in bytes. `i64_field` so a TEXT-stored number still counts
-    /// toward the quota rather than reading as zero.
+    // `i64_field` so a TEXT-stored number still counts toward the quota
+    // rather than reading as zero.
+    /// Size in bytes.
     pub size: i64,
     pub content_type: String,
-    /// `Pending` while the storage upload is in flight, `Complete` after.
-    /// Quota accounting counts both; user-facing search and admin stats see
-    /// only `Complete`.
+    /// `pending` while the upload is in flight, `complete` after. Quota
+    /// accounting counts both; search and the admin stats see only
+    /// `complete`.
     pub status: ObjectStatus,
     pub uploaded_by: String,
+    // The timestamp `list_stale_pending` compares.
     /// When the upload was reserved — the timestamp the object browser
-    /// renders as "modified", and the one `list_stale_pending` compares.
+    /// renders as "modified".
     pub uploaded_at: String,
     pub created_at: String,
     pub updated_at: String,
