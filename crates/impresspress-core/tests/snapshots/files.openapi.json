@@ -974,7 +974,7 @@
             "name": "prefix",
             "required": false,
             "schema": {
-              "description": "Key prefix filter",
+              "description": "List only the objects whose key starts with this text. The match is case-sensitive (`a/B` does not list `a/b.txt`) and literal: no character is a wildcard.",
               "type": "string"
             }
           }
