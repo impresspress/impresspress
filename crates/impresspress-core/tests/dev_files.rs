@@ -1214,7 +1214,8 @@ async fn an_activation_composes_its_site_from_the_manifest_a_racing_write_has_no
     );
     let outcome = composed.expect("the activation must succeed");
     assert_eq!(
-        outcome.generation.site_files, 1,
+        outcome.generation.site_files,
+        Some(1),
         "the generation must project the manifest that was current when the \
          activation read it — one file. Two means the read resumed on a \
          manifest the racing write had saved underneath it, which is the \

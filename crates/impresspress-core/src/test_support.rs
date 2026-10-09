@@ -4127,11 +4127,33 @@ pub async fn output_is_error(out: OutputStream, code: &str) -> bool {
 /// exercise the actual declarations shipped in `blocks/*/mod.rs`.
 ///
 /// This is the block list that backs the generated `/openapi.json` document
-/// in tests, so it is derived from the production discovery set,
+/// in tests, so it is derived from the build's block manifest,
 /// [`crate::blocks::all_block_infos`], rather than listed by hand: a hand
 /// list is how `impresspress/signal`, on by default and schema-bearing, went
 /// unpublished in tests and ungated by `tests/openapi_snapshot.rs`. A block
 /// added to the build's manifest joins the document here the same day.
+///
+/// Production builds its discovery documents from the runtime it registered,
+/// `wafer.block_infos()`, not from the manifest. On native the two publish
+/// the same endpoints: the runtime impresspress itself serves (no
+/// application hooks) registers every manifest block as declared and adds
+/// only the service and middleware blocks (`wafer-run/*`,
+/// `impresspress/router`, `impresspress/body-limit`), none of which declares
+/// an endpoint — `impresspress/tests/boot_lifecycle.rs`
+/// (`the_block_manifest_declares_every_endpoint_the_native_runtime_publishes`)
+/// holds it to that, and pins nothing beyond native. The other runtimes
+/// build through the same `ImpresspressBuilder::build`, so they register the
+/// same blocks for the same block features, plus additions of their own:
+///
+/// * Cloudflare (`impresspress-cloudflare`'s `runtime_build`) adds whatever
+///   the deploying application registers through its `register_blocks`
+///   hook — application blocks outside this crate, as native's `AppHooks`
+///   ones are. This list does not cover those.
+/// * The browser runtime adds the dev sandbox (this list adds it too, below),
+///   the blocks a
+///   sandbox compiles, which are not part of any build, and, when it is
+///   handed an embedding service, `impresspress/transformers-embed`, which
+///   declares no endpoint.
 #[cfg(all(
     feature = "block-files",
     feature = "block-messages",

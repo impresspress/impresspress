@@ -25,8 +25,12 @@ use super::{
     contracts::{
         ActivationResponse, GenerationDetail, GenerationListQuery, GenerationListResponse,
     },
-    generation, no_store, no_store_db_error, no_store_db_error_internal, no_store_error,
-    repo::{self, generations::GenerationCause},
+    generation::{self, GenerationManifest},
+    no_store, no_store_db_error, no_store_db_error_internal, no_store_error, no_store_error_status,
+    repo::{
+        self,
+        generations::{GenerationCause, GenerationRow},
+    },
     retention, DevShared,
 };
 
@@ -50,11 +54,25 @@ pub async fn handle_list(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
 async fn list(ctx: &dyn Context, limit: u32) -> Result<GenerationListResponse, WaferError> {
     let rows = repo::generations::list_recent(ctx, limit).await?;
-    let mut generations = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let manifest = generation::from_row(row)?;
-        generations.push(generation::summarize(row, &manifest));
-    }
+    let generations = rows
+        .iter()
+        .map(|row| {
+            // One row whose manifest does not parse is listed with its counts
+            // unknown, never allowed to fail the listing: the listing is how
+            // a caller learns why that generation failed, and how it finds
+            // every healthy one.
+            let manifest = generation::from_row(row)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        generation_id = %row.id,
+                        error = %e.message,
+                        "dev sandbox: listing a generation whose manifest cannot be read",
+                    )
+                })
+                .ok();
+            generation::summarize(row, manifest.as_ref())
+        })
+        .collect();
     Ok(GenerationListResponse { generations })
 }
 
@@ -64,35 +82,80 @@ pub async fn handle_detail(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let Some(id) = generation_id(msg) else {
         return no_store_error(ErrorCode::InvalidArgument, "the path names no generation");
     };
-    match detail(ctx, &id).await {
+    let (row, manifest) = match readable(ctx, &id, "dev generation detail").await {
+        Ok(loaded) => loaded,
+        Err(refusal) => return refusal,
+    };
+    match detail(ctx, &row, manifest).await {
         Ok(response) => no_store().json(&response),
-        // A generation id that is not in the ledger is a 404 the caller can
-        // act on, not an internal failure — and a WRAP refusal on the
-        // ledger is a 403, which is what the shared classification adds.
-        Err(e) => no_store_db_error(e, &format!("no generation {id:?}"), "dev generation detail"),
+        Err(e) => no_store_db_error_internal(e, "dev generation detail"),
     }
 }
 
-async fn detail(ctx: &dyn Context, id: &str) -> Result<GenerationDetail, WaferError> {
-    let (row, manifest) = generation::load(ctx, id).await?;
+/// A generation and its manifest, or the refusal a request about it answers.
+///
+/// A generation id that is not in the ledger is a 404 the caller can act on,
+/// not an internal failure — and a WRAP refusal on the ledger is a 403, which
+/// is what the shared classification adds. A row whose manifest columns do not
+/// parse exists but cannot be shown or republished: a `409` carrying its
+/// `failure_message`, not a 500 — the row is readable enough to say why.
+async fn readable(
+    ctx: &dyn Context,
+    id: &str,
+    context: &str,
+) -> Result<(GenerationRow, GenerationManifest), OutputStream> {
+    let row = repo::generations::get(ctx, id)
+        .await
+        .map_err(|e| no_store_db_error(e, &format!("no generation {id:?}"), context))?;
+    match generation::from_row(&row) {
+        Ok(manifest) => Ok((row, manifest)),
+        Err(e) => {
+            tracing::warn!(
+                generation_id = %id,
+                error = %e.message,
+                "{context}: the generation's manifest cannot be read",
+            );
+            let mut message =
+                format!("generation {id}'s stored manifest cannot be read back, so its files and blocks cannot be shown or republished");
+            if let Some(reason) = row.failure_message.as_deref() {
+                message.push_str(&format!(" (it failed: {reason})"));
+            }
+            Err(no_store_error_status(
+                ErrorCode::FailedPrecondition,
+                409,
+                &message,
+            ))
+        }
+    }
+}
+
+async fn detail(
+    ctx: &dyn Context,
+    row: &GenerationRow,
+    manifest: GenerationManifest,
+) -> Result<GenerationDetail, WaferError> {
     // A parent that is no longer in the ledger is a MISSING BASELINE, not a
-    // missing generation. Propagating its `NotFound` through the same `?` as
-    // the row above would surface at `handle_detail` as `"no generation {id}"`
-    // naming the CHILD — a 404 for a generation the list response is still
-    // showing, sending the caller after the wrong id. Retention is bounded, so
+    // missing generation. Propagating its `NotFound` would fail the request
+    // about the CHILD — a generation the list response is still showing —
+    // over a row the caller did not ask about. Retention is bounded, so
     // a parent outliving its child is expected rather than exceptional: the
     // diff simply has nothing to be a diff from, exactly as for a generation
     // that never had a parent.
+    //
+    // A parent whose own manifest does not parse is the same missing baseline,
+    // for the same reason: the child is perfectly readable, and refusing it
+    // over its parent would hide it behind a generation the caller did not ask
+    // about.
     let parent = match row.parent_id.as_deref() {
-        Some(parent_id) => match generation::load(ctx, parent_id).await {
-            Ok((_row, manifest)) => Some(manifest),
+        Some(parent_id) => match repo::generations::get(ctx, parent_id).await {
+            Ok(parent) => generation::from_row(&parent).ok(),
             Err(e) if e.code == ErrorCode::NotFound => None,
             Err(e) => return Err(e),
         },
         None => None,
     };
     Ok(GenerationDetail {
-        summary: generation::summarize(&row, &manifest),
+        summary: generation::summarize(row, Some(&manifest)),
         diff_from_parent: generation::diff(parent.as_ref(), &manifest),
         manifest,
     })
@@ -109,15 +172,9 @@ pub async fn handle_rollback(
         return no_store_error(ErrorCode::InvalidArgument, "the path names no generation");
     };
 
-    let target = match generation::load(ctx, &id).await {
+    let target = match readable(ctx, &id, "dev generation rollback").await {
         Ok((_row, manifest)) => manifest,
-        Err(e) => {
-            return no_store_db_error(
-                e,
-                &format!("no generation {id:?}"),
-                "dev generation rollback",
-            )
-        }
+        Err(refusal) => return refusal,
     };
 
     // A new generation carrying the target's contents — not the target row

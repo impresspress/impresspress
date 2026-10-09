@@ -1788,22 +1788,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             };
@@ -1993,22 +2010,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             } | null;
@@ -2231,22 +2265,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             } | null;
@@ -2400,22 +2451,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             } | null;
@@ -2542,22 +2610,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             } | null;
@@ -2619,22 +2704,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             }[];
@@ -2763,22 +2865,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             };
@@ -2829,22 +2948,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             };
@@ -3051,22 +3187,39 @@ export interface paths {
                                 activated_at: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of blocks in the generation's block manifest.
+                                 * @description Number of blocks in the generation's block manifest, or null when its
+                                 *     stored manifest cannot be read back.
                                  */
-                                blocks: number;
+                                blocks: number | null;
                                 /** @description What created this generation. */
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content. When the sandbox
+                                 *     could not read the generation's stored manifest back on its next start,
+                                 *     it says that, and `site_files` and `blocks` are null.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
                                 parent_id: string | null;
                                 /**
                                  * Format: uint32
-                                 * @description Number of files in the generation's site manifest.
+                                 * @description Number of files in the generation's site manifest, or null when its
+                                 *     stored manifest cannot be read back (`failure_message` then says so
+                                 *     for a generation the sandbox abandoned over it).
                                  */
-                                site_files: number;
+                                site_files: number | null;
                                 /** @description Where the generation sits in its lifecycle. */
                                 status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
                             } | null;

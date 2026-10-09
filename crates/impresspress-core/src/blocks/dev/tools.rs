@@ -94,7 +94,9 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
         HttpMethod::Get,
         "/b/dev/api/generations",
         "dev_list_generations",
-        "List the publication ledger, newest first: every generation the sandbox has created.",
+        "List the publication ledger, newest first: the generations the sandbox still keeps. \
+         A generation whose `status` is `failed` carries `failure_message`, saying why it \
+         failed.",
     ),
     (
         "impresspress/dev",

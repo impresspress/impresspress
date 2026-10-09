@@ -851,3 +851,56 @@ async fn an_env_export_the_seeder_refuses_does_not_reach_a_blocks_init() {
         "from-env",
     );
 }
+
+/// The test discovery documents are built from the build's block manifest
+/// (`impresspress_core::test_support::real_block_infos`, which is
+/// `blocks::all_block_infos()` plus the dev sandbox under `block-dev`), while
+/// production builds them from the runtime it registered,
+/// `wafer.block_infos()`. That substitution is sound only while the two
+/// publish the same endpoints: the runtime may add blocks the manifest lacks
+/// (the service and middleware blocks), but none of them may declare an
+/// endpoint, and every manifest block must be registered exactly as declared.
+#[tokio::test]
+async fn the_block_manifest_declares_every_endpoint_the_native_runtime_publishes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("block_manifest_parity.sqlite3");
+    let storage_root = tmp.path().join("storage");
+    std::fs::create_dir_all(&storage_root).expect("create storage root");
+    let (wafer, _db) = build_runtime(&db_path, &storage_root).await;
+
+    let registered: HashMap<String, serde_json::Value> = wafer
+        .block_infos()
+        .into_iter()
+        .map(|info| {
+            let json = serde_json::to_value(&info).expect("BlockInfo serializes");
+            (info.name, json)
+        })
+        .collect();
+    let manifest = impresspress_core::blocks::all_block_infos();
+
+    for info in &manifest {
+        let declared = serde_json::to_value(info).expect("BlockInfo serializes");
+        assert_eq!(
+            registered.get(&info.name),
+            Some(&declared),
+            "{} is in the block manifest but the native runtime registers it differently \
+             (or not at all)",
+            info.name
+        );
+    }
+    for info in wafer.block_infos() {
+        if manifest.iter().any(|m| m.name == info.name) {
+            continue;
+        }
+        assert!(
+            info.endpoints.is_empty(),
+            "{} is registered by the native runtime but not in the block manifest, and it \
+             declares endpoints the test discovery documents would never see: {:?}",
+            info.name,
+            info.endpoints
+                .iter()
+                .map(|e| format!("{:?} {}", e.method, e.path))
+                .collect::<Vec<_>>()
+        );
+    }
+}
