@@ -1,18 +1,20 @@
-//! Response types for the `/b/storage/api/...` JSON surface that the
-//! `.output::<T>()` derive migration can actually reach.
+//! The caller-facing response types of the files block's JSON endpoints
+//! (`/b/storage/api/...`, `/b/storage/admin/api/...`, `/b/cloudstorage/...`).
 //!
-//! [`ObjectInfoResponse`] / [`ObjectListResponse`] are what
-//! [`super::storage::objects::handle_list_objects`] builds from the bucket's
-//! object rows (`repo::objects::list_page_for_bucket`) and serializes, so the
-//! type this schema is derived from is the type that goes out on the wire.
-//! Their field names match `wafer_core::clients::storage::{ObjectInfo,
-//! ObjectList}`, and `packages/impresspress-js` reads them. `last_modified` is a
-//! `chrono::DateTime<Utc>`, which schemars' `chrono04` feature renders as
+//! Every response schema the route table publishes is derived from a type in
+//! this module, and every one of those types is built here from the repo's
+//! row types (the `From`/`TryFrom` impls below) — the only place a stored
+//! row becomes a response body. The row types in `repo` are neither
+//! `Serialize` nor `JsonSchema`, so a handler cannot answer a row directly
+//! and a new column stays in the database until a view publishes it.
+//!
+//! `last_modified` on [`ObjectInfoResponse`] is a `chrono::DateTime<Utc>`,
+//! which schemars' `chrono04` feature renders as
 //! `{"type": "string", "format": "date-time"}`.
 
 use serde::{Deserialize, Serialize};
 
-use super::repo::Page;
+use super::{models::QuotaConfig, repo, repo::Page};
 
 /// Where an object row is in its upload: the `status` column of
 /// `impresspress__files__objects`.
@@ -40,20 +42,25 @@ pub enum ObjectStatus {
     Complete,
 }
 
-// The row's `id` beside the row's columns, exactly as
-// `wafer_core::clients::database::Record` serializes. The backends put `id` in
-// BOTH places (`row_to_record` inserts every column into `data` and copies
-// `id` out to the envelope), and `packages/impresspress-js` reads the envelope
-// one (`flattenRecordList`: `{ id: r.id, ...r.data }`), so both are published.
+// A record's own `id`, which the list envelope lifts out beside it.
 //
-// Generic in the row type rather than carrying an untyped
-// `serde_json::Map<String, Value>`. The SDK reads *named columns* out of
-// `data` — `FileMetadataRecord` in `storage.service.ts`, `ShareRecord` in
-// `extensions.service.ts` — so an untyped `data` would publish a schema that
-// says nothing about the fields those interfaces rely on, and the SDK's
-// type-freshness gate would report green on exactly the columns that can
-// drift. `T` is the row struct the handler already had in hand, so the bytes
-// are unchanged.
+// The SDK reads the envelope's `id` (`flattenRecordList`: `{ id: r.id,
+// ...r.data }`), and `data` has always carried the same `id` too, so both
+// are published; this trait is how the envelope gets it from a typed view
+// without re-serializing the view to look.
+/// A view that is published as one record of a list.
+pub trait RecordData: Serialize {
+    /// The record's id, published both on the envelope and inside `data`.
+    fn record_id(&self) -> &str;
+}
+
+// Generic in the view type rather than carrying an untyped
+// `serde_json::Map<String, Value>`. The SDK reads *named fields* out of
+// `data` — `FileMetadataRecord` / `FileViewRecord` in `storage.service.ts`,
+// `ShareRecord` in `extensions.service.ts` — so an untyped `data` would
+// publish a schema that says nothing about the fields those interfaces rely
+// on, and the SDK's type-freshness gate would report green on exactly the
+// fields that can drift.
 /// One record of a list: its `id`, and the record itself under `data`, which
 /// carries the same `id`.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -62,25 +69,21 @@ pub struct RecordView<T> {
     pub data: T,
 }
 
-impl<T: Serialize> RecordView<T> {
-    /// Build the record envelope for one typed row.
-    ///
-    /// The row serializes to its columns — every row type mirrors its table
-    /// column-for-column precisely so this cannot drop one — and `id` is
-    /// lifted out to the envelope while staying in `data`.
-    pub fn from_row(row: T) -> Self {
-        let id = match serde_json::to_value(&row) {
-            Ok(serde_json::Value::Object(map)) => map
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            // Unreachable: every row type is a plain struct of scalars. A
-            // non-object would mean a row grew a serde attribute that
-            // changes its shape, which the round-trip test below catches.
-            _ => String::new(),
-        };
-        Self { id, data: row }
+impl<T: RecordData> RecordView<T> {
+    /// Wrap one view in its record envelope.
+    pub fn new(data: T) -> Self {
+        Self {
+            id: data.record_id().to_string(),
+            data,
+        }
+    }
+
+    /// Project one stored row and wrap it.
+    pub fn from_row<R>(row: R) -> Self
+    where
+        T: From<R>,
+    {
+        Self::new(T::from(row))
     }
 }
 
@@ -90,9 +93,7 @@ impl<T: Serialize> RecordView<T> {
 // time. `packages/impresspress-js/src/services/storage.service.ts` declares
 // the matching `RecordListWire<T>` and names `/b/storage/api/search` and
 // `/b/storage/api/recent` in its doc comment; that SDK has its own CI job and
-// is the reason this shape is preserved rather than modernised here. Changing
-// it is a deliberate, separate change that moves the SDK in lockstep — see the
-// follow-up in the PR that introduced this type.
+// is the reason this shape is preserved rather than modernised here.
 /// The envelope the block's JSON list endpoints answer: one page of
 /// `records`, the page's `page` and `page_size`, and `total_count` across all
 /// pages.
@@ -104,15 +105,276 @@ pub struct RecordListView<T> {
     pub page_size: i64,
 }
 
-impl<T: Serialize> RecordListView<T> {
-    /// Build the envelope from a repo page of typed rows.
-    pub fn from_page(page: Page<T>) -> Self {
+impl<T: RecordData> RecordListView<T> {
+    /// Build the envelope from a repo page of stored rows, projecting each
+    /// row to its view.
+    pub fn from_page<R>(page: Page<R>) -> Self
+    where
+        T: From<R>,
+    {
         Self {
             records: page.rows.into_iter().map(RecordView::from_row).collect(),
             total_count: page.total,
             page: page.page,
             page_size: page.page_size,
         }
+    }
+}
+
+// `GET /b/storage/api/search`. Not published from the stored row:
+// `created_at`/`updated_at` are the table's bookkeeping stamps (`uploaded_at`
+// already says when), and the stored blob key and claim id
+// (`repo::objects::claim_blob_key`) are how the block finds the bytes.
+/// One of the caller's stored files that a search matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ObjectView {
+    /// Stable object identifier.
+    pub id: String,
+    /// The bucket holding the file. A bucket holds at most one file per key.
+    pub bucket: String,
+    /// The file's key within the bucket.
+    pub key: String,
+    /// Size in bytes.
+    pub size: i64,
+    pub content_type: String,
+    // `search_completed` filters on `complete`; the field keeps the whole
+    // column's type so the SDK's `'pending' | 'complete'` still fits.
+    /// Always `complete`: search lists only files whose upload finished.
+    #[schemars(extend("enum" = ["complete"]))]
+    pub status: ObjectStatus,
+    /// User id of the uploader: the caller, since search covers only the
+    /// caller's own files.
+    pub uploaded_by: String,
+    // The column is nullable in migration 001; every upload writes it now.
+    /// When the upload began, as an RFC 3339 stamp; empty for a file stored
+    /// without one.
+    pub uploaded_at: String,
+}
+
+impl From<repo::objects::ObjectRow> for ObjectView {
+    fn from(row: repo::objects::ObjectRow) -> Self {
+        Self {
+            id: row.id,
+            bucket: row.bucket,
+            key: row.key,
+            size: row.size,
+            content_type: row.content_type,
+            status: row.status,
+            uploaded_by: row.uploaded_by,
+            uploaded_at: row.uploaded_at,
+        }
+    }
+}
+
+impl RecordData for ObjectView {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+// `GET /b/storage/api/recent` pages the object-view log
+// (`repo::views::list_recent_for_user`), one entry per tracked download, so
+// this names the object and when — not its size, type or upload state. The
+// log's `created_at`/`updated_at` stamps are not published: `viewed_at` is
+// the instant, and an entry is never modified.
+/// One recorded download of an object by the caller, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ViewedObjectView {
+    /// Id of this recorded view.
+    pub id: String,
+    /// Bucket holding the viewed object.
+    pub bucket: String,
+    /// Object key within the bucket.
+    pub key: String,
+    /// The viewer: the caller, since the list covers only the caller's own
+    /// views.
+    pub user_id: String,
+    /// RFC 3339 instant of the view.
+    pub viewed_at: String,
+}
+
+impl From<repo::views::ViewRow> for ViewedObjectView {
+    fn from(row: repo::views::ViewRow) -> Self {
+        Self {
+            id: row.id,
+            bucket: row.bucket,
+            key: row.key,
+            user_id: row.user_id,
+            viewed_at: row.viewed_at,
+        }
+    }
+}
+
+impl RecordData for ViewedObjectView {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+// `GET /b/cloudstorage/shares` (the caller's own) and
+// `GET /b/cloudstorage/admin/shares` (every user's). The admin listing keeps
+// `token`: it is how an admin finds the share behind a reported
+// `/b/storage/direct/{token}` link, and an admin can read the shared object
+// anyway. The stored `updated_at` is not published: no write ever modifies
+// a share row (an opening bumps `access_count` through
+// `increment_field_where`, which stamps nothing), so it is the database's
+// copy of the creation instant `created_at` already carries.
+/// One share link to an object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ShareView {
+    /// Id of the share — the `{id}` of `DELETE /b/cloudstorage/shares/{id}`.
+    pub id: String,
+    /// The opaque token embedded in the public `/b/storage/direct/{token}`
+    /// URL: random bytes, hex-encoded, asserting nothing about the share.
+    /// This share is what it addresses, and what decides whether the link
+    /// still works. No two shares have the same token.
+    pub token: String,
+    pub bucket: String,
+    pub key: String,
+    // The ownership key `handle_delete_share` checks.
+    /// User id of the share's creator — besides an admin, the only user who
+    /// can delete it.
+    pub created_by: String,
+    /// RFC 3339 creation instant.
+    pub created_at: String,
+    /// How many times the public link has been opened.
+    pub access_count: i64,
+    // `None` is a SQL `NULL` or a stored empty string. Creating a share
+    // cannot produce one — `NewShare` takes a non-optional expiry — and
+    // migration 003 gave every historical row an end.
+    /// When this share link stops working, as an RFC 3339 stamp.
+    ///
+    /// `null` is NOT "never expires": every share link has an end, and a
+    /// share that records none cannot be shown to be live, so its public
+    /// link is refused.
+    pub expires_at: Option<String>,
+    /// How many times the public link may be opened, or `null` for no limit.
+    pub max_access_count: Option<i64>,
+}
+
+impl From<repo::shares::ShareRow> for ShareView {
+    fn from(row: repo::shares::ShareRow) -> Self {
+        Self {
+            id: row.id,
+            token: row.token,
+            bucket: row.bucket,
+            key: row.key,
+            created_by: row.created_by,
+            created_at: row.created_at,
+            access_count: row.access_count,
+            expires_at: row.expires_at,
+            max_access_count: row.max_access_count,
+        }
+    }
+}
+
+impl RecordData for ShareView {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+// `GET /b/cloudstorage/admin/access-logs`. An entry is written once
+// (`repo::shares::log_access`) and never modified, so its
+// `created_at`/`updated_at` stamps say nothing `accessed_at` does not.
+/// One recorded opening of a share's public link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AccessLogView {
+    /// Id of this log entry.
+    pub id: String,
+    /// The share whose link was opened — its `id` in the shares listing.
+    pub share_id: String,
+    /// RFC 3339 instant of the recorded access.
+    pub accessed_at: String,
+    /// The address the request came from.
+    pub ip_address: String,
+    /// The `User-Agent` the request sent.
+    pub user_agent: String,
+}
+
+impl From<repo::shares::AccessLogRow> for AccessLogView {
+    fn from(row: repo::shares::AccessLogRow) -> Self {
+        Self {
+            id: row.id,
+            share_id: row.share_id,
+            accessed_at: row.accessed_at,
+            ip_address: row.ip_address,
+            user_agent: row.user_agent,
+        }
+    }
+}
+
+impl RecordData for AccessLogView {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+// A projection of `QuotaConfig`, the enforcement path's type, so a change to
+// how quotas are enforced is not by itself a change to this response.
+/// Storage caps, as they are enforced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct QuotaCapsView {
+    /// Most bytes one user may store across all buckets, in-flight uploads
+    /// included.
+    pub max_storage_bytes: i64,
+    /// Largest single file one user may upload, in bytes.
+    pub max_file_size_bytes: i64,
+    /// Most objects one user may hold in any one bucket, in-flight uploads
+    /// included.
+    pub max_files_per_bucket: i64,
+}
+
+impl From<QuotaConfig> for QuotaCapsView {
+    fn from(config: QuotaConfig) -> Self {
+        Self {
+            max_storage_bytes: config.max_storage_bytes,
+            max_file_size_bytes: config.max_file_size_bytes,
+            max_files_per_bucket: config.max_files_per_bucket,
+        }
+    }
+}
+
+// `GET /b/cloudstorage/admin/quotas` and the
+// `PATCH /b/cloudstorage/admin/quotas/{id}` echo. The caps are flat beside
+// `user_id`, as the stored columns have always been answered. The stored
+// `reset_period_days` column is not published: nothing enforces it, and an
+// update naming it is refused.
+/// One user's quota override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct QuotaView {
+    /// Id of this override.
+    pub id: String,
+    // UNIQUE index `idx_cloud_quotas_user_id` (migration 001).
+    /// The user this override applies to — the `{id}` of
+    /// `PATCH /b/cloudstorage/admin/quotas/{id}`. A user has at most one
+    /// override.
+    pub user_id: String,
+    /// The caps this user is held to: each one the override sets replaces
+    /// the block default, field by field.
+    #[serde(flatten)]
+    pub caps: QuotaCapsView,
+    /// When the override was first set.
+    pub created_at: String,
+    /// When an admin last set the override, as an RFC 3339 stamp.
+    pub updated_at: String,
+}
+
+impl From<repo::quota::QuotaRow> for QuotaView {
+    fn from(row: repo::quota::QuotaRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            caps: row.config.into(),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+impl RecordData for QuotaView {
+    fn record_id(&self) -> &str {
+        &self.id
     }
 }
 
@@ -125,6 +387,38 @@ pub struct ObjectInfoResponse {
     pub size: i64,
     pub content_type: String,
     pub last_modified: chrono::DateTime<chrono::Utc>,
+}
+
+// `last_modified` is when the upload that stored it began (`uploaded_at`),
+// the instant the SSR object browser shows as "modified"; a row with none —
+// the column is nullable in migration 001 — falls back to the row's own
+// `updated_at`, which every write stamps. A row with neither readable is
+// reported, naming it.
+impl TryFrom<repo::objects::ObjectRow> for ObjectInfoResponse {
+    type Error = wafer_run::WaferError;
+
+    fn try_from(row: repo::objects::ObjectRow) -> Result<Self, Self::Error> {
+        let parse = |stamp: &str| {
+            chrono::DateTime::parse_from_rfc3339(stamp)
+                .ok()
+                .map(|t| t.with_timezone(&chrono::Utc))
+        };
+        let Some(last_modified) = parse(&row.uploaded_at).or_else(|| parse(&row.updated_at)) else {
+            return Err(wafer_run::WaferError::new(
+                wafer_run::ErrorCode::Internal,
+                format!(
+                    "object row {} has no readable uploaded_at or updated_at ({:?}, {:?})",
+                    row.id, row.uploaded_at, row.updated_at
+                ),
+            ));
+        };
+        Ok(Self {
+            key: row.key,
+            size: row.size,
+            content_type: row.content_type,
+            last_modified,
+        })
+    }
 }
 
 /// `GET /b/storage/api/buckets/{name}/objects` response body.
@@ -235,7 +529,7 @@ pub struct QuotaUsageView {
 pub struct QuotaResponse {
     /// The caller's effective caps: their per-user override if they have
     /// one, otherwise the block defaults.
-    pub quota: super::models::QuotaConfig,
+    pub quota: QuotaCapsView,
     pub usage: QuotaUsageView,
 }
 
@@ -284,7 +578,7 @@ mod tests {
     /// reshaped this would break it silently.
     #[test]
     fn the_envelope_matches_the_sdk_s_record_list_wire() {
-        let body = serde_json::to_value(RecordListView::from_page(object_page()))
+        let body = serde_json::to_value(RecordListView::<ObjectView>::from_page(object_page()))
             .expect("the view serializes");
 
         assert_eq!(body["total_count"], json!(7));
@@ -306,20 +600,19 @@ mod tests {
     /// seeing `undefined`.
     #[test]
     fn the_record_view_publishes_id_in_both_places() {
-        let body =
-            serde_json::to_value(RecordListView::from_page(object_page())).expect("serializes");
+        let body = serde_json::to_value(RecordListView::<ObjectView>::from_page(object_page()))
+            .expect("serializes");
         assert_eq!(body["records"][0]["id"], json!("o1"));
         assert_eq!(body["records"][0]["data"]["id"], json!("o1"));
     }
 
-    /// Every column of the objects table reaches the wire. The row type is
-    /// what the view serializes, so a column missing from the row is a
-    /// column missing from the response — this is the assertion that makes
-    /// "the row mirrors the table" load-bearing rather than aspirational.
+    /// A search hit publishes the file, not the stored row: the table's
+    /// `created_at`/`updated_at` bookkeeping stays behind, and every field
+    /// the SDK's `FileMetadataRecord` names is there.
     #[test]
-    fn the_object_row_publishes_every_column_of_its_table() {
-        let body =
-            serde_json::to_value(RecordListView::from_page(object_page())).expect("serializes");
+    fn the_object_view_publishes_the_file_not_the_row() {
+        let body = serde_json::to_value(RecordListView::<ObjectView>::from_page(object_page()))
+            .expect("serializes");
         let data = body["records"][0]["data"]
             .as_object()
             .expect("data is an object")
@@ -331,17 +624,13 @@ mod tests {
             [
                 "bucket",
                 "content_type",
-                "created_at",
                 "id",
                 "key",
                 "size",
                 "status",
-                "updated_at",
                 "uploaded_at",
                 "uploaded_by",
             ],
-            "the columns `migrations/001_initial_schema.sqlite.sql` declares \
-             for the objects table, plus its `id` primary key"
         );
     }
 
@@ -371,7 +660,8 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v))
             .collect(),
         });
-        let body = serde_json::to_value(RecordView::from_row(row)).expect("serializes");
+        let body =
+            serde_json::to_value(RecordView::<ShareView>::from_row(row)).expect("serializes");
 
         assert_eq!(body["id"], json!("s1"));
         for field in [
@@ -392,9 +682,9 @@ mod tests {
         }
     }
 
-    /// `QuotaRow` groups its cap columns behind a `QuotaConfig` for the
-    /// enforcement path, but they ARE columns of one table, so the wire
-    /// stays flat — `#[serde(flatten)]`. A `config` key here would be a
+    /// `QuotaView` groups its caps behind a `QuotaCapsView`, but the
+    /// response has always answered them flat beside `user_id`, so the wire
+    /// stays flat — `#[serde(flatten)]`. A `caps` key here would be a
     /// reshaped response body for `GET /b/cloudstorage/admin/quotas` and
     /// `PATCH /b/cloudstorage/admin/quotas/{id}`.
     #[test]
@@ -410,13 +700,14 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v))
             .collect(),
         });
-        let body = serde_json::to_value(RecordView::from_row(row)).expect("serializes");
+        let body =
+            serde_json::to_value(RecordView::<QuotaView>::from_row(row)).expect("serializes");
 
         assert_eq!(body["id"], json!("q1"));
         assert_eq!(body["data"]["user_id"], json!("u-9"));
         assert_eq!(body["data"]["max_storage_bytes"], json!(2048));
         assert!(
-            body["data"].get("config").is_none(),
+            body["data"].get("caps").is_none(),
             "the caps are columns, not a nested object: {body}"
         );
     }

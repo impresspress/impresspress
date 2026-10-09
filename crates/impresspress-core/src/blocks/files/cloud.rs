@@ -11,8 +11,8 @@ use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError
 
 use super::{
     contracts::{
-        DeletedResponse, ObjectStatus, QuotaResponse, RecordListView, RecordView,
-        ShareCreatedResponse,
+        AccessLogView, DeletedResponse, ObjectStatus, QuotaResponse, QuotaView, RecordListView,
+        RecordView, ShareCreatedResponse, ShareView,
     },
     repo,
 };
@@ -23,7 +23,7 @@ use crate::{
 
 pub(super) async fn handle_list_shares(ctx: &dyn Context, msg: &Message) -> OutputStream {
     match repo::shares::list_for_user(ctx, msg.user_id(), 100).await {
-        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Ok(page) => ok_json(&RecordListView::<ShareView>::from_page(page)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
@@ -232,14 +232,17 @@ pub(super) async fn handle_get_quota(ctx: &dyn Context, msg: &Message) -> Output
         Ok(usage) => usage,
         Err(e) => return crud::db_error_internal(e, "Quota usage lookup failed"),
     };
-    ok_json(&QuotaResponse { quota, usage })
+    ok_json(&QuotaResponse {
+        quota: quota.into(),
+        usage,
+    })
 }
 
 pub(super) async fn handle_admin_list_shares(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let (page, page_size, _) = msg.pagination_params(20);
     let offset = ((page - 1) * page_size) as i64;
     match repo::shares::list_recent(ctx, page_size as u32, offset).await {
-        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Ok(page) => ok_json(&RecordListView::<ShareView>::from_page(page)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
@@ -251,14 +254,14 @@ pub(super) async fn handle_access_logs(ctx: &dyn Context, msg: &Message) -> Outp
     let offset = ((page - 1) * page_size) as i64;
 
     match repo::shares::list_access_logs(ctx, share_id, page_size as u32, offset).await {
-        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Ok(page) => ok_json(&RecordListView::<AccessLogView>::from_page(page)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
 pub(super) async fn handle_admin_quotas(ctx: &dyn Context, _msg: &Message) -> OutputStream {
     match repo::quota::list(ctx, 1000).await {
-        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Ok(page) => ok_json(&RecordListView::<QuotaView>::from_page(page)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
@@ -300,7 +303,7 @@ pub(super) async fn handle_update_quota(
     }
 
     match repo::quota::upsert_for_user(ctx, user_id, body).await {
-        Ok(row) => ok_json(&RecordView::from_row(row)),
+        Ok(row) => ok_json(&RecordView::<QuotaView>::from_row(row)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }

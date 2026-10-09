@@ -22,9 +22,9 @@ pub const TABLE: &str = "impresspress__files__cloud_shares";
 /// Access log table — one row per recorded share access (audit trail).
 pub const ACCESS_LOGS_TABLE: &str = "impresspress__files__cloud_access_logs";
 
-// One share row, decoded.
-/// One share link to an object.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+/// One share row, decoded. Not a response body: callers see
+/// [`ShareView`](crate::blocks::files::contracts::ShareView).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareRow {
     pub id: String,
     // Unique across the table.
@@ -81,8 +81,9 @@ impl ShareRow {
 
 // The child audit table of a share: a log row is meaningless without the
 // share it points at, which is why both tables live behind this one module.
-/// One recorded opening of a share's public link.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+/// One access-log row, decoded. Not a response body: callers see
+/// [`AccessLogView`](crate::blocks::files::contracts::AccessLogView).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessLogRow {
     pub id: String,
     pub share_id: String,

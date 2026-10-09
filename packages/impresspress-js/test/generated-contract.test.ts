@@ -90,7 +90,7 @@ type SearchRow = Json200<"/b/storage/api/search", "get">["records"][number];
 type _SearchRowFits = ServerFits<FileMetadataRecord, Flattened<SearchRow["data"]>>;
 // `/recent` pages the object-view audit table, so the row is a
 // `FileViewRecord`. Asserting `FileMetadataRecord` here compiled only while
-// the route published `ObjectRow` — a shape the handler never sent.
+// the route published the object-metadata row — a shape the handler never sent.
 type _RecentRowFits = ServerFits<
   FileViewRecord,
   Flattened<Json200<"/b/storage/api/recent", "get">["records"][number]["data"]>

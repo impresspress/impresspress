@@ -160,7 +160,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminListShares,
     )
     .summary("Recent shares, all users (admin)")
-    .output(response_schema_of::<contracts::RecordListView<repo::shares::ShareRow>>)
+    .output(response_schema_of::<contracts::RecordListView<contracts::ShareView>>)
     .tags(&["cloudstorage"]),
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -168,7 +168,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminAccessLogs,
     )
     .summary("Share access logs (admin)")
-    .output(response_schema_of::<contracts::RecordListView<repo::shares::AccessLogRow>>)
+    .output(response_schema_of::<contracts::RecordListView<contracts::AccessLogView>>)
     .tags(&["cloudstorage"]),
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -176,7 +176,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminListQuotas,
     )
     .summary("Per-user quotas (admin)")
-    .output(response_schema_of::<contracts::RecordListView<repo::quota::QuotaRow>>)
+    .output(response_schema_of::<contracts::RecordListView<contracts::QuotaView>>)
     .tags(&["cloudstorage"]),
     // PATCH is what clients send; `update` is the action both PUT and PATCH
     // map to, which is what the old delegated arm matched.
@@ -187,7 +187,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     )
     .summary("Set a user's quota (admin)")
     .path_params(quota_user_id_path_schema)
-    .output(response_schema_of::<contracts::RecordView<repo::quota::QuotaRow>>)
+    .output(response_schema_of::<contracts::RecordView<contracts::QuotaView>>)
     .tags(&["cloudstorage"]),
     // ── Public share link ── `share::handle_direct_access` rate-limits per
     // remote IP, resolves the token to its share row, and enforces that
@@ -219,23 +219,20 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     // `msg.user_id()`.
     EndpointRoute::authenticated(HttpMethod::Get, "/b/storage/api/search", Route::Search)
         .summary("Search objects")
-        .output(response_schema_of::<contracts::RecordListView<repo::objects::ObjectRow>>)
+        .output(response_schema_of::<contracts::RecordListView<contracts::ObjectView>>)
         .tags(&["storage"]),
-    // The row type here is `views::ViewRow`, NOT `objects::ObjectRow`:
+    // The view here is `ViewedObjectView`, NOT `ObjectView`:
     // `storage::handle_recent` reads `repo::views::list_recent_for_user`, so
-    // what goes on the wire is the object-view audit row (`user_id`,
-    // `viewed_at`), not object metadata (`size`, `content_type`, `status`).
-    // Both in-repo consumers — the summary below and the SDK's
-    // `getRecentFiles` — read as though it were metadata; which side is
-    // wrong is a product question, and the schema describes what the
-    // handler emits today rather than pre-judging it.
+    // what goes on the wire is one recorded view (`user_id`, `viewed_at`),
+    // not object metadata (`size`, `content_type`, `status`). The SDK's
+    // `getRecentFiles` types it as `FileViewRecord` to match.
     EndpointRoute::authenticated(HttpMethod::Get, "/b/storage/api/recent", Route::Recent)
         .summary("Recently viewed objects")
         .description(
             "Recorded object views, newest first — one entry per tracked download, naming \
              the object viewed and when. Not object metadata.",
         )
-        .output(response_schema_of::<contracts::RecordListView<repo::views::ViewRow>>)
+        .output(response_schema_of::<contracts::RecordListView<contracts::ViewedObjectView>>)
         .tags(&["storage"]),
     // The object rows bind `{key...}`: keys contain `/`, and dispatch has
     // always matched the rest of the path. The declaration used to say
@@ -313,7 +310,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     // refuses to delete another user's share.
     EndpointRoute::authenticated(HttpMethod::Get, "/b/cloudstorage/shares", Route::ListShares)
         .summary("List my share links")
-        .output(response_schema_of::<contracts::RecordListView<repo::shares::ShareRow>>)
+        .output(response_schema_of::<contracts::RecordListView<contracts::ShareView>>)
         .tags(&["cloudstorage"]),
     EndpointRoute::authenticated(
         HttpMethod::Post,
@@ -1307,7 +1304,9 @@ mod handle_tests {
     use wafer_run::{Block as _, InputStream};
 
     use super::*;
-    use crate::test_support::{admin_msg, anon_msg, output_is_error, output_json, TestContext};
+    use crate::test_support::{
+        admin_msg, anon_msg, auth_msg, output_is_error, output_json, TestContext,
+    };
 
     /// The stats endpoint the admin block used to reach by rewriting
     /// `/b/admin/api/storage/stats` to a synthetic path and forwarding it
@@ -1412,5 +1411,215 @@ mod handle_tests {
             )
             .await;
         assert!(output_is_error(out, "Unauthenticated").await);
+    }
+
+    /// Resolve a `{"$ref": "#/$defs/X"}` against the root schema it came
+    /// from; any other node is returned as is.
+    fn resolve<'a>(
+        root: &'a serde_json::Value,
+        node: &'a serde_json::Value,
+    ) -> &'a serde_json::Value {
+        match node.get("$ref").and_then(|r| r.as_str()) {
+            Some(r) => {
+                let name = r.strip_prefix("#/$defs/").expect("a local $defs ref");
+                &root["$defs"][name]
+            }
+            None => node,
+        }
+    }
+
+    /// The field names the route's published response schema lists for one
+    /// record's `data`.
+    fn published_data_fields(method: HttpMethod, template: &str, list: bool) -> Vec<String> {
+        let route = ROUTES
+            .iter()
+            .find(|r| r.method == method && r.template == template)
+            .unwrap_or_else(|| panic!("no files route {method:?} {template}"));
+        let schema = (route.output.expect("the route declares a response schema"))();
+        let record = if list {
+            resolve(&schema, &schema["properties"]["records"]["items"])
+        } else {
+            &schema
+        };
+        let data = resolve(&schema, &record["properties"]["data"]);
+        let mut fields: Vec<String> = data["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{template}: `data` publishes no properties: {schema}"))
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort_unstable();
+        fields
+    }
+
+    /// The field names one record's `data` carries on the wire.
+    fn wire_data_fields(record: &serde_json::Value) -> Vec<String> {
+        let mut fields: Vec<String> = record["data"]
+            .as_object()
+            .unwrap_or_else(|| panic!("record has no `data` object: {record}"))
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort_unstable();
+        fields
+    }
+
+    /// Every endpoint that answers records answers a caller-facing view, not
+    /// the stored row: each record's `data` carries exactly the fields listed
+    /// here, and exactly the fields the route's published schema names. The
+    /// stored bookkeeping columns (`created_at`/`updated_at` where another
+    /// field already says when, `reset_period_days`) stay in the database.
+    ///
+    /// Driven through `FilesBlock::handle`, over rows the production writers
+    /// made, so a handler that serialized something other than the declared
+    /// type would show up as a wire/schema mismatch.
+    #[tokio::test]
+    async fn every_record_endpoint_answers_exactly_its_published_view() {
+        use serde_json::json;
+
+        let ctx = test_support::share_ctx("photos", "alice").await;
+        test_support::upload(&ctx, "photos", "a.png", b"png", "image/png", "alice").await;
+
+        let block = FilesBlock::new();
+        let call = |msg: wafer_run::Message, body: Option<serde_json::Value>| {
+            let input = match body {
+                Some(b) => InputStream::from_bytes(serde_json::to_vec(&b).unwrap()),
+                None => InputStream::empty(),
+            };
+            let block = &block;
+            let ctx = &ctx;
+            async move { output_json(block.handle(ctx, msg, input).await).await }
+        };
+
+        let created = call(
+            auth_msg("create", "/b/cloudstorage/shares", "alice"),
+            Some(json!({ "bucket": "photos", "key": "a.png" })),
+        )
+        .await;
+        let share_id = created["id"].as_str().expect("share id").to_string();
+        repo::shares::log_access(&ctx, &share_id, "203.0.113.7", "test-agent")
+            .await
+            .expect("log an access");
+        repo::views::insert(&ctx, "photos", "a.png", "alice")
+            .await
+            .expect("record a view");
+        let patched = call(
+            admin_msg("update", "/b/cloudstorage/admin/quotas/alice"),
+            Some(json!({ "max_storage_bytes": 4096 })),
+        )
+        .await;
+
+        let mut search = auth_msg("retrieve", "/b/storage/api/search", "alice");
+        search.set_meta("req.query.q", "a.png");
+
+        let share_fields = [
+            "access_count",
+            "bucket",
+            "created_at",
+            "created_by",
+            "expires_at",
+            "id",
+            "key",
+            "max_access_count",
+            "token",
+        ];
+        let quota_fields = [
+            "created_at",
+            "id",
+            "max_file_size_bytes",
+            "max_files_per_bucket",
+            "max_storage_bytes",
+            "updated_at",
+            "user_id",
+        ];
+        let cases: Vec<(wafer_run::Message, HttpMethod, &str, &[&str])> = vec![
+            (
+                search,
+                HttpMethod::Get,
+                "/b/storage/api/search",
+                &[
+                    "bucket",
+                    "content_type",
+                    "id",
+                    "key",
+                    "size",
+                    "status",
+                    "uploaded_at",
+                    "uploaded_by",
+                ],
+            ),
+            (
+                auth_msg("retrieve", "/b/storage/api/recent", "alice"),
+                HttpMethod::Get,
+                "/b/storage/api/recent",
+                &["bucket", "id", "key", "user_id", "viewed_at"],
+            ),
+            (
+                auth_msg("retrieve", "/b/cloudstorage/shares", "alice"),
+                HttpMethod::Get,
+                "/b/cloudstorage/shares",
+                &share_fields,
+            ),
+            (
+                admin_msg("retrieve", "/b/cloudstorage/admin/shares"),
+                HttpMethod::Get,
+                "/b/cloudstorage/admin/shares",
+                &share_fields,
+            ),
+            (
+                admin_msg("retrieve", "/b/cloudstorage/admin/access-logs"),
+                HttpMethod::Get,
+                "/b/cloudstorage/admin/access-logs",
+                &["accessed_at", "id", "ip_address", "share_id", "user_agent"],
+            ),
+            (
+                admin_msg("retrieve", "/b/cloudstorage/admin/quotas"),
+                HttpMethod::Get,
+                "/b/cloudstorage/admin/quotas",
+                &quota_fields,
+            ),
+        ];
+
+        for (msg, method, template, expected) in cases {
+            let body = call(msg, None).await;
+            let records = body["records"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{template}: no records: {body}"));
+            assert!(
+                !records.is_empty(),
+                "{template}: the fixture lists nothing: {body}"
+            );
+            for record in records {
+                assert_eq!(
+                    wire_data_fields(record),
+                    expected,
+                    "{template} on the wire: {record}"
+                );
+                assert_eq!(
+                    record["id"], record["data"]["id"],
+                    "{template}: the envelope `id` is the record's own"
+                );
+            }
+            assert_eq!(
+                published_data_fields(method, template, true),
+                expected,
+                "{template}: the published schema"
+            );
+        }
+
+        assert_eq!(
+            wire_data_fields(&patched),
+            quota_fields,
+            "quota update on the wire: {patched}"
+        );
+        assert_eq!(
+            published_data_fields(
+                HttpMethod::Patch,
+                "/b/cloudstorage/admin/quotas/{id}",
+                false
+            ),
+            quota_fields,
+            "quota update: the published schema"
+        );
     }
 }

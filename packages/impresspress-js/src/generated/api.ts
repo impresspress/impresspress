@@ -1214,11 +1214,13 @@ export interface paths {
                                 data: {
                                     /** @description RFC 3339 instant of the recorded access. */
                                     accessed_at: string;
-                                    created_at: string;
+                                    /** @description Id of this log entry. */
                                     id: string;
+                                    /** @description The address the request came from. */
                                     ip_address: string;
+                                    /** @description The share whose link was opened — its `id` in the shares listing. */
                                     share_id: string;
-                                    updated_at: string;
+                                    /** @description The `User-Agent` the request sent. */
                                     user_agent: string;
                                 };
                                 id: string;
@@ -1269,19 +1271,34 @@ export interface paths {
                             records: {
                                 /** @description One user's quota override. */
                                 data: {
+                                    /** @description When the override was first set. */
                                     created_at: string;
+                                    /** @description Id of this override. */
                                     id: string;
-                                    /** Format: int64 */
+                                    /**
+                                     * Format: int64
+                                     * @description Largest single file one user may upload, in bytes.
+                                     */
                                     max_file_size_bytes: number;
                                     /**
                                      * Format: int64
-                                     * @description Most objects one user may hold in any one bucket, in-flight uploads included.
+                                     * @description Most objects one user may hold in any one bucket, in-flight uploads
+                                     *     included.
                                      */
                                     max_files_per_bucket: number;
-                                    /** Format: int64 */
+                                    /**
+                                     * Format: int64
+                                     * @description Most bytes one user may store across all buckets, in-flight uploads
+                                     *     included.
+                                     */
                                     max_storage_bytes: number;
+                                    /** @description When an admin last set the override, as an RFC 3339 stamp. */
                                     updated_at: string;
-                                    /** @description The user this override applies to. A user has at most one override. */
+                                    /**
+                                     * @description The user this override applies to — the `{id}` of
+                                     *     `PATCH /b/cloudstorage/admin/quotas/{id}`. A user has at most one
+                                     *     override.
+                                     */
                                     user_id: string;
                                 };
                                 id: string;
@@ -1335,19 +1352,34 @@ export interface paths {
                         "application/json": {
                             /** @description One user's quota override. */
                             data: {
+                                /** @description When the override was first set. */
                                 created_at: string;
+                                /** @description Id of this override. */
                                 id: string;
-                                /** Format: int64 */
+                                /**
+                                 * Format: int64
+                                 * @description Largest single file one user may upload, in bytes.
+                                 */
                                 max_file_size_bytes: number;
                                 /**
                                  * Format: int64
-                                 * @description Most objects one user may hold in any one bucket, in-flight uploads included.
+                                 * @description Most objects one user may hold in any one bucket, in-flight uploads
+                                 *     included.
                                  */
                                 max_files_per_bucket: number;
-                                /** Format: int64 */
+                                /**
+                                 * Format: int64
+                                 * @description Most bytes one user may store across all buckets, in-flight uploads
+                                 *     included.
+                                 */
                                 max_storage_bytes: number;
+                                /** @description When an admin last set the override, as an RFC 3339 stamp. */
                                 updated_at: string;
-                                /** @description The user this override applies to. A user has at most one override. */
+                                /**
+                                 * @description The user this override applies to — the `{id}` of
+                                 *     `PATCH /b/cloudstorage/admin/quotas/{id}`. A user has at most one
+                                 *     override.
+                                 */
                                 user_id: string;
                             };
                             id: string;
@@ -1389,7 +1421,10 @@ export interface paths {
                             records: {
                                 /** @description One share link to an object. */
                                 data: {
-                                    /** Format: int64 */
+                                    /**
+                                     * Format: int64
+                                     * @description How many times the public link has been opened.
+                                     */
                                     access_count: number;
                                     bucket: string;
                                     /** @description RFC 3339 creation instant. */
@@ -1407,6 +1442,7 @@ export interface paths {
                                      *     link is refused.
                                      */
                                     expires_at: string | null;
+                                    /** @description Id of the share — the `{id}` of `DELETE /b/cloudstorage/shares/{id}`. */
                                     id: string;
                                     key: string;
                                     /**
@@ -1421,7 +1457,6 @@ export interface paths {
                                      *     still works. No two shares have the same token.
                                      */
                                     token: string;
-                                    updated_at: string;
                                 };
                                 id: string;
                             }[];
@@ -1469,14 +1504,22 @@ export interface paths {
                              *     one, otherwise the block defaults.
                              */
                             quota: {
-                                /** Format: int64 */
+                                /**
+                                 * Format: int64
+                                 * @description Largest single file one user may upload, in bytes.
+                                 */
                                 max_file_size_bytes: number;
                                 /**
                                  * Format: int64
-                                 * @description Most objects one user may hold in any one bucket, in-flight uploads included.
+                                 * @description Most objects one user may hold in any one bucket, in-flight uploads
+                                 *     included.
                                  */
                                 max_files_per_bucket: number;
-                                /** Format: int64 */
+                                /**
+                                 * Format: int64
+                                 * @description Most bytes one user may store across all buckets, in-flight uploads
+                                 *     included.
+                                 */
                                 max_storage_bytes: number;
                             };
                             /**
@@ -1541,7 +1584,10 @@ export interface paths {
                             records: {
                                 /** @description One share link to an object. */
                                 data: {
-                                    /** Format: int64 */
+                                    /**
+                                     * Format: int64
+                                     * @description How many times the public link has been opened.
+                                     */
                                     access_count: number;
                                     bucket: string;
                                     /** @description RFC 3339 creation instant. */
@@ -1559,6 +1605,7 @@ export interface paths {
                                      *     link is refused.
                                      */
                                     expires_at: string | null;
+                                    /** @description Id of the share — the `{id}` of `DELETE /b/cloudstorage/shares/{id}`. */
                                     id: string;
                                     key: string;
                                     /**
@@ -1573,7 +1620,6 @@ export interface paths {
                                      *     still works. No two shares have the same token.
                                      */
                                     token: string;
-                                    updated_at: string;
                                 };
                                 id: string;
                             }[];
@@ -21417,16 +21463,18 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One recorded view of an object. */
+                                /** @description One recorded download of an object by the caller, newest first. */
                                 data: {
                                     /** @description Bucket holding the viewed object. */
                                     bucket: string;
-                                    created_at: string;
+                                    /** @description Id of this recorded view. */
                                     id: string;
                                     /** @description Object key within the bucket. */
                                     key: string;
-                                    updated_at: string;
-                                    /** @description The viewer. */
+                                    /**
+                                     * @description The viewer: the caller, since the list covers only the caller's own
+                                     *     views.
+                                     */
                                     user_id: string;
                                     /** @description RFC 3339 instant of the view. */
                                     viewed_at: string;
@@ -21477,14 +21525,14 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One stored object's metadata. */
+                                /** @description One of the caller's stored files that a search matched. */
                                 data: {
-                                    /** @description Bucket name; `(bucket, key)` is unique. */
+                                    /** @description The bucket holding the file. A bucket holds at most one file per key. */
                                     bucket: string;
                                     content_type: string;
-                                    created_at: string;
+                                    /** @description Stable object identifier. */
                                     id: string;
-                                    /** @description Object key within the bucket. */
+                                    /** @description The file's key within the bucket. */
                                     key: string;
                                     /**
                                      * Format: int64
@@ -21492,17 +21540,19 @@ export interface paths {
                                      */
                                     size: number;
                                     /**
-                                     * @description `pending` while the upload is in flight, `complete` after. Quota
-                                     *     accounting and the bucket's object listing include both; search and
-                                     *     the admin stats see only `complete`.
+                                     * @description Always `complete`: search lists only files whose upload finished.
+                                     * @enum {unknown}
                                      */
-                                    status: "pending" | "complete";
-                                    updated_at: string;
+                                    status: "complete";
                                     /**
-                                     * @description When the upload was reserved — the timestamp the object browser
-                                     *     renders as "modified".
+                                     * @description When the upload began, as an RFC 3339 stamp; empty for a file stored
+                                     *     without one.
                                      */
                                     uploaded_at: string;
+                                    /**
+                                     * @description User id of the uploader: the caller, since search covers only the
+                                     *     caller's own files.
+                                     */
                                     uploaded_by: string;
                                 };
                                 id: string;

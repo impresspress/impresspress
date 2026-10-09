@@ -31,22 +31,20 @@
                                 "description": "RFC 3339 instant of the recorded access.",
                                 "type": "string"
                               },
-                              "created_at": {
-                                "type": "string"
-                              },
                               "id": {
+                                "description": "Id of this log entry.",
                                 "type": "string"
                               },
                               "ip_address": {
+                                "description": "The address the request came from.",
                                 "type": "string"
                               },
                               "share_id": {
-                                "type": "string"
-                              },
-                              "updated_at": {
+                                "description": "The share whose link was opened — its `id` in the shares listing.",
                                 "type": "string"
                               },
                               "user_agent": {
+                                "description": "The `User-Agent` the request sent.",
                                 "type": "string"
                               }
                             },
@@ -55,9 +53,7 @@
                               "share_id",
                               "accessed_at",
                               "ip_address",
-                              "user_agent",
-                              "created_at",
-                              "updated_at"
+                              "user_agent"
                             ],
                             "type": "object"
                           },
@@ -128,29 +124,34 @@
                             "description": "One user's quota override.",
                             "properties": {
                               "created_at": {
+                                "description": "When the override was first set.",
                                 "type": "string"
                               },
                               "id": {
+                                "description": "Id of this override.",
                                 "type": "string"
                               },
                               "max_file_size_bytes": {
+                                "description": "Largest single file one user may upload, in bytes.",
                                 "format": "int64",
                                 "type": "integer"
                               },
                               "max_files_per_bucket": {
-                                "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
+                                "description": "Most objects one user may hold in any one bucket, in-flight uploads\nincluded.",
                                 "format": "int64",
                                 "type": "integer"
                               },
                               "max_storage_bytes": {
+                                "description": "Most bytes one user may store across all buckets, in-flight uploads\nincluded.",
                                 "format": "int64",
                                 "type": "integer"
                               },
                               "updated_at": {
+                                "description": "When an admin last set the override, as an RFC 3339 stamp.",
                                 "type": "string"
                               },
                               "user_id": {
-                                "description": "The user this override applies to. A user has at most one override.",
+                                "description": "The user this override applies to — the `{id}` of\n`PATCH /b/cloudstorage/admin/quotas/{id}`. A user has at most one\noverride.",
                                 "type": "string"
                               }
                             },
@@ -231,29 +232,34 @@
                       "description": "One user's quota override.",
                       "properties": {
                         "created_at": {
+                          "description": "When the override was first set.",
                           "type": "string"
                         },
                         "id": {
+                          "description": "Id of this override.",
                           "type": "string"
                         },
                         "max_file_size_bytes": {
+                          "description": "Largest single file one user may upload, in bytes.",
                           "format": "int64",
                           "type": "integer"
                         },
                         "max_files_per_bucket": {
-                          "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
+                          "description": "Most objects one user may hold in any one bucket, in-flight uploads\nincluded.",
                           "format": "int64",
                           "type": "integer"
                         },
                         "max_storage_bytes": {
+                          "description": "Most bytes one user may store across all buckets, in-flight uploads\nincluded.",
                           "format": "int64",
                           "type": "integer"
                         },
                         "updated_at": {
+                          "description": "When an admin last set the override, as an RFC 3339 stamp.",
                           "type": "string"
                         },
                         "user_id": {
-                          "description": "The user this override applies to. A user has at most one override.",
+                          "description": "The user this override applies to — the `{id}` of\n`PATCH /b/cloudstorage/admin/quotas/{id}`. A user has at most one\noverride.",
                           "type": "string"
                         }
                       },
@@ -320,6 +326,7 @@
                             "description": "One share link to an object.",
                             "properties": {
                               "access_count": {
+                                "description": "How many times the public link has been opened.",
                                 "format": "int64",
                                 "type": "integer"
                               },
@@ -342,6 +349,7 @@
                                 ]
                               },
                               "id": {
+                                "description": "Id of the share — the `{id}` of `DELETE /b/cloudstorage/shares/{id}`.",
                                 "type": "string"
                               },
                               "key": {
@@ -358,9 +366,6 @@
                               "token": {
                                 "description": "The opaque token embedded in the public `/b/storage/direct/{token}`\nURL: random bytes, hex-encoded, asserting nothing about the share.\nThis share is what it addresses, and what decides whether the link\nstill works. No two shares have the same token.",
                                 "type": "string"
-                              },
-                              "updated_at": {
-                                "type": "string"
                               }
                             },
                             "required": [
@@ -370,10 +375,9 @@
                               "key",
                               "created_by",
                               "created_at",
-                              "expires_at",
                               "access_count",
-                              "max_access_count",
-                              "updated_at"
+                              "expires_at",
+                              "max_access_count"
                             ],
                             "type": "object"
                           },
@@ -432,15 +436,17 @@
                       "description": "The caller's effective caps: their per-user override if they have\none, otherwise the block defaults.",
                       "properties": {
                         "max_file_size_bytes": {
+                          "description": "Largest single file one user may upload, in bytes.",
                           "format": "int64",
                           "type": "integer"
                         },
                         "max_files_per_bucket": {
-                          "description": "Most objects one user may hold in any one bucket, in-flight uploads included.",
+                          "description": "Most objects one user may hold in any one bucket, in-flight uploads\nincluded.",
                           "format": "int64",
                           "type": "integer"
                         },
                         "max_storage_bytes": {
+                          "description": "Most bytes one user may store across all buckets, in-flight uploads\nincluded.",
                           "format": "int64",
                           "type": "integer"
                         }
@@ -521,6 +527,7 @@
                             "description": "One share link to an object.",
                             "properties": {
                               "access_count": {
+                                "description": "How many times the public link has been opened.",
                                 "format": "int64",
                                 "type": "integer"
                               },
@@ -543,6 +550,7 @@
                                 ]
                               },
                               "id": {
+                                "description": "Id of the share — the `{id}` of `DELETE /b/cloudstorage/shares/{id}`.",
                                 "type": "string"
                               },
                               "key": {
@@ -559,9 +567,6 @@
                               "token": {
                                 "description": "The opaque token embedded in the public `/b/storage/direct/{token}`\nURL: random bytes, hex-encoded, asserting nothing about the share.\nThis share is what it addresses, and what decides whether the link\nstill works. No two shares have the same token.",
                                 "type": "string"
-                              },
-                              "updated_at": {
-                                "type": "string"
                               }
                             },
                             "required": [
@@ -571,10 +576,9 @@
                               "key",
                               "created_by",
                               "created_at",
-                              "expires_at",
                               "access_count",
-                              "max_access_count",
-                              "updated_at"
+                              "expires_at",
+                              "max_access_count"
                             ],
                             "type": "object"
                           },
@@ -1213,27 +1217,22 @@
                         "description": "One record of a list: its `id`, and the record itself under `data`, which\ncarries the same `id`.",
                         "properties": {
                           "data": {
-                            "description": "One recorded view of an object.",
+                            "description": "One recorded download of an object by the caller, newest first.",
                             "properties": {
                               "bucket": {
                                 "description": "Bucket holding the viewed object.",
                                 "type": "string"
                               },
-                              "created_at": {
-                                "type": "string"
-                              },
                               "id": {
+                                "description": "Id of this recorded view.",
                                 "type": "string"
                               },
                               "key": {
                                 "description": "Object key within the bucket.",
                                 "type": "string"
                               },
-                              "updated_at": {
-                                "type": "string"
-                              },
                               "user_id": {
-                                "description": "The viewer.",
+                                "description": "The viewer: the caller, since the list covers only the caller's own\nviews.",
                                 "type": "string"
                               },
                               "viewed_at": {
@@ -1246,9 +1245,7 @@
                               "bucket",
                               "key",
                               "user_id",
-                              "viewed_at",
-                              "created_at",
-                              "updated_at"
+                              "viewed_at"
                             ],
                             "type": "object"
                           },
@@ -1316,23 +1313,21 @@
                         "description": "One record of a list: its `id`, and the record itself under `data`, which\ncarries the same `id`.",
                         "properties": {
                           "data": {
-                            "description": "One stored object's metadata.",
+                            "description": "One of the caller's stored files that a search matched.",
                             "properties": {
                               "bucket": {
-                                "description": "Bucket name; `(bucket, key)` is unique.",
+                                "description": "The bucket holding the file. A bucket holds at most one file per key.",
                                 "type": "string"
                               },
                               "content_type": {
                                 "type": "string"
                               },
-                              "created_at": {
-                                "type": "string"
-                              },
                               "id": {
+                                "description": "Stable object identifier.",
                                 "type": "string"
                               },
                               "key": {
-                                "description": "Object key within the bucket.",
+                                "description": "The file's key within the bucket.",
                                 "type": "string"
                               },
                               "size": {
@@ -1341,7 +1336,10 @@
                                 "type": "integer"
                               },
                               "status": {
-                                "description": "`pending` while the upload is in flight, `complete` after. Quota\naccounting and the bucket's object listing include both; search and\nthe admin stats see only `complete`.",
+                                "description": "Always `complete`: search lists only files whose upload finished.",
+                                "enum": [
+                                  "complete"
+                                ],
                                 "oneOf": [
                                   {
                                     "const": "pending",
@@ -1355,14 +1353,12 @@
                                   }
                                 ]
                               },
-                              "updated_at": {
-                                "type": "string"
-                              },
                               "uploaded_at": {
-                                "description": "When the upload was reserved — the timestamp the object browser\nrenders as \"modified\".",
+                                "description": "When the upload began, as an RFC 3339 stamp; empty for a file stored\nwithout one.",
                                 "type": "string"
                               },
                               "uploaded_by": {
+                                "description": "User id of the uploader: the caller, since search covers only the\ncaller's own files.",
                                 "type": "string"
                               }
                             },
@@ -1374,9 +1370,7 @@
                               "content_type",
                               "status",
                               "uploaded_by",
-                              "uploaded_at",
-                              "created_at",
-                              "updated_at"
+                              "uploaded_at"
                             ],
                             "type": "object"
                           },

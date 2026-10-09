@@ -5,7 +5,10 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         crud,
-        files::{contracts::RecordListView, repo},
+        files::{
+            contracts::{ObjectView, RecordListView, ViewedObjectView},
+            repo,
+        },
     },
     http::{err_bad_request, ok_json},
 };
@@ -29,7 +32,7 @@ pub(in crate::blocks::files) async fn handle_search(
     )
     .await
     {
-        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Ok(page) => ok_json(&RecordListView::<ObjectView>::from_page(page)),
         Err(e) => crud::db_error_internal(e, "Search failed"),
     }
 }
@@ -39,7 +42,7 @@ pub(in crate::blocks::files) async fn handle_recent(
     msg: &Message,
 ) -> OutputStream {
     match repo::views::list_recent_for_user(ctx, msg.user_id(), 20).await {
-        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Ok(page) => ok_json(&RecordListView::<ViewedObjectView>::from_page(page)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
