@@ -19,6 +19,19 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Search: the text is literal and ASCII case is ignored everywhere
+
+**What changes.** The admin user search, the audit-log resource filter, the
+request-log path search, product search and file search keep a row when the
+field contains the typed text. `%` and `_` used to act as wildcards in the
+admin and log searches (`a_b` matched `axb`); they now match only
+themselves, as does `\`. ASCII letters match in either case on every
+backend; PostgreSQL deployments used to need the exact case. The storage
+object listing's `prefix` filter is unchanged.
+
+**Blocks.** A block's filter can use the new `contains_ignore_case`
+operator for the same search; `like` still takes a pattern.
+
 ### Native: pending migrations apply at every boot; `--run-migrations` is gone
 
 **What changes.** `impresspress serve` (and any server built on

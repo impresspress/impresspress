@@ -745,7 +745,7 @@
             "name": "search",
             "required": false,
             "schema": {
-              "description": "Substring filter on the product name.",
+              "description": "Substring filter: keeps the products whose name contains this text,\nignoring the case of ASCII letters. Characters are literal: `%`, `_`\nand `\\` match only themselves.",
               "type": [
                 "string",
                 "null"
@@ -16310,7 +16310,7 @@
             "name": "search",
             "required": false,
             "schema": {
-              "description": "Substring filter on the product name.",
+              "description": "Substring filter: keeps the products whose name contains this text,\nignoring the case of ASCII letters. Characters are literal: `%`, `_`\nand `\\` match only themselves.",
               "type": [
                 "string",
                 "null"

@@ -892,7 +892,7 @@ async fn release_to_environment(
 /// single release writes. Both halves are deliberate: the outcome is identical
 /// per key, so an operator asking the audit log who released a given key has to
 /// find it whichever control was used — `logs::handle_list` filters `resource`
-/// with `LIKE` and `action` with equality, and an aggregate row would answer
+/// by substring and `action` with equality, and an aggregate row would answer
 /// neither query with the key it hid inside a list.
 ///
 /// A failure part way through leaves the keys already released released, and

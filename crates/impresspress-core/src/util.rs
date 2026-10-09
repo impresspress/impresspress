@@ -818,25 +818,13 @@ pub fn parse_body_value(data: &[u8]) -> Result<serde_json::Value, serde_json::Er
 pub(crate) fn to_wire_filters(
     filters: &[wafer_block::db::Filter],
 ) -> Vec<wafer_block::wire::database::FilterNode> {
-    use wafer_block::{db::FilterOp, wire::database as wire};
+    use wafer_block::wire::database as wire;
     filters
         .iter()
         .map(|f| {
-            let operator = match f.operator {
-                FilterOp::Equal => "eq",
-                FilterOp::NotEqual => "neq",
-                FilterOp::GreaterThan => "gt",
-                FilterOp::GreaterEqual => "gte",
-                FilterOp::LessThan => "lt",
-                FilterOp::LessEqual => "lte",
-                FilterOp::Like => "like",
-                FilterOp::In => "in",
-                FilterOp::IsNull => "is_null",
-                FilterOp::IsNotNull => "is_not_null",
-            };
             wire::FilterNode::Leaf(wire::FilterDef {
                 field: f.field.clone(),
-                operator: operator.to_string(),
+                operator: f.operator.as_wire().to_string(),
                 value: f.value.clone(),
                 column: None,
             })

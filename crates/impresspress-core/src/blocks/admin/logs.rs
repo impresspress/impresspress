@@ -33,8 +33,8 @@ pub(super) async fn handle_list(ctx: &dyn Context, msg: &Message) -> OutputStrea
     if let Some(resource) = query.resource {
         filters.push(Filter {
             field: "resource".to_string(),
-            operator: FilterOp::Like,
-            value: serde_json::Value::String(format!("%{resource}%")),
+            operator: FilterOp::ContainsIgnoreCase,
+            value: serde_json::Value::String(resource),
         });
     }
 

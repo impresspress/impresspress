@@ -162,11 +162,12 @@ fn active_filter() -> Filter {
     }
 }
 
-fn like_filter(field: &str, pattern: &str) -> Filter {
+/// `field` contains `text` — literally, ASCII case ignored.
+fn contains_filter(field: &str, text: &str) -> Filter {
     Filter {
         field: field.to_string(),
-        operator: FilterOp::Like,
-        value: json!(pattern),
+        operator: FilterOp::ContainsIgnoreCase,
+        value: json!(text),
     }
 }
 
@@ -768,8 +769,8 @@ pub struct ActiveUserQuery {
     pub page: i64,
     /// Items per page; values below 1 fall back to 20.
     pub page_size: u32,
-    /// Case-insensitive `LIKE '%…%'` over the email address AND the user
-    /// id. Both admin surfaces asked a different one of those two questions
+    /// Literal substring of the email address OR the user id, ASCII case
+    /// ignored (`FilterOp::ContainsIgnoreCase`). Both admin surfaces asked a different one of those two questions
     /// before this function existed; one door means one answer.
     pub search: Option<String>,
 }
@@ -802,23 +803,20 @@ pub async fn list_active_page(
     let search = query.search.as_deref().filter(|s| !s.is_empty());
 
     let opts = match search {
-        Some(search) => {
-            let like = format!("%{search}%");
-            ListOptions {
-                filter_tree: Some(vec![FilterTree::All(vec![
-                    FilterTree::Leaf(active_filter()),
-                    FilterTree::Any(vec![
-                        FilterTree::Leaf(like_filter("email", &like)),
-                        FilterTree::Leaf(like_filter("id", &like)),
-                    ]),
-                ])]),
-                sort: newest_first(),
-                limit: Some(page_size),
-                offset,
-                skip_count: false,
-                ..Default::default()
-            }
-        }
+        Some(search) => ListOptions {
+            filter_tree: Some(vec![FilterTree::All(vec![
+                FilterTree::Leaf(active_filter()),
+                FilterTree::Any(vec![
+                    FilterTree::Leaf(contains_filter("email", search)),
+                    FilterTree::Leaf(contains_filter("id", search)),
+                ]),
+            ])]),
+            sort: newest_first(),
+            limit: Some(page_size),
+            offset,
+            skip_count: false,
+            ..Default::default()
+        },
         None => ListOptions {
             filters: vec![active_filter()],
             sort: newest_first(),
@@ -1298,6 +1296,45 @@ mod lifecycle_and_listing_tests {
         .unwrap();
         assert_eq!(by_id.rows.len(), 1, "a full user id must match");
         assert_eq!(by_id.rows[0].id, target.id);
+    }
+
+    /// The search text is literal: `_` and `%` are not LIKE wildcards, and
+    /// ASCII letters match in either case.
+    #[tokio::test]
+    async fn list_active_page_search_is_literal_and_ignores_ascii_case() {
+        let ctx = ctx().await;
+        let underscore = seed(&ctx, "a_b@example.com").await;
+        seed(&ctx, "axb@example.com").await;
+        let percent = seed(&ctx, "100%off@example.com").await;
+        seed(&ctx, "1000off@example.com").await;
+
+        let ids = |search: &'static str| {
+            let ctx = &ctx;
+            async move {
+                list_active_page(
+                    ctx,
+                    &ActiveUserQuery {
+                        page: 1,
+                        page_size: 20,
+                        search: Some(search.into()),
+                    },
+                )
+                .await
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(ids("a_b").await, [underscore.id.as_str()], "`_` is literal");
+        assert_eq!(ids("0%o").await, [percent.id.as_str()], "`%` is literal");
+        assert_eq!(
+            ids("A_B@EXAMPLE.com").await,
+            [underscore.id.as_str()],
+            "ASCII case is ignored"
+        );
     }
 
     #[tokio::test]

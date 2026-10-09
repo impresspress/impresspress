@@ -121,17 +121,14 @@ fn owned_objects_filter(user_id: &str) -> Vec<Filter> {
 }
 
 /// Escape SQL LIKE wildcards (`%`, `_`) and the escape char itself (`\`) in
-/// user-supplied search terms so a user searching for `100% off` doesn't
-/// also match arbitrary characters.
+/// the key prefix [`list_page_for_bucket`] matches, so `%`/`_` in it match
+/// only themselves.
 ///
 /// SQLite's `LIKE` has *no* default escape character — a bare backslash is
 /// just a literal byte, so escaping here would be silently inert on its own.
-/// What makes it effective is the `wafer-sql-utils` `FilterOp::Like` builder
-/// (used by [`search_completed`]'s query below), which renders an explicit
-/// `ESCAPE '\'` clause on every backend (SQLite/D1 and Postgres) — see
-/// `wafer-sql-utils::query::leaf_expr`. Without that clause, a query
-/// containing `_` or `%` would match as a wildcard instead of a literal
-/// character.
+/// What makes it effective is the `wafer-sql-utils` `FilterOp::Like` builder,
+/// which renders an explicit `ESCAPE '\'` clause on every backend (SQLite/D1
+/// and Postgres) — see `wafer-sql-utils::query::predicate_on`.
 fn escape_like(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -929,9 +926,9 @@ pub async fn list_stale_pending(
         .collect()
 }
 
-/// Search `user_id`'s `complete` objects whose key contains `query`
-/// (case rules per backend `LIKE`), newest upload first. `query` is
-/// LIKE-escaped here ([`escape_like`]) so `%`/`_` match literally.
+/// Search `user_id`'s `complete` objects whose key contains `query` —
+/// literally, ASCII case ignored (`FilterOp::ContainsIgnoreCase`) — newest
+/// upload first.
 pub async fn search_completed(
     ctx: &dyn Context,
     user_id: &str,
@@ -943,8 +940,8 @@ pub async fn search_completed(
         filters: vec![
             Filter {
                 field: "key".to_string(),
-                operator: FilterOp::Like,
-                value: serde_json::Value::String(format!("%{}%", escape_like(query))),
+                operator: FilterOp::ContainsIgnoreCase,
+                value: serde_json::Value::String(query.to_string()),
             },
             // Only show the current user's files
             Filter {
@@ -975,8 +972,8 @@ pub async fn search_completed(
 /// (every row when it is empty), sorted by `key` ascending — the objects
 /// `GET /b/storage/api/buckets/{name}/objects` lists. The prefix is
 /// LIKE-escaped ([`escape_like`]), so `%`/`_` in it match literally; case
-/// follows the backend's `LIKE`, as in [`search_completed`] (SQLite and D1
-/// fold ASCII case, PostgreSQL does not).
+/// follows the backend's `LIKE` (SQLite and D1 fold ASCII case, PostgreSQL
+/// does not).
 pub async fn list_page_for_bucket(
     ctx: &dyn Context,
     bucket: &str,

@@ -324,7 +324,7 @@ let rows = db::list(
     ctx,
     TABLE,
     ListOptions::new()
-        .filter("email", "like", Json::str("%@example.com"))
+        .filter("email", "contains_ignore_case", Json::str(search))
         .sort("created_at", true)   // true = descending
         .limit(50)
         .offset(0),
@@ -333,8 +333,14 @@ let rows = db::list(
 let n = db::count(ctx, TABLE, &[Filter::new("email", "eq", Json::str(email))])?;
 ```
 
-Filter operators are `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `in`,
-`is_null` and `is_not_null`. Anything else is refused by the host.
+Filter operators are `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`,
+`contains_ignore_case`, `in`, `is_null` and `is_not_null`. Anything else is
+refused by the host.
+
+For a search box, use `contains_ignore_case`: its value is plain text, kept
+when the column contains it, ignoring the case of ASCII letters; `%`, `_`
+and `\` match only themselves. `like` takes a pattern instead, so passing a
+user's text to it makes `%` and `_` wildcards.
 
 Always set a `limit` on a list a user can grow. A list with no `limit`
 returns every matching row; `limit(0)` is refused, and so is an `offset`
