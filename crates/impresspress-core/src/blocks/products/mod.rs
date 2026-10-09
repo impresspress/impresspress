@@ -32,10 +32,17 @@ mod tests;
 // `snapshot_upsert`) in every build that does not compile the sandbox.
 // The gate says what the re-export is for as well as keeping the default
 // build warning-free.
-// The import-side twin of the offer write's variable check, for the data
-// snapshot's one write path that bypasses `repo::offers::build_offer`.
+// The data snapshot's import, and nothing else, uses these three, so they are
+// `block-dev`-gated for the same reason as the products re-export above:
+// `validate_imported_variables` is the import-side twin of the offer write's
+// variable check, for the one write path that bypasses
+// `repo::offers::build_offer`; `unarchived_offer_ids` and
+// `archive_offers_write` find and archive the offers a product the import
+// carries no longer has, by the same write `repo::offers::archive` makes.
 #[cfg(feature = "block-dev")]
-pub(crate) use repo::offers::validate_imported_variables;
+pub(crate) use repo::offers::{
+    archive_offers_write, unarchived_offer_ids, validate_imported_variables,
+};
 #[cfg(feature = "block-dev")]
 pub(crate) use repo::products::{
     list_every_live as list_live_products, snapshot_upsert as product_snapshot_upsert, TABLE,

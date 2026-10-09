@@ -30,7 +30,9 @@ use impresspress_core::{
         products::ProductsBlock,
     },
     platform_state::{user_roles, variables},
-    test_support::{anon_msg, output_http_json, output_http_status, TestContext, WriteLog},
+    test_support::{
+        admin_msg, anon_msg, output_http_json, output_http_status, TestContext, WriteLog,
+    },
     util::json_map,
 };
 use serde_json::json;
@@ -51,6 +53,7 @@ const PRODUCT_VERSIONS_TABLE: &str = "impresspress__products__product_versions";
 const CHECKOUT_PRESETS_TABLE: &str = "impresspress__products__checkout_presets";
 const PRODUCTS_VARIABLES_TABLE: &str = "impresspress__products__variables";
 const PURCHASES_TABLE: &str = "impresspress__products__purchases";
+const LINE_ITEMS_TABLE: &str = "impresspress__products__line_items";
 
 // ---------------------------------------------------------------------------
 // Coverage: every declared table has a decision.
@@ -2283,5 +2286,204 @@ async fn an_import_keeps_a_checkout_preset_it_does_not_carry() {
     assert_eq!(
         ids_for_offer(&ctx, CHECKOUT_PRESETS_TABLE, "offer_imported").await,
         vec!["preset_local"]
+    );
+}
+
+/// One more active, priced offer of `prod_imported`, beside the one
+/// [`priced_offer_bundle`] carries.
+fn second_offer_rows(
+    offer_id: &str,
+) -> (
+    serde_json::Map<String, serde_json::Value>,
+    serde_json::Map<String, serde_json::Value>,
+) {
+    let offer = row(json!({
+        "id": offer_id,
+        "product_id": "prod_imported",
+        "name": "Dropped offer",
+        "currency": "NZD",
+        "status": "active",
+        "version": 1,
+        "interval_count": 1,
+        "mode": "payment",
+        "pricing_model": "components",
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }));
+    let mut component = fixed_component(&format!("{offer_id}_base"), "base", 700);
+    component.insert("offer_id".to_string(), json!(offer_id));
+    (offer, component)
+}
+
+/// The HTTP status the public pricing preview answers for `offer_id`.
+async fn preview_status(ctx: &TestContext, offer_id: &str) -> u16 {
+    let out = ctx
+        .request_json(
+            anon_msg("create", "/b/products/pricing/preview"),
+            &json!({"offer_id": offer_id, "quantity": 1}),
+        )
+        .await;
+    output_http_status(out).await
+}
+
+async fn offer_record(ctx: &TestContext, offer_id: &str) -> db::Record {
+    db::get(ctx, OFFERS_TABLE, offer_id).await.unwrap()
+}
+
+/// Offers belong to their product, so an import that carries a product
+/// carries that product's offer set — but an offer can be named by orders
+/// (`line_items.offer_id`), subscription items, entitlements and Payment
+/// Links, so one the bundle no longer has is ARCHIVED, exactly as the
+/// products block retires an offer, rather than deleted: it can no longer be
+/// previewed or bought, and every order that names it still reads.
+///
+/// Offers of a product the bundle does not carry, and an offer that was
+/// already archived, are left exactly as they were.
+#[tokio::test]
+async fn a_re_import_archives_the_offers_a_carried_product_no_longer_has() {
+    let ctx = TestContext::with_products().await.fixture();
+    // A product (and its active offer) this destination has that no bundle
+    // below carries.
+    seed_row(
+        &ctx,
+        PRODUCTS_TABLE,
+        "prod_local",
+        json!({"name": "Local", "status": "active", "approval_status": "approved"}),
+    )
+    .await;
+    seed_row(
+        &ctx,
+        OFFERS_TABLE,
+        "offer_local",
+        json!({"product_id": "prod_local", "name": "Local", "status": "active"}),
+    )
+    .await;
+    // An offer of the carried product that was already archived here.
+    seed_row(
+        &ctx,
+        OFFERS_TABLE,
+        "offer_retired",
+        json!({
+            "product_id": "prod_imported",
+            "name": "Retired",
+            "status": "archived",
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }),
+    )
+    .await;
+
+    let mut first = priced_offer_bundle(
+        vec![fixed_component("component_base", "base", 1000)],
+        Vec::new(),
+    );
+    let (dropped, dropped_component) = second_offer_rows("offer_dropped");
+    first.tables.get_mut(OFFERS_TABLE).unwrap().push(dropped);
+    first
+        .tables
+        .get_mut(OFFER_COMPONENTS_TABLE)
+        .unwrap()
+        .push(dropped_component);
+    let report = data_snapshot::import(&as_dev(&ctx), &first).await.unwrap();
+    assert_eq!(report.archived_offers, 0, "the first import drops nothing");
+    assert_eq!(preview_status(&ctx, "offer_dropped").await, 200);
+
+    // An order placed against the offer the next bundle drops.
+    seed_row(
+        &ctx,
+        PURCHASES_TABLE,
+        "purchase_dropped",
+        json!({"user_id": "buyer_1", "buyer_user_id": "buyer_1", "status": "completed"}),
+    )
+    .await;
+    seed_row(
+        &ctx,
+        LINE_ITEMS_TABLE,
+        "line_dropped",
+        json!({
+            "purchase_id": "purchase_dropped",
+            "product_id": "prod_imported",
+            "product_name": "Imported",
+            "offer_id": "offer_dropped",
+            "component_id": "offer_dropped_base",
+        }),
+    )
+    .await;
+
+    let later = priced_offer_bundle(
+        vec![fixed_component("component_base", "base", 1000)],
+        Vec::new(),
+    );
+    let report = data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+    assert_eq!(
+        report.archived_offers, 1,
+        "offer_dropped alone: not the carried offer, not the already-archived one, not another \
+         product's"
+    );
+
+    let archived = offer_record(&ctx, "offer_dropped").await;
+    assert_eq!(archived.data["status"], json!("archived"));
+    assert_ne!(
+        archived.data["updated_at"],
+        json!(STAMP),
+        "archiving stamps the row, as the products block's own archive does"
+    );
+    assert_eq!(
+        preview_status(&ctx, "offer_dropped").await,
+        404,
+        "an archived offer cannot be previewed or bought"
+    );
+    // It is kept whole, not just as a row: the admin reads it, components and
+    // all, as an archived offer.
+    let out = ctx
+        .dispatch_resolved(admin_msg(
+            "retrieve",
+            "/b/products/api/admin/products/prod_imported/offers/offer_dropped",
+        ))
+        .await;
+    let body = output_http_json(out).await;
+    assert_eq!(body["status"], json!("archived"), "{body}");
+    assert_eq!(
+        body["offer"]["components"][0]["key"],
+        json!("base"),
+        "{body}"
+    );
+    // And the order that names it still reads.
+    let out = ctx
+        .dispatch_resolved(admin_msg(
+            "retrieve",
+            "/b/products/api/admin/purchases/purchase_dropped",
+        ))
+        .await;
+    let body = output_http_json(out).await;
+    assert_eq!(
+        body["line_items"][0]["offer_id"],
+        json!("offer_dropped"),
+        "{body}"
+    );
+
+    // The offer the bundle carries is untouched by the archival.
+    assert_eq!(
+        offer_record(&ctx, "offer_imported").await.data["status"],
+        json!("active")
+    );
+    assert_eq!(preview_status(&ctx, "offer_imported").await, 200);
+    // Another product's offer is untouched.
+    assert_eq!(
+        offer_record(&ctx, "offer_local").await.data["status"],
+        json!("active")
+    );
+    // An offer already archived is not archived again.
+    assert_eq!(
+        offer_record(&ctx, "offer_retired").await.data["updated_at"],
+        json!(STAMP)
+    );
+
+    // Re-importing converges: nothing left to archive, nothing refused.
+    let report = data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+    assert_eq!(report.archived_offers, 0);
+    assert_eq!(
+        offer_record(&ctx, "offer_dropped").await.data["status"],
+        json!("archived")
     );
 }
