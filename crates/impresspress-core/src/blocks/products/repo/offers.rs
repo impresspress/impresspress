@@ -215,11 +215,16 @@ pub(crate) async fn unarchived_offer_ids(
 ///
 /// Only the local half of the products block's archive. Its Stripe half
 /// (`stripe::archive_offer_catalog`: retire the offer's active Payment Links,
-/// deactivate its synced Prices) has nothing to do at an import destination:
-/// the import exists only in builds with the dev block, which only the browser
-/// runtime ships, and there `stripe_secret_operations_allowed` is false, so no
-/// offer is ever synced and no Payment Link created. `archive_offer_catalog`
-/// itself goes straight to [`archive`] for an offer with neither.
+/// deactivate its synced Prices) is one the import could not run: the import
+/// exists only in builds with the dev block, which only the browser runtime
+/// ships, and there `stripe_secret_operations_allowed` is false, so every
+/// Stripe call `archive_offer_catalog` would make is refused. An offer at the
+/// destination may still name a Stripe Price — a hand-written bundle can carry
+/// `price_…` ids, since the export resets provider linkage and the import does
+/// not — but the browser runtime could not archive that Price either way, and
+/// no offer there gained a Payment Link, whose creation it also refuses. What
+/// the browser can do is what this does: take the offer out of its own
+/// catalog.
 #[cfg(feature = "block-dev")]
 pub(crate) fn archive_offers_write(
     offer_ids: &[String],

@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wafer_block::{
     db::{Filter, FilterOp},
-    wire::database::{BatchWrite, OnConflict, UpsertRequest},
+    wire::database::{BatchWrite, BatchWriteResult, OnConflict, UpsertRequest},
 };
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
@@ -794,13 +794,20 @@ fn reset_provider_linkage(table: &str, row: &mut serde_json::Map<String, Value>)
     }
 }
 
-/// Rows written per table, keyed by table name — only tables `snapshot`
-/// actually carried rows for appear here, so a table the export decided to
-/// include but that happened to be empty is present with `0`, and a table
-/// the snapshot never mentions at all is simply absent.
+/// What one [`import`] wrote.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImportReport {
+    /// Rows written per table, keyed by table name — only tables `snapshot`
+    /// actually carried rows for appear here, so a table the export decided
+    /// to include but that happened to be empty is present with `0`, and a
+    /// table the snapshot never mentions at all is simply absent.
     pub tables: BTreeMap<String, usize>,
+    /// Offers this destination held for a product the snapshot carries, that
+    /// the snapshot does not carry, and that the import archived (see
+    /// [`archive_dropped_offers`]) — the rows the batch's archive writes
+    /// changed, not the rows `snapshot` carried, so it is absent from
+    /// [`Self::tables`].
+    pub archived_offers: u64,
 }
 
 /// [`Mode::Replace`] tables, in the explicit dependency order [`import`]
@@ -1053,7 +1060,9 @@ pub async fn import(
             });
         }
     }
+    let archive_writes = writes.len()..;
     writes.extend(archive_dropped_offers(ctx, snapshot).await?);
+    let archive_writes = archive_writes.start..writes.len();
     for (table, rows) in &snapshot.tables {
         if REPLACE_ORDER.contains(&table.as_str()) {
             continue; // already queued above, in dependency order
@@ -1085,9 +1094,24 @@ pub async fn import(
         report.tables.insert(table.clone(), rows.len());
     }
     if !writes.is_empty() {
-        // The per-op results (each created row as stored) are not needed: the
-        // report counts the snapshot's rows, which is what was written.
-        db::batch(ctx, writes).await?;
+        // Results come back one per write, in order. The report counts the
+        // snapshot's rows, which is what was written, so only the archive
+        // writes' results are read: how many offers they actually changed.
+        let results = db::batch(ctx, writes).await?;
+        for result in &results[archive_writes] {
+            let BatchWriteResult::UpdatedWhere { rows_affected } = result else {
+                return Err(WaferError::new(
+                    ErrorCode::Internal,
+                    format!("an offer archive write answered {result:?}, not a filtered update"),
+                ));
+            };
+            report.archived_offers += u64::try_from(*rows_affected).map_err(|_| {
+                WaferError::new(
+                    ErrorCode::Internal,
+                    format!("an offer archive write reported {rows_affected} rows"),
+                )
+            })?;
+        }
     }
     Ok(report)
 }

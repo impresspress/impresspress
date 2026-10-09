@@ -2384,7 +2384,8 @@ async fn a_re_import_archives_the_offers_a_carried_product_no_longer_has() {
         .get_mut(OFFER_COMPONENTS_TABLE)
         .unwrap()
         .push(dropped_component);
-    data_snapshot::import(&as_dev(&ctx), &first).await.unwrap();
+    let report = data_snapshot::import(&as_dev(&ctx), &first).await.unwrap();
+    assert_eq!(report.archived_offers, 0, "the first import drops nothing");
     assert_eq!(preview_status(&ctx, "offer_dropped").await, 200);
 
     // An order placed against the offer the next bundle drops.
@@ -2413,7 +2414,12 @@ async fn a_re_import_archives_the_offers_a_carried_product_no_longer_has() {
         vec![fixed_component("component_base", "base", 1000)],
         Vec::new(),
     );
-    data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+    let report = data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+    assert_eq!(
+        report.archived_offers, 1,
+        "offer_dropped alone: not the carried offer, not the already-archived one, not another \
+         product's"
+    );
 
     let archived = offer_record(&ctx, "offer_dropped").await;
     assert_eq!(archived.data["status"], json!("archived"));
@@ -2474,7 +2480,8 @@ async fn a_re_import_archives_the_offers_a_carried_product_no_longer_has() {
     );
 
     // Re-importing converges: nothing left to archive, nothing refused.
-    data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+    let report = data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+    assert_eq!(report.archived_offers, 0);
     assert_eq!(
         offer_record(&ctx, "offer_dropped").await.data["status"],
         json!("archived")
