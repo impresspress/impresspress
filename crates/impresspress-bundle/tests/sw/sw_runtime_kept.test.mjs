@@ -139,11 +139,6 @@ test('…and where neither has it, the worker dies at stage load and sends the p
   assert.deepEqual(worker.navigated, [CLIENT_URL]);
 });
 
-// A host that falls back to its app shell for unknown paths (the dev
-// sandbox's `not_found_handling = "single-page-application"`) answers a
-// binary it no longer has with a 200 and an HTML page. Kept, it would be a
-// version that can never load — and its `activate` would drop the binary of
-// the version that worked.
 // Two versions can ask the host for the same runtime binary at once: a
 // recovery's replacement installing while the browser restarts the old worker
 // for another tab, its kept copy dropped by that recovery. Chromium's HTTP
@@ -170,6 +165,11 @@ test('the runtime binary is fetched past the HTTP cache, at install and when the
   }
 });
 
+// A host that falls back to its app shell for unknown paths (the dev
+// sandbox's `not_found_handling = "single-page-application"`) answers a
+// binary it no longer has with a 200 and an HTML page. Kept, it would be a
+// version that can never load — and its `activate` would drop the binary of
+// the version that worked.
 test('a 200 that is not a WebAssembly module is not kept, and the version does not install', async (t) => {
   captureConsole(t);
   const worker = await loadWorker({

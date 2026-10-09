@@ -1454,27 +1454,33 @@ test('a new version that does not activate is waited for, then asked about', asy
 // with nothing in its way. "Restart it" and the reset there register a
 // replacement over it: one more wait for that same version is no way out.
 // (Registering anew is what gives the browser a new install to activate on.)
+// Stuck either way: installed and waiting, or still installing.
 for (const [button, label] of [
   ['impresspress-restart', 'Restart it'],
   ['impresspress-reset', 'the reset']
 ]) {
-  test(`${label} on the not-started screen registers a replacement over the version that has not started`, async () => {
-    const shell = loadShell({ installs: 'stalls', registeredUrl: `${ORIGIN}/sw.js`, now: NOW });
-    await shown(shell, button);
-    const stalled = shell.registration().waiting;
-    assert.equal(stalled.state, 'installed');
+  for (const [installs, slot, state] of [
+    ['stalls', 'waiting', 'installed'],
+    ['stalls-installing', 'installing', 'installing']
+  ]) {
+    test(`${label} on the not-started screen registers a replacement over the version that has not started (${state})`, async () => {
+      const shell = loadShell({ installs, registeredUrl: `${ORIGIN}/sw.js`, now: NOW });
+      await shown(shell, button);
+      const stalled = shell.registration()[slot];
+      assert.equal(stalled.state, state);
 
-    shell.stuck(button).click();
-    // Bounded: a button that only waits again registers nothing, ever.
-    for (let turn = 0; turn < 1_000 && shell.registeredUrls.length < 2; turn += 1) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+      shell.stuck(button).click();
+      // Bounded: a button that only waits again registers nothing, ever.
+      for (let turn = 0; turn < 1_000 && shell.registeredUrls.length < 2; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
 
-    assert.deepEqual(shell.registeredUrls, [`${ORIGIN}/sw.js`, REPLACEMENT]);
-    const replacing = shell.registration().waiting;
-    assert.notEqual(replacing, stalled);
-    assert.equal(replacing.scriptURL, `${ORIGIN}${REPLACEMENT}`);
-  });
+      assert.deepEqual(shell.registeredUrls, [`${ORIGIN}/sw.js`, REPLACEMENT]);
+      const replacing = shell.registration()[slot];
+      assert.notEqual(replacing, stalled);
+      assert.equal(replacing.scriptURL, `${ORIGIN}${REPLACEMENT}`);
+    });
+  }
 }
 
 // The erase comes BEFORE the replacement loads anything: the runtime holds

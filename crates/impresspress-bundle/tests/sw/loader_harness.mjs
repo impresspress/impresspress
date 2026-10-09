@@ -136,8 +136,9 @@ function element() {
 ///                 the wait for it runs out at once. Where the origin has a
 ///                 registration (`registeredUrl`), each version registered
 ///                 over it is a new one, left `waiting` there in its place.
-///                 `'late'`: one that activates a moment after that wait has
-///                 run out
+///                 `'stalls-installing'`: the same, but each version is left
+///                 `installing` — its install never finishes. `'late'`: one
+///                 that activates a moment after that wait has run out
 /// - `secure`    — whether the page is a secure context (`window
 ///                 .isSecureContext`); `false` is the same shell served over
 ///                 plain http at a LAN address
@@ -167,6 +168,8 @@ export function loadShell({
   documentTitle = title,
   secure = true
 } = {}) {
+  // A newly registered version that never activates, either way.
+  const stalls = installs === 'stalls' || installs === 'stalls-installing';
   const sessionStorage = storage(session);
   const localStorage = storage();
   // `#status`, keeping every line written to it.
@@ -268,7 +271,7 @@ export function loadShell({
   const workerListeners = new Set();
   const worker = {
     state:
-      installs === 'stalls' || installs === 'late' ? 'installed' : installs ? 'activated' : 'redundant',
+      stalls || installs === 'late' ? 'installed' : installs ? 'activated' : 'redundant',
     addEventListener: (type, l) => type === 'statechange' && workerListeners.add(l),
     removeEventListener: (type, l) => workerListeners.delete(l),
     // The page asking the worker to take it.
@@ -353,12 +356,13 @@ export function loadShell({
       registered += 1;
       registeredUrls.push(url);
       events.push(`register ${url}`);
-      if (installs === 'stalls' && registeredUrl !== undefined) {
+      if (stalls && registeredUrl !== undefined) {
         const current = await serviceWorker.getRegistration();
-        const stalled = version('installed');
+        const installing = installs === 'stalls-installing';
+        const stalled = version(installing ? 'installing' : 'installed');
         stalled.scriptURL = new URL(url, ORIGIN).href;
-        current.installing = null;
-        current.waiting = stalled;
+        current.installing = installing ? stalled : null;
+        current.waiting = installing ? null : stalled;
         return current;
       }
       if (installs === 'late') {
@@ -489,7 +493,7 @@ export function loadShell({
     const now =
       ms === 0 ||
       (ms === 10_000
-        ? !claims || installs === 'stalls' || installs === 'late'
+        ? !claims || stalls || installs === 'late'
         : ms === 2_000
           ? !answersRuntime
           : probeTimesOut(probes.length));

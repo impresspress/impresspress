@@ -978,10 +978,14 @@ pub async fn import(
     let mut writes = Vec::new();
     // `Replace` tables first, in `REPLACE_ORDER` — not the snapshot's own
     // alphabetical order. `Upsert` and `OwnedSet` tables carry no such
-    // dependency (every foreign id they reference — `product_id`,
-    // `offer_id` — is validated by the owning handler at write time, never
-    // enforced by this import), so the remaining loop below keeps the
-    // snapshot's own order.
+    // dependency: this import enforces none of the foreign ids they
+    // reference (`product_id`, `offer_id`), and nor does the schema. Outside
+    // it, an `Upsert` table's references are checked by the handler that
+    // writes the row; an `OwnedSet` row is created, and its `offer_id`
+    // set, only by its owner's writer (`offers::create` /
+    // `offers::update_draft`, through `replace_for_offer`), to the id of the
+    // offer that writer has just written, so there is nothing to check.
+    // Hence the remaining loop below keeps the snapshot's own order.
     for &table in REPLACE_ORDER {
         let Some(rows) = snapshot.tables.get(table) else {
             continue;

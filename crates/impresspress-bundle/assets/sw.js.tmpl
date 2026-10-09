@@ -328,9 +328,15 @@ async function ensureInitialized() {
  * recovery (`runtimeBinary`) — and Chromium's HTTP cache holds a second
  * request for a URL until the first has its response headers, for up to 20
  * seconds: the old worker's start waited that long behind the install. The
- * HTTP cache has nothing to give either request: the worker keeps the binary
- * itself, in RUNTIME_CACHE, and a recovery's replacement is to fetch its own
- * afresh (`dropCaches` in `loader.js`).
+ * worker keeps the binary itself, in RUNTIME_CACHE, so the HTTP cache is
+ * needed only where that copy has gone.
+ *
+ * What this gives up is exactly that case, offline: a version installing, or
+ * a worker whose kept copy was dropped (a recovery) or evicted, cannot get
+ * its runtime without the host — the install fails, the start dies at stage
+ * `load` — where an HTTP cache entry might have answered before. That is the
+ * contract `dropCaches` in `loader.js` already states: a recovery's
+ * replacement fetches its own binary afresh, not a copy from before.
  */
 function fetchRuntime() {
     return fetch(RUNTIME_URL, { cache: 'no-store' });
