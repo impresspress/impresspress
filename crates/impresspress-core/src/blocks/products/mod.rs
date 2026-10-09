@@ -34,8 +34,13 @@ mod tests;
 // build warning-free.
 // The import-side twin of the offer write's variable check, for the data
 // snapshot's one write path that bypasses `repo::offers::build_offer`.
+//
+// The import also archives the offers a product it carries no longer has, by
+// the same write `repo::offers::archive` makes.
 #[cfg(feature = "block-dev")]
-pub(crate) use repo::offers::validate_imported_variables;
+pub(crate) use repo::offers::{
+    archive_offers_write, unarchived_offer_ids, validate_imported_variables,
+};
 #[cfg(feature = "block-dev")]
 pub(crate) use repo::products::{
     list_every_live as list_live_products, snapshot_upsert as product_snapshot_upsert, TABLE,

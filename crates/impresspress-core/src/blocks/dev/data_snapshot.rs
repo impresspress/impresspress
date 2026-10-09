@@ -64,12 +64,13 @@ use crate::{
             orgs, pats, provider_links, rate_limits, sessions, tokens, users,
         },
         products::{
-            list_live_products, money, product_snapshot_upsert, validate_imported_variables,
-            CHECKOUT_PRESETS_TABLE, DISPUTES_TABLE, ENTITLEMENTS_TABLE, GROUPS_TABLE,
-            GROUP_TEMPLATES_TABLE, LINE_ITEMS_TABLE, OFFERS_TABLE, OFFER_COMPONENTS_TABLE,
-            PAYMENT_LINKS_TABLE, PRODUCT_TEMPLATES_TABLE, PRODUCT_VERSIONS_TABLE,
-            PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE, SELLER_ACCOUNTS_TABLE,
-            STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE, SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE,
+            archive_offers_write, list_live_products, money, product_snapshot_upsert,
+            unarchived_offer_ids, validate_imported_variables, CHECKOUT_PRESETS_TABLE,
+            DISPUTES_TABLE, ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE,
+            LINE_ITEMS_TABLE, OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE,
+            PRODUCT_TEMPLATES_TABLE, PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE,
+            PURCHASES_TABLE, REFUNDS_TABLE, SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE,
+            SUBSCRIPTIONS_TABLE, SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE,
             VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
         },
     },
@@ -104,9 +105,11 @@ pub struct DataSnapshot {
 /// identifies it, and two instances never mint the same one.
 pub const BY_ID: &[&str] = &["id"];
 
-/// Owner ids per `DeleteWhere` that clears a [`Mode::OwnedSet`] table: under
-/// D1's cap of 100 bound parameters per statement.
-const OWNER_IDS_PER_DELETE: usize = 50;
+/// Ids bound to one statement of [`import`] — a `DeleteWhere` that clears a
+/// [`Mode::OwnedSet`] table, a read of a carried product's offers, an update
+/// that archives offers: under D1's cap of 100 bound parameters per
+/// statement, with room for the statement's other filters.
+const IDS_PER_STATEMENT: usize = 50;
 
 /// How [`import`] applies one allowlisted table's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +188,10 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     (GROUP_TEMPLATES_TABLE, Mode::Upsert(BY_ID)),
     (PRODUCT_TEMPLATES_TABLE, Mode::Upsert(BY_ID)),
     (PRODUCT_VERSIONS_TABLE, Mode::Upsert(BY_ID)),
+    // Upserted by id, and also a set each product owns: [`import`] archives
+    // the destination's offers of a product the snapshot carries that the
+    // snapshot does not — see [`archive_dropped_offers`] for why archived and
+    // not deleted.
     (OFFERS_TABLE, Mode::Upsert(BY_ID)),
     // The four below hang off a row above them, and [`export`] filters each
     // against the ids its owner actually exported — so the order here is
@@ -863,7 +870,9 @@ mod replace_order_tests {
 /// a filtered delete of every row (`BatchWrite::DeleteWhere` with no filters)
 /// followed by a `Create` per snapshot row, in [`REPLACE_ORDER`]; then, for
 /// each [`Mode::OwnedSet`] table, a `DeleteWhere` of the rows of every owner
-/// the snapshot carries; then every `Upsert` and `OwnedSet` row. A write that
+/// the snapshot carries; then the archive of every offer a carried product no
+/// longer has ([`archive_dropped_offers`]); then every `Upsert` and
+/// `OwnedSet` row. A write that
 /// fails (a duplicate key, a
 /// bad row) rolls all of it back, so a failed import leaves the users, their
 /// credentials and every other table as they were.
@@ -876,8 +885,9 @@ mod replace_order_tests {
 /// raised `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` on a plan that allows it,
 /// is the fix, not a retry.
 ///
-/// Every write is keyed on the snapshot's own row ids, and every owned set is
-/// replaced rather than merged, so importing the same snapshot again — or a
+/// Every write is keyed on the snapshot's own row ids, every owned set is
+/// replaced rather than merged, and a carried product's offers are the
+/// snapshot's (the rest archived), so importing the same snapshot again — or a
 /// later export of the same shop — converges to the snapshot's state —
 /// `tests/dev_data_snapshot.rs`'s
 /// `import_replaces_users_and_upserts_products_so_ownership_survives` test
@@ -1032,7 +1042,7 @@ pub async fn import(
         let owners: Vec<String> = owners.into_iter().collect();
         // One statement per chunk rather than per owner, and chunked because
         // D1 binds at most 100 parameters to one statement.
-        for chunk in owners.chunks(OWNER_IDS_PER_DELETE) {
+        for chunk in owners.chunks(IDS_PER_STATEMENT) {
             writes.push(BatchWrite::DeleteWhere {
                 collection: table.to_string(),
                 filters: crate::util::to_wire_filters(&[Filter {
@@ -1043,6 +1053,7 @@ pub async fn import(
             });
         }
     }
+    writes.extend(archive_dropped_offers(ctx, snapshot).await?);
     for (table, rows) in &snapshot.tables {
         if REPLACE_ORDER.contains(&table.as_str()) {
             continue; // already queued above, in dependency order
@@ -1079,6 +1090,59 @@ pub async fn import(
         db::batch(ctx, writes).await?;
     }
     Ok(report)
+}
+
+/// The writes that archive every offer the destination holds for a product
+/// `snapshot` carries (a row of the products table) but that `snapshot` does
+/// not carry, and is not archived already.
+///
+/// A product's offers are its set, as an offer's variables are the offer's,
+/// so a re-import of a later export converges on the source's offers. But
+/// unlike a variable, an offer is named from outside the catalog — by an
+/// order's line items, a subscription item, an entitlement, a Payment Link,
+/// a checkout preset — and nothing enforces those references, so deleting
+/// one would leave that history pointing at nothing. The products block never
+/// deletes an offer either: it archives it (`repo::offers::archive`), and this
+/// writes exactly the columns that does, so the offer can no longer be
+/// previewed or bought and still reads, children and all, wherever it is
+/// named. See [`archive_offers_write`] for why its Stripe half has nothing to
+/// do here.
+///
+/// Offers of a product `snapshot` does not carry are untouched, as are owned
+/// sets of owners it does not carry ([`Mode::OwnedSet`]). The destination's
+/// offers are read before the batch, which is one transaction only for its
+/// writes; an offer archived in between keeps its own stamp, because the
+/// write is fenced on the status.
+async fn archive_dropped_offers(
+    ctx: &dyn Context,
+    snapshot: &DataSnapshot,
+) -> Result<Vec<BatchWrite>, WaferError> {
+    let ids = |table: &str| -> BTreeSet<String> {
+        snapshot
+            .tables
+            .get(table)
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row.get("id").and_then(Value::as_str))
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let products: Vec<String> = ids(PRODUCTS_COLLECTION).into_iter().collect();
+    let carried_offers = ids(OFFERS_TABLE);
+    let mut dropped = Vec::new();
+    for chunk in products.chunks(IDS_PER_STATEMENT) {
+        dropped.extend(
+            unarchived_offer_ids(ctx, chunk)
+                .await?
+                .into_iter()
+                .filter(|id| !carried_offers.contains(id)),
+        );
+    }
+    Ok(dropped
+        .chunks(IDS_PER_STATEMENT)
+        .map(archive_offers_write)
+        .collect())
 }
 
 /// A snapshot's grant rows with every repeat of a `(user_id, role)` pair

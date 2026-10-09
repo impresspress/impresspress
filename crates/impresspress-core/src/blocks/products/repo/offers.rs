@@ -178,6 +178,70 @@ pub(crate) fn validate_imported_variables<'a>(
     Ok(())
 }
 
+/// The ids of every offer of the products in `product_ids` that is not
+/// archived — what a data-snapshot import reads to find the offers a product
+/// it carries no longer has. The caller bounds `product_ids` to what one
+/// statement may bind.
+#[cfg(feature = "block-dev")]
+pub(crate) async fn unarchived_offer_ids(
+    ctx: &dyn Context,
+    product_ids: &[String],
+) -> Result<Vec<String>, WaferError> {
+    let records = db_read::list_every(
+        ctx,
+        TABLE,
+        vec![
+            Filter {
+                field: "product_id".to_string(),
+                operator: FilterOp::In,
+                value: Value::from(product_ids.to_vec()),
+            },
+            Filter {
+                field: "status".to_string(),
+                operator: FilterOp::NotEqual,
+                value: serde_json::json!(OfferStatus::Archived),
+            },
+        ],
+    )
+    .await?;
+    Ok(records.into_iter().map(|record| record.id).collect())
+}
+
+/// The batch write that archives the offers in `offer_ids` inside a
+/// data-snapshot import's one batch: the columns [`archive`] writes, on every
+/// listed offer that is not archived already (so a row archived since it was
+/// read keeps its own stamp). The caller bounds `offer_ids` to what one
+/// statement may bind.
+///
+/// Only the local half of the products block's archive. Its Stripe half
+/// (`stripe::archive_offer_catalog`: retire the offer's active Payment Links,
+/// deactivate its synced Prices) has nothing to do at an import destination:
+/// the import exists only in builds with the dev block, which only the browser
+/// runtime ships, and there `stripe_secret_operations_allowed` is false, so no
+/// offer is ever synced and no Payment Link created. `archive_offer_catalog`
+/// itself goes straight to [`archive`] for an offer with neither.
+#[cfg(feature = "block-dev")]
+pub(crate) fn archive_offers_write(
+    offer_ids: &[String],
+) -> wafer_block::wire::database::BatchWrite {
+    wafer_block::wire::database::BatchWrite::UpdateWhere {
+        collection: TABLE.to_string(),
+        filters: crate::util::to_wire_filters(&[
+            Filter {
+                field: "id".to_string(),
+                operator: FilterOp::In,
+                value: Value::from(offer_ids.to_vec()),
+            },
+            Filter {
+                field: "status".to_string(),
+                operator: FilterOp::NotEqual,
+                value: serde_json::json!(OfferStatus::Archived),
+            },
+        ]),
+        data: archived_columns(),
+    }
+}
+
 fn component_from_record(record: &Record) -> Result<OfferComponent, WaferError> {
     let condition = if empty_json_field(record, "condition_json") {
         Condition::Always
@@ -803,6 +867,19 @@ pub(crate) async fn publish(
     get_managed(ctx, offer_id).await
 }
 
+/// What archiving writes to an offer row: the status, and the update stamp.
+/// The offer's variables, components, presets and every order that names it
+/// are left as they are, which is what lets an archived offer still be read.
+/// [`archive`] and [`archive_offers_write`] both write exactly this.
+fn archived_columns() -> HashMap<String, Value> {
+    let mut data = HashMap::from([(
+        "status".to_string(),
+        serde_json::json!(OfferStatus::Archived),
+    )]);
+    stamp_updated(&mut data);
+    data
+}
+
 pub(crate) async fn archive(
     ctx: &dyn Context,
     product_id: &str,
@@ -812,11 +889,7 @@ pub(crate) async fn archive(
     if managed.status == OfferStatus::Archived {
         return Ok(managed);
     }
-    let mut data = HashMap::from([(
-        "status".to_string(),
-        serde_json::json!(OfferStatus::Archived),
-    )]);
-    stamp_updated(&mut data);
+    let data = archived_columns();
     // The offer is archived from whichever state it is in; `managed.status`
     // is the CAS expectation directly, which is what the re-spelled
     // `match` this replaces was reconstructing.
