@@ -412,7 +412,7 @@ fn list_objects_query_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "prefix": {"type": "string", "description": "Key prefix filter"},
+            "prefix": {"type": "string", "description": "List only the objects whose key starts with this text. The match is case-sensitive (`a/B` does not list `a/b.txt`) and literal: no character is a wildcard."},
             "page": {"type": "integer", "default": 1},
             "page_size": {"type": "integer", "default": 50, "maximum": 100}
         }

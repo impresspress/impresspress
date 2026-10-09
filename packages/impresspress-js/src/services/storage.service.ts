@@ -39,7 +39,11 @@ export interface ListObjectsResult {
 }
 
 export interface ListOptions {
-  /** Key prefix filter. */
+  /**
+   * List only the objects whose key starts with this text. The match is
+   * case-sensitive (`a/B` does not list `a/b.txt`) and literal: no character
+   * is a wildcard.
+   */
   prefix?: string;
   page?: number;
   page_size?: number;

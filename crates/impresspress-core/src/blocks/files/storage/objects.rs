@@ -2962,6 +2962,59 @@ mod integration_tests {
         assert_eq!(notes["total_count"], serde_json::json!(3));
     }
 
+    /// **Fails on the pre-fix tree.** The listing's `prefix` is a literal,
+    /// case-sensitive key prefix on every backend: object keys are
+    /// case-sensitive (`a/B.txt` and `a/b.txt` are different objects), and
+    /// `%`, `_`, `*`, `?` and `[` match only themselves. It used to be a
+    /// LIKE, which ignores ASCII case on SQLite and D1. PostgreSQL runs the
+    /// same operator through wafer-run's shared conformance suite.
+    #[tokio::test]
+    async fn the_object_listing_prefix_is_literal_and_case_sensitive() {
+        let ctx = ctx_with_storage().await;
+        seed_bucket(&ctx, "assets", "alice").await;
+        for key in [
+            "a/b.txt", "a/B.txt", "a_b/x", "axb/x", "s*/x", "sx/x", "[a]/x", "a/x",
+        ] {
+            let out = alice_uploads(&ctx, "assets", key).await;
+            assert_eq!(output_json(out).await["uploaded"], serde_json::json!(true));
+        }
+        let listed = |prefix: &'static str| {
+            let ctx = &ctx;
+            async move {
+                let mut msg =
+                    auth_msg("retrieve", "/b/storage/api/buckets/assets/objects", "alice");
+                msg.set_meta("req.param.name", "assets");
+                msg.set_meta("req.query.prefix", prefix);
+                let body = output_json(handle_list_objects(ctx, &msg).await).await;
+                body["objects"]
+                    .as_array()
+                    .expect("objects")
+                    .iter()
+                    .map(|o| o["key"].as_str().expect("key").to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(
+            listed("a/B").await,
+            ["a/B.txt"],
+            "`a/B` does not list `a/b.txt`"
+        );
+        assert_eq!(
+            listed("a/b").await,
+            ["a/b.txt"],
+            "`a/b` does not list `a/B.txt`"
+        );
+        assert_eq!(listed("a_").await, ["a_b/x"], "`_` is literal");
+        assert_eq!(listed("s*").await, ["s*/x"], "`*` is literal");
+        assert_eq!(listed("[a]").await, ["[a]/x"], "`[` opens no class");
+        assert_eq!(
+            listed("A").await,
+            Vec::<String>::new(),
+            "case is significant"
+        );
+    }
+
     /// **Fails on the pre-fix tree.** The pending sweep reclaims the blob of
     /// a reservation it deletes, not only the row. An upload whose bytes were
     /// stored but whose row could not be recorded left them in storage

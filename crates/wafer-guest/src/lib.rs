@@ -1905,8 +1905,8 @@ pub struct Filter {
     /// Column to compare.
     pub field: String,
     /// One of `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`,
-    /// `contains_ignore_case`, `in`, `is_null`, `is_not_null`. Anything else
-    /// is refused by the host.
+    /// `contains_ignore_case`, `starts_with`, `in`, `is_null`, `is_not_null`.
+    /// Anything else is refused by the host.
     pub operator: String,
     /// Value to compare against. Ignored by `is_null` / `is_not_null`.
     pub value: json::Json,

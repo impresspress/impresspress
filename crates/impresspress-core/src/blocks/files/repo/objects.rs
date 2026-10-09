@@ -121,29 +121,6 @@ fn owned_objects_filter(user_id: &str) -> Vec<Filter> {
     }]
 }
 
-/// Escape SQL LIKE wildcards (`%`, `_`) and the escape char itself (`\`) in
-/// the key prefix [`list_page_for_bucket`] matches, so `%`/`_` in it match
-/// only themselves.
-///
-/// SQLite's `LIKE` has *no* default escape character — a bare backslash is
-/// just a literal byte, so escaping here would be silently inert on its own.
-/// What makes it effective is the `wafer-sql-utils` `FilterOp::Like` builder,
-/// which renders an explicit `ESCAPE '\'` clause on every backend (SQLite/D1
-/// and Postgres) — see `wafer-sql-utils::query::predicate_on`.
-fn escape_like(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        match c {
-            '\\' | '%' | '_' => {
-                out.push('\\');
-                out.push(c);
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// The storage key a reservation stores its upload's bytes under, within the
 /// object's bucket: the object's key with `claim_id` in front of its last
 /// segment — `reports/q3.pdf` becomes `reports/{claim_id}~q3.pdf`.
@@ -972,9 +949,9 @@ pub async fn search_completed(
 /// One page of the object rows in `bucket` whose key starts with `prefix`
 /// (every row when it is empty), sorted by `key` ascending — the objects
 /// `GET /b/storage/api/buckets/{name}/objects` lists. The prefix is
-/// LIKE-escaped ([`escape_like`]), so `%`/`_` in it match literally; case
-/// follows the backend's `LIKE` (SQLite and D1 fold ASCII case, PostgreSQL
-/// does not).
+/// literal and case-sensitive on every backend ([`FilterOp::StartsWith`]):
+/// object keys are case-sensitive, so `a/B` does not list `a/b.txt`, and no
+/// character in it is a wildcard.
 pub async fn list_page_for_bucket(
     ctx: &dyn Context,
     bucket: &str,
@@ -990,8 +967,8 @@ pub async fn list_page_for_bucket(
     if !prefix.is_empty() {
         filters.push(Filter {
             field: "key".to_string(),
-            operator: FilterOp::Like,
-            value: serde_json::Value::String(format!("{}%", escape_like(prefix))),
+            operator: FilterOp::StartsWith,
+            value: serde_json::Value::String(prefix.to_string()),
         });
     }
     let opts = ListOptions {
