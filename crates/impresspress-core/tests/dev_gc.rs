@@ -1353,3 +1353,81 @@ async fn boot_accepts_the_staged_build_of_a_live_block_and_closes_the_rest() {
         "and the serving block keeps its own",
     );
 }
+
+/// Insert a generation whose block manifest does not parse — written by a
+/// build this one cannot read — and move it to `status`.
+async fn insert_unreadable_generation(ctx: &TestContext, status: GenerationStatus) -> String {
+    let id = repo::new_id();
+    generations::insert(
+        ctx,
+        &NewGeneration {
+            id: id.clone(),
+            parent_id: None,
+            cause: GenerationCause::BlockCompile,
+            site_manifest_json: r#"{"files":[]}"#.to_string(),
+            block_manifest_json: "not-json-at-all".to_string(),
+            manifest_sha256: "cc".to_string(),
+        },
+    )
+    .await
+    .expect("insert an unreadable generation");
+    let failure = (status == GenerationStatus::Failed)
+        .then_some("abandoned at boot: its stored manifest could not be read back");
+    generations::set_status(ctx, &id, status, failure, None)
+        .await
+        .expect("set its status");
+    id
+}
+
+/// A `failed` generation whose manifest cannot be read protects nothing —
+/// nothing can show, roll back to or activate it — so collection runs past
+/// it rather than pausing until retention pushes it out of the window.
+#[tokio::test]
+async fn collection_runs_past_a_failed_generation_whose_manifest_cannot_be_read() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let shared = ctx.dev_shared();
+    write_file(&ctx, "site/index.html", "live", None).await;
+    ctx.drain_deferred().await;
+    insert_unreadable_generation(&ctx, GenerationStatus::Failed).await;
+    let (sha, _stored) = blobs::put(&ctx, b"named by nothing")
+        .await
+        .expect("store an unreferenced blob");
+
+    gc::collect(&ctx, &shared)
+        .await
+        .expect("an unreadable failed generation does not stop collection");
+    assert!(
+        !blobs::exists(&ctx, &sha).await.expect("exists"),
+        "the unreferenced blob was collected",
+    );
+    assert!(
+        blobs::exists(&ctx, &sha_of_live()).await.expect("exists"),
+        "what the live generation names is kept",
+    );
+}
+
+/// Any other status may be live, or become live: collecting over a manifest
+/// that cannot be read could delete what it serves, so that stays an error.
+#[tokio::test]
+async fn collection_refuses_over_a_live_generation_whose_manifest_cannot_be_read() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let shared = ctx.dev_shared();
+    write_file(&ctx, "site/index.html", "live", None).await;
+    ctx.drain_deferred().await;
+    insert_unreadable_generation(&ctx, GenerationStatus::Superseded).await;
+    let (sha, _stored) = blobs::put(&ctx, b"named by nothing")
+        .await
+        .expect("store an unreferenced blob");
+
+    gc::collect(&ctx, &shared)
+        .await
+        .expect_err("an unreadable generation that is not failed stops collection");
+    assert!(
+        blobs::exists(&ctx, &sha).await.expect("exists"),
+        "nothing was collected",
+    );
+}
+
+fn sha_of_live() -> String {
+    blobs::sha256_hex(b"live")
+}

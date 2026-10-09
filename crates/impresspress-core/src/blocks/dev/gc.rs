@@ -207,7 +207,28 @@ pub async fn collect_interleaved(
         // two halves ARE the manifest (`generation::from_row` is exact), and
         // reading the shas off a parsed manifest is what keeps this and the
         // activation's own content check reading the same fields.
-        let manifest = generation::from_row(row)?;
+        //
+        // A `failed` row whose manifest does not parse protects nothing: the
+        // detail and rollback endpoints refuse it, and nothing moves a
+        // generation out of `failed` — so the content it names is
+        // unreachable through it, and refusing to collect over it
+        // would pause collection until retention pushed it out of the window.
+        // Any other status is a generation that is (or may become) live, and
+        // collecting over its unreadable manifest could delete what it serves:
+        // that stays an error.
+        let manifest = match generation::from_row(row) {
+            Ok(manifest) => manifest,
+            Err(e) if row.status == repo::generations::GenerationStatus::Failed => {
+                tracing::warn!(
+                    generation_id = %row.id,
+                    error = %e.message,
+                    "dev sandbox: collecting past a failed generation whose manifest cannot be \
+                     read; it protects no content",
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         live_blobs.extend(manifest.site.files.iter().map(|entry| entry.sha256.clone()));
         live_artifacts.extend(
             manifest
