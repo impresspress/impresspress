@@ -34,7 +34,7 @@
 //   a cause entry or breaker that is stale, undated or malformed   no recovery
 //   the boot probe ran out of time (either branch)       waits; asks; keeps data
 //   the worker does not take the page                    asks; keeps data
-//   the boot probe could not be made (it threw)          no recovery
+//   the boot probe could not be made (it threw)          no recovery; asks again
 //   the worker could not be registered                   no recovery
 //   the retry button on the stopped screen               as the failure shown
 //   "Keep waiting" / "Restart it" on the waiting screen  keep data
@@ -748,8 +748,18 @@ test('a worker that reports a failure as the probe times out is what is acted on
   assertUntouched(shell);
 });
 
-// The two failures that reach this shell with no cause and are not a timeout.
-// Neither is acted on, so neither can erase anything.
+/// Let the shell run until `done()` holds, a turn at a time.
+async function until(done, what) {
+  for (let turn = 0; turn < 1_000; turn += 1) {
+    if (done()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(`never happened: ${what}`);
+}
+
+// A probe that could not be made has no answer in it. It is not acted on, so
+// it erases and clears nothing — and the shell does not go on to the app on
+// it either: it asks again, within the same 60 s.
 test('a probe that threw proves nothing, clears nothing and erases nothing', async () => {
   const shell = loadShell({
     session: { [RECOVERY_DONE]: 'restarted' },
@@ -758,13 +768,169 @@ test('a probe that threw proves nothing, clears nothing and erases nothing', asy
       throw new TypeError('Failed to fetch');
     }
   });
-  await shell.booted;
+  await until(() => shell.probes.length >= 3, 'the probe is asked again');
 
   assert.equal(shell.session.getItem(RECOVERY_DONE), 'restarted');
   assert.deepEqual(shell.registeredUrls, ['/sw.js']);
   assert.deepEqual(shell.cacheNames(), ['assets-v1']);
   assert.deepEqual(shell.opfs(), ['app.sqlite']);
   assert.equal(shell.stuck('impresspress-stopped-cause'), null);
+  assertUntouched(shell);
+
+  // Asking again goes on for as long as a probe that hangs is waited for,
+  // and ends the same way: the shell says so, waits once more, then asks the
+  // person. The page has a way in, and nothing was erased on the way.
+  shell.deadline();
+  await until(
+    () => shell.status.textContent.startsWith('The app has not answered for 60 seconds.'),
+    'the first 60 s run out'
+  );
+  const asked = shell.probes.length;
+  await until(() => shell.probes.length >= asked + 2, 'asked again after the first 60 s');
+  shell.deadline();
+  await shell.booted;
+  assert.equal(
+    shell.stuck('impresspress-stopped-title').textContent,
+    'Kiln & Co is taking a long time to start'
+  );
+  assert.equal(
+    shell.stuck('impresspress-stopped-cause').textContent,
+    'The app has not answered for 120 seconds.'
+  );
+  assertUntouched(shell);
+  assert.equal(shell.session.getItem(RECOVERY_DONE), 'restarted');
+});
+
+// What makes the probe throw in WebKit: a navigation away from the shell
+// beginning. WebKit rejects the request under way and every one the
+// document makes after it, and — on iOS — fires no `beforeunload` first. A
+// shell that went on to the app on that would reload over the navigation:
+// the tab would land back here, on `/`, instead of where it was sent.
+// Reproduced in Playwright's WebKit with `beforeunload` withheld.
+//
+// Here the navigation is under way for the first three probes and then ends
+// without replacing the document (a download, a 204): the shell must do
+// nothing while it is under way, and the app's answer decides after.
+function navigationUnderWay(underWay, during) {
+  let calls = 0;
+  return () => {
+    calls += 1;
+    if (calls <= underWay) {
+      during(calls);
+      throw new TypeError('Load failed');
+    }
+    return new Response('<html>', { status: 200 });
+  };
+}
+
+test('a navigation that cut the probe off is not reloaded over, with no beforeunload', async () => {
+  const whileUnderWay = [];
+  const shell = loadShell({
+    now: NOW,
+    probe: navigationUnderWay(3, () =>
+      whileUnderWay.push([shell.location.reloads, shell.location.replaced.length])
+    )
+  });
+  await shell.booted;
+
+  assert.deepEqual(whileUnderWay, [[0, 0], [0, 0], [0, 0]], 'nothing navigated while it was under way');
+  assert.equal(shell.probes.length, 4);
+  // No `beforeunload` came, and the navigation left this document in
+  // place: the shell is still what the tab shows, so it goes on to the app.
+  assert.equal(shell.location.reloads, 1);
+  // One line in the console for the whole ask, not one a second.
+  assert.equal(shell.warnings.filter((w) => w.includes('Boot probe failed')).length, 1);
+});
+
+// Desktop WebKit fires `beforeunload` as well: once the navigation ends and
+// the app answers, the shell stands down as in Chromium.
+test('a navigation that cut the probe off and fired beforeunload is stood down from', async () => {
+  const shell = loadShell({
+    now: NOW,
+    onProbe: ({ leave }) => leave(),
+    probe: navigationUnderWay(3, () => {})
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 4);
+  assert.equal(shell.location.reloads, 0);
+  assert.deepEqual(shell.location.replaced, []);
+  assert.match(shell.status.textContent, /If this page stays, reload it\.$/);
+});
+
+// A probe that failed for a reason that passes — the worker was stopped
+// under it and started again — is followed by one that is answered, and that
+// answer is what the shell goes on with.
+test('a probe that threw is asked again, and the answer is what the shell goes on with', async () => {
+  let calls = 0;
+  const shell = loadShell({
+    session: { [RECOVERY_DONE]: 'restarted' },
+    probe: () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('Failed to fetch');
+      return new Response('<html>', { status: 200 });
+    },
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 2);
+  assert.equal(shell.probes[1].url, shell.probes[0].url);
+  assertEntered(shell);
+});
+
+// …and an answer that says the runtime died is acted on like any other.
+test('a probe asked again that meets a dead runtime sets the breaker', async () => {
+  let calls = 0;
+  const shell = loadShell({
+    probe: () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('Failed to fetch');
+      return stoppedResponse(CAUSE, 'initialize');
+    },
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 2);
+  assert.equal(shell.session.getItem(BREAKER), breaker(CAUSE, 'initialize'));
+  assert.equal(shell.location.reloads, 1);
+});
+
+// …and one whose notice arrives while the shell pauses between probes:
+// looked for again after the pause, so no further probe is made.
+test('a worker that reports its death during the pause is not asked again', async () => {
+  const shell = loadShell({
+    now: NOW,
+    probe: () => {
+      // Delivered in the next turn: after the shell has looked once, during
+      // its pause.
+      setTimeout(() => shell.post({ type: 'sw-self-destruct', reason: CAUSE, stage: 'initialize' }), 0);
+      throw new TypeError('Failed to fetch');
+    }
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 1);
+  assert.equal(shell.session.getItem(BREAKER), breaker(CAUSE, 'initialize'));
+  assertUntouched(shell);
+});
+
+// A worker that posts its self-destruct notice is navigating this page
+// itself: the shell stops asking.
+test('a probe that threw as the worker reported its death is not asked again', async () => {
+  const shell = loadShell({
+    now: NOW,
+    onProbe: ({ post }) => post({ type: 'sw-self-destruct', reason: CAUSE, stage: 'initialize' }),
+    probe: () => {
+      throw new TypeError('Failed to fetch');
+    }
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 1);
+  assert.equal(shell.session.getItem(BREAKER), breaker(CAUSE, 'initialize'));
+  assertUntouched(shell);
 });
 
 test('a worker that cannot be registered is said, and nothing is recovered or erased', async () => {

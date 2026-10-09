@@ -28,6 +28,62 @@ function source(variable) {
 
 const SOURCES = { plain: source('LOADER_JS'), wipe: source('LOADER_JS_WIPE') };
 
+/// The timers the loader sets, by the constant each is set with, read from the
+/// rendered source: the stub below tells them apart by their delay, so it
+/// keys every one to the constant that names it rather than to a number
+/// written here. Refused, so that a change cannot slip past the stub:
+/// - two of these constants with the same value (the stub could not tell
+///   their timers apart);
+/// - a `setTimeout` whose delay is a number written in place, other than the
+///   `0` that leaves the current task (it would be stubbed as whichever timer
+///   shares its value).
+function timerDelays(rendered) {
+  const value = (name) => {
+    const match = rendered.match(new RegExp(`\\nconst ${name} = ([\\d_]+);`));
+    if (!match) throw new Error(`the rendered loader.js no longer declares ${name}`);
+    return Number(match[1].replaceAll('_', ''));
+  };
+  const delays = {
+    control: value('CONTROL_WAIT_MS'),
+    runtimeAnswer: value('RUNTIME_ANSWER_MS'),
+    deadline: value('BOOT_PROBE_TIMEOUT_MS'),
+    retry: value('PROBE_RETRY_MS')
+  };
+  if (new Set(Object.values(delays)).size !== Object.keys(delays).length) {
+    throw new Error(`two of the loader's timer constants share a value: ${JSON.stringify(delays)}`);
+  }
+  for (const delay of setTimeoutDelays(rendered)) {
+    if (/^\d[\d_]*$/.test(delay) && delay !== '0') {
+      throw new Error(`a timer in loader.js has a delay written in place: ${delay} ms`);
+    }
+  }
+  return delays;
+}
+
+/// The delay argument of every `setTimeout(…)` call in `source`, as written:
+/// the text after the call's last top-level comma.
+function setTimeoutDelays(source) {
+  const delays = [];
+  for (let at = source.indexOf('setTimeout('); at !== -1; at = source.indexOf('setTimeout(', at + 1)) {
+    let depth = 0;
+    let lastComma = -1;
+    for (let i = at + 'setTimeout'.length; i < source.length; i += 1) {
+      const c = source[i];
+      if (c === '(' || c === '[' || c === '{') depth += 1;
+      else if (c === ')' || c === ']' || c === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          delays.push(source.slice(lastComma + 1, i).trim());
+          break;
+        }
+      } else if (c === ',' && depth === 1) lastComma = i;
+    }
+  }
+  return delays;
+}
+
+const DELAYS = timerDelays(SOURCES.plain);
+
 export const ORIGIN = 'https://app.example';
 export const STOP_CACHE = '__impresspress_sw_stopped';
 export const STOP_KEY = '/__impresspress_sw_stopped';
@@ -85,7 +141,10 @@ function element() {
 /// - `stop`      — the body sw.js left in Cache Storage (any JSON value), or
 ///                 `undefined` for no entry
 /// - `probe`     — `fetch`'s answer to the boot probe: a `Response`, or a
-///                 function returning one / throwing
+///                 function returning one / throwing. A throw is a request
+///                 the browser would not make or finish: WebKit rejects every
+///                 request a document makes once a navigation away from it
+///                 has begun, the request under way included
 /// - `wipe`      — the `opfs_wipe_on_recovery` rendering
 /// - `now`       — what `Date.now()` returns
 /// - `path`      — the path the shell was loaded at; `/` is its own, anything
@@ -95,9 +154,13 @@ function element() {
 ///                 is `/`, so any makes this load a redirect, not a reload)
 /// - `title`     — what the page's `[data-app-title]` element shows, or `null`
 ///                 for a page without one; `documentTitle` is `<title>`
-/// - `timesOut`  — how many boot probes in a row never answer (`true`: all
-///                 of them): the 60 s timer of each fires at once and its
-///                 `fetch` rejects as an aborted request does
+/// - `timesOut`  — how many asks in a row never get an answer (`true`: all
+///                 of them). An ask (`askApp`) is one 60 s timer over one or
+///                 more probes; the timer of an ask that is to run out fires
+///                 at once, and its first probe's `fetch` rejects as an
+///                 aborted request does. Asks are counted by the probes made
+///                 before each: the Nth ask with no probe made again in
+///                 between is the Nth probe (no test combines the two)
 /// - `controlled` — what controls the page: `true`, the registered worker;
 ///                 `false`, nothing; `'dead'`, a worker that is not the
 ///                 registered one (a dead one another tab unregistered)
@@ -484,23 +547,47 @@ export function loadShell({
 
   // `reload()` after a good probe is deferred with `setTimeout(…, 0)`; run it
   // at once so a test sees it without waiting.
-  // The probe's 60 s abort timer is set just before its `fetch`, so the probe
-  // it belongs to is the next one: fired at once for a probe that is to run
-  // out of time, real otherwise — but never holding the process open.
+  // An ask's 60 s abort timer is set just before its first `fetch`, so the
+  // ask it belongs to is the one that makes the next probe: fired at once
+  // for an ask that is to run out of time (`timesOut`), real otherwise — but
+  // never holding the process open.
   // The 10 s wait for control runs out at once for a worker that never
   // claims.
+  //
+  // The pause before a probe that could not be made is asked again runs in
+  // the next turn: a probe that keeps failing is asked again and again, as
+  // in a browser, and a test ends that by running the deadline out
+  // (`deadline`).
+  //
+  // A 60 s timer that is not fired at once is kept, so a test can run it out
+  // when it chooses (`deadline`); `clearTimeout` forgets it.
+  const deadlines = [];
   const setTimeoutStub = (fn, ms) => {
-    const now =
-      ms === 0 ||
-      (ms === 10_000
-        ? !claims || stalls || installs === 'late'
-        : ms === 2_000
-          ? !answersRuntime
-          : probeTimesOut(probes.length));
-    return now ? (fn(), 0) : setTimeout(fn, ms).unref();
+    if (ms === DELAYS.retry) return setTimeout(fn, 0);
+    let now;
+    if (ms === 0) now = true;
+    else if (ms === DELAYS.control) now = !claims || stalls || installs === 'late';
+    else if (ms === DELAYS.runtimeAnswer) now = !answersRuntime;
+    else if (ms === DELAYS.deadline) now = probeTimesOut(probes.length);
+    else throw new Error(`loader.js set a timer this harness does not know: ${ms} ms`);
+    if (now) return (fn(), 0);
+    const handle = setTimeout(fn, ms).unref();
+    if (ms === DELAYS.deadline) deadlines.push({ handle, fn });
+    return handle;
+  };
+  const clearTimeoutStub = (handle) => {
+    const kept = deadlines.findIndex((d) => d.handle === handle);
+    if (kept !== -1) deadlines.splice(kept, 1);
+    clearTimeout(handle);
   };
   const DateStub = { now: () => now };
-  const consoleStub = { log() {}, warn() {}, error() {} };
+  // Every warning the loader logs, as the text of its arguments.
+  const warnings = [];
+  const consoleStub = {
+    log() {},
+    warn: (...args) => warnings.push(args.map(String).join(' ')),
+    error() {}
+  };
 
   const run = new Function(
     'window',
@@ -511,6 +598,7 @@ export function loadShell({
     'caches',
     'fetch',
     'setTimeout',
+    'clearTimeout',
     'Date',
     'console',
     SOURCES[wipe ? 'wipe' : 'plain']
@@ -524,6 +612,7 @@ export function loadShell({
     caches,
     fetch,
     setTimeoutStub,
+    clearTimeoutStub,
     DateStub,
     consoleStub
   );
@@ -577,10 +666,20 @@ export function loadShell({
     opfs: () => [...opfs],
     /// sw.js posting a message to this page.
     post,
+    /// Every warning the loader logged, in order.
+    warnings,
     /// A navigation away from this page beginning.
     leave,
     /// This page restored from the back/forward cache.
-    comeBack
+    comeBack,
+    /// The 60 s the shell gives the app to answer running out now: the
+    /// pending timer fires. Throws if none is pending.
+    deadline: () => {
+      const pending = deadlines.pop();
+      if (!pending) throw new Error('no 60 s timer is pending');
+      clearTimeout(pending.handle);
+      pending.fn();
+    }
   };
 }
 

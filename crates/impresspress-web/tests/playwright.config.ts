@@ -58,5 +58,18 @@ export default defineConfig({
   },
   projects: [
     { name: 'desktop-chrome', use: { ...devices['Desktop Chrome'] } },
+    // The boot shell in WebKit (`boot-navigation.spec.ts` says why), run
+    // locally only: CI installs Chromium alone. Opt in with `E2E_WEBKIT=1`
+    // after `npx playwright install webkit --with-deps`. The launch options
+    // are its own: the suite's are Chromium flags.
+    ...(process.env.E2E_WEBKIT
+      ? [
+          {
+            name: 'webkit',
+            testMatch: /boot-navigation\.spec\.ts$/,
+            use: { ...devices['Desktop Safari'], launchOptions: {} },
+          },
+        ]
+      : []),
   ],
 });
