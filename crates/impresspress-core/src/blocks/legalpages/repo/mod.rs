@@ -41,7 +41,7 @@ pub struct Page<T> {
     pub total: i64,
     /// 1-based index of this page, as the database service computed it.
     pub page: i64,
-    /// Rows per page, as the database service computed it.
+    /// Items per page, as the database service computed it.
     pub page_size: i64,
 }
 

@@ -22,7 +22,7 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "Body of `PATCH /b/legalpages/api/documents/{id}`: a document's text.\n\n`title` and `content` are the only columns this endpoint can reach, and\nany other field is refused by name. A document's `status` and `version`\nchange only through a publish.",
+                "description": "Body of `PATCH /b/legalpages/api/documents/{id}`: a document's text.\n\n`title` and `content` are the only fields this endpoint can change, and\nany other field is refused by name. A document's `status` and `version`\nchange only through a publish.",
                 "properties": {
                   "content": {
                     "description": "New Markdown body. Omitted leaves the stored body.",

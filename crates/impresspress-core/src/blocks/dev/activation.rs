@@ -82,12 +82,13 @@ pub struct ActivationOutcome {
     pub progress: Vec<ProgressStep>,
 }
 
+// Design §7.5 lists the activating calls; the activation push (design §2.6)
+// says only which generation went live, so the timings travel here.
 /// One phase of an activation, with how long it took.
 ///
 /// Published in the result of every call that activates a generation — file
-/// writes and deletes, staging, block removal, rollback (design §7.5) — so the
-/// caller that asked for a change sees where its time went. The activation push (design
-/// §2.6) says only which generation went live; the timings travel here.
+/// writes and deletes, staging, block removal, rollback — so the caller that
+/// asked for a change sees where its time went.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressStep {

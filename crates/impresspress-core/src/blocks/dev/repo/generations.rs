@@ -29,7 +29,13 @@ pub enum GenerationStatus {
     Activating,
     /// Currently serving.
     Active,
-    /// Abandoned; `failure_message` says why.
+    // The reason is stored in the row's `failure_message`, which no view
+    // publishes. Writers: `activation::abandon` (validation or activation
+    // failed), `retire_abandoned` (in flight when the process ended) and
+    // `abandon_dangling` (the journalled generation could not be loaded).
+    /// Abandoned: its validation or activation failed, the sandbox stopped
+    /// before its activation finished, or on the next start its stored
+    /// manifest could not be read back.
     Failed,
     /// No longer serving — replaced by a later generation.
     ///

@@ -110,9 +110,10 @@ pub struct CreateContextRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+// See the module doc for why this replaced a `HashMap<String, Value>` plus a
+// runtime whitelist.
 /// `PATCH /b/messages/api/contexts/{id}` request body. Every field is
-/// optional and only the ones present are applied — see the module doc for
-/// why this replaced a `HashMap<String, Value>` plus a runtime whitelist.
+/// optional and only the ones present are applied.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UpdateContextRequest {
     pub status: Option<String>,

@@ -186,7 +186,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "`PATCH /b/messages/api/contexts/{id}` request body. Every field is\noptional and only the ones present are applied — see the module doc for\nwhy this replaced a `HashMap<String, Value>` plus a runtime whitelist.",
+                "description": "`PATCH /b/messages/api/contexts/{id}` request body. Every field is\noptional and only the ones present are applied.",
                 "properties": {
                   "metadata": true,
                   "status": {

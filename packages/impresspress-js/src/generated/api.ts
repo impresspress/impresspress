@@ -68,9 +68,9 @@ export interface paths {
                             /** @description The rows, in the order the query returned them. */
                             rows: {
                                 /**
-                                 * @description Every column of the row, name → value, its keys written in
-                                 *     [`AdminSqlQueryResponse::columns`] order. Read the order from
-                                 *     `columns`, not from this object: a JSON parser need not keep key order,
+                                 * @description Every column of the row, name → value, its keys written in the
+                                 *     response's `columns` order. Read the order from `columns`, not from
+                                 *     this object: a JSON parser need not keep key order,
                                  *     and JavaScript's `JSON.parse` enumerates integer-like names (`1`)
                                  *     before the others. Two result columns with one name collapse into one
                                  *     entry — alias them apart.
@@ -120,12 +120,9 @@ export interface paths {
                     content: {
                         "application/json": {
                             /**
-                             * @description Whether the block is enabled.
-                             *
-                             *     Read from the boot block-settings snapshot — the same source
-                             *     `routing::route_to_block`'s feature gate consults — so `false` means
-                             *     the router answers "endpoint not found" for every one of this block's
-                             *     routes. A block with no stored row reports `true`.
+                             * @description Whether the block is enabled. `false` means every one of this block's
+                             *     routes answers "endpoint not found". A block that was never switched
+                             *     off reports `true`.
                              */
                             enabled: boolean;
                             /** @description Interface identifier, e.g. `"http-handler@v1"`. */
@@ -175,12 +172,13 @@ export interface paths {
                         "application/json": {
                             /**
                              * Format: int64
-                             * @description 1-based index of this page. Always 1 — the handler does not paginate.
+                             * @description 1-based index of this page. Always 1 — this endpoint does not
+                             *     paginate.
                              */
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page. Always the handler's fixed 1000-row ceiling.
+                             * @description Items per page. Always the fixed ceiling of 1000.
                              */
                             page_size: number;
                             /** @description Roles, sorted by name ascending. */
@@ -426,7 +424,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Audit entries on this page, newest first. */
@@ -445,8 +443,8 @@ export interface paths {
                                 /** @description Target the action was applied to. */
                                 resource: string;
                                 /**
-                                 * @description RFC 3339 write timestamp. Audit rows are never updated, so this always
-                                 *     equals `created_at`.
+                                 * @description RFC 3339 write timestamp. Audit entries are never updated, so this
+                                 *     always equals `created_at`.
                                  */
                                 updated_at: string;
                                 /**
@@ -501,8 +499,8 @@ export interface paths {
                                 /** @description Variable name, e.g. `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`. */
                                 key: string;
                                 /**
-                                 * @description Whether `value` is masked. True when the row carries the sensitive
-                                 *     flag, or the key is one this build knows to hold a secret: it ends in
+                                 * @description Whether `value` is masked. True when the variable is flagged
+                                 *     sensitive, or the key is one this build knows to hold a secret: it ends in
                                  *     `_SECRET` or `_KEY`, or its declaration is a password-typed or
                                  *     auto-generated variable.
                                  */
@@ -510,10 +508,10 @@ export interface paths {
                                 /**
                                  * @description The stored value, or `"********"` when `sensitive` is true.
                                  *
-                                 *     Typed as `any` rather than `string` because the stored column is text
-                                 *     that the SQLite and D1 backends decode back into JSON when it looks
-                                 *     like an object or an array: a variable holding `["a","b"]` reads back
-                                 *     as an array, one holding `on` reads back as a string.
+                                 *     Usually a string, but not always: on SQLite and D1 deployments a value
+                                 *     that is a JSON object or array is answered as that JSON — a variable
+                                 *     holding `["a","b"]` reads back as an array, one holding `on` as a
+                                 *     string.
                                  */
                                 value: unknown;
                             }[];
@@ -565,7 +563,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Users on this page, newest first. */
@@ -576,7 +574,7 @@ export interface paths {
                                 created_at: string;
                                 /**
                                  * @description RFC 3339 soft-delete timestamp. Always `null` in the list response,
-                                 *     which filters on `deleted_at IS NULL`.
+                                 *     which lists only accounts that have not been deleted.
                                  */
                                 deleted_at: string | null;
                                 /** @description Whether the account is disabled (blocked from signing in). */
@@ -594,12 +592,16 @@ export interface paths {
                                 /** @description Full name, when the user supplied one. */
                                 name: string | null;
                                 /**
-                                 * @description Legacy single-role column on the user row (`"user"` by default).
-                                 *     Authorization uses `roles`; this field is retained because the column is
-                                 *     still written by the signup path.
+                                 * @description The account's own role (`"user"` by default). A signed-in session
+                                 *     holds it alongside `roles`, which lists it only when the same role is
+                                 *     also granted.
                                  */
                                 role: string;
-                                /** @description Role names assigned to this user in `impresspress__admin__user_roles`. */
+                                /**
+                                 * @description Roles granted to this user. Admins manage grants through
+                                 *     `/b/admin/api/iam/user-roles`, but not every grant is made there: the
+                                 *     configured bootstrap admin is granted `admin` when they sign in.
+                                 */
                                 roles: string[];
                                 /** @description RFC 3339 timestamp of the last modification. */
                                 updated_at: string;
@@ -1208,11 +1210,7 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /**
-                                 * @description One access-log row, decoded. The child audit table of a share: a log row
-                                 *     is meaningless without the share it points at, which is why both tables
-                                 *     live behind this one module.
-                                 */
+                                /** @description One recorded opening of a share's public link. */
                                 data: {
                                     /** @description RFC 3339 instant of the recorded access. */
                                     accessed_at: string;
@@ -1269,7 +1267,7 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One quota-override row, decoded. */
+                                /** @description One user's quota override. */
                                 data: {
                                     created_at: string;
                                     id: string;
@@ -1283,7 +1281,7 @@ export interface paths {
                                     /** Format: int64 */
                                     max_storage_bytes: number;
                                     updated_at: string;
-                                    /** @description The user this override applies to. Unique across the table. */
+                                    /** @description The user this override applies to. A user has at most one override. */
                                     user_id: string;
                                 };
                                 id: string;
@@ -1335,7 +1333,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /** @description One quota-override row, decoded. */
+                            /** @description One user's quota override. */
                             data: {
                                 created_at: string;
                                 id: string;
@@ -1349,7 +1347,7 @@ export interface paths {
                                 /** Format: int64 */
                                 max_storage_bytes: number;
                                 updated_at: string;
-                                /** @description The user this override applies to. Unique across the table. */
+                                /** @description The user this override applies to. A user has at most one override. */
                                 user_id: string;
                             };
                             id: string;
@@ -1389,7 +1387,7 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One share row, decoded. */
+                                /** @description One share link to an object. */
                                 data: {
                                     /** Format: int64 */
                                     access_count: number;
@@ -1397,38 +1395,30 @@ export interface paths {
                                     /** @description RFC 3339 creation instant. */
                                     created_at: string;
                                     /**
-                                     * @description User id of the share's creator — the ownership key
-                                     *     `handle_delete_share` checks.
+                                     * @description User id of the share's creator — besides an admin, the only user who
+                                     *     can delete it.
                                      */
                                     created_by: string;
                                     /**
-                                     * @description The end this share link records, as an RFC 3339 stamp.
+                                     * @description When this share link stops working, as an RFC 3339 stamp.
                                      *
-                                     *     `None` is a SQL `NULL` or a stored empty string — one meaning, since
-                                     *     the column is nullable and every caller treated `""` as unset. It is
-                                     *     NOT "never expires": every share link has an end, and a row that
-                                     *     records none cannot be shown to be live, so the public link refuses
-                                     *     it. Creating a share cannot produce one — `NewShare` takes a
-                                     *     non-optional expiry — and migration 003 gave every historical row an
-                                     *     end, so a `None` here is a row that reached the table some other
-                                     *     way.
+                                     *     `null` is NOT "never expires": every share link has an end, and a
+                                     *     share that records none cannot be shown to be live, so its public
+                                     *     link is refused.
                                      */
                                     expires_at: string | null;
                                     id: string;
                                     key: string;
                                     /**
                                      * Format: int64
-                                     * @description Access cap, or `None` for unlimited. A non-positive stored value is
-                                     *     `None` too, which is the meaning [`NewShare::max_access_count`]
-                                     *     documents and the meaning
-                                     *     [`increment_access_count_capped`] enforces.
+                                     * @description How many times the public link may be opened, or `null` for no limit.
                                      */
                                     max_access_count: number | null;
                                     /**
                                      * @description The opaque token embedded in the public `/b/storage/direct/{token}`
                                      *     URL: random bytes, hex-encoded, asserting nothing about the share.
-                                     *     This row is what it addresses, and what decides whether the link
-                                     *     still works. Unique across the table.
+                                     *     This share is what it addresses, and what decides whether the link
+                                     *     still works. No two shares have the same token.
                                      */
                                     token: string;
                                     updated_at: string;
@@ -1475,8 +1465,8 @@ export interface paths {
                     content: {
                         "application/json": {
                             /**
-                             * @description The caller's effective caps: their override row if they have one,
-                             *     otherwise the block defaults.
+                             * @description The caller's effective caps: their per-user override if they have
+                             *     one, otherwise the block defaults.
                              */
                             quota: {
                                 /** Format: int64 */
@@ -1490,19 +1480,20 @@ export interface paths {
                                 max_storage_bytes: number;
                             };
                             /**
-                             * @description The `usage` half of [`QuotaResponse`]. Both numbers are computed over the
-                             *     caller's object rows, not read from a counter column.
+                             * @description The `usage` half of the quota response, counted from the caller's objects
+                             *     when it is asked for.
                              */
                             usage: {
                                 /**
                                  * Format: int64
-                                 * @description Objects the caller owns across all buckets, `Pending` included; not
+                                 * @description Objects the caller owns across all buckets, `pending` included; not
                                  *     what the per-bucket `max_files_per_bucket` cap is checked against.
                                  */
                                 file_count: number;
                                 /**
                                  * Format: int64
-                                 * @description `SUM(size)` over the caller's rows, `Pending` reservations included.
+                                 * @description Total `size` of the caller's objects, `pending` reservations
+                                 *     included.
                                  */
                                 total_bytes: number;
                             };
@@ -1548,7 +1539,7 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One share row, decoded. */
+                                /** @description One share link to an object. */
                                 data: {
                                     /** Format: int64 */
                                     access_count: number;
@@ -1556,38 +1547,30 @@ export interface paths {
                                     /** @description RFC 3339 creation instant. */
                                     created_at: string;
                                     /**
-                                     * @description User id of the share's creator — the ownership key
-                                     *     `handle_delete_share` checks.
+                                     * @description User id of the share's creator — besides an admin, the only user who
+                                     *     can delete it.
                                      */
                                     created_by: string;
                                     /**
-                                     * @description The end this share link records, as an RFC 3339 stamp.
+                                     * @description When this share link stops working, as an RFC 3339 stamp.
                                      *
-                                     *     `None` is a SQL `NULL` or a stored empty string — one meaning, since
-                                     *     the column is nullable and every caller treated `""` as unset. It is
-                                     *     NOT "never expires": every share link has an end, and a row that
-                                     *     records none cannot be shown to be live, so the public link refuses
-                                     *     it. Creating a share cannot produce one — `NewShare` takes a
-                                     *     non-optional expiry — and migration 003 gave every historical row an
-                                     *     end, so a `None` here is a row that reached the table some other
-                                     *     way.
+                                     *     `null` is NOT "never expires": every share link has an end, and a
+                                     *     share that records none cannot be shown to be live, so its public
+                                     *     link is refused.
                                      */
                                     expires_at: string | null;
                                     id: string;
                                     key: string;
                                     /**
                                      * Format: int64
-                                     * @description Access cap, or `None` for unlimited. A non-positive stored value is
-                                     *     `None` too, which is the meaning [`NewShare::max_access_count`]
-                                     *     documents and the meaning
-                                     *     [`increment_access_count_capped`] enforces.
+                                     * @description How many times the public link may be opened, or `null` for no limit.
                                      */
                                     max_access_count: number | null;
                                     /**
                                      * @description The opaque token embedded in the public `/b/storage/direct/{token}`
                                      *     URL: random bytes, hex-encoded, asserting nothing about the share.
-                                     *     This row is what it addresses, and what decides whether the link
-                                     *     still works. Unique across the table.
+                                     *     This share is what it addresses, and what decides whether the link
+                                     *     still works. No two shares have the same token.
                                      */
                                     token: string;
                                     updated_at: string;
@@ -1622,7 +1605,7 @@ export interface paths {
                             /** @description Path of the public share link, relative to the deployment's origin. */
                             direct_url: string;
                             /**
-                             * @description Row id of the new share — the `{id}` of `DELETE
+                             * @description Id of the new share — the `{id}` of `DELETE
                              *     /b/cloudstorage/shares/{id}`.
                              */
                             id: string;
@@ -1895,13 +1878,10 @@ export interface paths {
                              *     in the guest's `Init`. Match on this rather than on `message`.
                              *
                              *     `null` when whoever produced the diagnostic had no code for it. Every
-                             *     diagnostic this crate produces has one — they are the constants above
-                             *     — but a *compiler* diagnostic forwarded by `/b/dev` need not: rustc
-                             *     numbers some of what it says (`E0425`) and not the rest, and the page
-                             *     forwards what the compiler gave it. This field is optional for the
-                             *     same reason `file`/`line`/`column` are: "when the compiler reported
-                             *     one". Inventing a placeholder on the way in would put a value in the
-                             *     build's stored record that nothing ever said.
+                             *     diagnostic the sandbox's own validator produces has one, but a
+                             *     *compiler* diagnostic need not: rustc numbers some of what it says
+                             *     (`E0425`) and not the rest, and the page forwards what the compiler
+                             *     gave it.
                              * @default null
                              */
                             code?: string | null;
@@ -1962,7 +1942,7 @@ export interface paths {
                             /**
                              * @description The stored build's id, or null when the request was refused before a
                              *     build could be recorded (an artifact over the size limit is never
-                             *     stored, so there is nothing for a build row to point at).
+                             *     stored, so there is no build record to point at).
                              */
                             build_id: string | null;
                             /**
@@ -1977,13 +1957,10 @@ export interface paths {
                                  *     in the guest's `Init`. Match on this rather than on `message`.
                                  *
                                  *     `null` when whoever produced the diagnostic had no code for it. Every
-                                 *     diagnostic this crate produces has one — they are the constants above
-                                 *     — but a *compiler* diagnostic forwarded by `/b/dev` need not: rustc
-                                 *     numbers some of what it says (`E0425`) and not the rest, and the page
-                                 *     forwards what the compiler gave it. This field is optional for the
-                                 *     same reason `file`/`line`/`column` are: "when the compiler reported
-                                 *     one". Inventing a placeholder on the way in would put a value in the
-                                 *     build's stored record that nothing ever said.
+                                 *     diagnostic the sandbox's own validator produces has one, but a
+                                 *     *compiler* diagnostic need not: rustc numbers some of what it says
+                                 *     (`E0425`) and not the rest, and the page forwards what the compiler
+                                 *     gave it.
                                  * @default null
                                  */
                                 code: string | null;
@@ -2725,13 +2702,9 @@ export interface paths {
                                     /** @description SHA-256 of the `wasm32-wasip1` artifact, hex-encoded. */
                                     artifact_sha256: string;
                                     /**
-                                     * @description Capabilities the guest is loaded under. Deny-by-default; the caller
-                                     *     validates the declared set against the block's own namespace before
-                                     *     this ever reaches [`RuntimeControl`].
-                                     *
-                                     *     `BlockCapabilities` is a producer type that derives neither
-                                     *     `JsonSchema` nor `PartialEq`. It is published as a free-form object
-                                     *     here, and compared field-by-field in the `PartialEq` impl below.
+                                     * @description Capabilities the guest is loaded under, deny-by-default: what the
+                                     *     block declared, checked against the block's own namespace before it
+                                     *     is loaded.
                                      */
                                     capabilities: unknown;
                                     /** @description Registered block name (`site/{name}`). */
@@ -3123,18 +3096,10 @@ export interface paths {
                             /**
                              * @description Why this instance's seed import was refused, if it was.
                              *
-                             *     `None` on every healthy instance — including one that never had a seed
-                             *     bundle to import. A sandbox whose seed was refused boots with an empty
-                             *     site and no other sign of it (`dev_runtime::install` logs and carries
-                             *     on, because a sandbox that refuses to boot is one whose `/b/dev` page
-                             *     — the only thing that could fix it — never comes up), so this is what
-                             *     makes the cause readable through `dev_status` instead of only through
-                             *     the service worker's console. Read from the same row an admin sees on
-                             *     `/b/admin/settings/variables`, which is the only surface an exported
-                             *     site has (it has no `/b/dev`). `dev.js` does not render it: the page
-                             *     polls this endpoint several times a second, so a log line would need
-                             *     its own "said this already" state, and the agent that would act on a
-                             *     refused seed reads `dev_status` rather than the log.
+                             *     `null` on every healthy instance — including one that never had a
+                             *     seed bundle to import. A sandbox whose seed was refused boots with an
+                             *     empty site and no other sign of it, so this is where the cause is
+                             *     read. An admin sees the same text on `/b/admin/settings/variables`.
                              */
                             seed_error: string | null;
                             /** @description What the sandbox's content stores hold right now. */
@@ -3317,7 +3282,7 @@ export interface paths {
                             /**
                              * @description Id of the assistant entry persisted in the messages block. Always
                              *     populated: a reply the store refused is answered with a 500, not a
-                             *     body (see `routes::chat::handle_chat`).
+                             *     body.
                              */
                             message_id: string;
                             /**
@@ -3508,7 +3473,7 @@ export interface paths {
                         "application/json": {
                             /** @description RFC 3339 creation timestamp. */
                             created_at: string;
-                            /** @description Stable row identifier. */
+                            /** @description Stable identifier. */
                             id: string;
                             /** @description Pinned model id. Empty means the default model. */
                             model: string;
@@ -3706,10 +3671,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /**
-                             * @description Lifecycle status of one model on one backend. Mirrors
-                             *     `wafer_core::clients::llm::ModelStatus`.
-                             */
+                            /** @description Lifecycle status of one model on one backend. */
                             status: {
                                 /**
                                  * Format: float
@@ -3809,7 +3771,7 @@ export interface paths {
                                 enabled: boolean;
                                 /** @description Base URL of the provider's API, e.g. `https://api.openai.com/v1`. */
                                 endpoint: string;
-                                /** @description Stable row identifier, used by the `/b/llm/api/providers/{id}` routes. */
+                                /** @description Stable identifier, used by the `/b/llm/api/providers/{id}` routes. */
                                 id: string;
                                 /**
                                  * @description Name of the admin configuration variable holding this provider's API
@@ -3914,7 +3876,7 @@ export interface paths {
                             enabled: boolean;
                             /** @description Base URL of the provider's API, e.g. `https://api.openai.com/v1`. */
                             endpoint: string;
-                            /** @description Stable row identifier, used by the `/b/llm/api/providers/{id}` routes. */
+                            /** @description Stable identifier, used by the `/b/llm/api/providers/{id}` routes. */
                             id: string;
                             /**
                              * @description Name of the admin configuration variable holding this provider's API
@@ -4048,7 +4010,7 @@ export interface paths {
                             enabled: boolean;
                             /** @description Base URL of the provider's API, e.g. `https://api.openai.com/v1`. */
                             endpoint: string;
-                            /** @description Stable row identifier, used by the `/b/llm/api/providers/{id}` routes. */
+                            /** @description Stable identifier, used by the `/b/llm/api/providers/{id}` routes. */
                             id: string;
                             /**
                              * @description Name of the admin configuration variable holding this provider's API
@@ -4399,7 +4361,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Groups on this page. */
@@ -4654,7 +4616,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Products on this page, newest first. */
@@ -10665,7 +10627,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Orders on this page, newest first. */
@@ -11931,7 +11893,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Types on this page, newest first. */
@@ -12217,7 +12179,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Products on this page, newest first. */
@@ -18018,7 +17980,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             records: {
@@ -18720,7 +18682,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Active products on this page, sorted by name. */
@@ -19071,7 +19033,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description The fixed ceiling on rows returned.
+                             * @description The fixed ceiling on items returned.
                              */
                             page_size: number;
                             /** @description Templates, sorted by name. */
@@ -19143,7 +19105,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Groups on this page. */
@@ -19449,7 +19411,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Products on this page, newest first. */
@@ -19798,7 +19760,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             records: {
@@ -20593,7 +20555,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Types on this page, newest first. */
@@ -20695,6 +20657,204 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/b/signal/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** ICE servers, room lifetime and code length */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            code_length?: number;
+                            ice_servers?: {
+                                urls?: string;
+                            }[];
+                            room_seconds?: number;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/b/signal/rooms/{code}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Host polls for the guest's answer
+         * @description null sdp while waiting; once answered, the answer is returned and the room is deleted — single-use. 404 once the room is gone
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description The stored SDP, or null while the answer is still pending */
+                            sdp?: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Guest puts its answer up
+         * @description 404 if the room is gone, 409 if an answer already stands
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Session description (offer or answer) */
+                        sdp: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/b/signal/rooms/{code}/offer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Guest reads the host's offer
+         * @description 404 when the code is unknown or expired
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description The stored SDP, or null while the answer is still pending */
+                            sdp?: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Host puts its offer up — also the room's create
+         * @description 409 if the code is already live, 400 on a malformed code or an over-long SDP
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Session description (offer or answer) */
+                        sdp: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/b/storage/admin/api/buckets": {
         parameters: {
             query?: never;
@@ -20719,10 +20879,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /**
-                             * @description Bucket names, from `repo::buckets::TABLE` — the single source of
-                             *     truth for bucket existence. Not the blob namespace's folder list.
-                             */
+                            /** @description Bucket names. */
                             buckets: string[];
                             /**
                              * @description Whether more buckets are visible to the caller than `buckets` names.
@@ -20771,12 +20928,13 @@ export interface paths {
                         "application/json": {
                             /**
                              * Format: int64
-                             * @description Rows in `repo::buckets::TABLE`, not folders in the blob namespace.
+                             * @description Number of buckets.
                              */
                             bucket_count: number;
                             /**
                              * Format: int64
-                             * @description Objects in `Complete` status. A `Pending` reservation is not a file.
+                             * @description Objects whose upload completed. A `pending` reservation, whose upload
+                             *     is still in flight, is not counted.
                              */
                             total_objects: number;
                             /**
@@ -20821,10 +20979,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /**
-                             * @description Bucket names, from `repo::buckets::TABLE` — the single source of
-                             *     truth for bucket existence. Not the blob namespace's folder list.
-                             */
+                            /** @description Bucket names. */
                             buckets: string[];
                             /**
                              * @description Whether more buckets are visible to the caller than `buckets` names.
@@ -20857,10 +21012,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            /**
-                             * @description Always `true` — the handler answers this body only after both the
-                             *     folder and the metadata row are in place.
-                             */
+                            /** @description Always `true` — this body is answered only once the bucket exists. */
                             created: boolean;
                             /** @description The bucket that now exists, echoed back from the request. */
                             name: string;
@@ -20994,8 +21146,8 @@ export interface paths {
                         "application/json": {
                             bucket: string;
                             /**
-                             * @description The stored key. For a multipart upload this is the key the handler
-                             *     resolved, which may differ from the one the caller sent.
+                             * @description The stored key. For a multipart upload sent without `?key=` it is the
+                             *     file part's `filename`, so it may differ from what the caller expected.
                              */
                             key: string;
                             /** @description Always `true`. */
@@ -21089,7 +21241,7 @@ export interface paths {
         };
         /**
          * Recently viewed objects
-         * @description Object-view audit rows, newest first — one row per tracked download, naming the object viewed and when. Not object metadata.
+         * @description Recorded object views, newest first — one entry per tracked download, naming the object viewed and when. Not object metadata.
          */
         get: {
             parameters: {
@@ -21112,7 +21264,7 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One object-view audit row, decoded. */
+                                /** @description One recorded view of an object. */
                                 data: {
                                     /** @description Bucket holding the viewed object. */
                                     bucket: string;
@@ -21172,7 +21324,7 @@ export interface paths {
                             /** Format: int64 */
                             page_size: number;
                             records: {
-                                /** @description One object-metadata row, decoded. */
+                                /** @description One stored object's metadata. */
                                 data: {
                                     /** @description Bucket name; `(bucket, key)` is unique. */
                                     bucket: string;
@@ -21183,20 +21335,19 @@ export interface paths {
                                     key: string;
                                     /**
                                      * Format: int64
-                                     * @description Size in bytes. `i64_field` so a TEXT-stored number still counts
-                                     *     toward the quota rather than reading as zero.
+                                     * @description Size in bytes.
                                      */
                                     size: number;
                                     /**
-                                     * @description `Pending` while the storage upload is in flight, `Complete` after.
-                                     *     Quota accounting counts both; user-facing search and admin stats see
-                                     *     only `Complete`.
+                                     * @description `pending` while the upload is in flight, `complete` after. Quota
+                                     *     accounting and the bucket's object listing include both; search and
+                                     *     the admin stats see only `complete`.
                                      */
                                     status: "pending" | "complete";
                                     updated_at: string;
                                     /**
                                      * @description When the upload was reserved — the timestamp the object browser
-                                     *     renders as "modified", and the one `list_stale_pending` compares.
+                                     *     renders as "modified".
                                      */
                                     uploaded_at: string;
                                     uploaded_by: string;
@@ -21420,7 +21571,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Tickets on this page, newest first. */
@@ -22195,7 +22346,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /**
@@ -22852,8 +23003,9 @@ export interface paths {
                         /** @description Index name. */
                         index: string;
                         /**
-                         * @description Arbitrary JSON stored on every chunk as `user_metadata`, beside the
-                         *     `document_id` and `chunk_index` the block adds.
+                         * @description Arbitrary JSON stored with every chunk. A chunk's metadata — what a
+                         *     query hit answers as `metadata` — is
+                         *     `{"document_id": …, "chunk_index": n, "user_metadata": <this value>}`.
                          */
                         metadata?: unknown;
                         /** @description The document text. */
@@ -22905,7 +23057,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @description Restrict hits to rows whose metadata matches. */
+                        /** @description Restrict hits to entries whose metadata matches. */
                         filter?: {
                             /**
                              * @description Equality constraints: each key is a dot-path into the stored metadata
@@ -22955,9 +23107,12 @@ export interface paths {
                         "application/json": {
                             /** @description Hits, best first. */
                             matches: {
-                                /** @description Matched row id. */
+                                /** @description Matched entry id. */
                                 id: string;
-                                /** @description The metadata stored with the row. Absent when the row stored none. */
+                                /**
+                                 * @description The metadata stored with the entry. Absent when the entry stored
+                                 *     none.
+                                 */
                                 metadata?: unknown;
                                 /**
                                  * Format: float
@@ -23007,7 +23162,7 @@ export interface paths {
                             indexes: {
                                 /**
                                  * Format: uint64
-                                 * @description Rows currently stored. `0` when the count could not be read.
+                                 * @description Entries currently stored. `0` when the count could not be read.
                                  */
                                 count: number;
                                 /** @description Index name. */
@@ -23046,9 +23201,12 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @description Rows to insert or replace. */
+                        /** @description Entries to insert or replace. */
                         entries: {
-                            /** @description Caller-supplied row id. Upserting the same id again replaces the row. */
+                            /**
+                             * @description Caller-supplied entry id. Upserting the same id again replaces the
+                             *     entry.
+                             */
                             id: string;
                             /**
                              * @description Arbitrary JSON metadata stored alongside the vector and echoed on

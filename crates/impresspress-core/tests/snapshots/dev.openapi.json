@@ -231,7 +231,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -258,7 +258,7 @@
                       "description": "One entry per phase the activation passed through, with how long it\ntook. The last is always `active`.",
                       "items": {
                         "additionalProperties": false,
-                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
                         "properties": {
                           "detail": {
                             "description": "Human-readable detail for the progress panel.",
@@ -366,7 +366,7 @@
                       "properties": {
                         "code": {
                           "default": null,
-                          "description": "Stable machine-readable identifier, e.g. `cap-collection` for a\ncapability outside the block's namespace or `guest-init` for a trap\nin the guest's `Init`. Match on this rather than on `message`.\n\n`null` when whoever produced the diagnostic had no code for it. Every\ndiagnostic this crate produces has one — they are the constants above\n— but a *compiler* diagnostic forwarded by `/b/dev` need not: rustc\nnumbers some of what it says (`E0425`) and not the rest, and the page\nforwards what the compiler gave it. This field is optional for the\nsame reason `file`/`line`/`column` are: \"when the compiler reported\none\". Inventing a placeholder on the way in would put a value in the\nbuild's stored record that nothing ever said.",
+                          "description": "Stable machine-readable identifier, e.g. `cap-collection` for a\ncapability outside the block's namespace or `guest-init` for a trap\nin the guest's `Init`. Match on this rather than on `message`.\n\n`null` when whoever produced the diagnostic had no code for it. Every\ndiagnostic the sandbox's own validator produces has one, but a\n*compiler* diagnostic need not: rustc numbers some of what it says\n(`E0425`) and not the rest, and the page forwards what the compiler\ngave it.",
                           "type": [
                             "string",
                             "null"
@@ -475,7 +475,7 @@
                   "description": "Response of `POST /b/dev/api/builds/stage`.\n\nA refused block is a result, not a transport failure: the status is `200`\nwith `success: false` and the reasons in `diagnostics`. Only a malformed\nrequest — bad JSON, or `artifact_base64` that is not base64 — is a `4xx`.",
                   "properties": {
                     "build_id": {
-                      "description": "The stored build's id, or null when the request was refused before a\nbuild could be recorded (an artifact over the size limit is never\nstored, so there is nothing for a build row to point at).",
+                      "description": "The stored build's id, or null when the request was refused before a\nbuild could be recorded (an artifact over the size limit is never\nstored, so there is no build record to point at).",
                       "type": [
                         "string",
                         "null"
@@ -489,7 +489,7 @@
                         "properties": {
                           "code": {
                             "default": null,
-                            "description": "Stable machine-readable identifier, e.g. `cap-collection` for a\ncapability outside the block's namespace or `guest-init` for a trap\nin the guest's `Init`. Match on this rather than on `message`.\n\n`null` when whoever produced the diagnostic had no code for it. Every\ndiagnostic this crate produces has one — they are the constants above\n— but a *compiler* diagnostic forwarded by `/b/dev` need not: rustc\nnumbers some of what it says (`E0425`) and not the rest, and the page\nforwards what the compiler gave it. This field is optional for the\nsame reason `file`/`line`/`column` are: \"when the compiler reported\none\". Inventing a placeholder on the way in would put a value in the\nbuild's stored record that nothing ever said.",
+                            "description": "Stable machine-readable identifier, e.g. `cap-collection` for a\ncapability outside the block's namespace or `guest-init` for a trap\nin the guest's `Init`. Match on this rather than on `message`.\n\n`null` when whoever produced the diagnostic had no code for it. Every\ndiagnostic the sandbox's own validator produces has one, but a\n*compiler* diagnostic need not: rustc numbers some of what it says\n(`E0425`) and not the rest, and the page forwards what the compiler\ngave it.",
                             "type": [
                               "string",
                               "null"
@@ -660,7 +660,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -690,7 +690,7 @@
                       "description": "One entry per phase the activation passed through, with how long it\ntook. Empty when nothing was activated.",
                       "items": {
                         "additionalProperties": false,
-                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
                         "properties": {
                           "detail": {
                             "description": "Human-readable detail for the progress panel.",
@@ -1087,7 +1087,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -1121,7 +1121,7 @@
                       "description": "One entry per phase the delete's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
                       "items": {
                         "additionalProperties": false,
-                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
                         "properties": {
                           "detail": {
                             "description": "Human-readable detail for the progress panel.",
@@ -1446,7 +1446,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -1480,7 +1480,7 @@
                       "description": "One entry per phase the write's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
                       "items": {
                         "additionalProperties": false,
-                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
                         "properties": {
                           "detail": {
                             "description": "Human-readable detail for the progress panel.",
@@ -1779,7 +1779,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -1809,7 +1809,7 @@
                       "description": "One entry per phase the batch's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
                       "items": {
                         "additionalProperties": false,
-                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
                         "properties": {
                           "detail": {
                             "description": "Human-readable detail for the progress panel.",
@@ -2014,7 +2014,7 @@
                               },
                               {
                                 "const": "failed",
-                                "description": "Abandoned; `failure_message` says why.",
+                                "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                                 "type": "string"
                               },
                               {
@@ -2144,14 +2144,14 @@
                         "blocks": {
                           "description": "The blocks the generation's runtime is built from.",
                           "items": {
-                            "description": "Everything the host needs to put one compiled guest into a runtime.\n\nThis is also the block entry of the generation manifest (design §11.3), so\na stored `block_manifest_json` decodes straight into `Vec<DynamicBlockSpec>`\nwith no intermediate shape.",
+                            "description": "Everything the host needs to put one compiled guest into a runtime.",
                             "properties": {
                               "artifact_sha256": {
                                 "description": "SHA-256 of the `wasm32-wasip1` artifact, hex-encoded.",
                                 "type": "string"
                               },
                               "capabilities": {
-                                "description": "Capabilities the guest is loaded under. Deny-by-default; the caller\nvalidates the declared set against the block's own namespace before\nthis ever reaches [`RuntimeControl`].\n\n`BlockCapabilities` is a producer type that derives neither\n`JsonSchema` nor `PartialEq`. It is published as a free-form object\nhere, and compared field-by-field in the `PartialEq` impl below."
+                                "description": "Capabilities the guest is loaded under, deny-by-default: what the\nblock declared, checked against the block's own namespace before it\nis loaded."
                               },
                               "name": {
                                 "description": "Registered block name (`site/{name}`).",
@@ -2384,7 +2384,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -2548,7 +2548,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -2575,7 +2575,7 @@
                       "description": "One entry per phase the activation passed through, with how long it\ntook. The last is always `active`.",
                       "items": {
                         "additionalProperties": false,
-                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                        "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback — so the caller that\nasked for a change sees where its time went.",
                         "properties": {
                           "detail": {
                             "description": "Human-readable detail for the progress panel.",
@@ -2950,7 +2950,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned; `failure_message` says why.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -3045,7 +3045,7 @@
                       "type": "integer"
                     },
                     "seed_error": {
-                      "description": "Why this instance's seed import was refused, if it was.\n\n`None` on every healthy instance — including one that never had a seed\nbundle to import. A sandbox whose seed was refused boots with an empty\nsite and no other sign of it (`dev_runtime::install` logs and carries\non, because a sandbox that refuses to boot is one whose `/b/dev` page\n— the only thing that could fix it — never comes up), so this is what\nmakes the cause readable through `dev_status` instead of only through\nthe service worker's console. Read from the same row an admin sees on\n`/b/admin/settings/variables`, which is the only surface an exported\nsite has (it has no `/b/dev`). `dev.js` does not render it: the page\npolls this endpoint several times a second, so a log line would need\nits own \"said this already\" state, and the agent that would act on a\nrefused seed reads `dev_status` rather than the log.",
+                      "description": "Why this instance's seed import was refused, if it was.\n\n`null` on every healthy instance — including one that never had a\nseed bundle to import. A sandbox whose seed was refused boots with an\nempty site and no other sign of it, so this is where the cause is\nread. An admin sees the same text on `/b/admin/settings/variables`.",
                       "type": [
                         "string",
                         "null"

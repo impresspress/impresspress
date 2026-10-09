@@ -232,8 +232,8 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     EndpointRoute::authenticated(HttpMethod::Get, "/b/storage/api/recent", Route::Recent)
         .summary("Recently viewed objects")
         .description(
-            "Object-view audit rows, newest first — one row per tracked download, naming the \
-             object viewed and when. Not object metadata.",
+            "Recorded object views, newest first — one entry per tracked download, naming \
+             the object viewed and when. Not object metadata.",
         )
         .output(response_schema_of::<contracts::RecordListView<repo::views::ViewRow>>)
         .tags(&["storage"]),
@@ -446,7 +446,7 @@ fn share_id_path_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": {"type": "string", "description": "Share row id, as `POST /b/cloudstorage/shares` returned it"}
+            "id": {"type": "string", "description": "Share id, as `POST /b/cloudstorage/shares` returned it"}
         }
     })
 }

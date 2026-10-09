@@ -54,7 +54,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nThe text differs per endpoint and is constant per endpoint rather than\nper outcome — the password-reset and verification pair answer the same\nsentence whatever the address's state, so nothing about an account can be\nlearned from the response.",
                   "properties": {
                     "message": {
                       "type": "string"
@@ -89,7 +89,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nThe text differs per endpoint and is constant per endpoint rather than\nper outcome — the password-reset and verification pair answer the same\nsentence whatever the address's state, so nothing about an account can be\nlearned from the response.",
                   "properties": {
                     "message": {
                       "type": "string"
@@ -226,7 +226,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nThe text differs per endpoint and is constant per endpoint rather than\nper outcome — the password-reset and verification pair answer the same\nsentence whatever the address's state, so nothing about an account can be\nlearned from the response.",
                   "properties": {
                     "message": {
                       "type": "string"
@@ -490,7 +490,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nThe text differs per endpoint and is constant per endpoint rather than\nper outcome — the password-reset and verification pair answer the same\nsentence whatever the address's state, so nothing about an account can be\nlearned from the response.",
                   "properties": {
                     "message": {
                       "type": "string"
@@ -520,7 +520,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nOne type because it is one shape. The *text* differs per endpoint and is\ndeliberately constant per endpoint rather than per outcome — the\npassword-reset and verification pair answer the same sentence whatever\nthe address's state, so nothing about an account can be learned from the\nresponse (`api::verify::resend_tests` pins that). A per-endpoint copy of\nthis struct would publish five schemas that must be kept identical by\nhand.",
+                  "description": "The one-key body five endpoints on this surface answer: `POST\n/b/auth/api/logout`, `/change-password`, `/forgot-password`,\n`/reset-password` and `/resend-verification`.\n\n`/change-password` answers it to JSON callers; that one endpoint answers a\nbrowser form with HTML instead.\n\nThe text differs per endpoint and is constant per endpoint rather than\nper outcome — the password-reset and verification pair answer the same\nsentence whatever the address's state, so nothing about an account can be\nlearned from the response.",
                   "properties": {
                     "message": {
                       "type": "string"

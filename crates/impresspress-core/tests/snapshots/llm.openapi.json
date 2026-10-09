@@ -66,7 +66,7 @@
                       "type": "string"
                     },
                     "message_id": {
-                      "description": "Id of the assistant entry persisted in the messages block. Always\npopulated: a reply the store refused is answered with a 500, not a\nbody (see `routes::chat::handle_chat`).",
+                      "description": "Id of the assistant entry persisted in the messages block. Always\npopulated: a reply the store refused is answered with a 500, not a\nbody.",
                       "type": "string"
                     },
                     "model": {
@@ -258,14 +258,14 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "description": "The override row after it was created or updated.",
+                      "description": "The override after it was created or updated.",
                       "properties": {
                         "created_at": {
                           "description": "RFC 3339 creation timestamp.",
                           "type": "string"
                         },
                         "id": {
-                          "description": "Stable row identifier.",
+                          "description": "Stable identifier.",
                           "type": "string"
                         },
                         "model": {
@@ -333,7 +333,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Override row id, as returned by `POST /b/llm/api/config`.",
+              "description": "Override id, as returned by `POST /b/llm/api/config`.",
               "type": "string"
             }
           }
@@ -380,7 +380,7 @@
                   "properties": {
                     "models": {
                       "items": {
-                        "description": "A model one of the registered backends can serve. Mirrors\n`wafer_core::clients::llm::ModelInfo`.",
+                        "description": "A model one of the registered backends can serve.",
                         "properties": {
                           "backend_id": {
                             "description": "Backend (provider name) the model is hosted in.",
@@ -538,7 +538,7 @@
                   "description": "`GET /b/llm/api/models/{backend_id}/{model_id}/status` response body.",
                   "properties": {
                     "status": {
-                      "description": "Lifecycle status of one model on one backend. Mirrors\n`wafer_core::clients::llm::ModelStatus`.",
+                      "description": "Lifecycle status of one model on one backend.",
                       "properties": {
                         "progress": {
                           "description": "Load progress in `0.0..=1.0`. Present only while `state` is\n`Loading`.",
@@ -688,7 +688,7 @@
                             "type": "string"
                           },
                           "id": {
-                            "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                            "description": "Stable identifier, used by the `/b/llm/api/providers/{id}` routes.",
                             "type": "string"
                           },
                           "key_var": {
@@ -876,7 +876,7 @@
                       "type": "string"
                     },
                     "id": {
-                      "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                      "description": "Stable identifier, used by the `/b/llm/api/providers/{id}` routes.",
                       "type": "string"
                     },
                     "key_var": {
@@ -964,7 +964,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
+              "description": "Provider id, as returned by `GET /b/llm/api/providers`.",
               "type": "string"
             }
           }
@@ -1006,7 +1006,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
+              "description": "Provider id, as returned by `GET /b/llm/api/providers`.",
               "type": "string"
             }
           }
@@ -1113,7 +1113,7 @@
                       "type": "string"
                     },
                     "id": {
-                      "description": "Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.",
+                      "description": "Stable identifier, used by the `/b/llm/api/providers/{id}` routes.",
                       "type": "string"
                     },
                     "key_var": {
@@ -1201,7 +1201,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Provider row id, as returned by `GET /b/llm/api/providers`.",
+              "description": "Provider id, as returned by `GET /b/llm/api/providers`.",
               "type": "string"
             }
           }

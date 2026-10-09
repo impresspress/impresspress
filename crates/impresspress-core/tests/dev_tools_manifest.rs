@@ -11,6 +11,8 @@ use impresspress_core::{
 };
 use wafer_run::context::Context;
 
+mod descriptions;
+
 /// Host passed to [`discovery_json_as`] — arbitrary, but shared with the
 /// other discovery-document tests (`openapi_document`,
 /// `pipeline.rs`'s discovery tests) so a failure's context matches theirs.
@@ -178,5 +180,38 @@ async fn tools_json_matches_its_snapshot() {
         rendered, expected,
         "tools.json changed — every changed line is a decision; regenerate deliberately with \
          UPDATE_DEV_TOOLS_SNAPSHOT=1"
+    );
+}
+
+/// `tools.json` is the dev sandbox's agent surface: every tool and parameter
+/// description in it is what an agent reads to decide what to send, so the
+/// same no-maintainer-notes gate `openapi_snapshot.rs` runs over
+/// `/openapi.json` runs here, under the `dev.tools` scope.
+#[tokio::test]
+async fn tools_json_descriptions_carry_no_maintainer_notes() {
+    let ctx = TestContext::with_products()
+        .await
+        .with_dev_added(FakeControl::new())
+        .await;
+    let doc = output_json(
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/tools.json"))
+            .await,
+    )
+    .await;
+
+    // The page registers a few tools of its own beside `tools.json`'s, and
+    // prose here may name them.
+    let page_tools = descriptions::dev_page_tool_names();
+    let failures = descriptions::check(&[descriptions::Scope::new(
+        "dev.tools",
+        &doc,
+        &[],
+        &page_tools,
+    )]);
+    assert!(
+        failures.is_empty(),
+        "tools.json descriptions carry maintainer notes - keep the caller-facing meaning in \
+         `///`, move the rest to a `//` comment beside the code:\n{}",
+        failures.join("\n---\n")
     );
 }

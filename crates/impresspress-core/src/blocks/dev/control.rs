@@ -89,11 +89,10 @@ pub struct DynamicRoute {
     pub access: RouteAccessKind,
 }
 
+// This is also the block entry of the generation manifest (design §11.3), so
+// a stored `block_manifest_json` decodes straight into `Vec<DynamicBlockSpec>`
+// with no intermediate shape.
 /// Everything the host needs to put one compiled guest into a runtime.
-///
-/// This is also the block entry of the generation manifest (design §11.3), so
-/// a stored `block_manifest_json` decodes straight into `Vec<DynamicBlockSpec>`
-/// with no intermediate shape.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DynamicBlockSpec {
     /// Registered block name (`site/{name}`).
@@ -102,13 +101,15 @@ pub struct DynamicBlockSpec {
     pub artifact_sha256: String,
     /// Route prefixes the block serves.
     pub routes: Vec<DynamicRoute>,
-    /// Capabilities the guest is loaded under. Deny-by-default; the caller
-    /// validates the declared set against the block's own namespace before
-    /// this ever reaches [`RuntimeControl`].
-    ///
-    /// `BlockCapabilities` is a producer type that derives neither
-    /// `JsonSchema` nor `PartialEq`. It is published as a free-form object
-    /// here, and compared field-by-field in the `PartialEq` impl below.
+    // The caller validates the declared set against the block's own
+    // namespace before this ever reaches [`RuntimeControl`].
+    //
+    // `BlockCapabilities` is a producer type that derives neither `JsonSchema`
+    // nor `PartialEq`. It is published as a free-form object here, and
+    // compared field-by-field in the `PartialEq` impl below.
+    /// Capabilities the guest is loaded under, deny-by-default: what the
+    /// block declared, checked against the block's own namespace before it
+    /// is loaded.
     #[schemars(with = "serde_json::Value")]
     pub capabilities: wafer_block::BlockCapabilities,
     /// `WAFER_GUEST_VERSION` of the `wafer_guest` crate the artifact was

@@ -38,8 +38,8 @@ use wafer_core::clients::vector as wire;
 // Mirrors
 // ---------------------------------------------------------------------------
 
-/// Distance metric a vector index is built with. Mirrors
-/// `wafer_core::clients::vector::DistanceMetric`.
+// Mirrors `wafer_core::clients::vector::DistanceMetric`.
+/// Distance metric a vector index is built with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DistanceMetric {
@@ -71,7 +71,8 @@ impl From<wire::DistanceMetric> for DistanceMetric {
     }
 }
 
-/// Search modality. Mirrors `wafer_core::clients::vector::SearchMode`.
+// Mirrors `wafer_core::clients::vector::SearchMode`.
+/// Search modality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
@@ -93,10 +94,12 @@ impl From<SearchMode> for wire::SearchMode {
     }
 }
 
-/// One row to upsert. Mirrors `wafer_core::clients::vector::VectorEntry`.
+// Mirrors `wafer_core::clients::vector::VectorEntry`.
+/// One entry to upsert.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorEntryInput {
-    /// Caller-supplied row id. Upserting the same id again replaces the row.
+    /// Caller-supplied entry id. Upserting the same id again replaces the
+    /// entry.
     pub id: String,
     /// Embedding vector; its length must match the index's `dimensions`.
     pub vector: Vec<f32>,
@@ -139,14 +142,16 @@ impl From<MetadataFilterInput> for wire::MetadataFilter {
     }
 }
 
-/// One query hit. Mirrors `wafer_core::clients::vector::VectorMatch`.
+// Mirrors `wafer_core::clients::vector::VectorMatch`.
+/// One query hit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorMatchView {
-    /// Matched row id.
+    /// Matched entry id.
     pub id: String,
     /// Similarity score; its scale depends on the index's metric.
     pub score: f32,
-    /// The metadata stored with the row. Absent when the row stored none.
+    /// The metadata stored with the entry. Absent when the entry stored
+    /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
@@ -238,12 +243,12 @@ pub struct IndexListResponse {
     pub indexes: Vec<String>,
 }
 
-/// One index with its row count.
+/// One index with its entry count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexStatsView {
     /// Index name.
     pub name: String,
-    /// Rows currently stored. `0` when the count could not be read.
+    /// Entries currently stored. `0` when the count could not be read.
     pub count: u64,
 }
 
@@ -276,7 +281,7 @@ pub struct AckResponse {
 pub struct UpsertRequest {
     /// Index name.
     pub index: String,
-    /// Rows to insert or replace.
+    /// Entries to insert or replace.
     pub entries: Vec<VectorEntryInput>,
 }
 
@@ -304,7 +309,7 @@ pub struct QueryRequest {
     pub vector: Option<Vec<f32>>,
     /// Maximum number of hits. Omitted means 10.
     pub top_k: Option<usize>,
-    /// Restrict hits to rows whose metadata matches.
+    /// Restrict hits to entries whose metadata matches.
     pub filter: Option<MetadataFilterInput>,
     /// Search modality. Omitted means `hybrid` for an index created with
     /// `keyword_search`, `vector` otherwise.
@@ -335,8 +340,10 @@ pub struct IngestRequest {
     pub document_id: String,
     /// The document text.
     pub text: String,
-    /// Arbitrary JSON stored on every chunk as `user_metadata`, beside the
-    /// `document_id` and `chunk_index` the block adds.
+    // `pages::ingest` builds each chunk's metadata object.
+    /// Arbitrary JSON stored with every chunk. A chunk's metadata — what a
+    /// query hit answers as `metadata` — is
+    /// `{"document_id": …, "chunk_index": n, "user_metadata": <this value>}`.
     pub metadata: Option<serde_json::Value>,
     /// Prepend an LLM-written one-paragraph summary of the document to every
     /// chunk before embedding. Silently skipped when no default LLM is

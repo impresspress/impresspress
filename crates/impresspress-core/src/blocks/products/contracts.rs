@@ -2087,7 +2087,7 @@ pub struct CatalogProductListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -2120,7 +2120,7 @@ impl CatalogProductListResponse {
     }
 }
 
-/// One page of product rows.
+/// One page of products.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProductListResponse {
     /// Products on this page, newest first.
@@ -2129,7 +2129,7 @@ pub struct ProductListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -2170,7 +2170,7 @@ pub struct PageQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_page_size")]
     #[schemars(range(max = 100))]
     pub page_size: u32,
@@ -2197,7 +2197,7 @@ pub struct ProductListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_page_size")]
     #[schemars(range(max = 100))]
     pub page_size: u32,
@@ -2451,7 +2451,7 @@ impl GroupView {
     }
 }
 
-/// One page of group rows.
+/// One page of groups.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GroupListResponse {
     /// Groups on this page.
@@ -2460,7 +2460,7 @@ pub struct GroupListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -2596,7 +2596,7 @@ impl ProductTypeView {
     }
 }
 
-/// One page of product type rows.
+/// One page of product types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProductTypeListResponse {
     /// Types on this page, newest first.
@@ -2605,7 +2605,7 @@ pub struct ProductTypeListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -2697,7 +2697,7 @@ pub struct GroupTemplateListResponse {
     pub total_count: i64,
     /// Always `1`.
     pub page: i64,
-    /// The fixed ceiling on rows returned.
+    /// The fixed ceiling on items returned.
     pub page_size: i64,
 }
 
@@ -3009,7 +3009,7 @@ pub struct BuyerOrderListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -3186,7 +3186,7 @@ pub struct SellerOrderListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -3285,7 +3285,7 @@ impl PurchaseView {
     }
 }
 
-/// One page of order rows.
+/// One page of orders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PurchaseListResponse {
     /// Orders on this page, newest first.
@@ -3294,7 +3294,7 @@ pub struct PurchaseListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -3341,7 +3341,7 @@ pub struct AdminPurchaseListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_page_size")]
     #[schemars(range(max = 100))]
     pub page_size: u32,
@@ -3376,7 +3376,7 @@ pub struct SellerOrderListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_page_size")]
     #[schemars(range(max = 100))]
     pub page_size: u32,

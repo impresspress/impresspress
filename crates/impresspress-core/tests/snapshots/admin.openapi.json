@@ -55,11 +55,11 @@
                     "rows": {
                       "description": "The rows, in the order the query returned them.",
                       "items": {
-                        "description": "One row of an [`AdminSqlQueryResponse`].",
+                        "description": "One row of a query result.",
                         "properties": {
                           "data": {
                             "additionalProperties": true,
-                            "description": "Every column of the row, name → value, its keys written in\n[`AdminSqlQueryResponse::columns`] order. Read the order from\n`columns`, not from this object: a JSON parser need not keep key order,\nand JavaScript's `JSON.parse` enumerates integer-like names (`1`)\nbefore the others. Two result columns with one name collapse into one\nentry — alias them apart.",
+                            "description": "Every column of the row, name → value, its keys written in the\nresponse's `columns` order. Read the order from `columns`, not from\nthis object: a JSON parser need not keep key order,\nand JavaScript's `JSON.parse` enumerates integer-like names (`1`)\nbefore the others. Two result columns with one name collapse into one\nentry — alias them apart.",
                             "type": "object"
                           },
                           "id": {
@@ -105,10 +105,10 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "description": "One row of `GET /b/admin/api/extensions`: a registered block, projected\noff wafer-run's `BlockInfo`.\n\nA closed field list for the same reason every view in this module is one\n— `BlockInfo` carries config keys, collection schemas, endpoint tables and\ncapability grants that this endpoint has never published and must not\nstart publishing because upstream grew a field.",
+                    "description": "One entry of `GET /b/admin/api/extensions`: a registered block.",
                     "properties": {
                       "enabled": {
-                        "description": "Whether the block is enabled.\n\nRead from the boot block-settings snapshot — the same source\n`routing::route_to_block`'s feature gate consults — so `false` means\nthe router answers \"endpoint not found\" for every one of this block's\nroutes. A block with no stored row reports `true`.",
+                        "description": "Whether the block is enabled. `false` means every one of this block's\nroutes answers \"endpoint not found\". A block that was never switched\noff reports `true`.",
                         "type": "boolean"
                       },
                       "interface": {
@@ -160,15 +160,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Response body of `GET /b/admin/api/iam/roles`.\n\nThe endpoint takes no query parameters: it returns every role, sorted by\nname, up to the handler's fixed 1000-row ceiling.",
+                  "description": "Response body of `GET /b/admin/api/iam/roles`.\n\nThe endpoint takes no query parameters: it returns every role, sorted by\nname, up to a fixed ceiling of 1000 roles.",
                   "properties": {
                     "page": {
-                      "description": "1-based index of this page. Always 1 — the handler does not paginate.",
+                      "description": "1-based index of this page. Always 1 — this endpoint does not\npaginate.",
                       "format": "int64",
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page. Always the handler's fixed 1000-row ceiling.",
+                      "description": "Items per page. Always the fixed ceiling of 1000.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -546,7 +546,7 @@
             "required": false,
             "schema": {
               "default": 50,
-              "description": "Rows per page, capped at 100.",
+              "description": "Items per page, capped at 100.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -557,7 +557,7 @@
             "name": "resource",
             "required": false,
             "schema": {
-              "description": "`LIKE '%…%'` filter on the affected resource.",
+              "description": "Substring filter: keeps the entries whose affected resource contains\nthis text. `%` and `_` in it are wildcards (any run of characters, any\none character) and `\\` escapes them. Letter case is ignored for ASCII\nletters on SQLite and D1 deployments and must match on Postgres.",
               "type": [
                 "string",
                 "null"
@@ -590,7 +590,7 @@
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page used to compute `page`.",
+                      "description": "Items per page used to compute `page`.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -620,7 +620,7 @@
                             "type": "string"
                           },
                           "updated_at": {
-                            "description": "RFC 3339 write timestamp. Audit rows are never updated, so this always\nequals `created_at`.",
+                            "description": "RFC 3339 write timestamp. Audit entries are never updated, so this\nalways equals `created_at`.",
                             "type": "string"
                           },
                           "user_id": {
@@ -688,11 +688,11 @@
                             "type": "string"
                           },
                           "sensitive": {
-                            "description": "Whether `value` is masked. True when the row carries the sensitive\nflag, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
+                            "description": "Whether `value` is masked. True when the variable is flagged\nsensitive, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
                             "type": "boolean"
                           },
                           "value": {
-                            "description": "The stored value, or `\"********\"` when `sensitive` is true.\n\nTyped as `any` rather than `string` because the stored column is text\nthat the SQLite and D1 backends decode back into JSON when it looks\nlike an object or an array: a variable holding `[\"a\",\"b\"]` reads back\nas an array, one holding `on` reads back as a string."
+                            "description": "The stored value, or `\"********\"` when `sensitive` is true.\n\nUsually a string, but not always: on SQLite and D1 deployments a value\nthat is a JSON object or array is answered as that JSON — a variable\nholding `[\"a\",\"b\"]` reads back as an array, one holding `on` as a\nstring."
                           }
                         },
                         "required": [
@@ -745,7 +745,7 @@
             "required": false,
             "schema": {
               "default": 20,
-              "description": "Rows per page, capped at 100.",
+              "description": "Items per page, capped at 100.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -756,7 +756,7 @@
             "name": "search",
             "required": false,
             "schema": {
-              "description": "Case-insensitive `LIKE '%…%'` filter on the email address.",
+              "description": "Substring filter: keeps the accounts whose email address or user id\ncontains this text. `%` and `_` in it are wildcards (any run of\ncharacters, any one character) and `\\` escapes them. Letter case is\nignored for ASCII letters on SQLite and D1 deployments and must match\non Postgres.",
               "type": [
                 "string",
                 "null"
@@ -777,7 +777,7 @@
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page used to compute `page`.",
+                      "description": "Items per page used to compute `page`.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -798,7 +798,7 @@
                             "type": "string"
                           },
                           "deleted_at": {
-                            "description": "RFC 3339 soft-delete timestamp. Always `null` in the list response,\nwhich filters on `deleted_at IS NULL`.",
+                            "description": "RFC 3339 soft-delete timestamp. Always `null` in the list response,\nwhich lists only accounts that have not been deleted.",
                             "type": [
                               "string",
                               "null"
@@ -839,11 +839,11 @@
                             ]
                           },
                           "role": {
-                            "description": "Legacy single-role column on the user row (`\"user\"` by default).\nAuthorization uses `roles`; this field is retained because the column is\nstill written by the signup path.",
+                            "description": "The account's own role (`\"user\"` by default). A signed-in session\nholds it alongside `roles`, which lists it only when the same role is\nalso granted.",
                             "type": "string"
                           },
                           "roles": {
-                            "description": "Role names assigned to this user in `impresspress__admin__user_roles`.",
+                            "description": "Roles granted to this user. Admins manage grants through\n`/b/admin/api/iam/user-roles`, but not every grant is made there: the\nconfigured bootstrap admin is granted `admin` when they sign in.",
                             "items": {
                               "type": "string"
                             },

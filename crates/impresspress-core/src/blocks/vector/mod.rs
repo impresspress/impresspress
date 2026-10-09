@@ -154,7 +154,7 @@ fn vector_id_path_schema() -> serde_json::Value {
             },
             "id": {
                 "type": "string",
-                "description": "Row id, as supplied on upsert (or `{document_id}:{n}` for an ingested chunk)."
+                "description": "Entry id, as supplied on upsert (or `{document_id}:{n}` for an ingested chunk)."
             }
         }
     })

@@ -17,7 +17,7 @@ use crate::{
     util::RecordExt,
 };
 
-/// One page of order rows, newest first.
+/// One page of orders, newest first.
 ///
 /// Every tier reads the same table through the same query; what differs is
 /// the projection, so each caller below names the view its own tier is

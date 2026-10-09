@@ -72,11 +72,19 @@ pub struct AdminUserView {
     pub name: Option<String>,
     /// Avatar image URL, when set.
     pub avatar_url: Option<String>,
-    /// Legacy single-role column on the user row (`"user"` by default).
-    /// Authorization uses `roles`; this field is retained because the column is
-    /// still written by the signup path.
+    // The single-role column on the users row, written by the signup path and
+    // not admin-writable. `auth::merge_roles` puts it first in a token's
+    // `roles` claim, ahead of the grants below.
+    /// The account's own role (`"user"` by default). A signed-in session
+    /// holds it alongside `roles`, which lists it only when the same role is
+    /// also granted.
     pub role: String,
-    /// Role names assigned to this user in `impresspress__admin__user_roles`.
+    // Read from `impresspress__admin__user_roles`. Writers: the IAM
+    // endpoints (`iam.rs`, including a role rename) and the bootstrap-admin
+    // grant in `auth::grant_bootstrap_admin`.
+    /// Roles granted to this user. Admins manage grants through
+    /// `/b/admin/api/iam/user-roles`, but not every grant is made there: the
+    /// configured bootstrap admin is granted `admin` when they sign in.
     pub roles: Vec<String>,
     /// Whether the email address has been verified.
     pub email_verified: bool,
@@ -88,8 +96,9 @@ pub struct AdminUserView {
     pub created_at: String,
     /// RFC 3339 timestamp of the last modification.
     pub updated_at: String,
+    // The list filters on `deleted_at IS NULL` (`users::list_active_page`).
     /// RFC 3339 soft-delete timestamp. Always `null` in the list response,
-    /// which filters on `deleted_at IS NULL`.
+    /// which lists only accounts that have not been deleted.
     pub deleted_at: Option<String>,
 }
 
@@ -125,10 +134,17 @@ pub struct AdminUserListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_user_page_size")]
     pub page_size: u32,
-    /// Case-insensitive `LIKE '%…%'` filter on the email address.
+    // `users::list_active_page` runs `email LIKE '%…%' OR id LIKE '%…%'` with
+    // the text unescaped, under wafer-sql-utils' `ESCAPE '\'`; LIKE folds
+    // ASCII case on SQLite/D1 and does not on Postgres.
+    /// Substring filter: keeps the accounts whose email address or user id
+    /// contains this text. `%` and `_` in it are wildcards (any run of
+    /// characters, any one character) and `\` escapes them. Letter case is
+    /// ignored for ASCII letters on SQLite and D1 deployments and must match
+    /// on Postgres.
     pub search: Option<String>,
 }
 
@@ -154,7 +170,7 @@ pub struct AdminUserListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -222,16 +238,17 @@ impl AdminRoleView {
 /// Response body of `GET /b/admin/api/iam/roles`.
 ///
 /// The endpoint takes no query parameters: it returns every role, sorted by
-/// name, up to the handler's fixed 1000-row ceiling.
+/// name, up to a fixed ceiling of 1000 roles.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AdminRoleListResponse {
     /// Roles, sorted by name ascending.
     pub records: Vec<AdminRoleView>,
     /// Total roles defined.
     pub total_count: i64,
-    /// 1-based index of this page. Always 1 — the handler does not paginate.
+    /// 1-based index of this page. Always 1 — this endpoint does not
+    /// paginate.
     pub page: i64,
-    /// Rows per page. Always the handler's fixed 1000-row ceiling.
+    /// Items per page. Always the fixed ceiling of 1000.
     pub page_size: i64,
 }
 
@@ -334,15 +351,18 @@ pub struct AdminRoleDeleteResponse {
 pub struct AdminSettingView {
     /// Variable name, e.g. `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`.
     pub key: String,
+    // Typed as `any` rather than `string` because the stored column is text
+    // that the SQLite and D1 backends decode back into JSON when it looks like
+    // an object or an array.
     /// The stored value, or `"********"` when `sensitive` is true.
     ///
-    /// Typed as `any` rather than `string` because the stored column is text
-    /// that the SQLite and D1 backends decode back into JSON when it looks
-    /// like an object or an array: a variable holding `["a","b"]` reads back
-    /// as an array, one holding `on` reads back as a string.
+    /// Usually a string, but not always: on SQLite and D1 deployments a value
+    /// that is a JSON object or array is answered as that JSON — a variable
+    /// holding `["a","b"]` reads back as an array, one holding `on` as a
+    /// string.
     pub value: serde_json::Value,
-    /// Whether `value` is masked. True when the row carries the sensitive
-    /// flag, or the key is one this build knows to hold a secret: it ends in
+    /// Whether `value` is masked. True when the variable is flagged
+    /// sensitive, or the key is one this build knows to hold a secret: it ends in
     /// `_SECRET` or `_KEY`, or its declaration is a password-typed or
     /// auto-generated variable.
     pub sensitive: bool,
@@ -384,8 +404,8 @@ pub struct AdminAuditLogView {
     pub ip_address: String,
     /// RFC 3339 timestamp the action was recorded at.
     pub created_at: String,
-    /// RFC 3339 write timestamp. Audit rows are never updated, so this always
-    /// equals `created_at`.
+    /// RFC 3339 write timestamp. Audit entries are never updated, so this
+    /// always equals `created_at`.
     pub updated_at: String,
 }
 
@@ -413,14 +433,20 @@ pub struct AdminAuditLogListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_log_page_size")]
     pub page_size: u32,
     /// Exact-match filter on the acting admin's user id.
     pub user_id: Option<String>,
     /// Exact-match filter on the action name.
     pub action: Option<String>,
-    /// `LIKE '%…%'` filter on the affected resource.
+    // `logs::handle_list` runs `resource LIKE '%…%'` with the text unescaped, under
+    // wafer-sql-utils' `ESCAPE '\'`; LIKE folds ASCII case on SQLite/D1 and
+    // does not on Postgres.
+    /// Substring filter: keeps the entries whose affected resource contains
+    /// this text. `%` and `_` in it are wildcards (any run of characters, any
+    /// one character) and `\` escapes them. Letter case is ignored for ASCII
+    /// letters on SQLite and D1 deployments and must match on Postgres.
     pub resource: Option<String>,
 }
 
@@ -448,7 +474,7 @@ pub struct AdminAuditLogListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -472,13 +498,12 @@ impl AdminAuditLogListResponse {
 // Shared query-param plumbing
 // ---------------------------------------------------------------------------
 
-/// One row of `GET /b/admin/api/extensions`: a registered block, projected
-/// off wafer-run's `BlockInfo`.
-///
-/// A closed field list for the same reason every view in this module is one
-/// — `BlockInfo` carries config keys, collection schemas, endpoint tables and
-/// capability grants that this endpoint has never published and must not
-/// start publishing because upstream grew a field.
+// Projected off wafer-run's `BlockInfo`. A closed field list for the same
+// reason every view in this module is one — `BlockInfo` carries config keys,
+// collection schemas, endpoint tables and capability grants that this
+// endpoint has never published and must not start publishing because upstream
+// grew a field.
+/// One entry of `GET /b/admin/api/extensions`: a registered block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AdminExtensionView {
     /// Block name in the canonical `{org}/{block}` form.
@@ -489,12 +514,11 @@ pub struct AdminExtensionView {
     pub interface: String,
     /// One-line summary of what the block does.
     pub summary: String,
-    /// Whether the block is enabled.
-    ///
-    /// Read from the boot block-settings snapshot — the same source
-    /// `routing::route_to_block`'s feature gate consults — so `false` means
-    /// the router answers "endpoint not found" for every one of this block's
-    /// routes. A block with no stored row reports `true`.
+    // Read from the boot block-settings snapshot — the same source
+    // `routing::route_to_block`'s feature gate consults.
+    /// Whether the block is enabled. `false` means every one of this block's
+    /// routes answers "endpoint not found". A block that was never switched
+    /// off reports `true`.
     pub enabled: bool,
 }
 
@@ -529,15 +553,15 @@ pub struct AdminSqlQueryResponse {
     pub row_count: usize,
 }
 
-/// One row of an [`AdminSqlQueryResponse`].
+/// One row of a query result.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AdminSqlQueryRow {
     /// The row's `id` column as text; `""` when the query selected no `id`
     /// (or it held no string or integer).
     pub id: String,
-    /// Every column of the row, name → value, its keys written in
-    /// [`AdminSqlQueryResponse::columns`] order. Read the order from
-    /// `columns`, not from this object: a JSON parser need not keep key order,
+    /// Every column of the row, name → value, its keys written in the
+    /// response's `columns` order. Read the order from `columns`, not from
+    /// this object: a JSON parser need not keep key order,
     /// and JavaScript's `JSON.parse` enumerates integer-like names (`1`)
     /// before the others. Two result columns with one name collapse into one
     /// entry — alias them apart.

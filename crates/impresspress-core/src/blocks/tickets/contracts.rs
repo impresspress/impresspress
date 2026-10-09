@@ -174,7 +174,7 @@ pub struct TicketListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -203,7 +203,7 @@ pub struct TicketListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_ticket_page_size")]
     pub page_size: u32,
     /// Exact-match filter on workflow state. Rejected with 400 when it is not
@@ -517,7 +517,7 @@ pub struct AddNoteRequest {
 
 /// Response body of `GET /b/tickets/api/admin/tickets/{id}/analyses`.
 ///
-/// Unpaginated: the handler returns the newest 100 analyses and no envelope
+/// Unpaginated: the endpoint returns the newest 100 analyses and no envelope
 /// counts.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AnalysisListResponse {
@@ -607,7 +607,7 @@ pub struct TicketTypeListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -636,7 +636,7 @@ pub struct TicketTypeListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_type_page_size")]
     pub page_size: u32,
 }

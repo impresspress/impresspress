@@ -766,7 +766,7 @@ pub async fn patch_admin_fields(
 pub struct ActiveUserQuery {
     /// 1-based; values below 1 clamp to 1.
     pub page: i64,
-    /// Rows per page; values below 1 fall back to 20.
+    /// Items per page; values below 1 fall back to 20.
     pub page_size: u32,
     /// Case-insensitive `LIKE '%…%'` over the email address AND the user
     /// id. Both admin surfaces asked a different one of those two questions
