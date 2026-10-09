@@ -105,6 +105,22 @@ pub struct GenerationSummary {
     pub created_at: String,
     /// RFC 3339 time the generation went live, or null if it never did.
     pub activated_at: Option<String>,
+    // Written with the status by each writer of `failed` (listed on
+    // `GenerationStatus::Failed`) and by nothing else: `set_status` leaves the
+    // stored message alone when given none, and no transition leaves
+    // `failed`. For an activation that failed it is `ActivationError`'s
+    // `Display`, which is also the refusal `ActivationError::into_response`
+    // answers the publishing request with.
+    /// Why the generation failed: set when `status` is `failed`, null
+    /// otherwise.
+    ///
+    /// When its validation or activation failed, this is the message a
+    /// request that publishes it is refused with, and it names what failed:
+    /// site content or a block artifact that is not stored, the error that
+    /// stopped the blocks from loading, or a storage failure. When the
+    /// sandbox stopped before its activation finished, it says that instead,
+    /// which is not a verdict on the generation's content.
+    pub failure_message: Option<String>,
     /// Number of files in the generation's site manifest.
     pub site_files: u32,
     /// Number of blocks in the generation's block manifest.

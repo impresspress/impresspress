@@ -1795,6 +1795,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2000,6 +2012,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2238,6 +2262,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2407,6 +2443,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2549,6 +2597,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2626,6 +2686,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2770,6 +2842,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -2836,6 +2920,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */
@@ -3058,6 +3154,18 @@ export interface paths {
                                 cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
                                 /** @description RFC 3339 creation time. */
                                 created_at: string;
+                                /**
+                                 * @description Why the generation failed: set when `status` is `failed`, null
+                                 *     otherwise.
+                                 *
+                                 *     When its validation or activation failed, this is the message a
+                                 *     request that publishes it is refused with, and it names what failed:
+                                 *     site content or a block artifact that is not stored, the error that
+                                 *     stopped the blocks from loading, or a storage failure. When the
+                                 *     sandbox stopped before its activation finished, it says that instead,
+                                 *     which is not a verdict on the generation's content.
+                                 */
+                                failure_message: string | null;
                                 /** @description Generation id. */
                                 id: string;
                                 /** @description The generation this one was derived from, or null for the first. */

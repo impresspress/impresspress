@@ -2216,8 +2216,9 @@ function registerExportTool() {
     description:
       'Export the current site as a runnable static bundle (zip) and hand it to the browser as \
 a download: the runtime, the site files, compiled blocks and their source, and a data snapshot of \
-products, offers and settings. Serve the unzipped folder over http to view it. Returns what the \
-bundle contains; use dev_export_manifest to see that without downloading.',
+products, offers, roles, non-sensitive settings and the user accounts with their password hashes. \
+Serve the unzipped folder over http to view it. Returns what the bundle contains; use \
+dev_export_manifest to see that without downloading.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     outputSchema: {
       type: 'object',

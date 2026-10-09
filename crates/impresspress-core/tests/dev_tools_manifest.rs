@@ -187,6 +187,12 @@ async fn tools_json_matches_its_snapshot() {
 /// description in it is what an agent reads to decide what to send, so the
 /// same no-maintainer-notes gate `openapi_snapshot.rs` runs over
 /// `/openapi.json` runs here, under the `dev.tools` scope.
+///
+/// The page registers a few tools of its own beside `tools.json`'s
+/// (`dev_compile_block`, `dev_export`), written in `dev.js` rather than
+/// projected from a contract. They reach the agent the same way, so their
+/// descriptions are checked too, under `dev.page`. Prose in either may name
+/// a tool from the other.
 #[tokio::test]
 async fn tools_json_descriptions_carry_no_maintainer_notes() {
     let ctx = TestContext::with_products()
@@ -199,19 +205,50 @@ async fn tools_json_descriptions_carry_no_maintainer_notes() {
     )
     .await;
 
-    // The page registers a few tools of its own beside `tools.json`'s, and
-    // prose here may name them.
+    let page = descriptions::dev_page_tools();
     let page_tools = descriptions::dev_page_tool_names();
-    let failures = descriptions::check(&[descriptions::Scope::new(
-        "dev.tools",
-        &doc,
-        &[],
-        &page_tools,
-    )]);
+    let failures = descriptions::check(&[
+        descriptions::Scope::new("dev.tools", &doc, &[], &page_tools),
+        descriptions::Scope::new("dev.page", &page, &[&doc], &[]),
+    ]);
     assert!(
         failures.is_empty(),
-        "tools.json descriptions carry maintainer notes - keep the caller-facing meaning in \
-         `///`, move the rest to a `//` comment beside the code:\n{}",
+        "dev tool descriptions carry maintainer notes - keep the caller-facing meaning in \
+         `///` (or, for a page tool, in its `description`), move the rest to a `//` comment \
+         beside the code:\n{}",
         failures.join("\n---\n")
     );
+}
+
+/// The page tools are read off `dev.js` by a small JavaScript reader, so it
+/// must be shown to read what the page registers: both tools, each with its
+/// description, the input field's description, and no `execute`.
+#[tokio::test]
+async fn the_page_tool_reader_reads_every_published_part() {
+    let page = descriptions::dev_page_tools();
+    let tools = page["tools"].as_array().expect("tools");
+    let compile = tools
+        .iter()
+        .find(|tool| tool["name"] == "dev_compile_block")
+        .expect("dev_compile_block");
+    // A line continuation inside the literal joins its lines with nothing:
+    // `the only \` then `dependency` reads as one sentence.
+    let description = compile["description"].as_str().expect("description");
+    assert!(
+        description.contains("the only dependency") && !description.contains('\n'),
+        "{description}"
+    );
+    assert_eq!(
+        compile["inputSchema"]["properties"]["name"]["description"],
+        "Block name, as used in blocks/<name>/",
+        "{compile}"
+    );
+    assert_eq!(compile["inputSchema"]["required"][0], "name", "{compile}");
+    for tool in tools {
+        assert!(tool.get("execute").is_none(), "{tool}");
+        assert!(
+            tool["description"].as_str().is_some_and(|d| !d.is_empty()),
+            "{tool}"
+        );
+    }
 }

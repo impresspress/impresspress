@@ -278,6 +278,7 @@ pub fn summarize(row: &GenerationRow, manifest: &GenerationManifest) -> Generati
         status: row.status,
         created_at: row.created_at.clone(),
         activated_at: row.activated_at.clone(),
+        failure_message: row.failure_message.clone(),
         site_files: manifest.site.files.len() as u32,
         blocks: manifest.blocks.len() as u32,
     }

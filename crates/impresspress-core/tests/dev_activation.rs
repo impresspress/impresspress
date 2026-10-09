@@ -28,6 +28,7 @@ use impresspress_core::{
     },
 };
 use serde_json::json;
+use wafer_run::streams::output::TerminalNotResponse;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -807,6 +808,65 @@ async fn rolling_back_to_a_generation_whose_content_is_gone_is_a_422() {
     )
     .await;
     assert_eq!(read["content"], "v2");
+}
+
+/// A generation that failed says why, wherever the ledger is read — not only
+/// in the refusal of the request that staged it. An agent that comes back
+/// later (another tab, the next session, after boot recovery abandoned an
+/// activation) has only the ledger to ask.
+#[tokio::test]
+async fn a_failed_generation_publishes_why_it_failed() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let g1 = write_file(&ctx, "site/index.html", "v1", None).await;
+    let sha1 = g1["sha256"].as_str().expect("sha256").to_string();
+    write_file(&ctx, "site/index.html", "v2", Some(&sha1)).await;
+    blobs::delete(&ctx, &sha1).await.expect("collect the blob");
+
+    let id1 = g1["generation"]["id"].as_str().expect("id").to_string();
+    let refusal = match dev_post(
+        &ctx,
+        &format!("/b/dev/api/generations/{id1}/rollback"),
+        json!({}),
+    )
+    .await
+    .collect_buffered()
+    .await
+    {
+        Err(TerminalNotResponse::Error(e)) => e.message,
+        other => panic!("a rollback to collected content is refused: {other:?}"),
+    };
+
+    let listed = output_json(dev_get(&ctx, "/b/dev/api/generations").await).await;
+    let failed = &listed["generations"][0];
+    assert_eq!(failed["status"], "failed", "{listed}");
+    // The same words the refusal carried, and they name what is missing.
+    assert_eq!(failed["failure_message"], refusal.as_str(), "{listed}");
+    assert!(
+        refusal.contains(&format!("no blob is stored for site content {sha1}")),
+        "{refusal}"
+    );
+
+    let failed_id = failed["id"].as_str().expect("id");
+    let detail =
+        output_json(dev_get(&ctx, &format!("/b/dev/api/generations/{failed_id}")).await).await;
+    assert_eq!(
+        detail["summary"]["failure_message"],
+        refusal.as_str(),
+        "{detail}"
+    );
+
+    // A generation that did not fail carries `null`, not an absent field.
+    let active = &listed["generations"][1];
+    assert_eq!(active["status"], "active", "{listed}");
+    assert_eq!(
+        active.get("failure_message"),
+        Some(&serde_json::Value::Null),
+        "{listed}"
+    );
+    assert_eq!(
+        dev_status(&ctx).await["active_generation"].get("failure_message"),
+        Some(&serde_json::Value::Null)
+    );
 }
 
 // ---------------------------------------------------------------------------

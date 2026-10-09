@@ -189,6 +189,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -231,7 +238,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -249,6 +256,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -618,6 +626,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -660,7 +675,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -678,6 +693,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -1045,6 +1061,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -1087,7 +1110,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -1105,6 +1128,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -1404,6 +1428,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -1446,7 +1477,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -1464,6 +1495,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -1737,6 +1769,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -1779,7 +1818,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -1797,6 +1836,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -1972,6 +2012,13 @@
                             "description": "RFC 3339 creation time.",
                             "type": "string"
                           },
+                          "failure_message": {
+                            "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
                           "id": {
                             "description": "Generation id.",
                             "type": "string"
@@ -2014,7 +2061,7 @@
                               },
                               {
                                 "const": "failed",
-                                "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                                "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                                 "type": "string"
                               },
                               {
@@ -2032,6 +2079,7 @@
                           "status",
                           "created_at",
                           "activated_at",
+                          "failure_message",
                           "site_files",
                           "blocks"
                         ],
@@ -2342,6 +2390,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -2384,7 +2439,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -2402,6 +2457,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -2506,6 +2562,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -2548,7 +2611,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -2566,6 +2629,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
@@ -2908,6 +2972,13 @@
                           "description": "RFC 3339 creation time.",
                           "type": "string"
                         },
+                        "failure_message": {
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "id": {
                           "description": "Generation id.",
                           "type": "string"
@@ -2950,7 +3021,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back. `failure_message` says which.",
                               "type": "string"
                             },
                             {
@@ -2968,6 +3039,7 @@
                         "status",
                         "created_at",
                         "activated_at",
+                        "failure_message",
                         "site_files",
                         "blocks"
                       ],
