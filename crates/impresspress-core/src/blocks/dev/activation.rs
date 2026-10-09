@@ -941,7 +941,7 @@ async fn activate_staged(
         .await
         .map_err(storage_error)?;
     Ok(ActivationOutcome {
-        generation: generation::summarize(&activated, manifest),
+        generation: generation::summarize(&activated, Some(manifest)),
         progress: progress.steps,
     })
 }
@@ -1271,7 +1271,7 @@ pub async fn converge_on_boot(
                     "dev sandbox: the activation journal names a generation that cannot be \
                      loaded; restoring the active generation",
                 );
-                abandon_dangling(ctx, &desired, &reason).await?;
+                abandon_dangling(ctx, &desired).await?;
                 restore_active_site(ctx, None, previous.as_ref()).await?;
                 clear_journal(ctx, &state).await?;
             }
@@ -1463,7 +1463,7 @@ async fn active_or_clear(
                 "dev sandbox: the activation journal names an active generation that cannot be \
                  loaded; clearing it and booting with nothing dynamic",
             );
-            abandon_dangling(ctx, &id, &reason).await?;
+            abandon_dangling(ctx, &id).await?;
             let cleared = RuntimeState {
                 active_generation_id: None,
                 ..state.clone()
@@ -1534,18 +1534,33 @@ async fn load_journalled(ctx: &dyn Context, id: &str) -> Result<Journalled, Wafe
     })
 }
 
-/// Record why a generation the journal pointed at could not be converged on.
+/// The message a generation the journal named is closed with when it could
+/// not be loaded ([`Journalled::Dangling`] on a row that exists).
+///
+/// "Manifest" because that is the only part of a stored row that can fail to
+/// read back: `status` and `cause` are held to their enums by the table's
+/// `CHECK` constraints. Fixed, and worded for the agent that reads it as
+/// `failure_message`: the parser's own account (which column, which byte) is
+/// for the maintainer, and both callers log it at `error!` before they get
+/// here.
+const UNREADABLE_AT_BOOT: &str = "abandoned at boot: its stored manifest could not be read back";
+
+/// Record that a generation the journal pointed at could not be converged on.
 ///
 /// Best effort by design: the row may not exist at all (that is one of the two
 /// ways loading it fails), and a journal that cannot be cleaned up must not
 /// stop the instance from booting.
-async fn abandon_dangling(ctx: &dyn Context, id: &str, message: &str) -> Result<(), String> {
+async fn abandon_dangling(ctx: &dyn Context, id: &str) -> Result<(), String> {
     match repo::generations::get(ctx, id).await {
-        Ok(_) => {
-            repo::generations::set_status(ctx, id, GenerationStatus::Failed, Some(message), None)
-                .await
-                .map_err(|e| e.message)
-        }
+        Ok(_) => repo::generations::set_status(
+            ctx,
+            id,
+            GenerationStatus::Failed,
+            Some(UNREADABLE_AT_BOOT),
+            None,
+        )
+        .await
+        .map_err(|e| e.message),
         // Nothing to mark: the journal outlived the row.
         Err(_) => Ok(()),
     }

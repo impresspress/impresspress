@@ -1983,17 +1983,77 @@ async fn boot_clears_a_journal_that_names_an_unreadable_generation() {
     );
 
     // The row that could not be read says so, rather than sitting `staged`
-    // forever with nothing explaining why it never activated.
+    // forever with nothing explaining why it never activated — in words for
+    // the caller, not the parser's.
     let row = generations::get(&ctx, &corrupt).await.expect("row");
     assert_eq!(row.status, GenerationStatus::Failed);
-    assert!(
-        row.failure_message
-            .as_deref()
-            .is_some_and(|m| m.contains("block_manifest_json")),
-        "{:?}",
-        row.failure_message
+    assert_eq!(row.failure_message.as_deref(), Some(UNREADABLE_AT_BOOT));
+
+    // One unreadable generation does not take the ledger down with it: the
+    // listing still answers, with that generation's counts unknown and its
+    // reason published, and every other generation as it was.
+    let listed = output_json(dev_get(&ctx, "/b/dev/api/generations").await).await;
+    let generations = listed["generations"].as_array().expect("generations");
+    let unreadable = generations
+        .iter()
+        .find(|g| g["id"] == corrupt.as_str())
+        .unwrap_or_else(|| panic!("the unreadable generation is listed: {listed}"));
+    assert_eq!(unreadable["status"], "failed", "{listed}");
+    assert_eq!(
+        unreadable["failure_message"], UNREADABLE_AT_BOOT,
+        "{listed}"
     );
+    assert_eq!(
+        unreadable["site_files"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
+    assert_eq!(unreadable["blocks"], serde_json::Value::Null, "{listed}");
+    let live = generations
+        .iter()
+        .find(|g| g["id"] == active.as_str())
+        .unwrap_or_else(|| panic!("the active generation is listed: {listed}"));
+    assert_eq!(live["status"], "active", "{listed}");
+    assert_eq!(live["site_files"], 1, "{listed}");
+
+    // Its detail cannot show a manifest it cannot read, so it is refused —
+    // with the reason, not as an internal error.
+    for path in [
+        format!("/b/dev/api/generations/{corrupt}"),
+        format!("/b/dev/api/generations/{corrupt}/rollback"),
+    ] {
+        let out = if path.ends_with("/rollback") {
+            dev_post(&ctx, &path, json!({})).await
+        } else {
+            dev_get(&ctx, &path).await
+        };
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(
+                    e.code,
+                    wafer_run::ErrorCode::FailedPrecondition,
+                    "{path}: {e:?}"
+                );
+                assert!(
+                    e.message.contains(UNREADABLE_AT_BOOT),
+                    "{path}: {}",
+                    e.message
+                );
+            }
+            other => panic!("{path} is refused: {other:?}"),
+        }
+        let out = if path.ends_with("/rollback") {
+            dev_post(&ctx, &path, json!({})).await
+        } else {
+            dev_get(&ctx, &path).await
+        };
+        assert_eq!(output_http_status(out).await, 409, "{path}");
+    }
 }
+
+/// What a generation the journal named but boot could not read is closed
+/// with — a fixed caller-facing sentence; the parser's detail is logged.
+const UNREADABLE_AT_BOOT: &str = "abandoned at boot: its stored manifest could not be read back";
 
 /// The symmetric hole. `desired` is not the only pointer the persistent
 /// journal holds: an `active` that cannot be loaded would make *every* boot
@@ -2076,13 +2136,7 @@ async fn boot_clears_an_active_pointer_to_an_unreadable_generation() {
 
     let row = generations::get(&ctx, &corrupt).await.expect("row");
     assert_eq!(row.status, GenerationStatus::Failed);
-    assert!(
-        row.failure_message
-            .as_deref()
-            .is_some_and(|m| m.contains("site_manifest_json")),
-        "{:?}",
-        row.failure_message
-    );
+    assert_eq!(row.failure_message.as_deref(), Some(UNREADABLE_AT_BOOT));
 }
 
 /// Clearing an unreadable `active` must not throw away a `desired` that loads

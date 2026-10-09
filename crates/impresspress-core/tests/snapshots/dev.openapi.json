@@ -145,10 +145,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -190,7 +193,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -208,10 +211,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -582,10 +588,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -627,7 +636,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -645,10 +654,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -1017,10 +1029,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -1062,7 +1077,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -1080,10 +1095,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -1384,10 +1402,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -1429,7 +1450,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -1447,10 +1468,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -1725,10 +1749,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -1770,7 +1797,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -1788,10 +1815,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -1968,10 +1998,13 @@
                             ]
                           },
                           "blocks": {
-                            "description": "Number of blocks in the generation's block manifest.",
+                            "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                             "format": "uint32",
                             "minimum": 0,
-                            "type": "integer"
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
                           },
                           "cause": {
                             "description": "What created this generation.",
@@ -2013,7 +2046,7 @@
                             "type": "string"
                           },
                           "failure_message": {
-                            "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                            "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                             "type": [
                               "string",
                               "null"
@@ -2031,10 +2064,13 @@
                             ]
                           },
                           "site_files": {
-                            "description": "Number of files in the generation's site manifest.",
+                            "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                             "format": "uint32",
                             "minimum": 0,
-                            "type": "integer"
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
                           },
                           "status": {
                             "description": "Where the generation sits in its lifecycle.",
@@ -2346,10 +2382,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -2391,7 +2430,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -2409,10 +2448,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -2518,10 +2560,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -2563,7 +2608,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -2581,10 +2626,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",
@@ -2928,10 +2976,13 @@
                           ]
                         },
                         "blocks": {
-                          "description": "Number of blocks in the generation's block manifest.",
+                          "description": "Number of blocks in the generation's block manifest, or null when its\nstored manifest cannot be read back.",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "cause": {
                           "description": "What created this generation.",
@@ -2973,7 +3024,7 @@
                           "type": "string"
                         },
                         "failure_message": {
-                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content.",
+                          "description": "Why the generation failed: set when `status` is `failed`, null\notherwise.\n\nWhen its validation or activation failed, this is the message a\nrequest that publishes it is refused with, and it names what failed:\nsite content or a block artifact that is not stored, the error that\nstopped the blocks from loading, or a storage failure. When the\nsandbox stopped before its activation finished, it says that instead,\nwhich is not a verdict on the generation's content. When the sandbox\ncould not read the generation's stored manifest back on its next start,\nit says that, and `site_files` and `blocks` are null.",
                           "type": [
                             "string",
                             "null"
@@ -2991,10 +3042,13 @@
                           ]
                         },
                         "site_files": {
-                          "description": "Number of files in the generation's site manifest.",
+                          "description": "Number of files in the generation's site manifest, or null when its\nstored manifest cannot be read back (`failure_message` then says so\nfor a generation the sandbox abandoned over it).",
                           "format": "uint32",
                           "minimum": 0,
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
                         },
                         "status": {
                           "description": "Where the generation sits in its lifecycle.",

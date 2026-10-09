@@ -381,23 +381,42 @@ fn stale(checked: &[&str], used: &BTreeSet<(usize, String)>) -> Vec<String> {
 /// any endpoint serves, so they are read here with [`js_literal`]: every
 /// key of each definition except its `execute` function, with every value a
 /// literal. A description built at run time (a variable, a call) is refused
-/// rather than skipped, so no description the page publishes can sit
-/// outside the gate.
+/// rather than skipped, and so is a `registerPageTool` call given anything
+/// but a literal, except the one forwarding loop whose tools come from
+/// `tools.json` (checked as `dev.tools`). So no description the page
+/// publishes can sit outside the gate.
 #[cfg(feature = "block-dev")]
 pub fn dev_page_tools() -> Value {
     let js = impresspress_core::blocks::dev::assets::dev_js();
     const CALL: &str = "registerPageTool(";
-    let tools: Vec<Value> = js
-        .match_indices(CALL)
-        .map(|(at, _)| &js[at + CALL.len()..])
-        // `registerPageTool(options)` — the function's own definition, and
-        // the manifest tools it forwards — names no literal.
-        .filter(|rest| rest.starts_with('{'))
-        .map(|rest| {
-            let mut lexer = JsLexer::new(rest);
-            js_literal(&mut lexer)
-        })
-        .collect();
+    let mut tools = Vec::new();
+    // The two places the name is followed by something other than a literal:
+    // the function's own definition, and the loop that forwards each
+    // `tools.json` tool (whose descriptions `dev.tools` checks) to it.
+    let mut forwarded = Vec::new();
+    for (at, _) in js.match_indices(CALL) {
+        let rest = js[at + CALL.len()..].trim_start();
+        if rest.starts_with('{') {
+            tools.push(js_literal(&mut JsLexer::new(rest)));
+            continue;
+        }
+        let argument = &rest[..rest.find(')').expect("a closed argument list")];
+        let site = if js[..at].ends_with("function ") {
+            "definition"
+        } else {
+            "call"
+        };
+        forwarded.push(format!("{site}({argument})"));
+    }
+    // Any other non-literal argument is a tool whose definition this reader
+    // cannot see — so it is refused, not skipped. A new one is either written
+    // as a literal or added here with the reason it is not a page tool.
+    assert_eq!(
+        forwarded,
+        ["definition(options)", "call(options)"],
+        "dev.js passes `registerPageTool` something other than an object literal; the \
+         description gate can only read a literal definition"
+    );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         names.contains(&"dev_export") && names.contains(&"dev_compile_block"),
@@ -556,9 +575,11 @@ impl<'a> JsLexer<'a> {
 /// One JavaScript literal — object, array, string (`+`-concatenated
 /// strings included), number, `true`, `false` or `null` — as JSON.
 ///
-/// An object key whose value is a function (`execute: async function …`)
-/// is skipped whole: code is not part of what the tool publishes. Any other
-/// value that is not a literal panics.
+/// A tool's `execute` is code, not something the tool publishes, so it is
+/// skipped whole: a function expression (`execute: async function …`) with
+/// its body, or the name of a function defined elsewhere. Any other value
+/// that is not a literal panics, `execute`'s included (an arrow function,
+/// say), with a message that says which.
 #[cfg(feature = "block-dev")]
 fn js_literal(lexer: &mut JsLexer<'_>) -> Value {
     match lexer.next() {
@@ -573,8 +594,17 @@ fn js_literal(lexer: &mut JsLexer<'_>) -> Value {
                     }
                 };
                 assert_eq!(lexer.next(), JsToken::Punct(':'), "after key `{key}`");
-                if matches!(lexer.peek(), JsToken::Word(w) if w == "async" || w == "function") {
-                    skip_function(lexer);
+                if key == "execute" {
+                    match lexer.peek() {
+                        JsToken::Word(w) if w == "async" || w == "function" => skip_function(lexer),
+                        JsToken::Word(_) => {
+                            lexer.next();
+                        }
+                        other => panic!(
+                            "a page tool's `execute` is neither a function expression nor a \
+                             function's name ({other:?}); teach this reader its shape"
+                        ),
+                    }
                 } else {
                     map.insert(key, js_literal(lexer));
                 }

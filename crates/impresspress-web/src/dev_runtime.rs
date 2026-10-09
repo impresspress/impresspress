@@ -1146,11 +1146,20 @@ async fn seed_on_boot(ctx: &dyn Context, shared: &Arc<DevShared>) -> Result<(), 
         &format!(
             "impresspress: dev sandbox imported the seed as generation {} ({} site files, {} \
              blocks)",
-            outcome.generation.id, outcome.generation.site_files, outcome.generation.blocks
+            outcome.generation.id,
+            count(outcome.generation.site_files),
+            count(outcome.generation.blocks)
         )
         .into(),
     );
     Ok(())
+}
+
+/// A [`GenerationSummary`](impresspress_core::blocks::dev::contracts::GenerationSummary)
+/// count for the console. Null only for a ledger row whose manifest cannot be
+/// read, which an activation's summary never is; printed rather than assumed.
+fn count(n: Option<u32>) -> String {
+    n.map_or_else(|| "unknown".to_string(), |n| n.to_string())
 }
 
 /// A `JsValue` rejection as a message, prefixed with what was being attempted.

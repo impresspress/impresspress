@@ -119,12 +119,20 @@ pub struct GenerationSummary {
     /// site content or a block artifact that is not stored, the error that
     /// stopped the blocks from loading, or a storage failure. When the
     /// sandbox stopped before its activation finished, it says that instead,
-    /// which is not a verdict on the generation's content.
+    /// which is not a verdict on the generation's content. When the sandbox
+    /// could not read the generation's stored manifest back on its next start,
+    /// it says that, and `site_files` and `blocks` are null.
     pub failure_message: Option<String>,
-    /// Number of files in the generation's site manifest.
-    pub site_files: u32,
-    /// Number of blocks in the generation's block manifest.
-    pub blocks: u32,
+    // `None` only from the ledger views (`generations_api`), which summarize
+    // every row whether or not its manifest columns parse; a summary of a
+    // generation that was just activated always has its manifest.
+    /// Number of files in the generation's site manifest, or null when its
+    /// stored manifest cannot be read back (`failure_message` then says so
+    /// for a generation the sandbox abandoned over it).
+    pub site_files: Option<u32>,
+    /// Number of blocks in the generation's block manifest, or null when its
+    /// stored manifest cannot be read back.
+    pub blocks: Option<u32>,
 }
 
 /// A block serving in the active generation.

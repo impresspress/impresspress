@@ -270,7 +270,11 @@ pub fn from_row(row: &GenerationRow) -> Result<GenerationManifest, WaferError> {
 }
 
 /// Project a row and its manifest into the summary every API publishes.
-pub fn summarize(row: &GenerationRow, manifest: &GenerationManifest) -> GenerationSummary {
+///
+/// `manifest` is `None` for a row whose manifest columns do not parse
+/// ([`from_row`] refused them): the ledger still lists it, with its counts
+/// unknown, rather than one unreadable row failing the whole listing.
+pub fn summarize(row: &GenerationRow, manifest: Option<&GenerationManifest>) -> GenerationSummary {
     GenerationSummary {
         id: row.id.clone(),
         parent_id: row.parent_id.clone(),
@@ -279,8 +283,8 @@ pub fn summarize(row: &GenerationRow, manifest: &GenerationManifest) -> Generati
         created_at: row.created_at.clone(),
         activated_at: row.activated_at.clone(),
         failure_message: row.failure_message.clone(),
-        site_files: manifest.site.files.len() as u32,
-        blocks: manifest.blocks.len() as u32,
+        site_files: manifest.map(|m| m.site.files.len() as u32),
+        blocks: manifest.map(|m| m.blocks.len() as u32),
     }
 }
 

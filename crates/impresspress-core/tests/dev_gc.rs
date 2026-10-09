@@ -1078,6 +1078,36 @@ async fn an_orphaned_staged_generation_is_retired_at_boot_and_its_blobs_collecte
             .contains("abandoned at boot"),
         "the row must say why it was closed: {retired:?}",
     );
+    // …and so must what a caller reads: the detail and the ledger listing
+    // publish the same reason, worded as "the sandbox stopped", not as a
+    // verdict on the generation's content.
+    let detail = output_json(
+        ctx.dispatch_resolved(admin_msg(
+            "retrieve",
+            &format!("/b/dev/api/generations/{orphan}"),
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(detail["summary"]["status"], "failed", "{detail}");
+    assert_eq!(
+        detail["summary"]["failure_message"],
+        "abandoned at boot: the process ended before this activation finished",
+        "{detail}"
+    );
+    // The orphan is 21 generations deep, past the default page.
+    let mut list = admin_msg("retrieve", "/b/dev/api/generations");
+    list.set_meta("req.query.limit", "100");
+    let listed = output_json(ctx.dispatch_resolved(list).await).await;
+    assert!(
+        listed["generations"]
+            .as_array()
+            .expect("generations")
+            .iter()
+            .any(|g| g["id"] == orphan.as_str()
+                && g["failure_message"] == detail["summary"]["failure_message"]),
+        "{listed}"
+    );
 
     // Now it is ordinary history, so the next activation prunes it and the
     // collector reclaims what only it named, after the write's reply.

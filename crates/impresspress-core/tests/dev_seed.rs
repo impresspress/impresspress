@@ -229,7 +229,7 @@ async fn a_seeded_sandbox_serves_its_llms_txt_without_owning_it_as_a_site_file()
     )
     .await
     .expect("activate the seed");
-    assert_eq!(outcome.generation.site_files, 2);
+    assert_eq!(outcome.generation.site_files, Some(2));
     assert_eq!(
         ctx.storage_get("wafer-run/web", "site", seed::LLMS_PATH)
             .await
@@ -766,8 +766,8 @@ async fn the_imported_generation_activates_as_generation_zero() {
         outcome.generation.parent_id, None,
         "generation 0 has no parent"
     );
-    assert_eq!(outcome.generation.site_files, 2);
-    assert_eq!(outcome.generation.blocks, 1);
+    assert_eq!(outcome.generation.site_files, Some(2));
+    assert_eq!(outcome.generation.blocks, Some(1));
     assert_eq!(
         ctx.storage_get("wafer-run/web", "site", "index.html")
             .await
