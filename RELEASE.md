@@ -19,6 +19,18 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Storage: the object listing's `prefix` is case-sensitive everywhere
+
+**What changes.** `GET /b/storage/api/buckets/{name}/objects?prefix=` lists
+the objects whose key starts with the prefix, with letter case significant
+on every backend: object keys are case-sensitive, so `a/B` no longer lists
+`a/b.txt` on SQLite and Cloudflare (D1), as it did before. PostgreSQL
+deployments already matched case. Every character of the prefix is literal
+(`%`, `_`, `*`, `?`, `[` and `\` match only themselves).
+
+**Blocks.** A block's filter can use the new `starts_with` operator for the
+same prefix match.
+
 ### Files API: listings publish views, not stored rows — a breaking change for API clients
 
 **What changes.** The files block's record listings answered the stored
@@ -48,7 +60,8 @@ field contains the typed text. `%` and `_` used to act as wildcards in the
 admin and log searches (`a_b` matched `axb`); they now match only
 themselves, as does `\`. ASCII letters match in either case on every
 backend; PostgreSQL deployments used to need the exact case. The storage
-object listing's `prefix` filter is unchanged.
+object listing's `prefix` filter is not a search; see "Storage: the object
+listing's `prefix` is case-sensitive everywhere".
 
 **Blocks.** A block's filter can use the new `contains_ignore_case`
 operator for the same search; `like` still takes a pattern.
