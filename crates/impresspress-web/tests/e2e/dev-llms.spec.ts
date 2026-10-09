@@ -1,12 +1,15 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Browser, type Page } from '@playwright/test';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   bootServiceWorker,
   enterFromWelcome,
   forwardSandboxDiagnostics,
   LLMS_BOOTSTRAP_PORT,
+  LLMS_EXPORT_PORT,
   runFromConsole,
   serveDirectory,
 } from './fixtures/dev-sandbox';
@@ -158,6 +161,7 @@ test('a fetch-only reader gets readable text from / and /llms.txt, on both seeds
 });
 
 test('with the worker active /llms.txt is the sandbox’s until the site writes its own', async ({
+  browser,
   page,
   request,
   baseURL,
@@ -185,7 +189,8 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   const before = await viaWorker();
   expect(before.controlled).toBe(true);
   expect(before.status).toBe(200);
-  expect(before.type).toMatch(/^text\/plain/);
+  // The runtime declares the charset the static host leaves out.
+  expect(before.type).toBe('text/plain; charset=utf-8');
   expect(before.text).toBe(fromStaticHost);
   const unknown = await page.evaluate(async () => (await fetch('/no-such-file.txt')).text());
   expect(unknown).toContain('<html');
@@ -196,9 +201,11 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   expect(listed.isError, JSON.stringify(listed)).toBe(false);
   expect(JSON.stringify(listed.result)).not.toContain('llms.txt');
 
-  // The site ships its own. The write is accepted — the path is not one the
-  // worker keeps from the runtime — and the runtime serves THAT file.
-  const OWN = '# Kiln & Co\n\n> Handmade ceramics, fired in small batches.\n';
+  // The site ships its own — in its own language, which need not be ASCII
+  // the way the sandbox's text is. The write is accepted — the path is not
+  // one the worker keeps from the runtime — and the runtime serves THAT
+  // file, declared as UTF-8.
+  const OWN = '# Töpferei Kiln & Co — 窯\n\n> Handgemachte Keramik, in kleinen Bränden gebrannt…\n';
   const written = await runFromConsole(page, 'dev_write_file', {
     path: 'site/llms.txt',
     content: OWN,
@@ -207,11 +214,12 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   expect(written.result.path).toBe('site/llms.txt');
   const own = await viaWorker();
   expect(own.status).toBe(200);
-  expect(own.type).toMatch(/^text\/plain/);
+  expect(own.type).toBe('text/plain; charset=utf-8');
   expect(own.text).toBe(OWN);
   // An export would carry the site's file twice — at the root for the static
   // host, under the seed for the exported runtime — and nothing else by
-  // that name.
+  // that name. The root copy is three bytes longer: the byte order mark a
+  // charset-less static host needs (below).
   const preview = await runFromConsole(page, 'dev_export_manifest', {});
   expect(preview.isError, JSON.stringify(preview)).toBe(false);
   const exported: { path: string; bytes: number }[] = preview.result.files.filter(
@@ -219,9 +227,10 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   );
   const ownBytes = new TextEncoder().encode(OWN).length;
   expect(exported).toEqual([
-    { path: 'llms.txt', bytes: ownBytes },
+    { path: 'llms.txt', bytes: ownBytes + 3 },
     { path: 'seed/site/llms.txt', bytes: ownBytes },
   ]);
+  await exportReadsOnAStaticHost(browser, page, OWN);
 
   // A reader with no worker is still told about the sandbox: the static host
   // never learned of the site's file.
@@ -239,6 +248,60 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
     without.result.files.filter((file: { path: string }) => file.path.endsWith('llms.txt')),
   ).toEqual([]);
 });
+
+/**
+ * Export the site, unpack it, serve it with a plain static server, and open
+ * its root `llms.txt` and `README.md` in a tab with no worker — the reader
+ * the root copy exists for.
+ *
+ * `python3 -m http.server` types `.txt` as `text/plain` and `.md` as a
+ * markdown type, with no charset (Cloudflare's asset server sends `.txt` the
+ * same way); a browser decodes such a document as windows-1252 unless the
+ * file itself says otherwise. Asserting that no charset was sent keeps this a
+ * test of such a host, not of one that happens to add one.
+ */
+async function exportReadsOnAStaticHost(browser: Browser, page: Page, own: string) {
+  const scratch = mkdtempSync(path.join(tmpdir(), 'dev-llms-export-'));
+  try {
+    const downloading = page.waitForEvent('download', { timeout: 120_000 });
+    const exported = await runFromConsole(page, 'dev_export', {});
+    expect(exported.isError, JSON.stringify(exported)).toBe(false);
+    const zipPath = path.join(scratch, 'export.zip');
+    await (await downloading).saveAs(zipPath);
+    const unpacked = path.join(scratch, 'site');
+    execFileSync('python3', [
+      '-c',
+      'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])',
+      zipPath,
+      unpacked,
+    ]);
+    const server = await serveDirectory(unpacked, LLMS_EXPORT_PORT);
+    const reader = await browser.newContext({ baseURL: `http://127.0.0.1:${LLMS_EXPORT_PORT}` });
+    try {
+      const tab = await reader.newPage();
+      const llms = await tab.goto('/llms.txt', { waitUntil: 'load' });
+      expect(llms!.fromServiceWorker()).toBe(false);
+      expect(llms!.headers()['content-type']).toBe('text/plain');
+      // (The type is the host's; only the file can say how to decode it.)
+      expect(await tab.evaluate(() => document.characterSet)).toBe('UTF-8');
+      expect(await tab.locator('body').textContent()).toBe(own);
+
+      const readme = await tab.goto('/README.md', { waitUntil: 'load' });
+      const readmeType = readme!.headers()['content-type'] ?? '';
+      expect(readmeType).toMatch(/^text\//);
+      expect(readmeType).not.toContain('charset');
+      expect(await tab.evaluate(() => document.characterSet)).toBe('UTF-8');
+      const text = (await tab.locator('body').textContent()) ?? '';
+      expect(text).toContain('The runtime shell — ');
+      expect(text).not.toContain('â€');
+    } finally {
+      await reader.close();
+      server.kill('SIGKILL');
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 /**
  * Open `/llms.txt` the way a person or an agent does — a top-level
@@ -298,7 +361,7 @@ test('a navigation to /llms.txt shows the text before, during and after the work
     });
     const answer = await openLlms(page);
     expect(answer.fromWorker).toBe(true);
-    expect(answer.type).toMatch(/^text\/plain/);
+    expect(answer.type).toBe('text/plain; charset=utf-8');
     // The runtime is up — the probe the shell was waiting on has its answer
     // by now — and the tab is still where the reader sent it.
     await expect
@@ -318,7 +381,7 @@ test('a navigation to /llms.txt shows the text before, during and after the work
     await bootServiceWorker(page);
     const answer = await openLlms(page);
     expect(answer.fromWorker).toBe(true);
-    expect(answer.type).toMatch(/^text\/plain/);
+    expect(answer.type).toBe('text/plain; charset=utf-8');
     expect(await shown(page)).toEqual({ path: '/llms.txt', text: fromStaticHost });
   } finally {
     await controlled.close();

@@ -36,10 +36,18 @@ nothing else; put it behind https to share it.
         the site, not the sandbox that built it.
 
     llms.txt
-        Only if your site has one (`seed/site/llms.txt`): the same file,
+        Only if your site has one (`seed/site/llms.txt`): the same text,
         placed where your static host serves it to a reader that runs no
-        JavaScript. Counted with the shell above. If you edit one, edit
-        both — and the hash in `seed/manifest.json`.
+        JavaScript. If the text is not plain ASCII, this copy starts with a
+        UTF-8 byte order mark: a static host may serve it with no charset,
+        and then a browser reads it as UTF-8 only because of that mark
+        (this README carries one for the same reason). A program that
+        decodes UTF-8 without stripping the mark sees an invisible U+FEFF
+        before the first `# `, so if your host lets you set headers, serve
+        `.txt` as `text/plain; charset=utf-8` (and `.md` with
+        `charset=utf-8`) as well. Counted with the shell above. If you edit
+        one, edit both — and the hash in `seed/manifest.json`, which is the
+        hash of the copy under `seed/`, without the mark.
 
     seed/manifest.json
         What the runtime imports on its first boot: every file below, with

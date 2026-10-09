@@ -393,5 +393,7 @@ export const SCENARIO_EXPORT_PORT = 8099;
 export const BOOTSTRAP_PORT = 8097;
 /** Where `dev-llms.spec.ts` serves that same bundle, for its plain GETs. */
 export const LLMS_BOOTSTRAP_PORT = 8096;
+/** Where `dev-llms.spec.ts` serves the export of a site with its own `llms.txt`. */
+export const LLMS_EXPORT_PORT = 8092;
 /** Where `sw-update.spec.ts` serves one deployment and then the next. */
 export const SW_UPDATE_PORT = 8095;
