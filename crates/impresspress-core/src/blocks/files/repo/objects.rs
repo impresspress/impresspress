@@ -57,8 +57,8 @@ pub struct ObjectRow {
     pub size: i64,
     pub content_type: String,
     /// `pending` while the upload is in flight, `complete` after. Quota
-    /// accounting counts both; search and the admin stats see only
-    /// `complete`.
+    /// accounting and the bucket's object listing include both; search and
+    /// the admin stats see only `complete`.
     pub status: ObjectStatus,
     pub uploaded_by: String,
     // The timestamp `list_stale_pending` compares.

@@ -632,7 +632,7 @@
                       "type": "string"
                     },
                     "id": {
-                      "description": "Row id of the new share — the `{id}` of `DELETE\n/b/cloudstorage/shares/{id}`.",
+                      "description": "Id of the new share — the `{id}` of `DELETE\n/b/cloudstorage/shares/{id}`.",
                       "type": "string"
                     },
                     "token": {
@@ -672,7 +672,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Share row id, as `POST /b/cloudstorage/shares` returned it",
+              "description": "Share id, as `POST /b/cloudstorage/shares` returned it",
               "type": "string"
             }
           }
@@ -770,7 +770,7 @@
                       "type": "integer"
                     },
                     "total_objects": {
-                      "description": "Objects whose upload completed. A `pending` reservation, whose upload\nis still in flight, is not a file.",
+                      "description": "Objects whose upload completed. A `pending` reservation, whose upload\nis still in flight, is not counted.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -985,7 +985,7 @@
                     "objects": {
                       "description": "Objects in this page.",
                       "items": {
-                        "description": "One object in a bucket listing, as its metadata row records it.",
+                        "description": "One object in a bucket listing, as its stored metadata records it.",
                         "properties": {
                           "content_type": {
                             "type": "string"
@@ -1065,7 +1065,7 @@
                       "type": "string"
                     },
                     "key": {
-                      "description": "The stored key. For a multipart upload this is the key the handler\nresolved, which may differ from the one the caller sent.",
+                      "description": "The stored key. For a multipart upload sent without `?key=` it is the\nfile part's `filename`, so it may differ from what the caller expected.",
                       "type": "string"
                     },
                     "uploaded": {
@@ -1192,7 +1192,7 @@
     },
     "/b/storage/api/recent": {
       "get": {
-        "description": "Object-view audit rows, newest first — one row per tracked download, naming the object viewed and when. Not object metadata.",
+        "description": "Recorded object views, newest first — one entry per tracked download, naming the object viewed and when. Not object metadata.",
         "responses": {
           "200": {
             "content": {
@@ -1341,16 +1341,16 @@
                                 "type": "integer"
                               },
                               "status": {
-                                "description": "`pending` while the upload is in flight, `complete` after. Quota\naccounting counts both; search and the admin stats see only\n`complete`.",
+                                "description": "`pending` while the upload is in flight, `complete` after. Quota\naccounting and the bucket's object listing include both; search and\nthe admin stats see only `complete`.",
                                 "oneOf": [
                                   {
                                     "const": "pending",
-                                    "description": "Reserved: the upload is in flight. Counts against quota; not listed\nas a file.",
+                                    "description": "Reserved: the upload is in flight. It counts against quota and appears\nin the bucket's object listing, but search and the admin stats leave\nit out.",
                                     "type": "string"
                                   },
                                   {
                                     "const": "complete",
-                                    "description": "Uploaded: the file is stored and listable.",
+                                    "description": "Uploaded: the file is stored.",
                                     "type": "string"
                                   }
                                 ]

@@ -388,7 +388,7 @@
                 "description": "`POST /b/vector/api/query` request body. At least one of `text` and\n`vector` is required. With `vector` alone it is the query vector as is;\nwith `text` alone the text is embedded with the index's own model. When\nboth are present `vector` is used as is and `text` is not embedded — it\nthen serves only as the keyword-query fallback in keyword and hybrid\nmode.",
                 "properties": {
                   "filter": {
-                    "description": "Restrict hits to rows whose metadata matches.",
+                    "description": "Restrict hits to entries whose metadata matches.",
                     "properties": {
                       "equals": {
                         "additionalProperties": true,
@@ -492,11 +492,11 @@
                         "description": "One query hit.",
                         "properties": {
                           "id": {
-                            "description": "Matched row id.",
+                            "description": "Matched entry id.",
                             "type": "string"
                           },
                           "metadata": {
-                            "description": "The metadata stored with the row. Absent when the row stored none."
+                            "description": "The metadata stored with the entry. Absent when the entry stored\nnone."
                           },
                           "score": {
                             "description": "Similarity score; its scale depends on the index's metric.",
@@ -544,10 +544,10 @@
                     "indexes": {
                       "description": "Every index, in lexical order. Empty when no vector backend is\navailable on this deployment.",
                       "items": {
-                        "description": "One index with its row count.",
+                        "description": "One index with its entry count.",
                         "properties": {
                           "count": {
-                            "description": "Rows currently stored. `0` when the count could not be read.",
+                            "description": "Entries currently stored. `0` when the count could not be read.",
                             "format": "uint64",
                             "minimum": 0,
                             "type": "integer"
@@ -594,12 +594,12 @@
                 "description": "`POST /b/vector/api/upsert` request body.",
                 "properties": {
                   "entries": {
-                    "description": "Rows to insert or replace.",
+                    "description": "Entries to insert or replace.",
                     "items": {
-                      "description": "One row to upsert.",
+                      "description": "One entry to upsert.",
                       "properties": {
                         "id": {
-                          "description": "Caller-supplied row id. Upserting the same id again replaces the row.",
+                          "description": "Caller-supplied entry id. Upserting the same id again replaces the\nentry.",
                           "type": "string"
                         },
                         "metadata": {
@@ -684,7 +684,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "description": "Row id, as supplied on upsert (or `{document_id}:{n}` for an ingested chunk).",
+              "description": "Entry id, as supplied on upsert (or `{document_id}:{n}` for an ingested chunk).",
               "type": "string"
             }
           },

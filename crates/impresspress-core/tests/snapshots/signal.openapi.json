@@ -1,0 +1,236 @@
+{
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/b/signal/config": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code_length": {
+                      "type": "integer"
+                    },
+                    "ice_servers": {
+                      "items": {
+                        "properties": {
+                          "urls": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "room_seconds": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "ICE servers, room lifetime and code length",
+        "tags": [
+          "signal"
+        ]
+      }
+    },
+    "/b/signal/rooms/{code}/answer": {
+      "get": {
+        "description": "null sdp while waiting; once answered, the answer is returned and the room is deleted — single-use. 404 once the room is gone",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "description": "Six-character room code (see GET /b/signal/config for its length)",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "sdp": {
+                      "description": "The stored SDP, or null while the answer is still pending",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Host polls for the guest's answer",
+        "tags": [
+          "signal"
+        ]
+      },
+      "post": {
+        "description": "404 if the room is gone, 409 if an answer already stands",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "description": "Six-character room code (see GET /b/signal/config for its length)",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "sdp": {
+                    "description": "Session description (offer or answer)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sdp"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Guest puts its answer up",
+        "tags": [
+          "signal"
+        ]
+      }
+    },
+    "/b/signal/rooms/{code}/offer": {
+      "get": {
+        "description": "404 when the code is unknown or expired",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "description": "Six-character room code (see GET /b/signal/config for its length)",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "sdp": {
+                      "description": "The stored SDP, or null while the answer is still pending",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Guest reads the host's offer",
+        "tags": [
+          "signal"
+        ]
+      },
+      "post": {
+        "description": "409 if the code is already live, 400 on a malformed code or an over-long SDP",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "description": "Six-character room code (see GET /b/signal/config for its length)",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "sdp": {
+                    "description": "Session description (offer or answer)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sdp"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Host puts its offer up — also the room's create",
+        "tags": [
+          "signal"
+        ]
+      }
+    }
+  }
+}

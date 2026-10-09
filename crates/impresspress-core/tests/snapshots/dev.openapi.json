@@ -231,7 +231,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -475,7 +475,7 @@
                   "description": "Response of `POST /b/dev/api/builds/stage`.\n\nA refused block is a result, not a transport failure: the status is `200`\nwith `success: false` and the reasons in `diagnostics`. Only a malformed\nrequest — bad JSON, or `artifact_base64` that is not base64 — is a `4xx`.",
                   "properties": {
                     "build_id": {
-                      "description": "The stored build's id, or null when the request was refused before a\nbuild could be recorded (an artifact over the size limit is never\nstored, so there is nothing for a build row to point at).",
+                      "description": "The stored build's id, or null when the request was refused before a\nbuild could be recorded (an artifact over the size limit is never\nstored, so there is no build record to point at).",
                       "type": [
                         "string",
                         "null"
@@ -660,7 +660,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -1087,7 +1087,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -1446,7 +1446,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -1779,7 +1779,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -2014,7 +2014,7 @@
                               },
                               {
                                 "const": "failed",
-                                "description": "Abandoned: validation or activation failed.",
+                                "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                                 "type": "string"
                               },
                               {
@@ -2384,7 +2384,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -2548,7 +2548,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {
@@ -2950,7 +2950,7 @@
                             },
                             {
                               "const": "failed",
-                              "description": "Abandoned: validation or activation failed.",
+                              "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                               "type": "string"
                             },
                             {

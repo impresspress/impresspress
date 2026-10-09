@@ -75,11 +75,16 @@ pub struct AdminUserView {
     // The single-role column on the users row, written by the signup path and
     // not admin-writable. `auth::merge_roles` puts it first in a token's
     // `roles` claim, ahead of the grants below.
-    /// The account's own role (`"user"` by default). It is not repeated in
-    /// `roles`, but a signed-in session holds it alongside them.
+    /// The account's own role (`"user"` by default). A signed-in session
+    /// holds it alongside `roles`, which lists it only when the same role is
+    /// also granted.
     pub role: String,
-    // Read from `impresspress__admin__user_roles`.
-    /// Roles granted to this user through `/b/admin/api/iam/user-roles`.
+    // Read from `impresspress__admin__user_roles`. Writers: the IAM
+    // endpoints (`iam.rs`, including a role rename) and the bootstrap-admin
+    // grant in `auth::grant_bootstrap_admin`.
+    /// Roles granted to this user. Admins manage grants through
+    /// `/b/admin/api/iam/user-roles`, but not every grant is made there: the
+    /// configured bootstrap admin is granted `admin` when they sign in.
     pub roles: Vec<String>,
     /// Whether the email address has been verified.
     pub email_verified: bool,
@@ -129,7 +134,7 @@ pub struct AdminUserListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_user_page_size")]
     pub page_size: u32,
     // `users::list_active_page` runs `email LIKE '%…%' OR id LIKE '%…%'` with
@@ -165,7 +170,7 @@ pub struct AdminUserListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -233,16 +238,17 @@ impl AdminRoleView {
 /// Response body of `GET /b/admin/api/iam/roles`.
 ///
 /// The endpoint takes no query parameters: it returns every role, sorted by
-/// name, up to the handler's fixed 1000-row ceiling.
+/// name, up to a fixed ceiling of 1000 roles.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AdminRoleListResponse {
     /// Roles, sorted by name ascending.
     pub records: Vec<AdminRoleView>,
     /// Total roles defined.
     pub total_count: i64,
-    /// 1-based index of this page. Always 1 — the handler does not paginate.
+    /// 1-based index of this page. Always 1 — this endpoint does not
+    /// paginate.
     pub page: i64,
-    /// Rows per page. Always the handler's fixed 1000-row ceiling.
+    /// Items per page. Always the fixed ceiling of 1000.
     pub page_size: i64,
 }
 
@@ -355,8 +361,8 @@ pub struct AdminSettingView {
     /// holding `["a","b"]` reads back as an array, one holding `on` as a
     /// string.
     pub value: serde_json::Value,
-    /// Whether `value` is masked. True when the row carries the sensitive
-    /// flag, or the key is one this build knows to hold a secret: it ends in
+    /// Whether `value` is masked. True when the variable is flagged
+    /// sensitive, or the key is one this build knows to hold a secret: it ends in
     /// `_SECRET` or `_KEY`, or its declaration is a password-typed or
     /// auto-generated variable.
     pub sensitive: bool,
@@ -398,8 +404,8 @@ pub struct AdminAuditLogView {
     pub ip_address: String,
     /// RFC 3339 timestamp the action was recorded at.
     pub created_at: String,
-    /// RFC 3339 write timestamp. Audit rows are never updated, so this always
-    /// equals `created_at`.
+    /// RFC 3339 write timestamp. Audit entries are never updated, so this
+    /// always equals `created_at`.
     pub updated_at: String,
 }
 
@@ -427,7 +433,7 @@ pub struct AdminAuditLogListQuery {
     /// 1-based page number. Values below 1 clamp to 1.
     #[serde(default = "default_page")]
     pub page: u32,
-    /// Rows per page, capped at 100.
+    /// Items per page, capped at 100.
     #[serde(default = "default_log_page_size")]
     pub page_size: u32,
     /// Exact-match filter on the acting admin's user id.
@@ -468,7 +474,7 @@ pub struct AdminAuditLogListResponse {
     pub total_count: i64,
     /// 1-based index of this page.
     pub page: i64,
-    /// Rows per page used to compute `page`.
+    /// Items per page used to compute `page`.
     pub page_size: i64,
 }
 
@@ -497,7 +503,7 @@ impl AdminAuditLogListResponse {
 // collection schemas, endpoint tables and capability grants that this
 // endpoint has never published and must not start publishing because upstream
 // grew a field.
-/// One row of `GET /b/admin/api/extensions`: a registered block.
+/// One entry of `GET /b/admin/api/extensions`: a registered block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AdminExtensionView {
     /// Block name in the canonical `{org}/{block}` form.

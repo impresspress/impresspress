@@ -172,12 +172,13 @@ export interface paths {
                         "application/json": {
                             /**
                              * Format: int64
-                             * @description 1-based index of this page. Always 1 — the handler does not paginate.
+                             * @description 1-based index of this page. Always 1 — this endpoint does not
+                             *     paginate.
                              */
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page. Always the handler's fixed 1000-row ceiling.
+                             * @description Items per page. Always the fixed ceiling of 1000.
                              */
                             page_size: number;
                             /** @description Roles, sorted by name ascending. */
@@ -423,7 +424,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Audit entries on this page, newest first. */
@@ -442,8 +443,8 @@ export interface paths {
                                 /** @description Target the action was applied to. */
                                 resource: string;
                                 /**
-                                 * @description RFC 3339 write timestamp. Audit rows are never updated, so this always
-                                 *     equals `created_at`.
+                                 * @description RFC 3339 write timestamp. Audit entries are never updated, so this
+                                 *     always equals `created_at`.
                                  */
                                 updated_at: string;
                                 /**
@@ -498,8 +499,8 @@ export interface paths {
                                 /** @description Variable name, e.g. `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`. */
                                 key: string;
                                 /**
-                                 * @description Whether `value` is masked. True when the row carries the sensitive
-                                 *     flag, or the key is one this build knows to hold a secret: it ends in
+                                 * @description Whether `value` is masked. True when the variable is flagged
+                                 *     sensitive, or the key is one this build knows to hold a secret: it ends in
                                  *     `_SECRET` or `_KEY`, or its declaration is a password-typed or
                                  *     auto-generated variable.
                                  */
@@ -562,7 +563,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Users on this page, newest first. */
@@ -591,11 +592,16 @@ export interface paths {
                                 /** @description Full name, when the user supplied one. */
                                 name: string | null;
                                 /**
-                                 * @description The account's own role (`"user"` by default). It is not repeated in
-                                 *     `roles`, but a signed-in session holds it alongside them.
+                                 * @description The account's own role (`"user"` by default). A signed-in session
+                                 *     holds it alongside `roles`, which lists it only when the same role is
+                                 *     also granted.
                                  */
                                 role: string;
-                                /** @description Roles granted to this user through `/b/admin/api/iam/user-roles`. */
+                                /**
+                                 * @description Roles granted to this user. Admins manage grants through
+                                 *     `/b/admin/api/iam/user-roles`, but not every grant is made there: the
+                                 *     configured bootstrap admin is granted `admin` when they sign in.
+                                 */
                                 roles: string[];
                                 /** @description RFC 3339 timestamp of the last modification. */
                                 updated_at: string;
@@ -1599,7 +1605,7 @@ export interface paths {
                             /** @description Path of the public share link, relative to the deployment's origin. */
                             direct_url: string;
                             /**
-                             * @description Row id of the new share — the `{id}` of `DELETE
+                             * @description Id of the new share — the `{id}` of `DELETE
                              *     /b/cloudstorage/shares/{id}`.
                              */
                             id: string;
@@ -1936,7 +1942,7 @@ export interface paths {
                             /**
                              * @description The stored build's id, or null when the request was refused before a
                              *     build could be recorded (an artifact over the size limit is never
-                             *     stored, so there is nothing for a build row to point at).
+                             *     stored, so there is no build record to point at).
                              */
                             build_id: string | null;
                             /**
@@ -3467,7 +3473,7 @@ export interface paths {
                         "application/json": {
                             /** @description RFC 3339 creation timestamp. */
                             created_at: string;
-                            /** @description Stable row identifier. */
+                            /** @description Stable identifier. */
                             id: string;
                             /** @description Pinned model id. Empty means the default model. */
                             model: string;
@@ -3765,7 +3771,7 @@ export interface paths {
                                 enabled: boolean;
                                 /** @description Base URL of the provider's API, e.g. `https://api.openai.com/v1`. */
                                 endpoint: string;
-                                /** @description Stable row identifier, used by the `/b/llm/api/providers/{id}` routes. */
+                                /** @description Stable identifier, used by the `/b/llm/api/providers/{id}` routes. */
                                 id: string;
                                 /**
                                  * @description Name of the admin configuration variable holding this provider's API
@@ -3870,7 +3876,7 @@ export interface paths {
                             enabled: boolean;
                             /** @description Base URL of the provider's API, e.g. `https://api.openai.com/v1`. */
                             endpoint: string;
-                            /** @description Stable row identifier, used by the `/b/llm/api/providers/{id}` routes. */
+                            /** @description Stable identifier, used by the `/b/llm/api/providers/{id}` routes. */
                             id: string;
                             /**
                              * @description Name of the admin configuration variable holding this provider's API
@@ -4004,7 +4010,7 @@ export interface paths {
                             enabled: boolean;
                             /** @description Base URL of the provider's API, e.g. `https://api.openai.com/v1`. */
                             endpoint: string;
-                            /** @description Stable row identifier, used by the `/b/llm/api/providers/{id}` routes. */
+                            /** @description Stable identifier, used by the `/b/llm/api/providers/{id}` routes. */
                             id: string;
                             /**
                              * @description Name of the admin configuration variable holding this provider's API
@@ -4355,7 +4361,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Groups on this page. */
@@ -4610,7 +4616,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Products on this page, newest first. */
@@ -10621,7 +10627,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Orders on this page, newest first. */
@@ -11887,7 +11893,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Types on this page, newest first. */
@@ -12173,7 +12179,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Products on this page, newest first. */
@@ -17974,7 +17980,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             records: {
@@ -18676,7 +18682,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Active products on this page, sorted by name. */
@@ -19027,7 +19033,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description The fixed ceiling on rows returned.
+                             * @description The fixed ceiling on items returned.
                              */
                             page_size: number;
                             /** @description Templates, sorted by name. */
@@ -19099,7 +19105,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Groups on this page. */
@@ -19405,7 +19411,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Products on this page, newest first. */
@@ -19754,7 +19760,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             records: {
@@ -20549,7 +20555,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Types on this page, newest first. */
@@ -20651,6 +20657,204 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/b/signal/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** ICE servers, room lifetime and code length */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            code_length?: number;
+                            ice_servers?: {
+                                urls?: string;
+                            }[];
+                            room_seconds?: number;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/b/signal/rooms/{code}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Host polls for the guest's answer
+         * @description null sdp while waiting; once answered, the answer is returned and the room is deleted — single-use. 404 once the room is gone
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description The stored SDP, or null while the answer is still pending */
+                            sdp?: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Guest puts its answer up
+         * @description 404 if the room is gone, 409 if an answer already stands
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Session description (offer or answer) */
+                        sdp: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/b/signal/rooms/{code}/offer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Guest reads the host's offer
+         * @description 404 when the code is unknown or expired
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description The stored SDP, or null while the answer is still pending */
+                            sdp?: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Host puts its offer up — also the room's create
+         * @description 409 if the code is already live, 400 on a malformed code or an over-long SDP
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    code: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Session description (offer or answer) */
+                        sdp: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/b/storage/admin/api/buckets": {
         parameters: {
             query?: never;
@@ -20730,7 +20934,7 @@ export interface paths {
                             /**
                              * Format: int64
                              * @description Objects whose upload completed. A `pending` reservation, whose upload
-                             *     is still in flight, is not a file.
+                             *     is still in flight, is not counted.
                              */
                             total_objects: number;
                             /**
@@ -20942,8 +21146,8 @@ export interface paths {
                         "application/json": {
                             bucket: string;
                             /**
-                             * @description The stored key. For a multipart upload this is the key the handler
-                             *     resolved, which may differ from the one the caller sent.
+                             * @description The stored key. For a multipart upload sent without `?key=` it is the
+                             *     file part's `filename`, so it may differ from what the caller expected.
                              */
                             key: string;
                             /** @description Always `true`. */
@@ -21037,7 +21241,7 @@ export interface paths {
         };
         /**
          * Recently viewed objects
-         * @description Object-view audit rows, newest first — one row per tracked download, naming the object viewed and when. Not object metadata.
+         * @description Recorded object views, newest first — one entry per tracked download, naming the object viewed and when. Not object metadata.
          */
         get: {
             parameters: {
@@ -21136,8 +21340,8 @@ export interface paths {
                                     size: number;
                                     /**
                                      * @description `pending` while the upload is in flight, `complete` after. Quota
-                                     *     accounting counts both; search and the admin stats see only
-                                     *     `complete`.
+                                     *     accounting and the bucket's object listing include both; search and
+                                     *     the admin stats see only `complete`.
                                      */
                                     status: "pending" | "complete";
                                     updated_at: string;
@@ -21367,7 +21571,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /** @description Tickets on this page, newest first. */
@@ -22142,7 +22346,7 @@ export interface paths {
                             page: number;
                             /**
                              * Format: int64
-                             * @description Rows per page used to compute `page`.
+                             * @description Items per page used to compute `page`.
                              */
                             page_size: number;
                             /**
@@ -22853,7 +23057,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @description Restrict hits to rows whose metadata matches. */
+                        /** @description Restrict hits to entries whose metadata matches. */
                         filter?: {
                             /**
                              * @description Equality constraints: each key is a dot-path into the stored metadata
@@ -22903,9 +23107,12 @@ export interface paths {
                         "application/json": {
                             /** @description Hits, best first. */
                             matches: {
-                                /** @description Matched row id. */
+                                /** @description Matched entry id. */
                                 id: string;
-                                /** @description The metadata stored with the row. Absent when the row stored none. */
+                                /**
+                                 * @description The metadata stored with the entry. Absent when the entry stored
+                                 *     none.
+                                 */
                                 metadata?: unknown;
                                 /**
                                  * Format: float
@@ -22955,7 +23162,7 @@ export interface paths {
                             indexes: {
                                 /**
                                  * Format: uint64
-                                 * @description Rows currently stored. `0` when the count could not be read.
+                                 * @description Entries currently stored. `0` when the count could not be read.
                                  */
                                 count: number;
                                 /** @description Index name. */
@@ -22994,9 +23201,12 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        /** @description Rows to insert or replace. */
+                        /** @description Entries to insert or replace. */
                         entries: {
-                            /** @description Caller-supplied row id. Upserting the same id again replaces the row. */
+                            /**
+                             * @description Caller-supplied entry id. Upserting the same id again replaces the
+                             *     entry.
+                             */
                             id: string;
                             /**
                              * @description Arbitrary JSON metadata stored alongside the vector and echoed on

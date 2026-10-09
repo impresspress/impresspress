@@ -67,6 +67,27 @@ pub const CALLER_FACING: &[CallerFacing] = &[
         fragment: "Two result columns with one name collapse into one entry",
         why: "a row of the caller's own query result",
     },
+    CallerFacing {
+        scopes: &["admin"],
+        fragment: "One row of a query result",
+        why: "a row of the caller's own query result",
+    },
+    CallerFacing {
+        scopes: &["admin"],
+        fragment: "Number of rows.",
+        why: "how many rows the caller's own query returned",
+    },
+    CallerFacing {
+        scopes: &["admin"],
+        fragment: "The rows, in the order the query returned them",
+        why: "the rows of the caller's own query result",
+    },
+    // -- admin: published values ------------------------------------------
+    CallerFacing {
+        scopes: &["admin"],
+        fragment: "`\"http-handler@v1\"`",
+        why: "an example of the interface identifier value the field carries",
+    },
     // -- dev: the caller writes, compiles and exports blocks --------------
     CallerFacing {
         scopes: &["dev", "dev.tools"],
@@ -103,42 +124,126 @@ pub const CALLER_FACING: &[CallerFacing] = &[
         fragment: "the rows of each data table",
         why: "what an export carries of the site's data tables",
     },
-    CallerFacing {
-        scopes: &["dev.tools"],
-        fragment: "use `dev_export` to actually download it",
-        why: "`dev_export` is a real tool: the dev page registers it itself, since its \
-              result is a download rather than a tools.json call",
-    },
 ];
+
+/// One published surface, checked on its own: its text, and the names a
+/// caller of THAT surface can use. A name another block publishes is not
+/// vocabulary here — prose in one block that names another block's field is
+/// still naming something its own caller cannot see.
+pub struct Scope {
+    pub name: &'static str,
+    pub texts: Vec<String>,
+    pub vocabulary: BTreeSet<String>,
+    /// Descriptions found on a field — the value of a `properties` entry.
+    field_texts: usize,
+    /// Descriptions and summaries found anywhere else (operations, tools,
+    /// whole schemas).
+    other_texts: usize,
+}
+
+impl Scope {
+    /// `node` is the surface as published. Its caller can also use the names
+    /// in `also_reads` (documents the surface is projected from) and
+    /// `extra_names` (names no document carries — tools a page script
+    /// registers, say).
+    pub fn new(
+        name: &'static str,
+        node: &Value,
+        also_reads: &[&Value],
+        extra_names: &[String],
+    ) -> Self {
+        let mut texts = Vec::new();
+        let (mut field_texts, mut other_texts) = (0, 0);
+        published_text(node, false, &mut texts, &mut field_texts, &mut other_texts);
+        let mut names = BTreeSet::new();
+        vocabulary(node, &mut names);
+        for document in also_reads {
+            vocabulary(document, &mut names);
+        }
+        names.extend(extra_names.iter().cloned());
+        Self {
+            name,
+            texts,
+            vocabulary: names,
+            field_texts,
+            other_texts,
+        }
+    }
+}
 
 /// Every `description` and `summary` string under `node`, whitespace
 /// collapsed: rustdoc wraps sentences, so a phrase can land with a newline
-/// in the middle of it.
-pub fn published_text(node: &Value) -> Vec<String> {
-    fn walk(node: &Value, out: &mut Vec<String>) {
-        match node {
-            Value::Object(map) => {
-                for key in ["description", "summary"] {
-                    if let Some(Value::String(text)) = map.get(key) {
-                        out.push(text.split_whitespace().collect::<Vec<_>>().join(" "));
+/// in the middle of it. `is_field` is whether `node` is the value of a
+/// `properties` entry, which is what the floor in [`check`] counts.
+fn published_text(
+    node: &Value,
+    is_field: bool,
+    out: &mut Vec<String>,
+    field_texts: &mut usize,
+    other_texts: &mut usize,
+) {
+    match node {
+        Value::Object(map) => {
+            for key in ["description", "summary"] {
+                if let Some(Value::String(text)) = map.get(key) {
+                    out.push(text.split_whitespace().collect::<Vec<_>>().join(" "));
+                    if is_field {
+                        *field_texts += 1;
+                    } else {
+                        *other_texts += 1;
                     }
                 }
-                map.values().for_each(|v| walk(v, out));
             }
-            Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
-            _ => {}
+            for (key, value) in map {
+                if key == "properties" {
+                    if let Value::Object(fields) = value {
+                        for field in fields.values() {
+                            published_text(field, true, out, field_texts, other_texts);
+                        }
+                        continue;
+                    }
+                }
+                published_text(value, false, out, field_texts, other_texts);
+            }
         }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|v| published_text(v, false, out, field_texts, other_texts)),
+        _ => {}
     }
-    let mut out = Vec::new();
-    walk(node, &mut out);
-    out
+}
+
+/// Every check, over every scope: the walk's floor, the leaks, and the
+/// exemptions that excused nothing.
+///
+/// The floor is structural rather than a count that rewording could move: a
+/// scope must publish descriptions both on its operations or tools and on
+/// the fields of their schemas. A walk that stopped at the top level — or
+/// never got there — fails it instead of passing over nothing.
+pub fn check(scopes: &[Scope]) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut used = BTreeSet::new();
+    for scope in scopes {
+        if scope.field_texts == 0 || scope.other_texts == 0 {
+            failures.push(format!(
+                "[{}] the walk found {} field and {} other descriptions; a published \
+                 surface has both, so the walk is looking in the wrong place and this \
+                 gate would pass forever",
+                scope.name, scope.field_texts, scope.other_texts
+            ));
+        }
+        failures.extend(leaks(scope, &mut used));
+    }
+    let checked: Vec<&str> = scopes.iter().map(|scope| scope.name).collect();
+    failures.extend(stale(&checked, &used));
+    failures
 }
 
 /// The names a caller can use, read off a published document: property
 /// keys, parameter and tool `name`s, enum and const values, and component
 /// schema names. A backticked identifier in prose that is none of these is
 /// the name of code.
-pub fn vocabulary(node: &Value, out: &mut BTreeSet<String>) {
+fn vocabulary(node: &Value, out: &mut BTreeSet<String>) {
     match node {
         Value::Object(map) => {
             for key in ["properties", "schemas", "$defs"] {
@@ -167,22 +272,25 @@ pub fn vocabulary(node: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// The leaks in `texts`, published under `scope`, each as `[marker] text`.
-/// Records in `used` each [`CALLER_FACING`] entry (by index) that excused a
-/// match here, with the scope it excused it in.
-pub fn leaks(
-    scope: &str,
-    texts: &[String],
-    vocabulary: &BTreeSet<String>,
-    used: &mut BTreeSet<(usize, String)>,
-) -> Vec<String> {
+/// The leaks in `scope`, each as `[scope] [marker] text`. Records in `used`
+/// each [`CALLER_FACING`] entry (by index) that excused a match here, with
+/// the scope it excused it in.
+fn leaks(scope: &Scope, used: &mut BTreeSet<(usize, String)>) -> Vec<String> {
+    let Scope {
+        name: scope,
+        texts,
+        vocabulary,
+        ..
+    } = scope;
     // Each marker names storage or implementation, never caller meaning: a
     // table name prefix, the words for stored tables and columns, SQL, a
     // source or migration file, a Rust path or intra-doc link, Rust's
     // `Option`/`Vec`/`HashMap` spelling of what the wire calls null, array
     // and object, a JSON Schema keyword discussed as a design choice, and
     // the internal surfaces (server-rendered pages, the WebMCP manifest) a
-    // field was justified by, and a section of a design document. Configuration keys (`IMPRESSPRESS__LLM__…`)
+    // field was justified by, a section of a design document, the words
+    // "handler" and "row" (how code, not a caller, names an endpoint and a
+    // record) and SQL aggregates. Configuration keys (`IMPRESSPRESS__LLM__…`)
     // are upper case and are operator-facing, so the table prefix is matched
     // in lower case only.
     let markers = regex::Regex::new(concat!(
@@ -192,6 +300,7 @@ pub fn leaks(
         r"|\.sql\b|\.rs\b|::|\[`[^`]+`\]",
         r"|`(?:None|Some)\b|`(?:Option|Vec|HashMap)<",
         r"|(?i:\bwriteonly\b|\bwebmcp\b|\bssr\b)|§",
+        r"|(?i:\bhandlers?\b|\brows?\b)|\b(?:SUM|COUNT|AVG|MIN|MAX)\(",
     ))
     .expect("marker pattern compiles");
     // A backticked snake_case or CamelCase identifier is published vocabulary
@@ -230,7 +339,7 @@ pub fn leaks(
         });
         for (range, marker) in found {
             let excused = CALLER_FACING.iter().enumerate().find(|(_, entry)| {
-                entry.scopes.contains(&scope)
+                entry.scopes.contains(scope)
                     && text
                         .match_indices(entry.fragment)
                         .any(|(at, fragment)| at <= range.start && range.end <= at + fragment.len())
@@ -250,7 +359,7 @@ pub fn leaks(
 
 /// The [`CALLER_FACING`] entries that excused nothing in one of their scopes
 /// this run checked: that wording is gone, so the exemption must go too.
-pub fn stale(checked: &[&str], used: &BTreeSet<(usize, String)>) -> Vec<String> {
+fn stale(checked: &[&str], used: &BTreeSet<(usize, String)>) -> Vec<String> {
     let mut out = Vec::new();
     for (index, entry) in CALLER_FACING.iter().enumerate() {
         for scope in entry.scopes.iter().filter(|s| checked.contains(s)) {
@@ -263,4 +372,22 @@ pub fn stale(checked: &[&str], used: &BTreeSet<(usize, String)>) -> Vec<String> 
         }
     }
     out
+}
+
+/// The tools the dev page registers itself (`registerPageTool({ name: … })`
+/// in `dev.js`), read off the script the block serves. They are published
+/// to the agent beside `tools.json`'s, so prose may name them.
+#[cfg(feature = "block-dev")]
+pub fn dev_page_tool_names() -> Vec<String> {
+    let js = impresspress_core::blocks::dev::assets::dev_js();
+    let names: Vec<String> = regex::Regex::new(r"registerPageTool\(\{\s*name:\s*'([a-z_]+)'")
+        .expect("page tool pattern compiles")
+        .captures_iter(js)
+        .map(|caps| caps[1].to_string())
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "dev_export"),
+        "dev.js registers `dev_export` itself; the pattern found {names:?}"
+    );
+    names
 }

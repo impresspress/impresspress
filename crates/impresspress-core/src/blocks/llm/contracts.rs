@@ -127,7 +127,7 @@ pub struct ChatResponse {
 /// A configured LLM provider as published by the admin API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderView {
-    /// Stable row identifier, used by the `/b/llm/api/providers/{id}` routes.
+    /// Stable identifier, used by the `/b/llm/api/providers/{id}` routes.
     pub id: String,
     /// Unique provider name. This is the `backend_id` chat requests route on.
     pub name: String,
@@ -453,7 +453,7 @@ pub struct ConfigUpdateRequest {
 /// One thread's provider/model override, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ThreadOverrideView {
-    /// Stable row identifier.
+    /// Stable identifier.
     pub id: String,
     /// Messages-block context id the override applies to.
     pub thread_id: String,
@@ -488,7 +488,7 @@ impl From<&ThreadSettingRow> for ThreadOverrideView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ConfigUpdateResponse {
-    /// The override row after it was created or updated.
+    /// The override after it was created or updated.
     Override(ThreadOverrideView),
     /// Nothing was written.
     Acknowledged(ConfigAcknowledgement),

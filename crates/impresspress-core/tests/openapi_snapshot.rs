@@ -43,6 +43,7 @@ const SNAPSHOTTED_BLOCKS: &[(&str, &[&str])] = &[
     ("llm", &["/b/llm"]),
     ("vector", &["/b/vector"]),
     ("legalpages", &["/b/legalpages"]),
+    ("signal", &["/b/signal"]),
 ];
 
 /// Blocks whose snapshot exists only under a non-default feature: the block,
@@ -218,6 +219,34 @@ async fn openapi_matches_committed_snapshots() {
                  Accept with: UPDATE_OPENAPI_SNAPSHOTS=1 cargo test -p impresspress-core --test openapi_snapshot\n\
                  Snapshot: {}",
                 path.display()
+            ));
+        }
+    }
+
+    // The other direction of the same vacuity: a path no compared block's
+    // prefixes claim belongs to a block this gate does not know, so its
+    // contract (and every description it publishes) would ship unreviewed.
+    // That is how `signal` went unsnapshotted.
+    let claimed: Vec<&str> = SNAPSHOTTED_BLOCKS
+        .iter()
+        .flat_map(|(_, prefixes)| prefixes.iter().copied())
+        .chain(
+            FEATURE_GATED_BLOCKS
+                .iter()
+                .filter(|(_, _, compiled)| *compiled)
+                .flat_map(|(_, prefixes, _)| prefixes.iter().copied()),
+        )
+        .collect();
+    for path in doc["paths"]
+        .as_object()
+        .expect("openapi paths object")
+        .keys()
+    {
+        if !claimed.iter().any(|prefix| path.starts_with(prefix)) {
+            failures.push(format!(
+                "\n=== {path} ===\nThis /openapi.json path matches no block's prefixes, so no \
+                 snapshot or description gate sees it. Add its block to SNAPSHOTTED_BLOCKS (or \
+                 FEATURE_GATED_BLOCKS) with the prefixes it serves."
             ));
         }
     }
@@ -699,8 +728,10 @@ async fn products_refund_rows_describe_provider_status_truthfully() {
 /// `tests/descriptions/` holds the markers and the reviewed exceptions. This
 /// checked the products block alone until the admin block was found
 /// publishing `LIKE '%…%'` as the meaning of a search parameter; every block
-/// compiled into this run is checked now, under its own scope, so a new block
-/// is covered the day it is added to [`SNAPSHOTTED_BLOCKS`].
+/// the snapshot gate compares is checked now, each under its own scope with
+/// its own vocabulary. `openapi_matches_committed_snapshots` fails on any
+/// path no compared block claims, so a block cannot reach the document
+/// without reaching this gate too.
 #[tokio::test]
 async fn descriptions_carry_no_maintainer_notes() {
     let ctx = impresspress_core::test_support::TestContext::new().await;
@@ -714,19 +745,7 @@ async fn descriptions_carry_no_maintainer_notes() {
     )
     .await;
 
-    let mut names = std::collections::BTreeSet::new();
-    descriptions::vocabulary(&doc, &mut names);
-    descriptions::vocabulary(&manifest, &mut names);
-    // The dev block's prose names the sandbox's agent tools, which
-    // `tools.json` publishes rather than either document above.
-    #[cfg(feature = "block-dev")]
-    names.extend(
-        impresspress_core::blocks::dev::tools::SELECTIONS
-            .iter()
-            .map(|selection| selection.3.to_string()),
-    );
-
-    let mut scopes: Vec<(&str, Vec<String>)> = SNAPSHOTTED_BLOCKS
+    let mut scopes: Vec<descriptions::Scope> = SNAPSHOTTED_BLOCKS
         .iter()
         .map(|(block, prefixes)| (*block, *prefixes))
         .chain(
@@ -739,24 +758,30 @@ async fn descriptions_carry_no_maintainer_notes() {
             let slice: serde_json::Value =
                 serde_json::from_str(&block_openapi(&doc, prefixes).text)
                     .expect("block openapi parses");
-            (block, descriptions::published_text(&slice))
+            // The dev block's prose names the sandbox's agent tools: the ones
+            // `tools.json` publishes and the ones the dev page registers.
+            #[cfg(feature = "block-dev")]
+            let tools: Vec<String> = if block == "dev" {
+                impresspress_core::blocks::dev::tools::SELECTIONS
+                    .iter()
+                    .map(|selection| selection.3.to_string())
+                    .chain(descriptions::dev_page_tool_names())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            #[cfg(not(feature = "block-dev"))]
+            let tools: Vec<String> = Vec::new();
+            descriptions::Scope::new(block, &slice, &[], &tools)
         })
         .collect();
-    scopes.push(("webmcp", descriptions::published_text(&manifest)));
+    // The manifest is projected from the same block declarations as the
+    // document, and a tool's prose is its endpoint's: a value it names (an
+    // enum the tool's input does not itself list, say) is one the document
+    // publishes. So its vocabulary is the document's as well as its own.
+    scopes.push(descriptions::Scope::new("webmcp", &manifest, &[&doc], &[]));
 
-    let mut failures = Vec::new();
-    let mut used = std::collections::BTreeSet::new();
-    for (scope, texts) in &scopes {
-        if texts.is_empty() {
-            failures.push(format!(
-                "[{scope}] publishes no descriptions - the walk is looking in the wrong \
-                 place and this test would pass forever"
-            ));
-        }
-        failures.extend(descriptions::leaks(scope, texts, &names, &mut used));
-    }
-    let checked: Vec<&str> = scopes.iter().map(|(scope, _)| *scope).collect();
-    failures.extend(descriptions::stale(&checked, &used));
+    let failures = descriptions::check(&scopes);
     assert!(
         failures.is_empty(),
         "published descriptions carry maintainer notes - keep the caller-facing meaning in \

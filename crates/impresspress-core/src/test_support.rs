@@ -4122,16 +4122,16 @@ pub async fn output_is_error(out: OutputStream, code: &str) -> bool {
     )
 }
 
-/// `BlockInfo` for every Worker-shipping block, fetched from the real block
+/// `BlockInfo` for every block this build ships, fetched from the real block
 /// structs (not hand-rolled fixtures) so `discovery_json`/`openapi_document`
 /// exercise the actual declarations shipped in `blocks/*/mod.rs`.
 ///
 /// This is the block list that backs the generated `/openapi.json` document
-/// in tests. A block absent from this list never appears in the document at
-/// all — regardless of how correct its own schema declarations are — so the
-/// per-block openapi snapshot gate (`tests/openapi_snapshot.rs`) depends on
-/// this staying in sync with every block that carries schema-bearing
-/// endpoints (or is expected to soon).
+/// in tests, so it is derived from the production discovery set,
+/// [`crate::blocks::all_block_infos`], rather than listed by hand: a hand
+/// list is how `impresspress/signal`, on by default and schema-bearing, went
+/// unpublished in tests and ungated by `tests/openapi_snapshot.rs`. A block
+/// added to the build's manifest joins the document here the same day.
 #[cfg(all(
     feature = "block-files",
     feature = "block-messages",
@@ -4142,40 +4142,16 @@ pub async fn output_is_error(out: OutputStream, code: &str) -> bool {
 ))]
 pub fn real_block_infos() -> Vec<BlockInfo> {
     #[cfg_attr(
-        not(any(feature = "block-legalpages", feature = "block-dev")),
-        expect(unused_mut, reason = "only the two feature-gated pushes below need it")
+        not(feature = "block-dev"),
+        expect(unused_mut, reason = "only the feature-gated dev push below needs it")
     )]
-    let mut infos = vec![
-        crate::blocks::auth_ui::AuthUiBlock::new().info(),
-        crate::blocks::files::FilesBlock::new().info(),
-        crate::blocks::products::ProductsBlock::new().info(),
-        crate::blocks::admin::AdminBlock::new().info(),
-        crate::blocks::messages::MessagesBlock::new().info(),
-        crate::blocks::tickets::TicketsBlock::new().info(),
-        // `info()` is declarative; the provider-admin handle it is built
-        // with never runs here, so the no-op one suffices (same as
-        // `blocks::feature_block_infos`).
-        crate::blocks::llm::LlmBlock::new(Arc::new(
-            crate::blocks::llm::provider_admin::NoopProviderAdmin,
-        ))
-        .info(),
-        crate::blocks::vector::VectorBlock::new().info(),
-    ];
+    let mut infos = crate::blocks::all_block_infos();
 
-    // Legalpages ships under its own feature, which the `cfg` on this
-    // function does not require, so it joins only when compiled in. It has
-    // to join at all because `tests/openapi_snapshot.rs` now guards it: a
-    // block absent from this list contributes no path to the generated
-    // document, and its snapshot would read `{}` forever no matter what it
-    // declared.
-    #[cfg(feature = "block-legalpages")]
-    infos.push(crate::blocks::legalpages::LegalPagesBlock::new().info());
-
-    // The dev sandbox ships only under its own (non-default) feature, so its
-    // `BlockInfo` joins the document only when the block is compiled in. Like
-    // `llm` above, `info()` is declarative — neither the `RuntimeControl` nor
-    // the `ShellSource` handle it is built with is ever called here, so the
-    // test doubles suffice.
+    // The dev sandbox is registered by the browser runtime alone
+    // (`impresspress-web`), so it is not in the build's block manifest, and
+    // ships only under its own (non-default) feature. Its `info()` is
+    // declarative — neither the `RuntimeControl` nor the `ShellSource` handle
+    // it is built with is ever called here, so the test doubles suffice.
     #[cfg(feature = "block-dev")]
     infos.push(
         crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(

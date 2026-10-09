@@ -21,7 +21,7 @@
           },
           "page_size": {
             "default": 20,
-            "description": "Rows per page, capped at 100.",
+            "description": "Items per page, capped at 100.",
             "format": "uint32",
             "maximum": 100,
             "minimum": 0,
@@ -59,7 +59,7 @@
       },
       "name": "shop_list_products",
       "outputSchema": {
-        "description": "One page of product rows.",
+        "description": "One page of products.",
         "properties": {
           "page": {
             "description": "1-based index of this page.",
@@ -67,7 +67,7 @@
             "type": "integer"
           },
           "page_size": {
-            "description": "Rows per page used to compute `page`.",
+            "description": "Items per page used to compute `page`.",
             "format": "int64",
             "type": "integer"
           },
@@ -8845,7 +8845,7 @@
           },
           "page_size": {
             "default": 20,
-            "description": "Rows per page, capped at 100.",
+            "description": "Items per page, capped at 100.",
             "format": "uint32",
             "maximum": 100,
             "minimum": 0,
@@ -8866,7 +8866,7 @@
       },
       "name": "shop_list_groups",
       "outputSchema": {
-        "description": "One page of group rows.",
+        "description": "One page of groups.",
         "properties": {
           "page": {
             "description": "1-based index of this page.",
@@ -8874,7 +8874,7 @@
             "type": "integer"
           },
           "page_size": {
-            "description": "Rows per page used to compute `page`.",
+            "description": "Items per page used to compute `page`.",
             "format": "int64",
             "type": "integer"
           },
@@ -9230,7 +9230,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {
@@ -9709,7 +9709,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {
@@ -10026,7 +10026,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {
@@ -10254,7 +10254,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {
@@ -10484,7 +10484,7 @@
                     },
                     {
                       "const": "failed",
-                      "description": "Abandoned: validation or activation failed.",
+                      "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                       "type": "string"
                     },
                     {
@@ -10848,7 +10848,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {
@@ -11006,7 +11006,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {
@@ -11318,7 +11318,7 @@
                   },
                   {
                     "const": "failed",
-                    "description": "Abandoned: validation or activation failed.",
+                    "description": "Abandoned: its validation or activation failed, the sandbox stopped\nbefore its activation finished, or on the next start its stored\nmanifest could not be read back.",
                     "type": "string"
                   },
                   {

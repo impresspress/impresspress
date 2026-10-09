@@ -105,7 +105,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "description": "One row of `GET /b/admin/api/extensions`: a registered block.",
+                    "description": "One entry of `GET /b/admin/api/extensions`: a registered block.",
                     "properties": {
                       "enabled": {
                         "description": "Whether the block is enabled. `false` means every one of this block's\nroutes answers \"endpoint not found\". A block that was never switched\noff reports `true`.",
@@ -160,15 +160,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Response body of `GET /b/admin/api/iam/roles`.\n\nThe endpoint takes no query parameters: it returns every role, sorted by\nname, up to the handler's fixed 1000-row ceiling.",
+                  "description": "Response body of `GET /b/admin/api/iam/roles`.\n\nThe endpoint takes no query parameters: it returns every role, sorted by\nname, up to a fixed ceiling of 1000 roles.",
                   "properties": {
                     "page": {
-                      "description": "1-based index of this page. Always 1 — the handler does not paginate.",
+                      "description": "1-based index of this page. Always 1 — this endpoint does not\npaginate.",
                       "format": "int64",
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page. Always the handler's fixed 1000-row ceiling.",
+                      "description": "Items per page. Always the fixed ceiling of 1000.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -546,7 +546,7 @@
             "required": false,
             "schema": {
               "default": 50,
-              "description": "Rows per page, capped at 100.",
+              "description": "Items per page, capped at 100.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -590,7 +590,7 @@
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page used to compute `page`.",
+                      "description": "Items per page used to compute `page`.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -620,7 +620,7 @@
                             "type": "string"
                           },
                           "updated_at": {
-                            "description": "RFC 3339 write timestamp. Audit rows are never updated, so this always\nequals `created_at`.",
+                            "description": "RFC 3339 write timestamp. Audit entries are never updated, so this\nalways equals `created_at`.",
                             "type": "string"
                           },
                           "user_id": {
@@ -688,7 +688,7 @@
                             "type": "string"
                           },
                           "sensitive": {
-                            "description": "Whether `value` is masked. True when the row carries the sensitive\nflag, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
+                            "description": "Whether `value` is masked. True when the variable is flagged\nsensitive, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
                             "type": "boolean"
                           },
                           "value": {
@@ -745,7 +745,7 @@
             "required": false,
             "schema": {
               "default": 20,
-              "description": "Rows per page, capped at 100.",
+              "description": "Items per page, capped at 100.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -777,7 +777,7 @@
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page used to compute `page`.",
+                      "description": "Items per page used to compute `page`.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -839,11 +839,11 @@
                             ]
                           },
                           "role": {
-                            "description": "The account's own role (`\"user\"` by default). It is not repeated in\n`roles`, but a signed-in session holds it alongside them.",
+                            "description": "The account's own role (`\"user\"` by default). A signed-in session\nholds it alongside `roles`, which lists it only when the same role is\nalso granted.",
                             "type": "string"
                           },
                           "roles": {
-                            "description": "Roles granted to this user through `/b/admin/api/iam/user-roles`.",
+                            "description": "Roles granted to this user. Admins manage grants through\n`/b/admin/api/iam/user-roles`, but not every grant is made there: the\nconfigured bootstrap admin is granted `admin` when they sign in.",
                             "items": {
                               "type": "string"
                             },

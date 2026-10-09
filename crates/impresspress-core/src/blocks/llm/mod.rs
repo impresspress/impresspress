@@ -712,7 +712,7 @@ fn override_id_path_schema() -> serde_json::Value {
         "properties": {
             "id": {
                 "type": "string",
-                "description": "Override row id, as returned by `POST /b/llm/api/config`."
+                "description": "Override id, as returned by `POST /b/llm/api/config`."
             }
         }
     })
@@ -732,7 +732,7 @@ fn provider_id_path_schema() -> serde_json::Value {
         "properties": {
             "id": {
                 "type": "string",
-                "description": "Provider row id, as returned by `GET /b/llm/api/providers`."
+                "description": "Provider id, as returned by `GET /b/llm/api/providers`."
             }
         }
     })

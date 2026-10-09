@@ -199,17 +199,15 @@ async fn tools_json_descriptions_carry_no_maintainer_notes() {
     )
     .await;
 
-    let mut names = std::collections::BTreeSet::new();
-    descriptions::vocabulary(&doc, &mut names);
-    let texts = descriptions::published_text(&doc);
-    assert!(
-        !texts.is_empty(),
-        "tools.json publishes no descriptions - the walk is looking in the wrong place"
-    );
-
-    let mut used = std::collections::BTreeSet::new();
-    let mut failures = descriptions::leaks("dev.tools", &texts, &names, &mut used);
-    failures.extend(descriptions::stale(&["dev.tools"], &used));
+    // The page registers a few tools of its own beside `tools.json`'s, and
+    // prose here may name them.
+    let page_tools = descriptions::dev_page_tool_names();
+    let failures = descriptions::check(&[descriptions::Scope::new(
+        "dev.tools",
+        &doc,
+        &[],
+        &page_tools,
+    )]);
     assert!(
         failures.is_empty(),
         "tools.json descriptions carry maintainer notes - keep the caller-facing meaning in \

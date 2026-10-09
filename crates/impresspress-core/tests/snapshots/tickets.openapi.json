@@ -239,7 +239,7 @@
             "required": false,
             "schema": {
               "default": 25,
-              "description": "Rows per page, capped at 100.",
+              "description": "Items per page, capped at 100.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -307,7 +307,7 @@
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page used to compute `page`.",
+                      "description": "Items per page used to compute `page`.",
                       "format": "int64",
                       "type": "integer"
                     },
@@ -1246,7 +1246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Response body of `GET /b/tickets/api/admin/tickets/{id}/analyses`.\n\nUnpaginated: the handler returns the newest 100 analyses and no envelope\ncounts.",
+                  "description": "Response body of `GET /b/tickets/api/admin/tickets/{id}/analyses`.\n\nUnpaginated: the endpoint returns the newest 100 analyses and no envelope\ncounts.",
                   "properties": {
                     "records": {
                       "description": "Analyses for this ticket, newest first.",
@@ -1661,7 +1661,7 @@
             "required": false,
             "schema": {
               "default": 50,
-              "description": "Rows per page, capped at 100.",
+              "description": "Items per page, capped at 100.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -1681,7 +1681,7 @@
                       "type": "integer"
                     },
                     "page_size": {
-                      "description": "Rows per page used to compute `page`.",
+                      "description": "Items per page used to compute `page`.",
                       "format": "int64",
                       "type": "integer"
                     },

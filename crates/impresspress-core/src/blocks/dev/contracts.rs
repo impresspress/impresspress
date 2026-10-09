@@ -486,7 +486,7 @@ pub struct StageBuildRequest {
 pub struct StageBuildResponse {
     /// The stored build's id, or null when the request was refused before a
     /// build could be recorded (an artifact over the size limit is never
-    /// stored, so there is nothing for a build row to point at).
+    /// stored, so there is no build record to point at).
     pub build_id: Option<String>,
     /// Whether the block was accepted and activated.
     pub success: bool,

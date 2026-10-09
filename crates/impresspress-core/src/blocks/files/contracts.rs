@@ -30,10 +30,13 @@ use super::repo::Page;
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStatus {
     // The row exists and counts against quota; the blob may not.
-    /// Reserved: the upload is in flight. Counts against quota; not listed
-    /// as a file.
+    // `repo::objects::list_page_for_bucket` has no status filter;
+    // `search_completed` and the stats count/sum filter on `complete`.
+    /// Reserved: the upload is in flight. It counts against quota and appears
+    /// in the bucket's object listing, but search and the admin stats leave
+    /// it out.
     Pending,
-    /// Uploaded: the file is stored and listable.
+    /// Uploaded: the file is stored.
     Complete,
 }
 
@@ -113,7 +116,7 @@ impl<T: Serialize> RecordListView<T> {
     }
 }
 
-/// One object in a bucket listing, as its metadata row records it.
+/// One object in a bucket listing, as its stored metadata records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ObjectInfoResponse {
     /// Object key.
@@ -179,8 +182,8 @@ pub struct DeletedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ObjectUploadedResponse {
     pub bucket: String,
-    /// The stored key. For a multipart upload this is the key the handler
-    /// resolved, which may differ from the one the caller sent.
+    /// The stored key. For a multipart upload sent without `?key=` it is the
+    /// file part's `filename`, so it may differ from what the caller expected.
     pub key: String,
     /// Always `true`.
     pub uploaded: bool,
@@ -190,7 +193,7 @@ pub struct ObjectUploadedResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StorageStatsResponse {
     /// Objects whose upload completed. A `pending` reservation, whose upload
-    /// is still in flight, is not a file.
+    /// is still in flight, is not counted.
     pub total_objects: i64,
     /// Sum of `size` over the same set.
     pub total_size_bytes: i64,
@@ -202,7 +205,7 @@ pub struct StorageStatsResponse {
 /// `POST /b/cloudstorage/shares` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ShareCreatedResponse {
-    /// Row id of the new share — the `{id}` of `DELETE
+    /// Id of the new share — the `{id}` of `DELETE
     /// /b/cloudstorage/shares/{id}`.
     pub id: String,
     /// The opaque token embedded in `direct_url`. It carries no expiry of

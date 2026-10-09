@@ -95,10 +95,11 @@ impl From<SearchMode> for wire::SearchMode {
 }
 
 // Mirrors `wafer_core::clients::vector::VectorEntry`.
-/// One row to upsert.
+/// One entry to upsert.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorEntryInput {
-    /// Caller-supplied row id. Upserting the same id again replaces the row.
+    /// Caller-supplied entry id. Upserting the same id again replaces the
+    /// entry.
     pub id: String,
     /// Embedding vector; its length must match the index's `dimensions`.
     pub vector: Vec<f32>,
@@ -145,11 +146,12 @@ impl From<MetadataFilterInput> for wire::MetadataFilter {
 /// One query hit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VectorMatchView {
-    /// Matched row id.
+    /// Matched entry id.
     pub id: String,
     /// Similarity score; its scale depends on the index's metric.
     pub score: f32,
-    /// The metadata stored with the row. Absent when the row stored none.
+    /// The metadata stored with the entry. Absent when the entry stored
+    /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
@@ -241,12 +243,12 @@ pub struct IndexListResponse {
     pub indexes: Vec<String>,
 }
 
-/// One index with its row count.
+/// One index with its entry count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexStatsView {
     /// Index name.
     pub name: String,
-    /// Rows currently stored. `0` when the count could not be read.
+    /// Entries currently stored. `0` when the count could not be read.
     pub count: u64,
 }
 
@@ -279,7 +281,7 @@ pub struct AckResponse {
 pub struct UpsertRequest {
     /// Index name.
     pub index: String,
-    /// Rows to insert or replace.
+    /// Entries to insert or replace.
     pub entries: Vec<VectorEntryInput>,
 }
 
@@ -307,7 +309,7 @@ pub struct QueryRequest {
     pub vector: Option<Vec<f32>>,
     /// Maximum number of hits. Omitted means 10.
     pub top_k: Option<usize>,
-    /// Restrict hits to rows whose metadata matches.
+    /// Restrict hits to entries whose metadata matches.
     pub filter: Option<MetadataFilterInput>,
     /// Search modality. Omitted means `hybrid` for an index created with
     /// `keyword_search`, `vector` otherwise.
