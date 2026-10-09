@@ -591,10 +591,12 @@ mod schema_tests {
     /// change `migrations/001_initial_schema.*.sql` too (and remember
     /// `IMPRESSPRESS_RUN_MIGRATIONS=1`).
     ///
-    /// The checked columns are exactly `QuotaConfig`'s fields: the
-    /// exhaustive destructure below stops compiling when a cap is added to
-    /// the struct, so it cannot go without a matching column default check. `reset_period_days` is in the SQL but not the
-    /// struct: see `migrations/mod.rs` for why the column stays.
+    /// The checked columns are exactly `QuotaConfig`'s fields. The field
+    /// names come from an exhaustive destructure, so a cap added to the
+    /// struct stops this compiling until it is named there, and once named
+    /// it fails the set comparison until it has a row in `asserts`.
+    /// `reset_period_days` is in the SQL but not the struct: see
+    /// `migrations/mod.rs` for why the column stays.
     #[test]
     fn quota_sql_defaults_match_quota_config_consts() {
         let sql = SQLITE_MIGRATIONS
@@ -615,13 +617,24 @@ mod schema_tests {
             ),
         ];
 
-        // No `..`: a field added to `QuotaConfig` is a compile error here
-        // until it is named — and given its row in `asserts` above.
-        let QuotaConfig {
-            max_storage_bytes: _,
-            max_file_size_bytes: _,
-            max_files_per_bucket: _,
-        } = QuotaConfig::default();
+        // One list of names feeds both the destructure (no `..`, so it must
+        // name every field) and the set compared against `asserts`.
+        macro_rules! quota_config_fields {
+            ($($field:ident),* $(,)?) => {{
+                let QuotaConfig { $($field: _),* } = QuotaConfig::default();
+                [$(stringify!($field)),*]
+            }};
+        }
+        let fields: std::collections::BTreeSet<&str> =
+            quota_config_fields!(max_storage_bytes, max_file_size_bytes, max_files_per_bucket,)
+                .into_iter()
+                .collect();
+        let checked: std::collections::BTreeSet<&str> =
+            asserts.iter().map(|(column, _)| *column).collect();
+        assert_eq!(
+            checked, fields,
+            "every QuotaConfig field needs its column default checked here, and nothing else"
+        );
 
         for (column, expected) in asserts {
             // Match the `<column> ... DEFAULT <value>` line in the DDL.
