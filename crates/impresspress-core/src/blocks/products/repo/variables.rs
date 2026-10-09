@@ -172,13 +172,6 @@ pub(crate) async fn replace_for_offer(
     Ok(())
 }
 
-/// Every variable row of every offer, for the data-snapshot import's check
-/// of the rows it is about to upsert against the ones already here.
-#[cfg(feature = "block-dev")]
-pub(crate) async fn list_every_row(ctx: &dyn Context) -> Result<Vec<Record>, WaferError> {
-    db_read::list_every(ctx, TABLE, Vec::new()).await
-}
-
 pub(crate) async fn delete_for_offer(ctx: &dyn Context, offer_id: &str) -> Result<(), WaferError> {
     for record in list_for_offer(ctx, offer_id).await? {
         db::delete(ctx, TABLE, &record.id).await?;

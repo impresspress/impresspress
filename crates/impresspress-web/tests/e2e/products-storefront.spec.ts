@@ -470,6 +470,48 @@ test.describe("products static storefront widget", () => {
     );
   });
 
+  test("a failed preview outranks a failed config read", async ({ page }) => {
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/storefront/config") return json(route, { error: "config store offline" }, 500);
+      if (path === "/b/products/pricing/preview") return json(route, { error: "seats: at most 10" }, 400);
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page);
+    const widget = await mount(page, "hosted");
+    // The buyer's own last action failed, and that is what they can act on.
+    await expect(widget.locator(".status")).toHaveText("seats: at most 10");
+    await expect(widget.locator(".status")).toHaveClass(/error/);
+  });
+
+  test("work in progress shows over a notice, which returns when it is done", async ({ page }) => {
+    let releasePreview: () => void = () => {};
+    const previewHeld = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    await page.route(`${apiOrigin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/b/products/storefront/product_static") return json(route, product());
+      if (path === "/b/products/storefront/config") return json(route, SERVER_CONFIG);
+      if (path === "/b/products/pricing/preview") {
+        await previewHeld;
+        return json(route, quote());
+      }
+      return json(route, { error: "unexpected route" }, 404);
+    });
+
+    await openStaticPage(page, "/product?impresspress_checkout=cancel");
+    const widget = await mount(page, "hosted");
+    await expect(widget.locator(".status")).toHaveText("Calculating…");
+    releasePreview();
+    await expect(widget.locator(".total span:last-child")).toHaveText("NZD 64.00");
+    await expect(widget.locator(".status")).toHaveText(
+      "Checkout was canceled. You can review your choices and try again.",
+    );
+  });
+
   for (const slower of ["preview", "order status"] as const) {
     test(`a payment outcome outranks a failed config read when the ${slower} answers last`, async ({ page }) => {
       const delay = (which: typeof slower) => new Promise((resolve) => setTimeout(resolve, which === slower ? 600 : 0));

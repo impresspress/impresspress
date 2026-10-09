@@ -79,6 +79,10 @@
   // - activity: work in progress (loading, calculating, preparing checkout).
   // - notice: standing information — the buyer canceled checkout, or the
   //   offer has no Payment Link.
+  //
+  // load() empties every slot, the payment outcome included, so changing
+  // `product-id` (or `api-base`) drops what the line said about the previous
+  // product: that outcome belonged to its receipt, not to this one.
   const STATUS_SLOTS = ["payment", "error", "config", "activity", "notice"];
 
   function element(tag, className, text) {

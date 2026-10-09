@@ -736,24 +736,64 @@ async fn products_descriptions_carry_no_maintainer_notes() {
     );
 
     // Each marker names storage or implementation, never caller meaning: a
-    // table name, a SQL operator, the word for a stored column, a Rust path,
-    // a JSON Schema keyword discussed as a design choice, and the internal
-    // surfaces (server-rendered pages, the WebMCP manifest) a field was
-    // justified by.
-    const MARKERS: &[&str] = &[
-        "impresspress__",
-        "LIKE",
-        "column",
-        "::",
-        "writeOnly",
-        "WebMCP",
-        "SSR",
-    ];
+    // table name or the words for stored tables and columns, a SQL operator,
+    // a migration file, a Rust path, a JSON Schema keyword discussed as a
+    // design choice, and the internal surfaces (server-rendered pages, the
+    // WebMCP manifest) a field was justified by. Matched case-insensitively,
+    // as words where a bare substring would hit ordinary prose.
+    let markers = regex::Regex::new(
+        r"(?i)impresspress__|\blike\s+'|\bcolumns?\b|\btables?\b|\.sql\b|::|\bwriteonly\b|\bwebmcp\b|\bssr\b",
+    )
+    .expect("marker pattern compiles");
+
+    // A backticked snake_case name a caller can use is one the document
+    // itself publishes — a property, a parameter, an enum or const value.
+    // Any other (`soft_delete`, `replace_for_offer`) is the name of code.
+    fn vocabulary(node: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::Object(props)) = map.get("properties") {
+                    out.extend(props.keys().cloned());
+                }
+                if let Some(serde_json::Value::String(name)) = map.get("name") {
+                    out.insert(name.clone());
+                }
+                for key in ["enum", "const"] {
+                    match map.get(key) {
+                        Some(serde_json::Value::Array(values)) => {
+                            out.extend(values.iter().filter_map(|v| v.as_str().map(str::to_string)))
+                        }
+                        Some(serde_json::Value::String(value)) => {
+                            out.insert(value.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                for value in map.values() {
+                    vocabulary(value, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    vocabulary(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut published_names = std::collections::BTreeSet::new();
+    vocabulary(&block, &mut published_names);
+    let backticked_snake =
+        regex::Regex::new(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").expect("snake pattern compiles");
+
     let mut leaks = Vec::new();
     for text in &published {
-        for marker in MARKERS {
-            if text.contains(marker) {
-                leaks.push(format!("[{marker}] {text}"));
+        for found in markers.find_iter(text) {
+            leaks.push(format!("[{}] {text}", found.as_str()));
+        }
+        for name in backticked_snake.captures_iter(text) {
+            if !published_names.contains(&name[1]) {
+                leaks.push(format!("[`{}` is not a published name] {text}", &name[1]));
             }
         }
     }

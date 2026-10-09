@@ -30,7 +30,7 @@ use impresspress_core::{
         products::ProductsBlock,
     },
     platform_state::{user_roles, variables},
-    test_support::{TestContext, WriteLog},
+    test_support::{anon_msg, output_http_json, output_http_status, TestContext, WriteLog},
     util::json_map,
 };
 use serde_json::json;
@@ -2081,75 +2081,207 @@ async fn import_refuses_an_offer_variable_the_offer_writers_refuse() {
     data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
 }
 
-/// Variables are rows of their own, upserted by id, so an offer's variable
-/// set after an import is the destination's rows for it overlaid with the
-/// bundle's. A bundle row with a fresh id and a key the offer already has
-/// here — the offer re-exported after its variable was removed and added
-/// again, or edited on this instance since the last import — would give the
-/// offer two variables of one key, and every preview and checkout of it would
-/// then be refused. The import refuses it instead, and writes nothing.
-#[tokio::test]
-async fn import_refuses_a_variable_key_the_offer_already_has_here() {
-    let ctx = TestContext::with_products().await.fixture();
-    seed_row(
-        &ctx,
-        OFFERS_TABLE,
-        "offer_imported",
-        serde_json::Value::Object(offer_row("NZD")),
-    )
-    .await;
-    seed_row(
-        &ctx,
-        PRODUCTS_VARIABLES_TABLE,
-        "var_local",
-        serde_json::Value::Object(variable_row("var_local", "kilo_grams")),
-    )
-    .await;
+/// A priced, publicly visible offer with the given components and variables:
+/// the product and offer rows a bundle carries, active and approved so the
+/// public pricing preview reads it.
+fn priced_offer_bundle(
+    components: Vec<serde_json::Map<String, serde_json::Value>>,
+    variables: Vec<serde_json::Map<String, serde_json::Value>>,
+) -> DataSnapshot {
+    let product = row(json!({
+        "id": "prod_imported",
+        "name": "Imported",
+        "currency": "NZD",
+        "status": "active",
+        "approval_status": "approved",
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }));
+    let offer = row(json!({
+        "id": "offer_imported",
+        "product_id": "prod_imported",
+        "name": "Imported offer",
+        "currency": "NZD",
+        "status": "active",
+        "version": 1,
+        "interval_count": 1,
+        "mode": "payment",
+        "pricing_model": "components",
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }));
+    snapshot_of(vec![
+        (PRODUCTS_TABLE, vec![product]),
+        (OFFERS_TABLE, vec![offer]),
+        (OFFER_COMPONENTS_TABLE, components),
+        (PRODUCTS_VARIABLES_TABLE, variables),
+    ])
+}
 
-    let snap = snapshot_of(vec![(
-        PRODUCTS_VARIABLES_TABLE,
-        vec![variable_row("var_new", "kilo_grams")],
-    )]);
-    let err = data_snapshot::import(&as_dev(&ctx), &snap)
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
-    assert_eq!(
-        err.message,
-        "the data snapshot carries a variable of offer \"offer_imported\" with the key \
-         \"kilo_grams\", which the offer already has on this instance, so nothing was imported"
-    );
-    let ids: Vec<String> = db::list_all(&ctx, PRODUCTS_VARIABLES_TABLE, Vec::new())
+fn fixed_component(id: &str, key: &str, amount: i64) -> serde_json::Map<String, serde_json::Value> {
+    row(json!({
+        "id": id,
+        "offer_id": "offer_imported",
+        "component_key": key,
+        "label": key,
+        "required": true,
+        "amount_rule_json": json!({"type": "fixed", "unit_amount_minor": amount}).to_string(),
+        "created_at": STAMP,
+        "updated_at": STAMP,
+    }))
+}
+
+async fn ids_for_offer(ctx: &TestContext, table: &str, offer_id: &str) -> Vec<String> {
+    let mut ids: Vec<String> = db::list_all(ctx, table, Vec::new())
         .await
         .unwrap()
         .into_iter()
+        .filter(|record| record.data.get("offer_id") == Some(&json!(offer_id)))
         .map(|record| record.id)
         .collect();
+    ids.sort();
+    ids
+}
+
+/// The total the public pricing preview quotes for `offer_imported`.
+async fn previewed_total(ctx: &TestContext) -> i64 {
+    let out = ctx
+        .request_json(
+            anon_msg("create", "/b/products/pricing/preview"),
+            &json!({"offer_id": "offer_imported", "quantity": 1, "inputs": {"kilo_grams": 1}}),
+        )
+        .await;
+    let body = output_http_json(out).await;
+    body["amounts"]["total_minor"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("no total in the preview: {body}"))
+}
+
+/// An offer's variables and components are a set the offer owns, and every
+/// offer writer replaces that set whole. The import does too: a re-import of
+/// a later export, in which the source dropped a component, removed a
+/// variable key and added it back (a fresh id under the same key) and
+/// re-created a component under its old key, converges on the source's set.
+/// Upserting the rows by id instead kept the dropped component — still
+/// charged at checkout — gave the offer two `kilo_grams` variables, and
+/// tripped the components' `UNIQUE (offer_id, component_key)`.
+#[tokio::test]
+async fn a_re_import_replaces_each_offers_variables_and_components() {
+    let ctx = TestContext::with_products().await.fixture();
+    // Rows the bundle never mentions: another offer's component, and a
+    // variable that predates offers (`offer_id` empty). Neither is the
+    // imported offer's, so neither may be touched.
+    seed_row(
+        &ctx,
+        OFFER_COMPONENTS_TABLE,
+        "component_elsewhere",
+        json!({
+            "offer_id": "offer_elsewhere",
+            "component_key": "base",
+            "label": "Elsewhere",
+            "amount_rule_json": json!({"type": "fixed", "unit_amount_minor": 1}).to_string(),
+        }),
+    )
+    .await;
+    seed_row(
+        &ctx,
+        PRODUCTS_VARIABLES_TABLE,
+        "var_unowned",
+        json!({"offer_id": "", "name": "kilo_grams", "var_type": "integer", "label": "Legacy"}),
+    )
+    .await;
+
+    let first = priced_offer_bundle(
+        vec![
+            fixed_component("component_base", "base", 1000),
+            fixed_component("component_extra", "extra", 500),
+        ],
+        vec![variable_row("var_kg", "kilo_grams")],
+    );
+    data_snapshot::import(&as_dev(&ctx), &first).await.unwrap();
+    assert_eq!(previewed_total(&ctx).await, 1500);
+
+    let later = priced_offer_bundle(
+        vec![fixed_component("component_base_again", "base", 1000)],
+        vec![variable_row("var_kg_again", "kilo_grams")],
+    );
+    data_snapshot::import(&as_dev(&ctx), &later).await.unwrap();
+
     assert_eq!(
-        ids,
-        vec!["var_local".to_string()],
-        "a refused import writes nothing"
+        ids_for_offer(&ctx, OFFER_COMPONENTS_TABLE, "offer_imported").await,
+        vec!["component_base_again"],
+        "the dropped component is gone and the re-created one replaced the old"
+    );
+    assert_eq!(
+        ids_for_offer(&ctx, PRODUCTS_VARIABLES_TABLE, "offer_imported").await,
+        vec!["var_kg_again"],
+        "one `kilo_grams`, under the source's new id"
+    );
+    assert_eq!(
+        previewed_total(&ctx).await,
+        1000,
+        "the dropped component is no longer priced"
+    );
+    assert_eq!(
+        ids_for_offer(&ctx, OFFER_COMPONENTS_TABLE, "offer_elsewhere").await,
+        vec!["component_elsewhere"],
+        "an offer the bundle does not carry keeps its set"
+    );
+    assert_eq!(
+        ids_for_offer(&ctx, PRODUCTS_VARIABLES_TABLE, "").await,
+        vec!["var_unowned"],
+        "an empty owner id is not an owner"
     );
 
-    // The same key under the row's own id is that row coming back - a
-    // re-import - and it lands: the bundle's row replaces the local one.
-    let mut returning = variable_row("var_local", "kilo_grams");
-    returning.insert("label".to_string(), json!("Weight in kilograms"));
-    let snap = snapshot_of(vec![(PRODUCTS_VARIABLES_TABLE, vec![returning])]);
-    data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
-    let rows = db::list_all(&ctx, PRODUCTS_VARIABLES_TABLE, Vec::new())
+    // An offer the bundle carries with no children ends with none.
+    data_snapshot::import(&as_dev(&ctx), &priced_offer_bundle(Vec::new(), Vec::new()))
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].data["label"], json!("Weight in kilograms"));
+    assert!(
+        ids_for_offer(&ctx, OFFER_COMPONENTS_TABLE, "offer_imported")
+            .await
+            .is_empty()
+    );
+    assert!(
+        ids_for_offer(&ctx, PRODUCTS_VARIABLES_TABLE, "offer_imported")
+            .await
+            .is_empty()
+    );
+    // And with nothing left to price, the preview refuses rather than quotes.
+    let out = ctx
+        .request_json(
+            anon_msg("create", "/b/products/pricing/preview"),
+            &json!({"offer_id": "offer_imported", "quantity": 1}),
+        )
+        .await;
+    assert_ne!(output_http_status(out).await, 200);
+}
 
-    // A local row the bundle moves to another offer frees its key here, so
-    // a new row taking that key on this offer is no duplicate.
-    let mut moved = variable_row("var_local", "kilo_grams");
-    moved.insert("offer_id".to_string(), json!("offer_other"));
-    let snap = snapshot_of(vec![(
-        PRODUCTS_VARIABLES_TABLE,
-        vec![moved, variable_row("var_new", "kilo_grams")],
-    )]);
-    data_snapshot::import(&as_dev(&ctx), &snap).await.unwrap();
+/// Checkout presets hang off an offer but are NOT a set it owns: each is
+/// separately identified (`preset_id` on a checkout request and a Payment
+/// Link), so one the destination made for itself survives an import that
+/// does not mention it.
+#[tokio::test]
+async fn an_import_keeps_a_checkout_preset_it_does_not_carry() {
+    let ctx = TestContext::with_products().await.fixture();
+    seed_row(
+        &ctx,
+        CHECKOUT_PRESETS_TABLE,
+        "preset_local",
+        json!({"offer_id": "offer_imported", "name": "Local", "slug": "local"}),
+    )
+    .await;
+    data_snapshot::import(
+        &as_dev(&ctx),
+        &priced_offer_bundle(
+            vec![fixed_component("component_base", "base", 1000)],
+            Vec::new(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ids_for_offer(&ctx, CHECKOUT_PRESETS_TABLE, "offer_imported").await,
+        vec!["preset_local"]
+    );
 }
