@@ -197,7 +197,7 @@ pub async fn handle_read(
         // lock this can no longer mean "a mutation moved underneath the read".
         Err(e) => return no_store_db_error_internal(e, "dev workspace blob read"),
     };
-    let (encoding, content) = encode_content(&entry.content_type, bytes);
+    let (encoding, content) = encode_content(entry.content_type(), bytes);
     no_store().json(&FileReadResponse {
         path: entry.path.clone(),
         sha256: entry.sha256.clone(),
@@ -945,7 +945,6 @@ mod tests {
             path: "site/a.css".to_string(),
             sha256: sha.to_string(),
             size,
-            content_type: "text/css; charset=utf-8".to_string(),
         }
     }
 
@@ -983,12 +982,12 @@ mod tests {
         // Unknown type, valid UTF-8: still handed back as text. This is the
         // `.gitignore` / `README` case.
         assert_eq!(
-            encode_content(paths::UNKNOWN_CONTENT_TYPE, b"target/\n".to_vec()),
+            encode_content(wafer_core::mime::UNKNOWN, b"target/\n".to_vec()),
             (FileEncoding::Utf8, "target/\n".to_string())
         );
         // Unknown type, not UTF-8: base64.
         assert_eq!(
-            encode_content(paths::UNKNOWN_CONTENT_TYPE, latin1.clone()),
+            encode_content(wafer_core::mime::UNKNOWN, latin1.clone()),
             (FileEncoding::Base64, Base64::encode_string(&latin1))
         );
     }

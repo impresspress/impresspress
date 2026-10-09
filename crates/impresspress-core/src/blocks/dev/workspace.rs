@@ -33,14 +33,17 @@ pub const SITE_PREFIX: &str = "site/";
 /// The `blocks/` area's path prefix, including its separator.
 pub const BLOCKS_PREFIX: &str = "blocks/";
 
-/// One file in the workspace: where it is, which blob holds it, how big it is
-/// and what it is served as.
+// What a file is served as is not recorded here: it is a function of the
+// path (`FileEntry::content_type`), so there is no stored copy to fall out of
+// step with the one content-type table.
+/// One file in the workspace: where it is, which blob holds it and how big
+/// it is.
 ///
 /// The same type is what a generation's site manifest is made of — a
 /// generation *is* the workspace's `site/` entries, frozen — so there is one
 /// definition rather than a wire type and a stored type that have to be kept
 /// in step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileEntry {
     /// Where the file lives. Workspace-relative (`site/index.html`) in the
@@ -51,8 +54,46 @@ pub struct FileEntry {
     pub sha256: String,
     /// Size in bytes.
     pub size: u64,
-    /// Content type the file is served with.
-    pub content_type: String,
+}
+
+impl FileEntry {
+    /// The content type the file is served, exported and read back with:
+    /// [`content_type_for`] of its path.
+    pub fn content_type(&self) -> &'static str {
+        content_type_for(&self.path)
+    }
+}
+
+/// What a [`FileEntry`] is read from: its three fields and nothing else, bar
+/// one legacy key.
+///
+/// Builds before the type was derived stored a `content_type` on every
+/// entry. It is read and dropped here, never kept, never written and never
+/// served: [`FileEntry::content_type`] is a function of the path whatever an
+/// entry once said. Reading it rather than refusing it is what keeps a
+/// sandbox whose upgrade has not finished working. A failed republish holds
+/// back the active generation's row with its stored types
+/// (`super::stored_types`), and a row that did not parse would read as a
+/// dangling generation, which the boot would abandon, dropping the very
+/// site the next boot is meant to republish. It also lets a seed bundle
+/// exported before the change import into this build.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFileEntry {
+    path: String,
+    sha256: String,
+    size: u64,
+    #[serde(default, rename = "content_type")]
+    _legacy_content_type: Option<serde::de::IgnoredAny>,
+}
+
+impl<'de> Deserialize<'de> for FileEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let StoredFileEntry {
+            path, sha256, size, ..
+        } = StoredFileEntry::deserialize(deserializer)?;
+        Ok(Self { path, sha256, size })
+    }
 }
 
 /// Every file the workspace holds, plus what its blob store has cost.
@@ -96,8 +137,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Record `sha256`/`size` at `path`, deriving the content type from the
-    /// path, and return the entry as stored.
+    /// Record `sha256`/`size` at `path` and return the entry as stored.
     ///
     /// The single writer of `files`, which is what keeps the map key and
     /// [`FileEntry::path`] from drifting apart.
@@ -106,7 +146,6 @@ impl Workspace {
             path: path.to_string(),
             sha256,
             size,
-            content_type: content_type_for(path).to_string(),
         };
         self.files.insert(path.to_string(), entry.clone());
         entry
@@ -338,10 +377,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_derives_the_content_type_and_keys_by_path() {
+    fn insert_keys_by_path_and_the_type_follows_the_path() {
         let mut ws = Workspace::default();
         let entry = ws.insert("site/index.html", "abc".to_string(), 11);
-        assert_eq!(entry.content_type, "text/html; charset=utf-8");
+        assert_eq!(entry.content_type(), "text/html; charset=utf-8");
         assert_eq!(ws.get("site/index.html"), Some(&entry));
         // The map key and the entry's own path can never disagree.
         for (key, entry) in &ws.files {
@@ -358,7 +397,7 @@ mod tests {
         // Everything else on the entry survives the projection.
         assert_eq!(files[0].sha256, "a");
         assert_eq!(files[0].size, 5);
-        assert_eq!(files[0].content_type, "text/css; charset=utf-8");
+        assert_eq!(files[0].content_type(), "text/css; charset=utf-8");
     }
 
     #[test]
@@ -404,9 +443,30 @@ mod tests {
         let json = serde_json::to_string(&ws).expect("serialize");
         assert_eq!(
             json,
-            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2,"content_type":"text/css; charset=utf-8"},"site/z.css":{"path":"site/z.css","sha256":"z","size":1,"content_type":"text/css; charset=utf-8"}},"blob_bytes":3,"blob_count":2}"#
+            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2},"site/z.css":{"path":"site/z.css","sha256":"z","size":1}},"blob_bytes":3,"blob_count":2}"#
         );
         assert!(!json.contains('\n'));
+    }
+
+    /// An entry an earlier build stored with a `content_type` reads, and the
+    /// stored type is dropped: whatever it said, even a type that disagrees
+    /// with the table, the entry is served with the type its path derives,
+    /// and it is never written back. Any other unknown key is still refused.
+    #[test]
+    fn a_stored_content_type_is_read_and_never_used() {
+        let entry: FileEntry = serde_json::from_str(
+            r#"{"path":"site/notes.md","sha256":"a","size":2,"content_type":"image/png"}"#,
+        )
+        .expect("a legacy entry reads");
+        assert_eq!(entry.content_type(), "text/markdown; charset=utf-8");
+        assert_eq!(
+            serde_json::to_string(&entry).expect("serialize"),
+            r#"{"path":"site/notes.md","sha256":"a","size":2}"#
+        );
+        assert!(serde_json::from_str::<FileEntry>(
+            r#"{"path":"site/notes.md","sha256":"a","size":2,"kind":"x"}"#
+        )
+        .is_err());
     }
 
     /// A manifest written before the blob counters existed must still load —
@@ -414,7 +474,7 @@ mod tests {
     #[test]
     fn a_manifest_without_the_blob_counters_loads_with_them_at_zero() {
         let ws: Workspace = serde_json::from_str(
-            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2,"content_type":"text/css; charset=utf-8"}}}"#,
+            r#"{"files":{"site/a.css":{"path":"site/a.css","sha256":"a","size":2}}}"#,
         )
         .expect("deserialize");
         assert_eq!(ws.files.len(), 1);

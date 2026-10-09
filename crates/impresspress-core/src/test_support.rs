@@ -958,6 +958,53 @@ impl TestContext {
         Ok(bytes)
     }
 
+    /// The content type one object was stored with, read from the store
+    /// directly like [`Self::storage_get`]. For the published site it is the
+    /// type `wafer-run/web` serves the file with.
+    pub async fn storage_content_type(
+        &self,
+        block: &str,
+        folder: &str,
+        key: &str,
+    ) -> Result<String, wafer_core::interfaces::storage::service::StorageError> {
+        use wafer_core::interfaces::storage::service::StorageService as _;
+        let (_bytes, info) = self
+            .storage()
+            .get(&store_folder(block, folder), key)
+            .await?;
+        Ok(info.content_type)
+    }
+
+    /// Store one object directly, as [`Self::storage_get`] reads it: for a
+    /// test that has to set up what an earlier build left in the store.
+    pub async fn storage_put(
+        &self,
+        block: &str,
+        folder: &str,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), wafer_core::interfaces::storage::service::StorageError> {
+        use wafer_core::interfaces::storage::service::StorageService as _;
+        self.storage()
+            .put(&store_folder(block, folder), key, bytes, content_type)
+            .await
+    }
+
+    /// Delete one object directly, as [`Self::storage_get`] reads it: for a
+    /// test whose store has lost something it still names.
+    pub async fn storage_delete(
+        &self,
+        block: &str,
+        folder: &str,
+        key: &str,
+    ) -> Result<(), wafer_core::interfaces::storage::service::StorageError> {
+        use wafer_core::interfaces::storage::service::StorageService as _;
+        self.storage()
+            .delete(&store_folder(block, folder), key)
+            .await
+    }
+
     /// Park the fixture's object store on the next `get` of one object, and
     /// hand back the handle that releases it.
     ///

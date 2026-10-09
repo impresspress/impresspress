@@ -85,7 +85,7 @@ impl R2StorageService {
                 ObjectInfo {
                     key,
                     size: obj.size() as i64,
-                    content_type: "application/octet-stream".to_string(),
+                    content_type: wafer_core::mime::UNKNOWN.to_string(),
                     last_modified: r2_date_to_chrono(obj.uploaded()),
                 }
             })
@@ -264,7 +264,7 @@ impl StorageService for R2StorageService {
             content_type: obj
                 .http_metadata()
                 .content_type
-                .unwrap_or_else(|| "application/octet-stream".to_string()),
+                .unwrap_or_else(|| wafer_core::mime::UNKNOWN.to_string()),
             last_modified: r2_date_to_chrono(obj.uploaded()),
         };
 
@@ -304,7 +304,7 @@ impl StorageService for R2StorageService {
             content_type: obj
                 .http_metadata()
                 .content_type
-                .unwrap_or_else(|| "application/octet-stream".to_string()),
+                .unwrap_or_else(|| wafer_core::mime::UNKNOWN.to_string()),
             last_modified: r2_date_to_chrono(obj.uploaded()),
         };
 

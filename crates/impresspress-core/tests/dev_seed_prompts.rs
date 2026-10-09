@@ -182,12 +182,6 @@ fn every_seed_llms_txt_is_the_preamble_then_the_guide_as_the_manifest_declares()
             path.display()
         );
         assert_eq!(sandbox.llms.path, seed::LLMS_PATH, "{}", path.display());
-        assert_eq!(
-            sandbox.llms.content_type,
-            seed::LLMS_CONTENT_TYPE,
-            "{}",
-            path.display()
-        );
         assert!(llms.len() <= seed::MAX_LLMS_BYTES, "{}", path.display());
         assert_eq!(sandbox.llms.size, llms.len() as u64, "{}", path.display());
         assert_eq!(

@@ -5,26 +5,22 @@
     {
       "path": "index.html",
       "sha256": "211f9566ed092474b0eb017eb30e10763b8c3dbbd0e2586727732e1124f211c2",
-      "size": 4085,
-      "content_type": "text/html; charset=utf-8"
+      "size": 4085
     },
     {
       "path": "vendor/bootstrap/LICENSE.txt",
       "sha256": "4620c84ad5ce8602ff65640ed6b7c8b78ebb9e036584f0ebc1ccc88206a4bb51",
-      "size": 1093,
-      "content_type": "text/plain; charset=utf-8"
+      "size": 1093
     },
     {
       "path": "vendor/bootstrap/bootstrap.bundle.min.js",
       "sha256": "e4fd49181388c48ec5040bd3fe66f57c29c8e67fcd8502b3354b96ec7ab47cc7",
-      "size": 80496,
-      "content_type": "application/javascript; charset=utf-8"
+      "size": 80496
     },
     {
       "path": "vendor/bootstrap/bootstrap.min.css",
       "sha256": "d85327d99c7a3ee1f9b5d0500d1370acea3ad2db39c163c2f51f232baedbdede",
-      "size": 232111,
-      "content_type": "text/css; charset=utf-8"
+      "size": 232111
     }
   ],
   "blocks": [],
@@ -35,14 +31,12 @@
     "guide": {
       "path": "guide.md",
       "sha256": "6c9bcf37c90ad0831cdddc2b41d96d4bf588a419d2424062ac6a6e044d1260cf",
-      "size": 8569,
-      "content_type": "text/markdown; charset=utf-8"
+      "size": 8569
     },
     "llms": {
       "path": "llms.txt",
       "sha256": "9327b5f9384524d4089f7ad74758a92b205b7af7a47fc700a0aecd6ce14b17b3",
-      "size": 11374,
-      "content_type": "text/plain; charset=utf-8"
+      "size": 11374
     }
   }
 }

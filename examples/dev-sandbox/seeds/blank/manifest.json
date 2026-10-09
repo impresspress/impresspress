@@ -5,14 +5,12 @@
     {
       "path": "index.html",
       "sha256": "1d99a70032bb6653006a92103e1ca3bb2310a1ae92ec10a27d384f080310ad79",
-      "size": 1525,
-      "content_type": "text/html; charset=utf-8"
+      "size": 1525
     },
     {
       "path": "styles.css",
       "sha256": "42dc260049205400b87903b91ca8c079a56e5fdd392e3c9cad63f3d86b01f8a8",
-      "size": 832,
-      "content_type": "text/css; charset=utf-8"
+      "size": 832
     }
   ],
   "blocks": [],
@@ -23,14 +21,12 @@
     "guide": {
       "path": "guide.md",
       "sha256": "95a449a275dda0b41591cc8cb15ae2ae2451a8ed0c5523ede47c72c05ed941e5",
-      "size": 6419,
-      "content_type": "text/markdown; charset=utf-8"
+      "size": 6419
     },
     "llms": {
       "path": "llms.txt",
       "sha256": "2652c337266a1d7efc0f461f03e086a48366ab69b77201e076a7b05450abcd6e",
-      "size": 9220,
-      "content_type": "text/plain; charset=utf-8"
+      "size": 9220
     }
   }
 }

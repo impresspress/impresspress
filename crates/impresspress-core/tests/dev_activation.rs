@@ -336,7 +336,6 @@ async fn a_site_write_whose_new_blob_is_missing_is_refused() {
         path: "style.css".to_string(),
         sha256: gone.clone(),
         size: 4,
-        content_type: "text/css; charset=utf-8".to_string(),
     });
 
     let err = activation::request(
@@ -416,7 +415,6 @@ async fn site_of(ctx: &TestContext, content: &str) -> SiteManifest {
             path: "index.html".to_string(),
             sha256,
             size: content.len() as u64,
-            content_type: "text/html; charset=utf-8".to_string(),
         }],
     }
 }
@@ -955,7 +953,6 @@ async fn boot_convergence_probes_every_blob_it_publishes() {
         path: "style.css".to_string(),
         sha256: sha_of("h1{}"),
         size: 4,
-        content_type: "text/css; charset=utf-8".to_string(),
     });
     let staged = insert_staged_site(&ctx, site).await;
 

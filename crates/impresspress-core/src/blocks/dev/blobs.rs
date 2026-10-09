@@ -20,9 +20,9 @@ pub const FOLDER: &str = "blobs";
 
 /// Content type blobs are stored under. The *file's* content type is a
 /// property of the path that names the blob, not of the blob: the same bytes
-/// can be reachable as `site/a.txt` and `blocks/x/README`, so it is recorded
-/// on the manifest entry ([`super::workspace::FileEntry::content_type`]) and
-/// never here.
+/// can be reachable as `site/a.txt` and `blocks/x/README`, so it is derived
+/// from the path ([`super::workspace::FileEntry::content_type`]) and never
+/// recorded here.
 const BLOB_CONTENT_TYPE: &str = "application/octet-stream";
 
 /// SHA-256 of `bytes`, lowercase hex — the key a blob is stored under.

@@ -200,7 +200,6 @@ async fn site_only_blob(ctx: &TestContext, content: &str) -> (SiteManifest, Stri
                 path: "index.html".to_string(),
                 sha256: sha256.clone(),
                 size: content.len() as u64,
-                content_type: "text/html; charset=utf-8".to_string(),
             }],
         },
         sha256,

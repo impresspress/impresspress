@@ -252,43 +252,14 @@ pub fn min_base64_decoded_len(encoded: &str) -> usize {
 /// The content type the site publisher serves `path` with, and the one the
 /// read endpoint consults to decide utf8 vs base64.
 ///
-/// Deliberately *not* `wafer_core::mime::mime_for_ext_str`, which this
-/// otherwise mirrors. Three entries differ, and each difference is the reason
-/// this table exists:
-///
-/// * `rs` and `toml` are absent upstream and would fall through to
-///   `application/octet-stream` — which would make the sandbox hand back a
-///   block's own Rust source as base64. They are the workspace's most-edited
-///   files.
-/// * `md` is `text/plain` here rather than `text/markdown`: the sandbox
-///   publishes the file, it does not render it.
-/// * `json` carries no charset, matching what the site publisher writes into
-///   `wafer-run/web/site` and what a generation manifest records.
+/// It is `wafer_core::mime`'s table, the one every server path uses: the
+/// native storage block derives each object's type from it, and the CLI's
+/// dev server and Cloudflare asset upload call it too. Every textual type
+/// there declares `charset=utf-8`; an extension it does not know is
+/// [`wafer_core::mime::UNKNOWN`].
 pub fn content_type_for(path: &str) -> &'static str {
-    match extension_of(path).as_str() {
-        "html" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "txt" | "md" | "rs" | "toml" => "text/plain; charset=utf-8",
-        "wasm" => "application/wasm",
-        "woff2" => "font/woff2",
-        _ => UNKNOWN_CONTENT_TYPE,
-    }
+    wafer_core::mime::mime_for_ext(std::path::Path::new(path))
 }
-
-/// What [`content_type_for`] answers when the extension says nothing.
-///
-/// A fallback, not a claim: it means "this file's type is unknown", which is
-/// exactly why [`may_be_text`] treats it differently from a type that really
-/// does describe binary content.
-pub const UNKNOWN_CONTENT_TYPE: &str = "application/octet-stream";
 
 /// Whether a content type describes text.
 ///
@@ -298,13 +269,14 @@ pub fn is_textual(content_type: &str) -> bool {
     content_type.starts_with("text/")
         || content_type.starts_with("application/json")
         || content_type.starts_with("application/javascript")
+        || content_type.starts_with("application/xml")
         || content_type.starts_with("image/svg+xml")
 }
 
 /// Whether the read endpoint may offer a file as a JSON string rather than
 /// base64 — that is, whether its type is text or simply unknown.
 ///
-/// [`UNKNOWN_CONTENT_TYPE`] counts, and that is the point: `.gitignore`,
+/// [`wafer_core::mime::UNKNOWN`] counts, and that is the point: `.gitignore`,
 /// `README`, `LICENSE` and `Dockerfile` all have no extension the table
 /// recognizes, and all of them are text a user edits. Offering them as text —
 /// and falling back to base64 the moment the bytes turn out not to be valid
@@ -314,19 +286,7 @@ pub fn is_textual(content_type: &str) -> bool {
 /// [`content_type_for`] still answers `application/octet-stream`, which is
 /// what the site publisher serves.
 pub fn may_be_text(content_type: &str) -> bool {
-    is_textual(content_type) || content_type == UNKNOWN_CONTENT_TYPE
-}
-
-/// The lowercase extension of `path`'s last segment, or `""` when it has none.
-///
-/// A leading dot does not start an extension (`.gitignore` has none), matching
-/// `std::path::Path::extension`.
-fn extension_of(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rfind('.') {
-        Some(0) | None => String::new(),
-        Some(dot) => name[dot + 1..].to_ascii_lowercase(),
-    }
+    is_textual(content_type) || content_type == wafer_core::mime::UNKNOWN
 }
 
 #[cfg(test)]
@@ -569,16 +529,19 @@ mod tests {
             ("site/a.css", "text/css; charset=utf-8"),
             ("site/app.js", "application/javascript; charset=utf-8"),
             ("site/app.mjs", "application/javascript; charset=utf-8"),
-            ("site/data.json", "application/json"),
-            ("site/logo.svg", "image/svg+xml"),
+            ("site/app.js.map", "application/json; charset=utf-8"),
+            ("site/data.json", "application/json; charset=utf-8"),
+            ("site/feed.xml", "application/xml; charset=utf-8"),
+            ("site/data.csv", "text/csv; charset=utf-8"),
+            ("site/logo.svg", "image/svg+xml; charset=utf-8"),
             ("site/dot.png", "image/png"),
             ("site/photo.JPG", "image/jpeg"),
             ("site/photo.jpeg", "image/jpeg"),
             ("site/anim.gif", "image/gif"),
             ("site/pic.webp", "image/webp"),
             ("site/favicon.ico", "image/x-icon"),
-            ("site/notes.txt", "text/plain; charset=utf-8"),
-            ("site/readme.md", "text/plain; charset=utf-8"),
+            ("site/llms.txt", "text/plain; charset=utf-8"),
+            ("site/readme.md", "text/markdown; charset=utf-8"),
             ("blocks/hello/src/lib.rs", "text/plain; charset=utf-8"),
             ("blocks/hello/Cargo.toml", "text/plain; charset=utf-8"),
             ("site/mod.wasm", "application/wasm"),
@@ -600,8 +563,11 @@ mod tests {
             "site/a.css",
             "site/app.js",
             "site/data.json",
+            "site/feed.xml",
+            "site/data.csv",
             "site/logo.svg",
             "site/notes.txt",
+            "site/readme.md",
             "blocks/hello/src/lib.rs",
             "blocks/hello/Cargo.toml",
         ] {
@@ -633,7 +599,7 @@ mod tests {
         ] {
             assert_eq!(
                 content_type_for(path),
-                UNKNOWN_CONTENT_TYPE,
+                wafer_core::mime::UNKNOWN,
                 "{path} stores as octet-stream"
             );
             assert!(

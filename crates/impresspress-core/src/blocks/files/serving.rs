@@ -59,7 +59,7 @@ const FALLBACK_FILENAME: &str = "download";
 /// including one whose backend reports no type at all, since the empty string
 /// is not a media type either. [`normalized_content_type`] is the single place
 /// that decides this, for both download paths.
-const FALLBACK_CONTENT_TYPE: &str = "application/octet-stream";
+const FALLBACK_CONTENT_TYPE: &str = wafer_core::mime::UNKNOWN;
 
 /// The stored content type, or [`FALLBACK_CONTENT_TYPE`] when it is not a
 /// well-formed media type.

@@ -30,14 +30,15 @@ use impresspress_core::{
         blobs,
         contracts::ExportManifest,
         data_snapshot::DataSnapshot,
-        export,
+        export, generation,
         repo::{
-            generations::GenerationCause,
+            generations::{self, GenerationCause},
             seed_info::{self, SeedInfo},
         },
         seed::{self, SeedManifest},
-        test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
-        BypassRules, DevShared, WAFER_GUEST_VERSION,
+        stored_types,
+        test_support::{dev_get, dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
+        workspace, BypassRules, DevShared, WAFER_GUEST_VERSION,
     },
     platform_state::variables,
     test_support::{
@@ -404,7 +405,6 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
     // data snapshot is a `SeedFile` like the rest, not a bare path.
     let data = manifest.data.as_ref().expect("the bundle carries data");
     assert_eq!(data.path, "data.json");
-    assert_eq!(data.content_type, "application/json");
     let data_bytes = entries.get("seed/data.json").expect("seed/data.json");
     assert_eq!(data.sha256, blobs::sha256_hex(data_bytes));
     assert_eq!(data.size, data_bytes.len() as u64);
@@ -1868,6 +1868,335 @@ async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() 
             .await
             .expect("published llms.txt"),
         OWN.as_bytes()
+    );
+}
+
+/// What a build before the type was derived stored for each file:
+/// `(site path, content, the type that build stored, the table's type)`.
+const STORED_THE_OLD_WAY: [(&str, &str, &str, &str); 4] = [
+    (
+        "notes.md",
+        "# Caf\u{e9}\n",
+        "text/plain; charset=utf-8",
+        "text/markdown; charset=utf-8",
+    ),
+    (
+        "data.json",
+        "{\"name\":\"caf\u{e9}\"}\n",
+        "application/json",
+        "application/json; charset=utf-8",
+    ),
+    (
+        "feed.xml",
+        "<feed>caf\u{e9}</feed>\n",
+        "application/octet-stream",
+        "application/xml; charset=utf-8",
+    ),
+    (
+        "data.csv",
+        "name\ncaf\u{e9}\n",
+        "application/octet-stream",
+        "text/csv; charset=utf-8",
+    ),
+];
+
+/// Put back what an earlier build left: a `content_type` on every stored
+/// entry (the generation rows and `workspace.json`) and every published file
+/// stored with that type.
+async fn store_the_old_way(ctx: &TestContext) {
+    let old_type = |path: &str| {
+        STORED_THE_OLD_WAY
+            .iter()
+            .find(|(name, ..)| path.ends_with(name))
+            .map_or("text/html; charset=utf-8", |(_, _, old, _)| old)
+    };
+    let with_types = |files: &mut Vec<serde_json::Value>| {
+        for entry in files {
+            let path = entry["path"].as_str().expect("path").to_string();
+            entry["content_type"] = json!(old_type(&path));
+        }
+    };
+
+    for row in generations::list_recent(ctx, 200).await.expect("rows") {
+        let mut site: serde_json::Value =
+            serde_json::from_str(&row.site_manifest_json).expect("site manifest");
+        with_types(site["files"].as_array_mut().expect("files"));
+        generations::replace_site_manifest(ctx, &row.id, &site.to_string(), &row.manifest_sha256)
+            .await
+            .expect("store the row the old way");
+    }
+
+    let ws = workspace::load(ctx).await.expect("workspace");
+    let mut value = serde_json::to_value(&ws).expect("workspace json");
+    for entry in value["files"].as_object_mut().expect("files").values_mut() {
+        let path = entry["path"].as_str().expect("path").to_string();
+        entry["content_type"] = json!(old_type(&path));
+    }
+    ctx.storage_put(
+        "impresspress/dev",
+        "",
+        workspace::KEY,
+        value.to_string().as_bytes(),
+        "application/json",
+    )
+    .await
+    .expect("store the workspace the old way");
+
+    for (name, content, old, _) in STORED_THE_OLD_WAY {
+        ctx.storage_put("wafer-run/web", "site", name, content.as_bytes(), old)
+            .await
+            .expect("publish the file the old way");
+    }
+}
+
+/// A sandbox an earlier build stored types for. Its next boot's upgrade
+/// serves every file with the table's type though no content changed, leaves
+/// no stored type behind, and the sandbox then exports a bundle that a fresh
+/// instance imports and publishes with the table's types.
+#[tokio::test]
+async fn a_sandbox_that_stored_old_types_serves_exports_and_imports_the_tables() {
+    let a_control = FakeControl::new();
+    let a = shop_instance(&a_control).await;
+    for (name, content, ..) in STORED_THE_OLD_WAY {
+        let written = output_json(
+            dev_post(
+                &a,
+                "/b/dev/api/files/write",
+                json!({"path": format!("site/{name}"), "content": content, "expected_sha256": null}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(written["path"], format!("site/{name}"), "{written}");
+    }
+    store_the_old_way(&a).await;
+    workspace::load(&a)
+        .await
+        .expect("a stored type is read and dropped");
+
+    let upgrade = stored_types::upgrade(&a).await.expect("upgrade");
+    assert!(upgrade.republished, "{upgrade:?}");
+    assert!(upgrade.workspace, "{upgrade:?}");
+    assert!(upgrade.generations > 0, "{upgrade:?}");
+    for (name, content, _, table) in STORED_THE_OLD_WAY {
+        assert_eq!(
+            a.storage_content_type("wafer-run/web", "site", name)
+                .await
+                .expect("published"),
+            table,
+            "{name} is served with the table's type"
+        );
+        assert_eq!(
+            a.storage_get("wafer-run/web", "site", name)
+                .await
+                .expect("published"),
+            content.as_bytes(),
+            "{name} keeps its content"
+        );
+    }
+    workspace::load(&a).await.expect("the workspace loads");
+    for row in generations::list_recent(&a, 200).await.expect("rows") {
+        assert!(
+            !row.site_manifest_json.contains("content_type"),
+            "{}",
+            row.id
+        );
+        let manifest = generation::from_row(&row).expect("the row loads");
+        assert_eq!(
+            generation::manifest_sha256(&manifest).expect("hash"),
+            row.manifest_sha256,
+            "the stored hash covers the manifest the row now holds"
+        );
+    }
+    assert!(
+        !stored_types::upgrade(&a)
+            .await
+            .expect("again")
+            .changed_anything(),
+        "a second boot has nothing to upgrade"
+    );
+
+    let archive = entries(
+        output_body(
+            a.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert!(
+        !text(&archive, "seed/manifest.json").contains("content_type"),
+        "a bundle declares no content type"
+    );
+    let manifest: SeedManifest =
+        serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");
+    let fetch = ArchiveFetch { archive };
+    let b_control = FakeControl::new();
+    b_control.set_validated_info(hello_info("site/hello"));
+    let b = TestContext::with_products()
+        .await
+        .with_auth_added()
+        .await
+        .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
+        .await;
+    let generation = seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
+    activation::request(
+        &b,
+        &b.dev_shared(),
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the imported generation");
+    for (name, _, _, table) in STORED_THE_OLD_WAY {
+        assert_eq!(
+            b.storage_content_type("wafer-run/web", "site", name)
+                .await
+                .expect("published by the importer"),
+            table,
+            "{name} is published with the table's type after import"
+        );
+    }
+}
+
+/// The republish can fail (here, a blob the active site names is gone).
+/// The rest of that boot (the journal convergence that decides what is
+/// active) must keep the active generation and its blocks, whose row still
+/// stores types; the workspace must load, so the files API works; and every
+/// other row is upgraded. Only the active row keeps its stored types, so
+/// the next boot publishes again, and once the blob is back that boot
+/// finishes the upgrade.
+#[tokio::test]
+async fn a_failed_republish_leaves_the_workspace_usable_and_retries_next_boot() {
+    let control = FakeControl::new();
+    let ctx = shop_instance(&control).await;
+    for (name, content, ..) in STORED_THE_OLD_WAY {
+        let written = output_json(
+            dev_post(
+                &ctx,
+                "/b/dev/api/files/write",
+                json!({"path": format!("site/{name}"), "content": content, "expected_sha256": null}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(written["path"], format!("site/{name}"), "{written}");
+    }
+    let before = impresspress_core::blocks::dev::repo::runtime_state::read(&ctx)
+        .await
+        .expect("journal");
+    let active_id = before
+        .active_generation_id
+        .clone()
+        .expect("an active generation");
+    let active_blocks: Vec<String> = generation::load(&ctx, &active_id)
+        .await
+        .expect("the active generation")
+        .1
+        .blocks
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
+    assert!(!active_blocks.is_empty(), "the shop serves a block");
+    store_the_old_way(&ctx).await;
+    let (name, content, old, table) = STORED_THE_OLD_WAY[0];
+    let sha = blobs::sha256_hex(content.as_bytes());
+    ctx.storage_delete("impresspress/dev", blobs::FOLDER, &sha)
+        .await
+        .expect("lose the blob");
+
+    stored_types::upgrade(&ctx)
+        .await
+        .expect_err("the publish cannot read the lost blob");
+    // The rest of this boot: the journal is converged on, and the active
+    // generation, whose row still stores types, stays active with its blocks.
+    let blocks: Vec<String> = activation::converge_on_boot(&ctx, &ctx.dev_shared())
+        .await
+        .expect("the boot converges")
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
+    assert_eq!(blocks, active_blocks, "the boot keeps the active blocks");
+    workspace::load(&ctx)
+        .await
+        .expect("the workspace loads whatever the publish did");
+    let listed = output_json(dev_get(&ctx, "/b/dev/api/files").await).await;
+    assert!(
+        listed["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|f| f["path"] == format!("site/{name}")),
+        "{listed}"
+    );
+    let left: Vec<String> = generations::list_with_stored_content_types(&ctx)
+        .await
+        .expect("rows")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let state = impresspress_core::blocks::dev::repo::runtime_state::read(&ctx)
+        .await
+        .expect("journal");
+    assert_eq!(
+        state.active_generation_id.as_deref(),
+        Some(active_id.as_str()),
+        "the generation stays active"
+    );
+    assert_eq!(
+        left,
+        vec![active_id.clone()],
+        "only the active row keeps its stored types"
+    );
+    assert_eq!(
+        ctx.storage_content_type("wafer-run/web", "site", name)
+            .await
+            .expect("still published"),
+        old,
+        "the site keeps serving what it served"
+    );
+
+    blobs::put(&ctx, content.as_bytes())
+        .await
+        .expect("the blob is back");
+    let upgrade = stored_types::upgrade(&ctx).await.expect("the next boot");
+    assert!(upgrade.republished, "{upgrade:?}");
+    assert_eq!(upgrade.generations, 1, "{upgrade:?}");
+    assert_eq!(
+        ctx.storage_content_type("wafer-run/web", "site", name)
+            .await
+            .expect("published"),
+        table
+    );
+    assert!(generations::list_with_stored_content_types(&ctx)
+        .await
+        .expect("rows")
+        .is_empty());
+    let blocks: Vec<String> = activation::converge_on_boot(&ctx, &ctx.dev_shared())
+        .await
+        .expect("the boot converges")
+        .into_iter()
+        .map(|block| block.name)
+        .collect();
+    assert_eq!(blocks, active_blocks, "still the same blocks");
+    assert_eq!(
+        impresspress_core::blocks::dev::repo::runtime_state::read(&ctx)
+            .await
+            .expect("journal")
+            .active_generation_id
+            .as_deref(),
+        Some(active_id.as_str())
     );
 }
 

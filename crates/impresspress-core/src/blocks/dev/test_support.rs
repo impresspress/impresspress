@@ -23,7 +23,7 @@ use super::{
         DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
         ValidationStage,
     },
-    paths, seed,
+    seed,
     seed::{SeedFetch, SeedFile},
 };
 use crate::test_support::{admin_msg, output_json, Session, TestContext};
@@ -414,18 +414,17 @@ impl SeedFetch for MapFetch {
     }
 }
 
-/// A [`SeedFile`] for `path`, with `sha256`/`size`/`content_type` derived
-/// from `bytes` the same way a real exporter would.
+/// A [`SeedFile`] for `path`, with `sha256`/`size` derived from `bytes` the
+/// same way a real exporter would.
 ///
-/// [`seed::import`] checks all three against what the *path* is served as,
-/// so a fixture built any other way would fail verification for reasons
-/// unrelated to what a test using this means to exercise.
+/// [`seed::import`] checks both against the bytes it fetches, so a fixture
+/// built any other way would fail verification for reasons unrelated to
+/// what a test using this means to exercise.
 pub fn seed_file(path: &str, bytes: &[u8]) -> SeedFile {
     SeedFile {
         path: path.to_string(),
         sha256: blobs::sha256_hex(bytes),
         size: bytes.len() as u64,
-        content_type: paths::content_type_for(path).to_string(),
     }
 }
 

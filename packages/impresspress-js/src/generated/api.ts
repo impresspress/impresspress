@@ -1771,8 +1771,6 @@ export interface paths {
                              *     the files API; the block does not serve until it is compiled.
                              */
                             files: {
-                                /** @description Content type the file is served with. */
-                                content_type: string;
                                 /**
                                  * @description Where the file lives. Workspace-relative (`site/index.html`) in the
                                  *     files API; relative to its area's root (`index.html`) in a
@@ -2235,8 +2233,6 @@ export interface paths {
                         "application/json": {
                             /** @description Matching files, in path order. */
                             files: {
-                                /** @description Content type the file is served with. */
-                                content_type: string;
                                 /**
                                  * @description Where the file lives. Workspace-relative (`site/index.html`) in the
                                  *     files API; relative to its area's root (`index.html`) in a
@@ -2631,8 +2627,6 @@ export interface paths {
                              *     next `expected_sha256`.
                              */
                             files: {
-                                /** @description Content type the file is served with. */
-                                content_type: string;
                                 /**
                                  * @description Where the file lives. Workspace-relative (`site/index.html`) in the
                                  *     files API; relative to its area's root (`index.html`) in a
@@ -2887,8 +2881,6 @@ export interface paths {
                                      * @default []
                                      */
                                     files: {
-                                        /** @description Content type the file is served with. */
-                                        content_type: string;
                                         /**
                                          * @description Where the file lives. Workspace-relative (`site/index.html`) in the
                                          *     files API; relative to its area's root (`index.html`) in a

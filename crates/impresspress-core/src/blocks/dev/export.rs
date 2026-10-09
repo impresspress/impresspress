@@ -515,7 +515,6 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             path: DATA_PATH.to_string(),
             sha256: blobs::sha256_hex(&data_bytes),
             size: data_bytes.len() as u64,
-            content_type: seed::DATA_CONTENT_TYPE.to_string(),
         }),
         // An export boots with the workspace off — no `/b/dev`, no reference
         // tool — so a guide would describe tools the bundle does not have.

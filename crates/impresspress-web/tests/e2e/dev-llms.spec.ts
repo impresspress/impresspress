@@ -249,6 +249,42 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   ).toEqual([]);
 });
 
+test('the runtime serves a site’s text files with their type and a UTF-8 charset', async ({ page }) => {
+  test.setTimeout(300_000);
+  await bootServiceWorker(page);
+  await enterFromWelcome(page);
+
+  // Every textual type in the one content-type table declares UTF-8, so
+  // non-ASCII text reads back unchanged however the reader decodes it.
+  const files: { path: string; content: string; type: string }[] = [
+    { path: 'notes.md', content: '# Töpferei — 窯\n', type: 'text/markdown; charset=utf-8' },
+    { path: 'feed.xml', content: '<feed>Töpferei — 窯</feed>\n', type: 'application/xml; charset=utf-8' },
+    { path: 'data.csv', content: 'name\nTöpferei — 窯\n', type: 'text/csv; charset=utf-8' },
+  ];
+  for (const file of files) {
+    const written = await runFromConsole(page, 'dev_write_file', {
+      path: `site/${file.path}`,
+      content: file.content,
+    });
+    expect(written.isError, JSON.stringify(written)).toBe(false);
+  }
+  for (const file of files) {
+    const served = await page.evaluate(async (url) => {
+      const response = await fetch(url, { cache: 'no-store' });
+      return {
+        controlled: navigator.serviceWorker.controller !== null,
+        status: response.status,
+        type: response.headers.get('content-type') ?? '',
+        text: await response.text(),
+      };
+    }, `/${file.path}`);
+    expect(served.controlled).toBe(true);
+    expect(served.status, file.path).toBe(200);
+    expect(served.type, file.path).toBe(file.type);
+    expect(served.text, file.path).toBe(file.content);
+  }
+});
+
 /**
  * Export the site, unpack it, serve it with a plain static server, and open
  * its root `llms.txt` and `README.md` in a tab with no worker — the reader

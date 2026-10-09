@@ -774,8 +774,7 @@ async fn adopt_site(
     }
     for entry in &site.files {
         // Through `Workspace::insert` — the only writer of `files` — so the
-        // map key and `FileEntry::path` cannot drift apart, and the content
-        // type is derived from the path exactly as a write would derive it.
+        // map key and `FileEntry::path` cannot drift apart.
         ws.insert(
             &format!("{}{}", workspace::SITE_PREFIX, entry.path),
             entry.sha256.clone(),
@@ -1634,7 +1633,6 @@ mod tests {
             path: path.to_string(),
             sha256: sha.to_string(),
             size: 4,
-            content_type: "text/html; charset=utf-8".to_string(),
         }
     }
 

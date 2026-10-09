@@ -3,25 +3,44 @@ use std::{fs, path::Path};
 #[cfg(feature = "embed-assets")]
 use impresspress::cli::helpers::cloudflare::assets::ui_asset_entries;
 use impresspress::cli::helpers::cloudflare::assets::{
-    mime_for_path, resolve_asset_base_url, stage,
+    release_manifest_from_staged_dir, resolve_asset_base_url, stage,
 };
 use tempfile::tempdir;
 
+/// A release asset is uploaded, and served, with the type its manifest entry
+/// records: the one table every server path uses, so text declares UTF-8.
 #[test]
-fn mime_for_path_covers_common_extensions() {
-    assert_eq!(
-        mime_for_path(Path::new("a.html")),
-        "text/html; charset=utf-8"
-    );
-    assert_eq!(mime_for_path(Path::new("x.WASM")), "application/wasm");
-    assert_eq!(
-        mime_for_path(Path::new("y.unknown")),
-        "application/octet-stream"
-    );
-    assert_eq!(
-        mime_for_path(Path::new("noext")),
-        "application/octet-stream"
-    );
+fn release_assets_carry_their_type_and_a_utf8_charset() {
+    let tmp = tempdir().unwrap();
+    let staged = tmp.path();
+    for name in [
+        "llms.txt",
+        "README.md",
+        "feed.xml",
+        "data.csv",
+        "index.html",
+        "x.WASM",
+        "noext",
+    ] {
+        fs::write(staged.join(name), "caf\u{e9}\n").unwrap();
+    }
+    let release = release_manifest_from_staged_dir(staged).unwrap();
+    for (key, expected) in [
+        ("llms.txt", "text/plain; charset=utf-8"),
+        ("README.md", "text/markdown; charset=utf-8"),
+        ("feed.xml", "application/xml; charset=utf-8"),
+        ("data.csv", "text/csv; charset=utf-8"),
+        ("index.html", "text/html; charset=utf-8"),
+        ("x.WASM", "application/wasm"),
+        ("noext", "application/octet-stream"),
+    ] {
+        let entry = release
+            .files
+            .iter()
+            .find(|e| e.logical_key == key)
+            .unwrap_or_else(|| panic!("{key} is in the release manifest"));
+        assert_eq!(entry.content_type, expected, "{key}");
+    }
 }
 
 #[test]

@@ -21,8 +21,8 @@
 //!
 //! # What is verified
 //!
-//! Every file's declared `sha256`, `size` and `content_type` are checked
-//! against the bytes that actually arrived, and every workspace path the
+//! Every file's declared `sha256` and `size` are checked against the bytes
+//! that actually arrived, and every workspace path the
 //! bundle would create is run through [`paths::validate_path`]. A seed is
 //! same-origin content, but it is still content this instance did not
 //! produce: a manifest naming `site/../../elsewhere`, or claiming a hash it
@@ -144,7 +144,7 @@ pub struct SandboxSeed {
     /// One paragraph the page shows verbatim; at most [`MAX_PROMPT_BYTES`].
     pub suggested_prompt: String,
     /// The guide, a Markdown file named [`GUIDE_PATH`] beside the manifest,
-    /// verified like every other file: hash, size, content type.
+    /// verified like every other file: hash and size.
     pub guide: SeedFile,
     /// What the sandbox tells a reader about itself, a text file named
     /// [`LLMS_PATH`] beside the manifest. The static host serves the same
@@ -237,15 +237,6 @@ pub fn data_url(path: &str) -> String {
     format!("{ROOT}{path}")
 }
 
-/// The content type `seed/data.json` is served as, and so the one the
-/// manifest must declare for it.
-///
-/// Here rather than beside the exporter's [`SeedManifest.data`] writer for
-/// the reason [`ROOT`] and the URL builders above are here: this module owns
-/// the bundle's layout, [`super::export`] writes what it reads, and a string
-/// spelled at both ends is a string that can be spelled two ways.
-pub const DATA_CONTENT_TYPE: &str = "application/json";
-
 /// Largest data snapshot a bundle may carry, in bytes.
 ///
 /// One constant for both ends of the format: the importer refuses a larger
@@ -273,10 +264,6 @@ pub const MAX_DATA_BYTES: usize = 2 * 1024 * 1024;
 /// The one name the guide may have, beside the manifest.
 pub const GUIDE_PATH: &str = "guide.md";
 
-/// What the guide is declared and served as. Not `paths::content_type_for`:
-/// the guide is not a workspace file and is never published.
-pub const GUIDE_CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
-
 /// Largest guide a bundle may carry. Sized for a document an agent reads
 /// once per session, not for a manual.
 pub const MAX_GUIDE_BYTES: usize = 256 * 1024;
@@ -292,11 +279,6 @@ pub fn guide_url(path: &str) -> String {
 /// The one name the sandbox's `llms.txt` may have, beside the manifest — and
 /// the site path the publisher serves it at (`/llms.txt`).
 pub const LLMS_PATH: &str = "llms.txt";
-
-/// What the sandbox's `llms.txt` is declared and served as: what
-/// `paths::content_type_for` gives a site's own `llms.txt`, so the path is
-/// one content type whichever of the two is being served.
-pub const LLMS_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// Largest `llms.txt` a bundle may carry: [`paths::MAX_FILE_BYTES`], because
 /// it is published where a site file of that name would be.
@@ -626,8 +608,8 @@ async fn import_bundle(
     // block artifact is stored (so a snapshot referencing this generation's
     // own content lands on a workspace that already has it), before the
     // staged manifest is handed back for activation. Verified the same way
-    // as every other referenced file (design §10.2) — hash, size and
-    // content type — via `fetch_and_verify`, not trusted unchecked the way
+    // as every other referenced file (design §10.2) — hash and size — via
+    // `fetch_and_verify`, not trusted unchecked the way
     // a bare `Option<String>` path could only ever be.
     if let Some(declared) = &manifest.data {
         let url = data_url(&declared.path);
@@ -636,8 +618,7 @@ async fn import_bundle(
         // beside them through every database write would be a second copy of
         // the snapshot for nothing.
         let snapshot: data_snapshot::DataSnapshot = {
-            let bytes =
-                fetch_and_verify(fetch, &url, declared, DATA_CONTENT_TYPE, MAX_DATA_BYTES).await?;
+            let bytes = fetch_and_verify(fetch, &url, declared, MAX_DATA_BYTES).await?;
             serde_json::from_slice(&bytes)
                 .map_err(|e| format!("{url}: not a valid data snapshot: {e}"))?
         };
@@ -660,17 +641,15 @@ async fn import_bundle(
     )))
 }
 
-/// Fetch one declared file and check it is what the manifest said it was —
-/// against `served_as`, the content type this instance considers correct for
-/// it.
+/// Fetch one declared file and check it is what the manifest said it was.
 ///
-/// All three declared properties are load-bearing, so all three are checked:
-/// `sha256` is what design §10.2 requires ("verify every referenced file's
-/// hash"); `size` costs nothing over bytes already in hand and catches a
-/// manifest built from a different tree; `content_type` is what the file will
-/// actually be served as, so a bundle claiming a different one was produced
-/// by an exporter that does not agree with this build about how files are
-/// served.
+/// Both declared properties are checked: `sha256` is what design §10.2
+/// requires ("verify every referenced file's hash"), and `size` costs
+/// nothing over bytes already in hand and catches a manifest built from a
+/// different tree. A manifest declares no content type: what a file is
+/// served as is a function of its path
+/// ([`super::workspace::FileEntry::content_type`]), so a bundle has nothing
+/// to say about it.
 ///
 /// `max_bytes` is the limit for this kind of file — [`paths::MAX_FILE_BYTES`]
 /// for a workspace file, [`MAX_DATA_BYTES`] for the data snapshot — and the
@@ -679,7 +658,6 @@ async fn fetch_and_verify(
     fetch: &dyn SeedFetch,
     url: &str,
     declared: &SeedFile,
-    served_as: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     if declared.size > max_bytes as u64 {
@@ -704,19 +682,12 @@ async fn fetch_and_verify(
             declared.size
         ));
     }
-    if declared.content_type != served_as {
-        return Err(format!(
-            "{url}: the manifest declares content type {:?}, but this build serves it as {served_as:?}",
-            declared.content_type
-        ));
-    }
     Ok(bytes)
 }
 
 /// [`fetch_and_verify`] for a file that lands in the workspace (`site/…`,
-/// `blocks/<name>/…`): `workspace_path` both gates the fetch (a manifest
-/// entry naming `../../elsewhere` must not cause a request for it either)
-/// and derives the content type every such file is checked against.
+/// `blocks/<name>/…`): `workspace_path` gates the fetch, so a manifest entry
+/// naming `../../elsewhere` does not cause a request for it either.
 async fn fetch_verified(
     fetch: &dyn SeedFetch,
     url: &str,
@@ -725,8 +696,7 @@ async fn fetch_verified(
 ) -> Result<Vec<u8>, String> {
     paths::validate_path(workspace_path)
         .map_err(|e| format!("the seed bundle names {workspace_path:?}: {e}"))?;
-    let served = paths::content_type_for(workspace_path);
-    fetch_and_verify(fetch, url, declared, served, paths::MAX_FILE_BYTES).await
+    fetch_and_verify(fetch, url, declared, paths::MAX_FILE_BYTES).await
 }
 
 /// Check and fetch a bundle's sandbox block: the template name, the prompt
@@ -756,14 +726,7 @@ async fn fetch_sandbox(
         ));
     }
     let url = guide_url(&declared.guide.path);
-    let bytes = fetch_and_verify(
-        fetch,
-        &url,
-        &declared.guide,
-        GUIDE_CONTENT_TYPE,
-        MAX_GUIDE_BYTES,
-    )
-    .await?;
+    let bytes = fetch_and_verify(fetch, &url, &declared.guide, MAX_GUIDE_BYTES).await?;
     let guide_markdown =
         String::from_utf8(bytes).map_err(|_| format!("{url}: the guide is not valid UTF-8"))?;
     let llms_text = fetch_llms(fetch, &declared.llms).await?;
@@ -776,8 +739,7 @@ async fn fetch_sandbox(
 }
 
 /// Fetch and check the sandbox's `llms.txt` as a manifest declares it: the
-/// one name it may have, then hash, size and content type like any other
-/// file. Shared by the import and by [`repair_llms`], so a text recorded on
+/// one name it may have, then hash and size like any other file. Shared by the import and by [`repair_llms`], so a text recorded on
 /// a later boot passed exactly the checks one recorded at import did.
 async fn fetch_llms(fetch: &dyn SeedFetch, declared: &SeedFile) -> Result<String, String> {
     if declared.path != LLMS_PATH {
@@ -787,7 +749,7 @@ async fn fetch_llms(fetch: &dyn SeedFetch, declared: &SeedFile) -> Result<String
         ));
     }
     let url = llms_url(&declared.path);
-    let bytes = fetch_and_verify(fetch, &url, declared, LLMS_CONTENT_TYPE, MAX_LLMS_BYTES).await?;
+    let bytes = fetch_and_verify(fetch, &url, declared, MAX_LLMS_BYTES).await?;
     String::from_utf8(bytes).map_err(|_| format!("{url}: llms.txt is not valid UTF-8"))
 }
 
