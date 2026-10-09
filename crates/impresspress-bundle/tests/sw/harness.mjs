@@ -79,6 +79,8 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const source = SOURCES[wipe ? 'wipe' : 'plain'];
   const listeners = {};
   const network = [];
+  // The options each of those requests was made with, in the same order.
+  const networkInits = [];
   const posted = [];
   const navigated = [];
   const warnings = [];
@@ -219,9 +221,11 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     }
   };
   // What the static host would say. `network` records what it was asked for:
-  // the URL string the worker passed, or the request object it forwarded.
-  globalThis.fetch = async (request) => {
+  // the URL string the worker passed, or the request object it forwarded;
+  // `networkInits`, the options it passed with it.
+  globalThis.fetch = async (request, init) => {
     network.push(request);
+    networkInits.push(init);
     if (runtime.host) return runtime.host(request);
     if (request === '/') {
       return new Response(SHELL_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } });
@@ -291,6 +295,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     /// How many times the worker claimed its clients.
     claimed: () => claimed,
     network,
+    networkInits,
     posted,
     navigated,
     /// What the worker left for the boot shell, or `undefined`.

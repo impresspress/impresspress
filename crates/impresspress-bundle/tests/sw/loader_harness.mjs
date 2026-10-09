@@ -133,8 +133,12 @@ function element() {
 ///                 asked only if available gets `null`
 /// - `installs: 'stalls'` — a newly registered worker that installs and then
 ///                 never activates (as Chromium has been seen to leave one);
-///                 the wait for it runs out at once. `'late'`: one that
-///                 activates a moment after that wait has run out
+///                 the wait for it runs out at once. Where the origin has a
+///                 registration (`registeredUrl`), each version registered
+///                 over it is a new one, left `waiting` there in its place.
+///                 `'stalls-installing'`: the same, but each version is left
+///                 `installing` — its install never finishes. `'late'`: one
+///                 that activates a moment after that wait has run out
 /// - `secure`    — whether the page is a secure context (`window
 ///                 .isSecureContext`); `false` is the same shell served over
 ///                 plain http at a LAN address
@@ -164,6 +168,8 @@ export function loadShell({
   documentTitle = title,
   secure = true
 } = {}) {
+  // A newly registered version that never activates, either way.
+  const stalls = installs === 'stalls' || installs === 'stalls-installing';
   const sessionStorage = storage(session);
   const localStorage = storage();
   // `#status`, keeping every line written to it.
@@ -265,7 +271,7 @@ export function loadShell({
   const workerListeners = new Set();
   const worker = {
     state:
-      installs === 'stalls' || installs === 'late' ? 'installed' : installs ? 'activated' : 'redundant',
+      stalls || installs === 'late' ? 'installed' : installs ? 'activated' : 'redundant',
     addEventListener: (type, l) => type === 'statechange' && workerListeners.add(l),
     removeEventListener: (type, l) => workerListeners.delete(l),
     // The page asking the worker to take it.
@@ -350,6 +356,15 @@ export function loadShell({
       registered += 1;
       registeredUrls.push(url);
       events.push(`register ${url}`);
+      if (stalls && registeredUrl !== undefined) {
+        const current = await serviceWorker.getRegistration();
+        const installing = installs === 'stalls-installing';
+        const stalled = version(installing ? 'installing' : 'installed');
+        stalled.scriptURL = new URL(url, ORIGIN).href;
+        current.installing = installing ? stalled : null;
+        current.waiting = installing ? null : stalled;
+        return current;
+      }
       if (installs === 'late') {
         // Activates a moment after the wait for it has already run out.
         setTimeout(() => {
@@ -478,7 +493,7 @@ export function loadShell({
     const now =
       ms === 0 ||
       (ms === 10_000
-        ? !claims || installs === 'stalls' || installs === 'late'
+        ? !claims || stalls || installs === 'late'
         : ms === 2_000
           ? !answersRuntime
           : probeTimesOut(probes.length));
@@ -555,6 +570,8 @@ export function loadShell({
     updates: () => updates,
     /// The worker that controls the page now.
     controller: () => controller,
+    /// The origin's registration, once the page has asked for it.
+    registration: () => registration,
     /// The record of deaths recovered from, whole.
     recoveryRecord: () => cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? [],
     opfs: () => [...opfs],

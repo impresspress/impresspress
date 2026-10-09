@@ -886,10 +886,12 @@ jobs:
       # built with `opfs_wipe_on_recovery = true`: what a recovery may erase
       # can only be shown where erasing is allowed. It uses this job's server
       # (a static host with no fallback) and, for its slow-start test, one of
-      # its own on 8094 over the same `pkg/`.
+      # its own on 8094 over the same `pkg/`. `insecure-origin.spec.ts` is
+      # the boot page on plain http at a LAN address, against this server;
+      # it is a file of its own for its launch flag.
       - name: Run smoke tests (browser WASM, port 8080)
         working-directory: crates/impresspress-web
-        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/recovery-wipe.spec.ts
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/insecure-origin.spec.ts tests/e2e/recovery-wipe.spec.ts
 
       - name: Stop server
         if: always()

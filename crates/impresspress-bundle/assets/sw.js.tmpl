@@ -321,6 +321,28 @@ async function ensureInitialized() {
 }
 
 /**
+ * Ask the host for this version's runtime binary, past the browser's HTTP
+ * cache (`no-store`). Two versions can ask for the same binary at once — a
+ * recovery's replacement installing (`keepRuntime`) while the browser starts
+ * the old worker again for another tab, its kept copy dropped by that
+ * recovery (`runtimeBinary`) — and Chromium's HTTP cache holds a second
+ * request for a URL until the first has its response headers, for up to 20
+ * seconds: the old worker's start waited that long behind the install. The
+ * worker keeps the binary itself, in RUNTIME_CACHE, so the HTTP cache is
+ * needed only where that copy has gone.
+ *
+ * What this gives up is exactly that case, offline: a version installing, or
+ * a worker whose kept copy was dropped (a recovery) or evicted, cannot get
+ * its runtime without the host — the install fails, the start dies at stage
+ * `load` — where an HTTP cache entry might have answered before. That is the
+ * contract `dropCaches` in `loader.js` already states: a recovery's
+ * replacement fetches its own binary afresh, not a copy from before.
+ */
+function fetchRuntime() {
+    return fetch(RUNTIME_URL, { cache: 'no-store' });
+}
+
+/**
  * This version's runtime binary, as a `Response` for `init()`: the one kept
  * in RUNTIME_CACHE, or — where that entry has gone (a recovery dropped the
  * caches, the browser evicted them) — the host's answer.
@@ -333,7 +355,7 @@ async function runtimeBinary() {
     } catch (e) {
         console.warn('[__APP_NAME__] could not read the kept runtime:', e);
     }
-    return fetch(RUNTIME_URL);
+    return fetchRuntime();
 }
 
 // The first four bytes of every WebAssembly binary: `\0asm`.
@@ -357,7 +379,7 @@ const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 async function keepRuntime() {
     const cache = await caches.open(RUNTIME_CACHE);
     if (await cache.match(RUNTIME_URL)) return;
-    const response = await fetch(RUNTIME_URL);
+    const response = await fetchRuntime();
     if (!response.ok) {
         throw new Error(`the runtime ${RUNTIME_URL} could not be fetched: HTTP ${response.status}`);
     }

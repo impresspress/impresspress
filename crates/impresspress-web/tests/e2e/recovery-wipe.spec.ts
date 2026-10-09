@@ -498,7 +498,12 @@ test('a reset completes when the browser restarts the old worker for another tab
     await stopActiveWorker(page);
     const other = await context.newPage();
     const otherOpened = other.goto('/b/auth/login', { waitUntil: 'commit' });
-    await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(3);
+    // Its request reaches the host at once, not queued behind the install's
+    // request for the same binary: Chromium's HTTP cache holds a second
+    // request for a URL until the first has its headers, for up to 20 s,
+    // and the worker fetches its runtime past that cache (`fetchRuntime` in
+    // `sw.js.tmpl`).
+    await expect.poll(() => server.held(), { timeout: 10_000 }).toBe(3);
     // The old worker gets its runtime first, and the replacement is still
     // installing. Superseded, with the reset's erase pending, the old worker
     // answers the other tab without loading anything — the other tab's
@@ -562,7 +567,9 @@ test('a reset completes when the old worker is restarted before the reset has re
 // the same moment, which Chromium has been seen to lose the activation on.
 // Whatever Chromium does, within moments the person is either in the app or
 // told that the new version has not started, and "Restart it" from there
-// ends in the app.
+// ends in the app: it registers a replacement over the version that has not
+// started (`notStarting` in `loader.js.tmpl`), rather than waiting for that
+// version's lost activation again.
 test('a reset whose replacement may not activate always leaves a way into the app', async ({ browser }) => {
   await withSlowStart(browser, async ({ page, context, server }) => {
     await page.getByRole('button', { name: 'Reset local data and reload' }).click();
@@ -570,7 +577,11 @@ test('a reset whose replacement may not activate always leaves a way into the ap
     await stopActiveWorker(page);
     const other = await context.newPage();
     const otherOpened = other.goto('/b/auth/login', { waitUntil: 'commit' });
-    await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(3);
+    // At once, as in the case above: the release comes well inside the
+    // CONTROL_WAIT_MS the not-started screen waits after the reset, so
+    // which of the two ends this test is the browser's doing, not the
+    // clock's.
+    await expect.poll(() => server.held(), { timeout: 5_000 }).toBe(3);
     server.release();
     await otherOpened;
 

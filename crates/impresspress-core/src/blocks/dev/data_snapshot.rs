@@ -977,10 +977,15 @@ pub async fn import(
     let mut report = ImportReport::default();
     let mut writes = Vec::new();
     // `Replace` tables first, in `REPLACE_ORDER` — not the snapshot's own
-    // alphabetical order. `Upsert` tables carry no such dependency (every
-    // foreign id they reference — `product_id`, `offer_id` — is validated by
-    // the owning handler at write time, never enforced by this import), so
-    // the remaining loop below keeps the snapshot's own order.
+    // alphabetical order. `Upsert` and `OwnedSet` tables carry no such
+    // dependency: this import enforces none of the foreign ids they
+    // reference (`product_id`, `offer_id`), and nor does the schema. Outside
+    // it, an `Upsert` table's references are checked by the handler that
+    // writes the row; an `OwnedSet` row is created, and its `offer_id`
+    // set, only by its owner's writer (`offers::create` /
+    // `offers::update_draft`, through `replace_for_offer`), to the id of the
+    // offer that writer has just written, so there is nothing to check.
+    // Hence the remaining loop below keeps the snapshot's own order.
     for &table in REPLACE_ORDER {
         let Some(rows) = snapshot.tables.get(table) else {
             continue;
@@ -1042,13 +1047,15 @@ pub async fn import(
         if REPLACE_ORDER.contains(&table.as_str()) {
             continue; // already queued above, in dependency order
         }
-        // The mode comes from the allowlist rather than being assumed: it
-        // carries the table's conflict target, and every remaining entry is
-        // an `Upsert` (each `Mode::Replace` table is named in
-        // `REPLACE_ORDER`). The loop above already refused any table not on
-        // the list, so a lookup miss here is unreachable — and is reported
-        // rather than defaulted, because defaulting to `BY_ID` is precisely
-        // the assumption this field exists to stop making.
+        // The mode comes from the allowlist rather than being assumed: every
+        // remaining entry is an `Upsert` or an `OwnedSet` (each
+        // `Mode::Replace` table is named in `REPLACE_ORDER`), and the mode
+        // says which conflict target its rows are upserted on — an
+        // `Upsert`'s own, an `OwnedSet`'s `BY_ID`. The loop above already
+        // refused any table not on the list, so a lookup miss here is
+        // unreachable — and is reported rather than defaulted, because
+        // defaulting to `BY_ID` is precisely the assumption this field
+        // exists to stop making.
         let conflict = match TABLE_ALLOWLIST.iter().find(|(name, _)| name == table) {
             Some((_, Mode::Upsert(conflict))) => Some(*conflict),
             // The set was cleared above; its rows keep their own ids.
