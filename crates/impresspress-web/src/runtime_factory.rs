@@ -2,7 +2,7 @@
 //!
 //! Cold start builds once with no dynamic blocks; an activation that changes
 //! the block set builds again with the new set and swaps the runtime (see
-//! `dev_runtime`, Task 9). Everything `initialize()` used to do between
+//! `site_runtime`). Everything `initialize()` used to do between
 //! `db_init()` and `store_wafer()` lives here, parameterised by the dynamic
 //! block set — so the second build is the *same* build, not a hand-kept copy
 //! of it.
@@ -15,9 +15,11 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "browser-devtools")]
+#[cfg(feature = "browser-site-runtime")]
 use impresspress_core::blocks::dev::{DevShared, DynamicBlockSpec};
 use impresspress_core::builder::{self, ImpresspressBuilder};
+#[cfg(feature = "browser-site-runtime")]
+use impresspress_core::routing::RouteAccess;
 use wafer_core::interfaces::{
     config::service::ConfigService,
     crypto::service::CryptoService,
@@ -31,27 +33,28 @@ use wasm_bindgen::prelude::*;
 /// block. Loading (wasmi instantiation over the stored artifact) is the
 /// caller's job — the factory only registers what it is handed, so a guest that
 /// fails to load never reaches a `Wafer` at all.
-#[cfg(feature = "browser-devtools")]
+#[cfg(feature = "browser-site-runtime")]
 pub type DynamicBlock = (DynamicBlockSpec, Arc<dyn wafer_run::Block>);
 
-/// Placeholder element type for builds without `browser-devtools`.
+/// Placeholder element type for builds without `browser-site-runtime`.
 ///
-/// Uninhabited on purpose: without the feature the sandbox cannot exist, so the
-/// only slice that can be constructed is the empty one. `build(&[])` therefore
+/// Uninhabited on purpose: without the feature the sandbox's runtime cannot
+/// exist, so the only slice that can be constructed is the empty one. `build(&[])` therefore
 /// compiles unchanged in both configurations without the call site growing a
 /// `#[cfg]`, and no "the feature is off but we still handled a dynamic block"
 /// path can be written by accident.
-#[cfg(not(feature = "browser-devtools"))]
+#[cfg(not(feature = "browser-site-runtime"))]
 pub enum DynamicBlock {}
 
 /// Build-time policy that is fixed for the life of the service worker.
 pub struct RuntimeOptions {
     /// `initialize({ dev: … })` — what the *bundle asked for*. This is a
     /// request, not a verdict: [`RuntimeFactory::new`] runs it through
-    /// [`SandboxMode::resolve`] and keeps only the result, because a bundle
-    /// can ask for a workspace that was never compiled in — and because
-    /// `dev: false` on a build that HAS the feature is an exported site,
-    /// which still needs the sandbox's runtime half.
+    /// [`SandboxMode::resolve`] with [`CompiledSandbox::COMPILED`] and keeps
+    /// only the result, because a bundle can ask for a workspace that was
+    /// never compiled in — and because `dev: false` on a build that HAS the
+    /// workspace is an exported site, which still needs the sandbox's runtime
+    /// half.
     pub dev_enabled: bool,
     /// `initialize({ pageEngines: … })` — the page-side model engines the
     /// bundle ships (`impresspress-bundle`'s `assets::PAGE_ENGINES`, as URL
@@ -60,6 +63,41 @@ pub struct RuntimeOptions {
     /// post to a page. Published as
     /// `impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`.
     pub page_engine_scripts: Vec<String>,
+}
+
+/// Which of the sandbox's halves this binary COMPILED — the build's side of
+/// [`SandboxMode`], fixed by the cargo features and nothing else.
+///
+/// `browser-devtools` implies `browser-site-runtime`, so these three are every
+/// configuration there is, and [`Self::COMPILED`] is the one this build is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompiledSandbox {
+    /// Neither feature: no sandbox code in the binary at all — the default
+    /// `pkg/` every non-sandbox bundle ships.
+    None,
+    /// `browser-site-runtime` alone: the runtime half (`site_runtime`), and
+    /// none of the workspace — no `/b/dev`, no probe, no export, no compiler
+    /// adapter. What a site that ships a `seed/` needs, and nothing more.
+    Site,
+    /// `browser-devtools`: the runtime half and the workspace half
+    /// (`dev_runtime`) — the development sandbox's own build.
+    Devtools,
+}
+
+impl CompiledSandbox {
+    /// This build's configuration, read from the features once, here.
+    ///
+    /// Every consumer reaches the features through this constant and
+    /// [`SandboxMode::resolve`] rather than restating a `cfg!` of its own, so
+    /// the rule is one expression; the const assertions below check it in
+    /// whichever configuration is being compiled.
+    pub const COMPILED: Self = if cfg!(feature = "browser-devtools") {
+        Self::Devtools
+    } else if cfg!(feature = "browser-site-runtime") {
+        Self::Site
+    } else {
+        Self::None
+    };
 }
 
 /// What the development sandbox contributes to this runtime.
@@ -83,56 +121,74 @@ pub struct RuntimeOptions {
 /// is read "on a cold boot with no active generation" — a property of the
 /// deployment, not of whether anyone can edit it.
 ///
-/// So: **the feature decides the runtime; the flag decides the workspace.**
+/// So: **the build decides which halves exist; the flag can only choose
+/// between the halves the build has.** [`CompiledSandbox`] is the build's
+/// side, `initialize({ dev })` the bundle's request, and
+/// [`Self::resolve`] the one rule that combines them:
+///
+/// | compiled | `dev: false` | `dev: true` |
+/// |---|---|---|
+/// | [`CompiledSandbox::None`] | [`Self::Absent`] | [`Self::Absent`] |
+/// | [`CompiledSandbox::Site`] | [`Self::Exported`] | [`Self::Exported`] |
+/// | [`CompiledSandbox::Devtools`] | [`Self::Exported`] | [`Self::Workspace`] |
+///
+/// A request the build cannot honour gets one console warning from
+/// `initialize()` and the mode the build has, never more.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// `browser-devtools` is not compiled in. There is no sandbox code in the
-    /// binary at all, and the runtime this produces is indistinguishable from
-    /// one that was never asked for a sandbox — no seeded variables, no
-    /// widened CSP, no seed import, nothing but the one console warning
-    /// `initialize()` emits when a bundle asks anyway. "Feature off =
-    /// nothing" is the security model (design §13), not an optimisation: a
-    /// relaxed `worker-src`/`frame-src` on a build with no sandbox to use
-    /// them is pure attack surface.
+    /// No sandbox is compiled in ([`CompiledSandbox::None`]). There is no
+    /// sandbox code in the binary at all, and the runtime this produces is
+    /// indistinguishable from one that was never asked for a sandbox — no
+    /// seeded variables, no widened CSP, no seed import, nothing but the one
+    /// console warning `initialize()` emits when a bundle asks anyway.
+    /// "Feature off = nothing" is the security model (design §13), not an
+    /// optimisation: a relaxed `worker-src`/`frame-src` on a build with no
+    /// sandbox to use them is pure attack surface.
     Absent,
-    /// The feature is compiled in and the bundle booted with `dev: false` —
-    /// **an exported site**. The runtime half is fully live (it imports its
-    /// `seed/`, converges its journal, rebuilds with its dynamic blocks and
-    /// serves `/`), and the workspace half does not exist: no `/b/dev` route,
-    /// no widened CSP, and no cross-origin isolation — which an exported site
-    /// positively wants back, since isolation is what stops a page it serves
-    /// from embedding a third-party iframe (design §20, amendment 14).
+    /// The runtime half is live and the workspace is not — **an exported
+    /// site**. Either a site build ([`CompiledSandbox::Site`], whatever the
+    /// bundle asked for: the workspace is not in the binary) or a
+    /// `browser-devtools` build booted with `dev: false`. The runtime half is
+    /// fully live (it imports its `seed/`, converges its journal, rebuilds
+    /// with its dynamic blocks and serves `/`), and the workspace half is
+    /// not reachable: no `/b/dev` route, no widened CSP, and no cross-origin
+    /// isolation — which an exported site positively wants back, since
+    /// isolation is what stops a page it serves from embedding a third-party
+    /// iframe (design §20, amendment 14). On a site build the workspace's
+    /// code is absent too; on a `browser-devtools` build it is compiled in
+    /// and unrouted.
     Exported,
-    /// The feature is compiled in and the bundle booted with `dev: true` —
-    /// the development sandbox itself. Everything [`Self::Exported`] has,
-    /// plus `/b/dev` and the tooling around it.
+    /// A `browser-devtools` build booted with `dev: true` — the development
+    /// sandbox itself. Everything [`Self::Exported`] has, plus `/b/dev` and
+    /// the tooling around it.
     Workspace,
 }
 
 impl SandboxMode {
-    /// Resolve the mode from the build and the bundle's request.
+    /// Resolve the mode from the build and the bundle's request — the table
+    /// in this type's doc.
     ///
-    /// `feature_compiled` is `cfg!(feature = "browser-devtools")`;
-    /// `requested` is the `dev` flag from `initialize({ dev: … })`. The flag
-    /// is a *request*: a bundle can ask for a workspace that was never
-    /// compiled in, and the answer is [`Self::Absent`], not a workspace.
+    /// `compiled` is [`CompiledSandbox::COMPILED`]; `requested` is the `dev`
+    /// flag from `initialize({ dev: … })`. The flag is a *request*: a bundle
+    /// can ask for a workspace that was never compiled in, and the answer is
+    /// the mode the build has — [`Self::Absent`] or [`Self::Exported`] — not
+    /// a workspace.
     ///
     /// Taken as parameters rather than read from `cfg!` inside, so the rule is
-    /// one pure expression stated once instead of a `cfg!` repeated at each
-    /// site that consumes it — every consumer reads
+    /// one pure expression stated once — every consumer reads
     /// [`RuntimeFactory::mode`], and the raw request is deliberately not
     /// stored on the factory at all.
-    pub const fn resolve(feature_compiled: bool, requested: bool) -> Self {
-        match (feature_compiled, requested) {
-            (false, _) => Self::Absent,
-            (true, false) => Self::Exported,
-            (true, true) => Self::Workspace,
+    pub const fn resolve(compiled: CompiledSandbox, requested: bool) -> Self {
+        match (compiled, requested) {
+            (CompiledSandbox::None, _) => Self::Absent,
+            (CompiledSandbox::Site, _) | (CompiledSandbox::Devtools, false) => Self::Exported,
+            (CompiledSandbox::Devtools, true) => Self::Workspace,
         }
     }
 
     /// Whether the sandbox's **runtime** half is live: the ledger, the seed
     /// import, journal convergence, the dynamic-block rebuild, and the
-    /// `HAS_LANDING_PAGE` fact. True for both compiled-in modes.
+    /// `HAS_LANDING_PAGE` fact. True for both modes a sandbox build can be in.
     pub const fn runtime_present(self) -> bool {
         !matches!(self, Self::Absent)
     }
@@ -145,51 +201,134 @@ impl SandboxMode {
     }
 }
 
+/// The routes [`RuntimeFactory::build`] registers for the `impresspress/dev`
+/// block in `mode`, in the order the router must be given them:
+/// `blocks::dev::WORKSPACE_ROUTES` in [`SandboxMode::Workspace`], and none in
+/// any other mode.
+///
+/// `build` iterates exactly this, so the const assertions below — which call
+/// it for every mode the configuration can resolve to — state what the
+/// runtime actually routes, not a parallel belief about it. In a site build
+/// the empty answer holds twice over: `impresspress-core` without
+/// `block-dev` has no `WORKSPACE_ROUTES` to name, so no branch of this
+/// function can return one.
+#[cfg(feature = "browser-site-runtime")]
+const fn workspace_routes(mode: SandboxMode) -> &'static [(&'static str, RouteAccess)] {
+    #[cfg(feature = "browser-devtools")]
+    if mode.workspace() {
+        return impresspress_core::blocks::dev::WORKSPACE_ROUTES;
+    }
+    #[cfg(not(feature = "browser-devtools"))]
+    let _ = mode;
+    &[]
+}
+
 // The rule, checked by rustc in the configuration actually being built rather
-// than by a unit test passing hand-written booleans. `impresspress-web` does
+// than by a unit test passing hand-written values. `impresspress-web` does
 // not compile for the host at all (every module reaches into
 // `impresspress_browser`'s `#[cfg(target_arch = "wasm32")]` items), so a
 // `#[test]` here would never execute; these `const` assertions do, on every
-// `cargo check --target wasm32-unknown-unknown` in both configurations and in
-// CI's wasm build. That is also the stronger check: it exercises the real
-// `cfg!(feature = …)` wiring below, which a parameterised unit test cannot.
+// `cargo check --target wasm32-unknown-unknown` of each configuration — CI's
+// three wasm32 clippy steps (no features, `browser-site-runtime`,
+// `browser-devtools`) and its wasm builds. That is also the stronger check:
+// it exercises the real `cfg!(feature = …)` wiring in
+// [`CompiledSandbox::COMPILED`], which a parameterised unit test cannot.
+// One block per configuration; exactly one of them compiles in any build.
 
-// --- feature off: nothing, whatever the bundle asked for -------------------
-#[cfg(not(feature = "browser-devtools"))]
+// --- no sandbox: nothing, whatever the bundle asked for -------------------
+#[cfg(not(feature = "browser-site-runtime"))]
 const _: () = {
+    assert!(matches!(CompiledSandbox::COMPILED, CompiledSandbox::None));
     assert!(matches!(
-        SandboxMode::resolve(cfg!(feature = "browser-devtools"), false),
+        SandboxMode::resolve(CompiledSandbox::COMPILED, false),
         SandboxMode::Absent
     ));
     assert!(matches!(
-        SandboxMode::resolve(cfg!(feature = "browser-devtools"), true),
+        SandboxMode::resolve(CompiledSandbox::COMPILED, true),
         SandboxMode::Absent
     ));
 };
 
-// --- feature on: the flag chooses which half ------------------------------
+// --- site build: the runtime half, whatever the bundle asked for ----------
+#[cfg(all(feature = "browser-site-runtime", not(feature = "browser-devtools")))]
+const _: () = {
+    assert!(matches!(CompiledSandbox::COMPILED, CompiledSandbox::Site));
+    // `dev: false` and `dev: true` alike: an exported site. The runtime half
+    // is live (`site_runtime::attach` relies on this), the workspace is not.
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::COMPILED, false),
+        SandboxMode::Exported
+    ));
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::COMPILED, true),
+        SandboxMode::Exported
+    ));
+    assert!(SandboxMode::resolve(CompiledSandbox::COMPILED, false).runtime_present());
+    assert!(SandboxMode::resolve(CompiledSandbox::COMPILED, true).runtime_present());
+    // And so the factory routes nothing of the workspace for any request:
+    // no `/b/dev`, no `/b/dev/enter`. The router legs of
+    // `impresspress-core`'s `tests/site_runtime.rs::no_workspace_path_answers`
+    // test only that test's fixture; this is the production registration.
+    assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, false)).is_empty());
+    assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, true)).is_empty());
+};
+
+// --- devtools build: the flag chooses which half --------------------------
 #[cfg(feature = "browser-devtools")]
 const _: () = {
+    assert!(matches!(
+        CompiledSandbox::COMPILED,
+        CompiledSandbox::Devtools
+    ));
     // `dev: false` — an exported site. The runtime half IS live; this is the
     // assertion whose absence made an exported bundle boot empty.
     assert!(matches!(
-        SandboxMode::resolve(cfg!(feature = "browser-devtools"), false),
+        SandboxMode::resolve(CompiledSandbox::COMPILED, false),
         SandboxMode::Exported
     ));
-    assert!(SandboxMode::resolve(cfg!(feature = "browser-devtools"), false).runtime_present());
-    assert!(!SandboxMode::resolve(cfg!(feature = "browser-devtools"), false).workspace());
+    assert!(SandboxMode::resolve(CompiledSandbox::COMPILED, false).runtime_present());
+    assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, false)).is_empty());
 
-    // `dev: true` — the sandbox itself: both halves.
+    // `dev: true` — the sandbox itself: both halves, and every workspace
+    // route.
     assert!(matches!(
-        SandboxMode::resolve(cfg!(feature = "browser-devtools"), true),
+        SandboxMode::resolve(CompiledSandbox::COMPILED, true),
         SandboxMode::Workspace
     ));
-    assert!(SandboxMode::resolve(cfg!(feature = "browser-devtools"), true).runtime_present());
-    assert!(SandboxMode::resolve(cfg!(feature = "browser-devtools"), true).workspace());
+    assert!(SandboxMode::resolve(CompiledSandbox::COMPILED, true).runtime_present());
+    assert!(
+        workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, true)).len()
+            == impresspress_core::blocks::dev::WORKSPACE_ROUTES.len()
+    );
+    assert!(!impresspress_core::blocks::dev::WORKSPACE_ROUTES.is_empty());
 };
 
-// --- and the predicates agree with the states, in every build -------------
+// --- and the rule and the predicates agree, in every build ----------------
 const _: () = {
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::None, false),
+        SandboxMode::Absent
+    ));
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::None, true),
+        SandboxMode::Absent
+    ));
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::Site, false),
+        SandboxMode::Exported
+    ));
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::Site, true),
+        SandboxMode::Exported
+    ));
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::Devtools, false),
+        SandboxMode::Exported
+    ));
+    assert!(matches!(
+        SandboxMode::resolve(CompiledSandbox::Devtools, true),
+        SandboxMode::Workspace
+    ));
     assert!(!SandboxMode::Absent.runtime_present());
     assert!(!SandboxMode::Absent.workspace());
     assert!(SandboxMode::Exported.runtime_present());
@@ -224,9 +363,10 @@ pub struct RuntimeFactory {
     pub(crate) image: Arc<dyn ImageService>,
     pub(crate) vector: Arc<dyn VectorService>,
     pub(crate) embedding: Arc<dyn EmbeddingService>,
-    /// The sandbox control plane, once it has been installed. `None` on cold
-    /// start — the first runtime is built before there is anything to control.
-    #[cfg(feature = "browser-devtools")]
+    /// The sandbox control plane, once it has been installed. `None` until
+    /// `site_runtime::attach` installs it, which it does before the first
+    /// build (see that function).
+    #[cfg(feature = "browser-site-runtime")]
     pub(crate) dev: Option<Arc<DevShared>>,
 }
 
@@ -234,7 +374,7 @@ impl RuntimeFactory {
     /// Construct the browser services once.
     /// `BrowserEmbeddingService::new` is the only fallible one.
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
-        let mode = SandboxMode::resolve(cfg!(feature = "browser-devtools"), options.dev_enabled);
+        let mode = SandboxMode::resolve(CompiledSandbox::COMPILED, options.dev_enabled);
 
         let config_svc: Arc<dyn ConfigService> =
             Arc::new(wafer_core::service_blocks::config::EnvConfigService::new());
@@ -283,15 +423,16 @@ impl RuntimeFactory {
             image,
             vector,
             embedding,
-            #[cfg(feature = "browser-devtools")]
+            #[cfg(feature = "browser-site-runtime")]
             dev: None,
         })
     }
 
     /// Install the sandbox control plane. Every runtime built after this point
-    /// carries the `impresspress/dev` block, its `/b/dev` Admin route and the
-    /// WRAP grant it needs on the published site.
-    #[cfg(feature = "browser-devtools")]
+    /// carries the `impresspress/dev` block and the WRAP grant it needs on the
+    /// published site — and, in [`SandboxMode::Workspace`], its `/b/dev`
+    /// routes (`workspace_routes`).
+    #[cfg(feature = "browser-site-runtime")]
     pub fn with_dev(mut self, dev: Arc<DevShared>) -> Self {
         self.dev = Some(dev);
         self
@@ -302,7 +443,7 @@ impl RuntimeFactory {
     /// Returns the booted `Wafer`; the caller decides whether this runtime
     /// becomes the live one (`store_wafer`) or replaces one (`replace_wafer`).
     pub async fn build(&self, dynamic: &[DynamicBlock]) -> Result<wafer_run::Wafer, JsValue> {
-        #[cfg(not(feature = "browser-devtools"))]
+        #[cfg(not(feature = "browser-site-runtime"))]
         let _ = dynamic;
 
         // ── Phase 1 ─────────────────────────────────────────────────────────
@@ -373,14 +514,14 @@ impl RuntimeFactory {
         // declared once, below; a second `block_config` for the same block
         // would silently drop the CSP.
         //
-        // The `mut` on this and on `builder` only bites under
-        // `browser-devtools`; without the feature there is no sandbox branch
-        // to widen either of them.
+        // The `mut` on this only bites under `browser-devtools`: only the
+        // workspace widens the headers, and a build without the workspace
+        // (a site build, or no sandbox at all) has no branch that does.
         #[cfg_attr(
             not(feature = "browser-devtools"),
             expect(
                 unused_mut,
-                reason = "only the sandbox branch widens it, and that branch is \
+                reason = "only the workspace branch widens it, and that branch is \
                           `feature = \"browser-devtools\"`-gated"
             )
         )]
@@ -412,12 +553,14 @@ impl RuntimeFactory {
             |map| (builder::fill_config_service(config_svc, map), ()),
         );
 
+        // The `mut` here bites under `browser-site-runtime`: the sandbox's
+        // runtime half registers the dev block and the generation's own blocks.
         #[cfg_attr(
-            not(feature = "browser-devtools"),
+            not(feature = "browser-site-runtime"),
             expect(
                 unused_mut,
                 reason = "only the sandbox branch extends it, and that branch is \
-                          `feature = \"browser-devtools\"`-gated"
+                          `feature = \"browser-site-runtime\"`-gated"
             )
         )]
         let mut builder = with_config
@@ -431,15 +574,17 @@ impl RuntimeFactory {
             .block_settings(initial_block_settings)
             .config_source(cfg_source);
 
-        #[cfg(feature = "browser-devtools")]
+        #[cfg(feature = "browser-site-runtime")]
         if let Some(dev) = &self.dev {
             use impresspress_core::blocks::dev;
 
-            // ── The RUNTIME half — both compiled-in modes ─────────────────
+            // ── The RUNTIME half — every mode a sandbox build can be in ──
             //
             // Everything below is what makes an ImpressPress folder serve the
-            // site it ships, and an exported bundle needs all of it. See
-            // `SandboxMode` for why this is not keyed on the `dev` flag.
+            // site it ships, and an exported bundle needs all of it — a site
+            // build (`browser-site-runtime`) compiles this and nothing of the
+            // workspace. See `SandboxMode` for why this is not keyed on the
+            // `dev` flag.
             //
             // The block itself is REGISTERED in both modes, and that is what
             // runs its `lifecycle(Init)` — which is what creates the
@@ -452,19 +597,31 @@ impl RuntimeFactory {
             // another block's table for no reason but bookkeeping.
             //
             // What keeps `/b/dev` unreachable in `Exported` is the absence of
-            // the ROUTE below — which is the same gate design §13 names as
-            // *the* gate ("the router — not any check inside any handler").
-            // An unrouted block has no HTTP surface at all.
+            // its ROUTES ([`workspace_routes`], below) — which is the same gate
+            // design §13 names as *the* gate ("the router — not any check
+            // inside any handler"). An unrouted block has no HTTP surface at
+            // all; on a site build there is also no workspace code behind it.
             //
             // Which constructor is the mode itself: both register the block,
-            // but only the workspace one routes `/b/dev` below, and only it
-            // may therefore declare that surface in its `BlockInfo` — see
-            // `DevBlock::runtime_only`.
-            let dev_block: Arc<dyn wafer_run::Block> = Arc::new(if self.mode.workspace() {
+            // but only the workspace one is routed below, and only it may
+            // therefore declare that surface in its `BlockInfo` — see
+            // `DevBlock::runtime_only`. A site build has only `runtime_only`.
+            #[cfg(feature = "browser-devtools")]
+            let dev_block = if self.mode.workspace() {
                 dev::DevBlock::with_workspace(dev.clone())
             } else {
                 dev::DevBlock::runtime_only()
-            });
+            };
+            #[cfg(not(feature = "browser-devtools"))]
+            let dev_block = {
+                // The site `DevBlock` holds no shared state: the host keeps
+                // `DevShared` for the activation queue and the boot run
+                // (`site_runtime::Sandbox`); this build's block only needs to
+                // be registered.
+                let _ = dev;
+                dev::DevBlock::runtime_only()
+            };
+            let dev_block: Arc<dyn wafer_run::Block> = Arc::new(dev_block);
             builder = builder
                 .extra_block(dev::BLOCK_NAME, dev_block)
                 // The published site is owned by `wafer-run/web`, so the dev
@@ -507,18 +664,23 @@ impl RuntimeFactory {
                 }
             }
 
-            // ── The WORKSPACE half — `dev: true` only ────────────────────
+            // ── The WORKSPACE half — `dev: true` on a devtools build only ──
+            //
+            // `/b/dev` is registered at `RouteAccess::Admin` here, at the
+            // router — not by a check inside any handler. That is the single
+            // gate keeping the sandbox admin-only, and its absence is what
+            // makes `/b/dev` a 404 on an exported site. The one `Public` row,
+            // the one-click entry page, is registered ahead of it and is
+            // absent from an exported site for the same reason;
+            // `dev::WORKSPACE_ROUTES` owns the list and its order, and
+            // `workspace_routes` is the one place that decides whether this
+            // runtime gets it — the function the const assertions above check
+            // for every mode this configuration can resolve to.
+            for (prefix, access) in workspace_routes(self.mode) {
+                builder = builder.add_route(*prefix, dev::BLOCK_NAME, *access);
+            }
+            #[cfg(feature = "browser-devtools")]
             if self.mode.workspace() {
-                // `/b/dev` is registered at `RouteAccess::Admin` here, at the
-                // router — not by a check inside any handler. That is the
-                // single gate keeping the sandbox admin-only, and its absence
-                // is what makes `/b/dev` a 404 on an exported site. The one
-                // `Public` row, the one-click entry page, is registered ahead
-                // of it and is absent from an exported site for the same
-                // reason; `dev::WORKSPACE_ROUTES` owns the list and its order.
-                for (prefix, access) in dev::WORKSPACE_ROUTES {
-                    builder = builder.add_route(*prefix, dev::BLOCK_NAME, *access);
-                }
                 // The `/b/dev` page previews the live site in a same-origin
                 // iframe. An exported site frames nothing.
                 security_headers["frame_ancestors"] = serde_json::json!("self");
@@ -608,10 +770,10 @@ impl RuntimeFactory {
     /// Keyed off [`SandboxMode::workspace`] rather than `dev.is_some()`: the
     /// policy is resolved once per runtime build, and a sandbox activation
     /// must not have to widen headers on a runtime that is already answering
-    /// requests. A bundle that was never booted with `{ dev: true }` — an
-    /// exported site, or any build without `browser-devtools` — therefore
-    /// carries the unrelaxed policy, which is what the feature-off smoke
-    /// asserts. Both relaxations exist for the workspace alone: the compiler
+    /// requests. A runtime not in [`SandboxMode::Workspace`] — an exported
+    /// site, a site build whatever it was asked for, or any build without the
+    /// sandbox — therefore carries the unrelaxed policy, which is what the
+    /// feature-off smoke asserts. Both relaxations exist for the workspace alone: the compiler
     /// worker and the `/b/dev` preview iframe.
     fn csp(&self) -> String {
         let mut csp = crate::IMPRESSPRESS_CSP.to_string();

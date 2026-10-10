@@ -80,8 +80,9 @@ test('admin can log in and reach the dashboard', async ({ page }) => {
 test('the default bundle has no dev block', async ({ page }) => {
   // The sandbox's security model (design §13) is that `impresspress/dev` is
   // ABSENT from a normal deployment, not merely disabled in one. `pkg/` is
-  // built without `browser-devtools` and without `[dev] enabled`, so both
-  // halves of that must hold: no route, and no relaxed header for the
+  // built with neither of the sandbox's features (`browser-site-runtime`, or
+  // `browser-devtools`, which implies it) and without `[dev] enabled`, so
+  // both halves of that must hold: no route, and no relaxed header for the
   // compiler worker / preview iframe the sandbox would need.
   //
   // Wait for the SW-served boot redirect to land rather than for

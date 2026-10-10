@@ -13,28 +13,49 @@ crate-type = ["cdylib", "rlib"]
 # can be loaded from bytes by the browser-hosted ImpressPress runtime. This is
 # intentionally opt-in until the browser editor/compiler pipeline exists.
 dynamic-wasm-blocks = ["wafer-run/wasmi"]
-# The browser development sandbox: the `impresspress/dev` control plane plus
-# wasmi for the guest blocks it activates. Off by default; a bundle built with
-# it still needs `[dev] enabled = true` in `impresspress.toml` to register
-# anything, and a bundle built without it ignores the flag entirely — the
-# sandbox's security model is that the block is absent from normal
-# deployments, not merely switched off in one.
+# The sandbox's RUNTIME half, and nothing of its workspace: the
+# `impresspress/dev` block registered without a route (its migrations create
+# the generation ledger), seed-on-boot, journal convergence and the
+# dynamic-block rebuild over wasmi (`site_runtime`). This is what an
+# ImpressPress folder needs to serve the site it ships — its `seed/`, its
+# data and its guest blocks — and it is everything a site build compiles of
+# the sandbox. `impresspress-core/site-runtime` is the same split on the core
+# side: `/b/dev`, the compiler adapter, the export and the WebMCP dev tools
+# are not in the binary at all, so no runtime flag can turn them on.
 # `web-sys/ServiceWorkerGlobalScope` + `WorkerGlobalScope`: seed-on-boot
 # fetches `/seed/manifest.json` from the worker's own global (`web_sys::window()`
 # is `None` there). Pulled in by the feature rather than unconditionally, so a
 # feature-off build compiles exactly the web-sys surface it did before.
-# `Clients` + `Client` + `ClientQueryOptions` + `ClientType`: an activation
-# posts the generation that went live to every window the worker controls
-# (`dev_runtime`'s `announce_active`, design §2.6) — same reason, same gate.
-browser-devtools = [
+browser-site-runtime = [
     "dynamic-wasm-blocks",
-    "impresspress-core/block-dev",
+    "impresspress-core/site-runtime",
     "web-sys/ServiceWorkerGlobalScope",
     "web-sys/WorkerGlobalScope",
+]
+# The browser development sandbox: the site runtime above plus the WORKSPACE
+# half (`dev_runtime`) — `/b/dev`, the probe, the export and the rest of the
+# `impresspress/dev` control plane (`impresspress-core/block-dev`). Off by
+# default; a bundle built with it still needs `[dev] enabled = true` in
+# `impresspress.toml` to route `/b/dev`, and without that flag it boots as an
+# exported site (runtime half only, the workspace compiled in but unrouted).
+# A bundle built without it ignores the flag entirely.
+# `Clients` + `Client` + `ClientQueryOptions` + `ClientType`: an activation
+# posts the generation that went live to every window the worker controls
+# (`dev_runtime`'s `announce_active`, design §2.6).
+# `RequestInit` + `RequestCache`: `dev_runtime`'s `BrowserShellSource`
+# fetches the static shell with `cache: 'no-store'` — an export must never
+# copy a previous deployment's bytes out of the HTTP cache under this
+# build's content-hashed names.
+# Both workspace-only, so a site build does not compile those bindings.
+browser-devtools = [
+    "browser-site-runtime",
+    "impresspress-core/block-dev",
     "web-sys/Clients",
     "web-sys/Client",
     "web-sys/ClientQueryOptions",
     "web-sys/ClientType",
+    "web-sys/RequestInit",
+    "web-sys/RequestCache",
 ]
 
 [dependencies]
@@ -45,11 +66,7 @@ impresspress-browser = { path = "../impresspress-browser" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
-    # `RequestInit` + `RequestCache` are what let `dev_runtime`'s
-    # `BrowserShellSource` fetch the static shell with `cache: 'no-store'` —
-    # an export must never copy a previous deployment's bytes out of the HTTP
-    # cache under this build's content-hashed names.
-    "Request", "RequestInit", "RequestCache", "Response", "ResponseInit",
+    "Request", "Response", "ResponseInit",
     "Headers", "ReadableStream",
     "Url",
     "console",
