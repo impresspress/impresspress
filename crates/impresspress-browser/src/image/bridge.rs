@@ -13,9 +13,9 @@ use crate::bridge::{
     image_unload_engine,
 };
 
-/// A refusal (no page can run the generation now) is
-/// [`ImageError::EngineUnavailable`] with bridge.js's caller-facing message;
-/// anything else is a backend fault.
+/// A refusal (no page can run the generation now, or the page's engine could
+/// not load) is [`ImageError::EngineUnavailable`] with its caller-facing
+/// message; anything else is a backend fault.
 fn js_err(e: wasm_bindgen::JsValue) -> ImageError {
     match crate::bridge::engine_unavailable(&e) {
         Some(message) => ImageError::EngineUnavailable(message),
@@ -102,8 +102,9 @@ pub async fn next_frame(request_id: &str) -> Result<Frame, ImageError> {
                 .to_string();
             Ok(Frame::Done { bytes, mime_type })
         }
-        // The page running the generation went away mid-stream: bridge.js
-        // ends the stream with the refusal's code and caller-facing message.
+        // A refusal after the stream started — the page running the
+        // generation went away, or it no longer holds the model: the stream
+        // ends with the refusal's code and caller-facing message.
         "error"
             if frame.get("code").and_then(|v| v.as_str())
                 == Some(crate::bridge::ENGINE_UNAVAILABLE) =>

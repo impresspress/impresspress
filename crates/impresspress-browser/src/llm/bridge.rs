@@ -59,8 +59,9 @@ pub async fn next_chunk(stream_id: &str) -> Result<StreamFrame, LlmError> {
     match kind {
         "chunk" => Ok(StreamFrame::Chunk(payload())),
         "done" => Ok(StreamFrame::Done),
-        // The page running the chat went away mid-stream: bridge.js ends the
-        // stream with the refusal's code and caller-facing message.
+        // A refusal after the stream started — the page running the chat
+        // went away, or it no longer holds the model: the stream ends with
+        // the refusal's code and caller-facing message.
         "error"
             if frame.get("code").and_then(|v| v.as_str())
                 == Some(crate::bridge::ENGINE_UNAVAILABLE) =>

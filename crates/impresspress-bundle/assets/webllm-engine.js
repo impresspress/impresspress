@@ -19,9 +19,17 @@
 //   { type: 'engine-present',      id, loaded, loading }   // runs the LLM engine;
 //                                                          // loaded / loading = [modelId] or []
 //   { type: 'llm-unload-response', id, error? }            // one-shot
-//   { type: 'llm-stream-frame',    id, kind, payload? }    // streams
+//   { type: 'llm-stream-frame',    id, kind, payload?, code? }  // streams
 //     `kind` ∈ {'chunk','done','error'}; chat emits 'chunk' frames per token
 //     and a terminal 'done' / 'error'.
+//
+// An error frame whose `code` is ENGINE_UNAVAILABLE is a refusal, as
+// bridge.js's own are: the engine cannot take the chat here (the model it
+// was sent for is not loaded in this page), and the payload is written for
+// whoever made the request. bridge.js passes it on as a refusal, which the
+// LLM service reports as `EngineUnavailable` with this message; any other
+// error is a fault in the chat itself. A failed `loadEngine` is not reported here at all: the load is
+// page-direct, so it rejects to the page script that called it.
 //
 // bridge.js sends a request only to a page that answered its probe, and a
 // chat or an unload only to the page whose answer lists the model: the
@@ -32,6 +40,9 @@
 // DOMContentLoaded for every page that loads this script (it's a multi-MB
 // jsdelivr ESM bundle), and most page loads never end up invoking the LLM.
 // Defer the import until a handler actually needs it.
+
+/** bridge.js's `ENGINE_UNAVAILABLE`: the `code` of a refusal. */
+const ENGINE_UNAVAILABLE = 'engine-unavailable';
 
 let _CreateMLCEngine = null;
 async function loadCreateMLCEngine() {
@@ -80,7 +91,16 @@ async function handleChatStream(msg) {
             return;
         }
         if (!_engine) {
-            await swStreamFrame(msg.id, 'error', 'no engine loaded');
+            // Sent here because this page held the model, or was loading it,
+            // when it was probed: the load has since failed, or the model was
+            // unloaded. The engine cannot take it — a refusal, not a fault.
+            await swPost({
+                type: 'llm-stream-frame',
+                id: msg.id,
+                kind: 'error',
+                payload: 'the page that took this request no longer holds the LLM model (its load failed, or it was unloaded) — load it again',
+                code: ENGINE_UNAVAILABLE,
+            });
             return;
         }
         const body = JSON.parse(msg.body);
