@@ -308,14 +308,16 @@ pub fn describe(err: &JsValue) -> String {
 
 /// The `code` bridge.js gives every refusal of a page-side engine request
 /// (`ENGINE_UNAVAILABLE` in `js/bridge.js`): no open page runs the engine,
-/// none holds the model, or the page running the request went away. Its
-/// message is written for the caller.
+/// none holds the model, the page running the request went away, or that
+/// page's engine refused it itself (its library, runtime or model could not
+/// load there). Its message is written for the caller.
 pub const ENGINE_UNAVAILABLE: &str = "engine-unavailable";
 
 /// The caller-facing message of an engine refusal (a rejection whose `code`
 /// is [`ENGINE_UNAVAILABLE`]), or `None` for any other rejection. The LLM,
 /// image and embedding bridges turn it into their service's
-/// `EngineUnavailable`, which the runtime answers as a 503 carrying it.
+/// `EngineUnavailable`, which `wafer-core`'s service handlers return as
+/// `Unavailable` (a 503) carrying it as written.
 pub fn engine_unavailable(err: &JsValue) -> Option<String> {
     let code = js_sys::Reflect::get(err, &JsValue::from_str("code")).ok()?;
     (code.as_string().as_deref() == Some(ENGINE_UNAVAILABLE)).then(|| describe(err))

@@ -1125,12 +1125,18 @@ jobs:
         # the isolation headers — it compiles nothing, so it costs ~35 s and
         # belongs with the other fake-worker specs.
         #
+        # `dev-page-engines.spec.ts` loads the REAL Transformers.js and ONNX
+        # Runtime (about 22 MB, mostly ONNX Runtime's wasm) from
+        # cdn.jsdelivr.net, as the deployed pages do: what it checks is that
+        # they load under the pages' CSP on a cross-origin-isolated page, which
+        # no stand-in can say. Only the model's files are local.
+        #
         # `sw-update.spec.ts` is last and serves its own port: it deploys
         # `UPDATE_DIST` over `DEV_DIST` for a browser that already has the
         # first, which is the one thing no spec before it does.
         run: |
           set -o pipefail
-          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-enter.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-llms.spec.ts tests/e2e/dev-auth-errors.spec.ts tests/e2e/dev-stopped-navigation.spec.ts tests/e2e/dev-vector.spec.ts tests/e2e/sw-update.spec.ts 2>&1 \
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-enter.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-llms.spec.ts tests/e2e/dev-auth-errors.spec.ts tests/e2e/dev-stopped-navigation.spec.ts tests/e2e/dev-vector.spec.ts tests/e2e/dev-page-engines.spec.ts tests/e2e/sw-update.spec.ts 2>&1 \
             | tee /tmp/dev-sandbox-e2e.log
 
       - name: Stop server
