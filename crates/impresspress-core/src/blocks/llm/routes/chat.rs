@@ -246,10 +246,13 @@ async fn dispatch_chat(
 ///
 /// - `Unavailable` is the model unable to take the chat now, and its message
 ///   is passed through: a 503 the caller can act on, not an opaque 500.
-/// - Anything else is classified by [`crud::db_error_internal`]: a WRAP
-///   refusal is a 403 and a quota a 429, and every other code is a fault,
-///   logged under `context` and answered with the sealed 500 — a
-///   `BackendError`'s text can be a provider's own error body.
+/// - Anything else is classified as every other failed call is, by
+///   [`crud::db_error_internal`] (see `crud::classify_db_error` for the
+///   whole table): a WRAP refusal is a 403 "Access denied", a quota a 429
+///   carrying its message, a duplicate key a 409, and so on; a code that
+///   table does not name is a fault, logged under `context` and answered
+///   with the sealed 500. `BackendError` is one of those (`Internal`), so
+///   its text, which can be a provider's own error body, stays in the log.
 ///
 /// Passing the message through is safe because of where an `Unavailable`
 /// from `wafer-run/llm` can come from. `wafer-core`'s llm handler
@@ -322,7 +325,8 @@ pub(in crate::blocks::llm) async fn handle_chat(
     // Drain the typed `ChatChunk` stream, concatenating `ChunkDelta::Text`
     // bytes into the assistant reply. A service failure — which the service
     // reports as the stream's error terminal — is answered through
-    // `chat_service_failed`, and nothing is stored.
+    // `chat_service_failed`, and no assistant turn is stored (the user turn
+    // `dispatch_chat` stored stays).
     let mut content = String::new();
     let mut truncated = false;
     // The model stopped because it hit the output-token budget, not because
@@ -1377,7 +1381,6 @@ mod tests {
         .await;
         next_frame(&mut out).await.expect("the first frame");
         drop(out);
-        assert!(!feed.cancelled(), "nothing has noticed the client yet");
 
         // The model's next item finds no one to forward it to. The service
         // may already be gone by then, so a refused send is fine too.

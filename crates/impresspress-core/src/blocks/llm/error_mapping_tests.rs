@@ -782,9 +782,10 @@ async fn a_rate_limited_provider_is_a_503() {
     }
 }
 
-/// Any other service failure is a fault: logged under a ref and answered with
-/// the sealed 500, whatever the provider's text said. `BackendError` carries
-/// a provider's own error body, so it never reaches the caller.
+/// A backend fault (`BackendError`, which reaches the route as `Internal`) is
+/// logged under a ref and answered with the sealed 500, whatever the
+/// provider's text said: that text can be a provider's own error body, so it
+/// never reaches the caller.
 #[tokio::test]
 async fn a_backend_fault_stays_the_sealed_500() {
     use wafer_core::interfaces::llm::service::LlmError;
