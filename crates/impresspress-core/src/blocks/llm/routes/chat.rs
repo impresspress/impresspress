@@ -6,7 +6,8 @@
 //! buffered handler ([`handle_chat`]) drains the resulting `ChatChunk`
 //! stream itself; the streaming handler ([`handle_chat_stream`]) hands it
 //! off to [`super::streaming::sse_chat_response`], which owns the SSE
-//! framing.
+//! framing, once it has the model's first item. Both answer a failed service
+//! call through [`chat_service_failed`].
 
 use futures::StreamExt;
 use wafer_core::clients::{
@@ -16,7 +17,7 @@ use wafer_core::clients::{
     },
     NativeTypedFrameStream,
 };
-use wafer_run::{context::Context, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
 
 use super::streaming::sse_chat_response;
 use crate::{
@@ -232,18 +233,53 @@ async fn dispatch_chat(
     };
     let stream = match llm_client::chat_stream(ctx, &chat_req).await {
         Ok(s) => s,
-        Err(e) => {
-            return Err(crate::blocks::crud::db_error_internal(
-                e,
-                "llm chat dispatch",
-            ))
-        }
+        Err(e) => return Err(chat_service_failed(e, "llm chat dispatch")),
     };
     Ok(DispatchOutcome {
         thread_id,
         model: resolved_model,
         stream,
     })
+}
+
+/// The answer to a failed `wafer-run/llm` chat call, for both chat routes.
+///
+/// - `Unavailable` is the model unable to take the chat now, and its message
+///   is passed through: a 503 the caller can act on, not an opaque 500.
+/// - Anything else is classified by [`crud::db_error_internal`]: a WRAP
+///   refusal is a 403 and a quota a 429, and every other code is a fault,
+///   logged under `context` and answered with the sealed 500 — a
+///   `BackendError`'s text can be a provider's own error body.
+///
+/// Passing the message through is safe because of where an `Unavailable`
+/// from `wafer-run/llm` can come from. `wafer-core`'s llm handler
+/// (`llm_error_to_block_error`) maps three `LlmError`s to it, and prefixes
+/// the op (`llm.chat: `):
+///
+/// - `EngineUnavailable`, whose reason is written for the caller — the
+///   variant's own contract is no paths, hosts or driver text;
+/// - `Network`, which the handler answers with its fixed
+///   `PROVIDER_UNREACHABLE` ("the model provider could not be reached") and
+///   whose transport text, which can name hosts, addresses and URLs, it only
+///   logs (since wafer-run #438; before it the text was the message);
+/// - `RateLimited`, the fixed "rate limited".
+///
+/// The handler is not the only source, though. The runtime raises
+/// `Unavailable` itself for a block whose `lifecycle(Init)` failed
+/// transiently, with that block's own error in the message (``block `X` init
+/// transient failure: …``). That cannot happen here only because
+/// `wafer-core`'s `wafer-run/llm` block
+/// (`wafer_core::service_blocks::llm::LlmBlock`, the one
+/// `builder::registration` registers) declares no lifecycle, so its Init is
+/// the trait's no-op. A new `Unavailable` arm in the handler, or a lifecycle on
+/// the llm block, has to be checked against this passthrough.
+///
+/// [`crud::db_error_internal`]: crate::blocks::crud::db_error_internal
+fn chat_service_failed(e: WaferError, context: &str) -> OutputStream {
+    match e.code {
+        ErrorCode::Unavailable => OutputStream::error(e),
+        _ => crate::blocks::crud::db_error_internal(e, context),
+    }
 }
 
 /// Result of the shared chat prelude — owns the typed stream plus the
@@ -284,7 +320,9 @@ pub(in crate::blocks::llm) async fn handle_chat(
     };
 
     // Drain the typed `ChatChunk` stream, concatenating `ChunkDelta::Text`
-    // bytes into the assistant reply. Propagate any error terminal as a 500.
+    // bytes into the assistant reply. A service failure — which the service
+    // reports as the stream's error terminal — is answered through
+    // `chat_service_failed`, and nothing is stored.
     let mut content = String::new();
     let mut truncated = false;
     // The model stopped because it hit the output-token budget, not because
@@ -295,7 +333,7 @@ pub(in crate::blocks::llm) async fn handle_chat(
     while let Some(item) = stream.next().await {
         let chunk = match item {
             Ok(c) => c,
-            Err(e) => return crate::blocks::crud::db_error_internal(e, "llm service error"),
+            Err(e) => return chat_service_failed(e, "llm service error"),
         };
         budget_exhausted |= chunk.finish_reason == Some(FinishReason::Length);
         match chunk.delta {
@@ -373,6 +411,17 @@ pub(in crate::blocks::llm) async fn handle_chat(
 /// encoding) to the HTTP response as a `data:` frame, then persists the
 /// accumulated assistant text to the messages block at natural
 /// end-of-stream — see [`sse_chat_response`].
+///
+/// The model's first item is read before the response starts.
+/// `wafer-run/llm` reports a failed chat as the stream's error terminal, so
+/// a chat the model refuses outright — an engine that cannot take it, a
+/// provider that cannot be reached — arrives as that first item, and with no
+/// status line written yet it is answered the way [`handle_chat`] answers
+/// it, through [`chat_service_failed`]: the refusal is a 503 that says why.
+/// Once a frame is on its way the status line is committed, and a later
+/// failure can only be the SSE `error` frame. Holding the first item costs nothing
+/// after it: it is the first frame sent, and every later one is forwarded
+/// as it arrives.
 pub(in crate::blocks::llm) async fn handle_chat_stream(
     block: &LlmBlock,
     ctx: &dyn Context,
@@ -385,17 +434,30 @@ pub(in crate::blocks::llm) async fn handle_chat_stream(
     let DispatchOutcome {
         thread_id,
         model: _,
-        stream,
+        mut stream,
     } = match dispatch_chat(block, ctx, msg, input).await {
         Ok(x) => x,
         Err(err) => return err,
+    };
+
+    // Dropped while it waits, this handler drops `stream` with it, and that
+    // cancels the chat (the token `wafer-core`'s handler gave the service
+    // fires when its output is dropped).
+    let first = match stream.next().await {
+        Some(Err(e)) => return chat_service_failed(e, "llm service error"),
+        first => first,
     };
 
     // The SSE producer runs in a spawned task, so it can't borrow `ctx` or
     // `msg`. `Context::clone_arc()` yields an owned handle that crosses the
     // spawn boundary, and `Message` is `Clone` — `messages_create` only
     // reads the forwarded auth identity off it.
-    sse_chat_response(stream, ctx.clone_arc(), msg.clone(), thread_id)
+    sse_chat_response(
+        futures::stream::iter(first).chain(stream),
+        ctx.clone_arc(),
+        msg.clone(),
+        thread_id,
+    )
 }
 
 #[cfg(test)]
@@ -480,23 +542,31 @@ mod tests {
     ) {
         use std::sync::Arc;
 
-        use crate::blocks::llm::{
-            routes::test_support::StubLlmServiceBlock, DEFAULT_MODEL_VAR, DEFAULT_PROVIDER_VAR,
-        };
+        use crate::blocks::llm::routes::test_support::StubLlmServiceBlock;
+
+        let chat_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (ctx, thread_id) = chat_fixture_serving(Arc::new(StubLlmServiceBlock {
+            chat_chunks,
+            chat_calls: chat_calls.clone(),
+            ..Default::default()
+        }))
+        .await;
+        (ctx, thread_id, chat_calls)
+    }
+
+    /// The messages block, a default provider and model, `llm` as
+    /// `wafer-run/llm`, and one thread owned by `user-a`. Returns the context
+    /// and the thread id.
+    async fn chat_fixture_serving(
+        llm: std::sync::Arc<dyn wafer_run::Block>,
+    ) -> (crate::test_support::TestContext, String) {
+        use crate::blocks::llm::{DEFAULT_MODEL_VAR, DEFAULT_PROVIDER_VAR};
 
         let mut ctx = crate::test_support::TestContext::with_llm().await;
         register_messages_block(&mut ctx).await;
         ctx.set_config(DEFAULT_PROVIDER_VAR, "stub-backend");
         ctx.set_config(DEFAULT_MODEL_VAR, "stub-model");
-        let chat_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        ctx.register_block(
-            "wafer-run/llm",
-            Arc::new(StubLlmServiceBlock {
-                chat_chunks,
-                chat_calls: chat_calls.clone(),
-                ..Default::default()
-            }),
-        );
+        ctx.register_block("wafer-run/llm", llm);
         let thread = crate::blocks::messages::service::create_context(
             &ctx.fixture(),
             "user-a",
@@ -509,7 +579,7 @@ mod tests {
         )
         .await
         .expect("seed a thread");
-        (ctx, thread.id, chat_calls)
+        (ctx, thread.id)
     }
 
     /// The body a chat request carries for `thread_id`.
@@ -636,9 +706,11 @@ mod tests {
         );
     }
 
-    /// The SSE path shares the prelude, so it must carry the budget too — and
-    /// it fails differently: the client receives `event: error` after the
-    /// status line is already committed, never a 500.
+    /// The SSE path shares the prelude, so it must carry the budget too. It
+    /// fails the same way when it does not: the encoder's refusal is the
+    /// stream's first item, which the route reads before its status line, so
+    /// it is the buffered route's sealed 500 rather than an `event: error`
+    /// frame after a 200.
     #[cfg(feature = "llm")]
     #[tokio::test]
     async fn a_streamed_chat_reaches_an_anthropic_provider_with_the_configured_max_tokens() {
@@ -663,7 +735,7 @@ mod tests {
         );
         assert!(
             sse.ends_with("data: [DONE]\n\n"),
-            "a refused request ends in `event: error`, got: {sse}"
+            "a whole answer ends in [DONE], got: {sse}"
         );
         let requests = fake.requests();
         assert_eq!(
@@ -1199,6 +1271,148 @@ mod tests {
             "impresspress/messages",
             Arc::new(crate::blocks::messages::MessagesBlock::new()),
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The streaming route reads the model's first item before its status line
+    // -----------------------------------------------------------------------
+    //
+    // So a refusal that arrives first is a status (see `error_mapping_tests`),
+    // which costs the stream nothing after that first item: each frame still
+    // goes out as the model sends it, and a client that goes away still
+    // cancels the chat. These feed the real `wafer-run/llm` block item by
+    // item, so a route that buffered would hang rather than pass.
+
+    /// How long a step that needs nothing but scheduling may take.
+    const STEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The next body frame of `out`, as text, skipping meta. `None` at a
+    /// terminal.
+    async fn next_frame(out: &mut OutputStream) -> Option<String> {
+        use wafer_block::stream::StreamEvent;
+        loop {
+            let event = tokio::time::timeout(STEP, out.next())
+                .await
+                .expect("the stream route forwards each frame as it comes")?;
+            match event {
+                StreamEvent::Chunk(bytes) => {
+                    return Some(String::from_utf8(bytes).expect("an SSE frame is utf8"))
+                }
+                StreamEvent::Meta(_) => continue,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Wait, a scheduling step at most, for `done`.
+    async fn until(what: &str, done: impl Fn() -> bool) {
+        tokio::time::timeout(STEP, async {
+            while !done() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    }
+
+    /// Each frame reaches the client while the model is still answering: the
+    /// route holds the first item only until its status line is decided.
+    #[tokio::test]
+    async fn the_stream_route_forwards_each_frame_while_the_model_answers() {
+        use crate::blocks::llm::routes::test_support::fed_llm_block;
+
+        let (llm, feed) = fed_llm_block();
+        let (ctx, thread_id) = chat_fixture_serving(llm).await;
+        feed.items
+            .unbounded_send(Ok(ChatChunk::text("Hel")))
+            .expect("feed");
+
+        let mut out = tokio::time::timeout(
+            STEP,
+            handle_chat_stream(
+                &stub_block(),
+                &ctx,
+                &crate::test_support::auth_msg("create", "/b/llm/api/chat/stream", "user-a"),
+                chat_body(&thread_id),
+            ),
+        )
+        .await
+        .expect("the status line waits for the first item only");
+
+        let first = next_frame(&mut out).await.expect("the first frame");
+        assert!(first.contains("Hel"), "{first}");
+
+        // The model has not finished; its next item is forwarded on its own.
+        feed.items
+            .unbounded_send(Ok(ChatChunk::text("lo")))
+            .expect("feed");
+        let second = next_frame(&mut out).await.expect("the second frame");
+        assert!(second.contains("lo"), "{second}");
+
+        feed.items.close_channel();
+        assert_eq!(
+            next_frame(&mut out).await.as_deref(),
+            Some("data: [DONE]\n\n")
+        );
+    }
+
+    /// A client that goes away mid-answer still cancels the chat: the frame
+    /// it is no longer there for ends the route's read of the model, which
+    /// fires the token `wafer-core`'s handler gave the service.
+    #[tokio::test]
+    async fn a_client_that_goes_away_mid_answer_cancels_the_chat() {
+        use crate::blocks::llm::routes::test_support::fed_llm_block;
+
+        let (llm, feed) = fed_llm_block();
+        let (ctx, thread_id) = chat_fixture_serving(llm).await;
+        feed.items
+            .unbounded_send(Ok(ChatChunk::text("Hel")))
+            .expect("feed");
+        let mut out = handle_chat_stream(
+            &stub_block(),
+            &ctx,
+            &crate::test_support::auth_msg("create", "/b/llm/api/chat/stream", "user-a"),
+            chat_body(&thread_id),
+        )
+        .await;
+        next_frame(&mut out).await.expect("the first frame");
+        drop(out);
+        assert!(!feed.cancelled(), "nothing has noticed the client yet");
+
+        // The model's next item finds no one to forward it to. The service
+        // may already be gone by then, so a refused send is fine too.
+        let _ = feed.items.unbounded_send(Ok(ChatChunk::text("lo")));
+        until("the chat is cancelled once its reader goes away", || {
+            feed.cancelled()
+        })
+        .await;
+    }
+
+    /// A client that goes away before the model's first item drops the route
+    /// while it waits for that item, which cancels the chat at once.
+    #[tokio::test]
+    async fn a_client_that_goes_away_before_the_first_item_cancels_the_chat() {
+        use crate::blocks::llm::routes::test_support::fed_llm_block;
+
+        let (llm, feed) = fed_llm_block();
+        let (ctx, thread_id) = chat_fixture_serving(llm).await;
+        let request = tokio::spawn(async move {
+            handle_chat_stream(
+                &stub_block(),
+                &ctx,
+                &crate::test_support::auth_msg("create", "/b/llm/api/chat/stream", "user-a"),
+                chat_body(&thread_id),
+            )
+            .await
+        });
+        until("the chat reaches the model", || feed.started()).await;
+        assert!(!feed.cancelled());
+
+        request.abort();
+        until("dropping the waiting route cancels the chat", || {
+            feed.cancelled()
+        })
+        .await;
     }
 
     #[tokio::test]

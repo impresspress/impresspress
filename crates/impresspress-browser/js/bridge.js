@@ -656,9 +656,9 @@ globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 // (`impresspress-browser`'s `bridge::engine_unavailable`) turn exactly that
 // code into the services' `EngineUnavailable` error, which `wafer-core`'s
 // service handlers return as `Unavailable` carrying the message as written
-// (the vector routes answer it as a 503; `/b/llm/api/chat` does not yet, and
-// answers a sanitized 500). A stream refused after it started
-// ends with an error frame that carries the same `code`.
+// (the vector routes and the chat routes answer it as a 503). A stream
+// refused after it started ends with an error frame that carries the same
+// `code`.
 //
 // The last of those is the page's to say: an engine script whose library,
 // runtime or model fails to load replies with the same `code` (a one-shot
