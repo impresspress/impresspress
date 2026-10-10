@@ -1,0 +1,85 @@
+{
+  "_source": "Raw `result` messages from the real packaged compiler (dist 807ace9e.2, rubrc 807ace9e), captured 2026-10-10 by posting `compile` at the worker started with the guest crate, exactly as the page does. Artifacts omitted; everything else verbatim.",
+  "success": {
+    "what": "the `hello` template as dev_create_block writes it",
+    "success": true,
+    "stdout": "DEBUG: main started\nDEBUG: logger setup done\n     Removed 10 files, 230.4KiB total\n\rDownloading /target/wasm32-wasip1/release/hello.wasm: [=========================] 100.0% (112.6 KB/112.6 KB)\nDownload successful.",
+    "stderr": "DEBUG: main started\nDEBUG: logger setup done\n   Compiling hello v0.1.0 (/blocks/hello)\nLinking using LC_ALL=\"C\" VSLANG=\"1033\" \"wasm-ld\" \"-flavor\" \"wasm\" \"--export\" \"__wafer_alloc\" \"--export\" \"__wafer_handle\" \"--export\" \"__wafer_host_codec\" \"--export\" \"__wafer_info\" \"--export\" \"__wafer_lifecycle\" \"-z\" \"stack-size=1048576\" \"--stack-first\" \"--allow-undefined\" \"--no-demangle\" \"/target/wasm32-wasip1/release/deps/hello.hello.9fd631c9dd9cf670-cgu.0.rcgu.o\" \"/target/wasm32-wasip1/release/deps/hello.cflgg02liqcccwf4qica4xq5s.rcgu.o\" \"/target/wasm32-wasip1/release/deps/libwafer_guest-71b19f9140647031.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libstd-c7f97b33ddfcbfbf.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libpanic_abort-431cc2501a123c59.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libwasi-f7d0229d2fe97cfd.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_demangle-710d955f336192eb.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libstd_detect-a196185ed7f17cfc.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libhashbrown-35a68b834152af94.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_std_workspace_alloc-9c960f87e9d5a453.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libminiz_oxide-0bc4b046969a6755.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libadler-a6b90b86640ec179.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libunwind-2e570680d1c4cd0a.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcfg_if-75a956684c8aceef.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/liblibc-374b1b6cc5790f18.rlib\" \"-l\" \"c\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/liballoc-be9b2b68a2d6adbd.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_std_workspace_core-4e237761d66d6cde.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcore-3e70038323b3a06e.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcompiler_builtins-3a0795e4489d8e8b.rlib\" \"-L\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/self-contained\" \"-o\" \"/target/wasm32-wasip1/release/deps/hello.wasm\" \"--gc-sections\" \"--no-entry\" \"-O2\" \"--strip-all\"\n    Finished `release` profile [optimized] target(s) in 1.80s",
+    "diagnostics": [],
+    "elapsedMs": 2236
+  },
+  "warning": {
+    "what": "`hello` plus `fn unused_helper() {}`: builds, with a dead_code warning",
+    "success": true,
+    "stdout": "DEBUG: main started\nDEBUG: logger setup done\n     Removed 10 files, 230.6KiB total\n\rDownloading /target/wasm32-wasip1/release/hello.wasm: [=========================] 100.0% (112.6 KB/112.6 KB)\nDownload successful.",
+    "stderr": "warning: function `unused_helper` is never used\n  --> src/lib.rs:45:4\n   |\n45 | fn unused_helper() {}\n   |    ^^^^^^^^^^^^^\n   |\n   = note: `#[warn(dead_code)]` on by default\n\nDEBUG: main started\nDEBUG: logger setup done\n   Compiling hello v0.1.0 (/blocks/hello)\nLinking using LC_ALL=\"C\" VSLANG=\"1033\" \"wasm-ld\" \"-flavor\" \"wasm\" \"--export\" \"__wafer_alloc\" \"--export\" \"__wafer_handle\" \"--export\" \"__wafer_host_codec\" \"--export\" \"__wafer_info\" \"--export\" \"__wafer_lifecycle\" \"-z\" \"stack-size=1048576\" \"--stack-first\" \"--allow-undefined\" \"--no-demangle\" \"/target/wasm32-wasip1/release/deps/hello.hello.9fd631c9dd9cf670-cgu.0.rcgu.o\" \"/target/wasm32-wasip1/release/deps/hello.cflgg02liqcccwf4qica4xq5s.rcgu.o\" \"/target/wasm32-wasip1/release/deps/libwafer_guest-71b19f9140647031.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libstd-c7f97b33ddfcbfbf.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libpanic_abort-431cc2501a123c59.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libwasi-f7d0229d2fe97cfd.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_demangle-710d955f336192eb.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libstd_detect-a196185ed7f17cfc.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libhashbrown-35a68b834152af94.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_std_workspace_alloc-9c960f87e9d5a453.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libminiz_oxide-0bc4b046969a6755.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libadler-a6b90b86640ec179.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libunwind-2e570680d1c4cd0a.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcfg_if-75a956684c8aceef.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/liblibc-374b1b6cc5790f18.rlib\" \"-l\" \"c\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/liballoc-be9b2b68a2d6adbd.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_std_workspace_core-4e237761d66d6cde.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcore-3e70038323b3a06e.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcompiler_builtins-3a0795e4489d8e8b.rlib\" \"-L\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/self-contained\" \"-o\" \"/target/wasm32-wasip1/release/deps/hello.wasm\" \"--gc-sections\" \"--no-entry\" \"-O2\" \"--strip-all\"\n    Finished `release` profile [optimized] target(s) in 1.87s",
+    "diagnostics": [
+      {
+        "file": "src/lib.rs",
+        "line": 45,
+        "column": 4,
+        "severity": "warning",
+        "message": "function `unused_helper` is never used",
+        "code": "dead_code"
+      }
+    ],
+    "elapsedMs": 2305
+  },
+  "syntax_error": {
+    "what": "`hello` with `let x = 1` missing its `;` inside init()",
+    "success": false,
+    "stdout": "DEBUG: main started\nDEBUG: logger setup done\n     Removed 10 files, 230.4KiB total",
+    "stderr": "error: expected `;`, found `Ok`\n  --> src/lib.rs:34:14\n   |\n34 |     let x = 1\n   |              ^ help: add `;` here\n35 |     Ok(())\n   |     -- unexpected token\n\nwarning: unused variable: `x`\n  --> src/lib.rs:34:9\n   |\n34 |     let x = 1\n   |         ^ help: if this is intentional, prefix it with an underscore: `_x`\n   |\n   = note: `#[warn(unused_variables)]` on by default\n\nDEBUG: main started\nDEBUG: logger setup done\n   Compiling hello v0.1.0 (/blocks/hello)\n    Finished `release` profile [optimized] target(s) in 0.57s",
+    "diagnostics": [
+      {
+        "file": "src/lib.rs",
+        "line": 34,
+        "column": 14,
+        "severity": "error",
+        "message": "expected `;`, found `Ok`"
+      },
+      {
+        "file": "src/lib.rs",
+        "line": 34,
+        "column": 9,
+        "severity": "warning",
+        "message": "unused variable: `x`",
+        "code": "unused_variables"
+      }
+    ],
+    "elapsedMs": 988
+  },
+  "link_error": {
+    "what": "`hello` plus `#[link(name = \"doesnotexist\")] extern \"C\" { fn from_missing_lib() -> i32; }` called from an export: wasm-ld cannot find the library",
+    "success": false,
+    "stdout": "DEBUG: main started\nDEBUG: logger setup done\n     Removed 10 files, 230.4KiB total\nFile not found: /target/wasm32-wasip1/release/hello.wasm",
+    "stderr": "DEBUG: main started\nDEBUG: logger setup done\n   Compiling hello v0.1.0 (/blocks/hello)\nLinking using LC_ALL=\"C\" VSLANG=\"1033\" \"wasm-ld\" \"-flavor\" \"wasm\" \"--export\" \"__wafer_alloc\" \"--export\" \"__wafer_handle\" \"--export\" \"__wafer_host_codec\" \"--export\" \"__wafer_info\" \"--export\" \"__wafer_lifecycle\" \"--export\" \"use_missing\" \"-z\" \"stack-size=1048576\" \"--stack-first\" \"--allow-undefined\" \"--no-demangle\" \"/target/wasm32-wasip1/release/deps/hello.hello.9fd631c9dd9cf670-cgu.0.rcgu.o\" \"/target/wasm32-wasip1/release/deps/hello.cflgg02liqcccwf4qica4xq5s.rcgu.o\" \"-l\" \"doesnotexist\" \"/target/wasm32-wasip1/release/deps/libwafer_guest-71b19f9140647031.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libstd-c7f97b33ddfcbfbf.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libpanic_abort-431cc2501a123c59.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libwasi-f7d0229d2fe97cfd.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_demangle-710d955f336192eb.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libstd_detect-a196185ed7f17cfc.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libhashbrown-35a68b834152af94.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_std_workspace_alloc-9c960f87e9d5a453.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libminiz_oxide-0bc4b046969a6755.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libadler-a6b90b86640ec179.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libunwind-2e570680d1c4cd0a.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcfg_if-75a956684c8aceef.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/liblibc-374b1b6cc5790f18.rlib\" \"-l\" \"c\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/liballoc-be9b2b68a2d6adbd.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/librustc_std_workspace_core-4e237761d66d6cde.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcore-3e70038323b3a06e.rlib\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/libcompiler_builtins-3a0795e4489d8e8b.rlib\" \"-L\" \"/sysroot/lib/rustlib/wasm32-wasip1/lib/self-contained\" \"-o\" \"/target/wasm32-wasip1/release/deps/hello.wasm\" \"--gc-sections\" \"--no-entry\" \"-O2\" \"--strip-all\"\nwasm-ld: error: unable to find library -ldoesnotexist\n    Finished `release` profile [optimized] target(s) in 1.66s",
+    "diagnostics": [
+      {
+        "file": "",
+        "line": 0,
+        "column": 0,
+        "severity": "error",
+        "code": "artifact-missing",
+        "message": "the build produced no /target/wasm32-wasip1/release/hello.wasm (`download` said: File not found: /target/wasm32-wasip1/release/hello.wasm). Either the build failed without a diagnostic (see stderr for cargo's output), or `[package] name` in Cargo.toml is not the block's name — cargo names the artifact after the package."
+      }
+    ],
+    "elapsedMs": 2105
+  },
+  "manifest_error": {
+    "what": "`hello` whose Cargo.toml has a table header spliced into a comment, leaving a line cargo cannot parse",
+    "success": false,
+    "stdout": "DEBUG: main started\nDEBUG: logger setup done\nerror: key with no value, expected `=`\n  --> blocks/hello/Cargo.toml:35:3\n   |\n35 | ` drops the symbol names and debug info from the module.\n   |   ^",
+    "stderr": "DEBUG: main started\nDEBUG: logger setup done\nerror: key with no value, expected `=`\n  --> blocks/hello/Cargo.toml:35:3\n   |\n35 | ` drops the symbol names and debug info from the module.\n   |   ^",
+    "diagnostics": [
+      {
+        "file": "blocks/hello/Cargo.toml",
+        "line": 35,
+        "column": 3,
+        "severity": "error",
+        "message": "key with no value, expected `=`"
+      }
+    ],
+    "elapsedMs": 45
+  }
+}

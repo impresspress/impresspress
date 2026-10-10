@@ -187,6 +187,7 @@ type Compile = {
   stdout: string;
   stderr: string;
   elapsed_ms: number;
+  timings: { sources_ms: number; toolchain_ms: number; compile_ms: number; stage_ms: number };
   compiler_version: string | null;
   progress: Array<{ phase: string; ms: number }>;
 };
@@ -322,6 +323,19 @@ test('dev_compile_block compiles a scaffolded block, stages it and puts it live;
   // `rustc --version` as the worker reported it at `ready` — the string the
   // build row records as `compiler_version`, not one the page made up.
   expect(built.compiler_version).toBe(FAKE_RUSTC_VERSION);
+  // The fake worker sends the real toolchain's chatter; the result carries
+  // the build without it — no cargo debug lines, no linker command line on a
+  // build that linked — and keeps the `Finished` that is true here.
+  expect(built.stdout).not.toContain('DEBUG:');
+  expect(built.stderr).not.toContain('DEBUG:');
+  expect(built.stderr).not.toContain('Linking using');
+  expect(built.stderr).toContain('Finished `release` profile');
+  // `elapsed_ms` is the whole call, so it holds every phase `timings` names —
+  // the build AND the activation, which the worker's own figure never saw.
+  const { sources_ms, toolchain_ms, compile_ms, stage_ms } = built.timings;
+  expect(compile_ms).toBeGreaterThan(0);
+  expect(stage_ms).toBeGreaterThan(0);
+  expect(built.elapsed_ms).toBeGreaterThanOrEqual(sources_ms + toolchain_ms + compile_ms + stage_ms - 4);
   // Every phase of `ActivationPhase`, in order: a new block means the runtime
   // was rebuilt, which is the step a site-only write skips.
   expect(built.progress.map((p) => p.phase)).toEqual([
@@ -437,6 +451,13 @@ test('dev_compile_block compiles a scaffolded block, stages it and puts it live;
   expect(failed.build_id).toBeNull();
   expect(failed.generation).toBeNull();
   expect(failed.diagnostics[0]).toMatchObject({ file: 'src/lib.rs', severity: 'error' });
+  // The fake's failure carries cargo's `Finished`, as the real one does after
+  // rustc fails; a result that says `success: false` must not carry it.
+  expect(failed.stderr).toContain('error: expected `;`');
+  expect(failed.stderr).not.toContain('Finished');
+  expect(failed.stderr).not.toContain('DEBUG:');
+  // Nothing was staged, so no activation time either.
+  expect(failed.timings.stage_ms).toBe(0);
   // …and the block that WAS compiled is still serving. A failed compile is not
   // a deployment.
   expect(await fetchBlock(page, BLOCK)).toEqual({ status: 200, body: GREETING_EDITED });

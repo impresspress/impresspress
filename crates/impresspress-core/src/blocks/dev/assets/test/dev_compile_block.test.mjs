@@ -382,7 +382,9 @@ test('a crate that does not compile is a result, and the diagnostics keep rustc 
   // Nothing was staged, so there is no build row and no generation.
   assert.equal(result.structuredContent.build_id, null);
   assert.equal(result.structuredContent.generation, null);
-  assert.equal(result.structuredContent.elapsed_ms, 38000);
+  // The worker's 38 s is its own figure for the build, not how long this call
+  // took — `elapsed_ms` is the call's wall clock (see the timings test).
+  assert.ok(result.structuredContent.elapsed_ms < 38000);
   assert.deepEqual(result.structuredContent.diagnostics[0], {
     severity: 'error',
     code: 'E0425',
@@ -396,6 +398,44 @@ test('a crate that does not compile is a result, and the diagnostics keep rustc 
   // page has no reason to invent a value for a diagnostic nobody coded.
   assert.equal(result.structuredContent.diagnostics[1].code, null);
   assert.equal(result.structuredContent.cancelled, false);
+});
+
+test('a diagnostic about no place in the source has a null file, line and column', async () => {
+  // The protocol has no "absent" for these — `file` is a string and
+  // `line`/`column` numbers — so the worker spells an unlocated diagnostic
+  // `''` and `0`, as the adapter's `link-error` does after it (captured:
+  // `fixtures/compile-outputs.json`, `link_error`). The tool's own spelling
+  // of absent is `null`, as `compile-timeout` already uses.
+  const { tools } = instantiate({
+    hasModelContext: true,
+    compilerManifest: MANIFEST,
+    workspace: HELLO,
+    compiler: fakeCompiler(() => ({
+      ...BUILT,
+      success: false,
+      artifact: null,
+      diagnostics: [
+        { file: '', line: 0, column: 0, severity: 'error', code: 'link-error', message: 'wasm-ld: unable to find library -lx' },
+        { file: 'src/lib.rs', line: 3, column: 9, severity: 'warning', message: 'unused variable' }
+      ]
+    }))
+  });
+  await settle();
+
+  const result = (await tools.get('dev_compile_block').execute({ name: 'hello' })).structuredContent;
+  assert.deepEqual(result.diagnostics[0], {
+    severity: 'error',
+    code: 'link-error',
+    message: 'wasm-ld: unable to find library -lx',
+    file: null,
+    line: null,
+    column: null
+  });
+  // A located one is untouched.
+  assert.deepEqual(
+    [result.diagnostics[1].file, result.diagnostics[1].line, result.diagnostics[1].column],
+    ['src/lib.rs', 3, 9]
+  );
 });
 
 test('a compile the adapter gave up on is a timeout, not a crate that does not build', async () => {
@@ -507,6 +547,88 @@ test('a successful compile stages the artifact and merges what staging answered'
   assert.deepEqual(
     elements.get('dev-progress-steps').children.map((step) => step.getAttribute('data-state')),
     ['done', 'done', 'done', 'done']
+  );
+});
+
+/** Resolve after `ms` of wall-clock time. */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('elapsed_ms is the whole wait, toolchain start-up included, and timings says where it went', async () => {
+  // The live report this pins: the first compile of a session took ~50 s
+  // and reported `elapsed_ms: 813` — the worker's figure for cargo alone,
+  // with the toolchain start-up it had waited behind left out. Here start-up
+  // takes 300 ms, the build 100 ms and staging 100 ms, while the worker
+  // claims 7 ms for its part, so nothing below can pass on that number.
+  class SlowStart {
+    async initialize() {
+      if (!this.started) {
+        this.started = sleep(300).then(() => 'rustc 1.90.0-nightly (fake)');
+      }
+      return this.started;
+    }
+
+    async compile() {
+      await sleep(100);
+      return { ...BUILT, elapsedMs: 7 };
+    }
+  }
+  const { tools } = instantiate({
+    hasModelContext: true,
+    compilerManifest: MANIFEST,
+    workspace: HELLO,
+    compiler: SlowStart,
+    status: { active_generation: null, runtime_generation: 0, blocks: [], activation: null },
+    async stage() {
+      await sleep(100);
+      return {
+        build_id: 'bld_1',
+        success: true,
+        diagnostics: [],
+        generation: { id: 'gen_2', cause: 'block_compile', status: 'active' },
+        progress: []
+      };
+    }
+  });
+  await settle();
+
+  const started = performance.now();
+  const result = (await tools.get('dev_compile_block').execute({ name: 'hello' })).structuredContent;
+  const waited = performance.now() - started;
+  assert.equal(result.success, true);
+  assert.ok(Number.isInteger(result.elapsed_ms));
+  assert.ok(result.elapsed_ms >= 490, `elapsed_ms ${result.elapsed_ms} leaves out part of the wait`);
+  assert.ok(result.elapsed_ms <= Math.ceil(waited), `elapsed_ms ${result.elapsed_ms} > the ${waited} ms waited`);
+  const { sources_ms, toolchain_ms, compile_ms, stage_ms } = result.timings;
+  assert.deepEqual(Object.keys(result.timings).sort(), ['compile_ms', 'sources_ms', 'stage_ms', 'toolchain_ms']);
+  assert.ok(toolchain_ms >= 290, `toolchain_ms ${toolchain_ms}`);
+  assert.ok(compile_ms >= 90 && compile_ms < 290, `compile_ms ${compile_ms}`);
+  assert.ok(stage_ms >= 90 && stage_ms < 290, `stage_ms ${stage_ms}`);
+  // The phases are the whole call: what they leave over is bookkeeping.
+  const parts = sources_ms + toolchain_ms + compile_ms + stage_ms;
+  assert.ok(parts <= result.elapsed_ms + 4 && result.elapsed_ms - parts < 50, JSON.stringify(result));
+
+  // The second compile joins a toolchain that is already up.
+  const again = (await tools.get('dev_compile_block').execute({ name: 'hello' })).structuredContent;
+  assert.ok(again.timings.toolchain_ms < 50, `toolchain_ms ${again.timings.toolchain_ms} on a warm toolchain`);
+  assert.ok(again.elapsed_ms >= 190 && again.elapsed_ms < 290, `elapsed_ms ${again.elapsed_ms}`);
+});
+
+test('a compile refused before the toolchain reports the time it took, not zero', async () => {
+  const { tools } = instantiate({
+    hasModelContext: true,
+    compilerManifest: MANIFEST,
+    workspace: [file('blocks/hello/Cargo.toml', '[package]\nname = "other"\n'), HELLO[1]]
+  });
+  await settle();
+  const result = (await tools.get('dev_compile_block').execute({ name: 'hello' })).structuredContent;
+  assert.equal(result.success, false);
+  assert.equal(result.diagnostics[0].code, 'package-name');
+  // Reading the sources is all this call did, and that is all it reports.
+  assert.ok(Number.isInteger(result.elapsed_ms));
+  assert.ok(result.timings.sources_ms <= result.elapsed_ms);
+  assert.deepEqual(
+    { ...result.timings, sources_ms: 'measured' },
+    { sources_ms: 'measured', toolchain_ms: 0, compile_ms: 0, stage_ms: 0 }
   );
 });
 

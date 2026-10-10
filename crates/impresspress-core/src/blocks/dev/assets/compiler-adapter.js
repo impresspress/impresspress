@@ -116,6 +116,144 @@ const CANCEL_GRACE_MS = 2000;
 const INIT_SILENCE_TIMEOUT_MS = 360000;
 
 /**
+ * Lines the toolchain prints that say nothing about the build.
+ *
+ * Rubrc's cargo (the prebuilt `crates/vfs/cargo_opt.wasm` at the pinned
+ * commit — not something this repo builds) writes both of these at the start
+ * of EVERY invocation, so they reach `stdout` through `cargo clean -p` and
+ * `stderr` through `cargo build` on every compile. Matched whole and by
+ * name: a line of the build's own output is never dropped because it merely
+ * looks like one of these.
+ */
+const TOOLCHAIN_DEBUG_LINES = new Set(['DEBUG: main started', 'DEBUG: logger setup done']);
+
+/**
+ * How rubrc's rustc announces the link step (prebuilt `rustc_opt.wasm`):
+ * `Linking using LC_ALL="C" … "wasm-ld" …`, the whole wasm-ld command line —
+ * ~1.8 KB on one line, every object and rlib by path — on every build that
+ * reaches the link, whether it then succeeds or not.
+ */
+const LINKER_INVOCATION = /^Linking using /;
+
+/**
+ * What wasm-ld says when it fails or warns.
+ *
+ * In this toolchain the linker runs inside rustc and its complaints are plain
+ * lines after the invocation — `wasm-ld: error: unable to find library -lx` —
+ * not one of cargo's JSON diagnostics, so the worker's `diagnostics` cannot
+ * carry them. `shapeCompileOutput` turns each one into a diagnostic of its own.
+ */
+const LINKER_MESSAGE = /^wasm-ld: (error|warning): (.+)$/;
+
+/**
+ * Cargo's closing status line, `Finished \`release\` profile … in 0.57s`.
+ *
+ * True only when the build was: this toolchain's cargo never sees rustc's
+ * exit status (`worker-entry.ts`, `removeArtifact`), so it prints it — and
+ * reports `build-finished` success — after rustc has failed too.
+ */
+const CARGO_FINISHED = /^\s*Finished `/;
+
+/**
+ * Turn the worker's raw output into what a compile result reports.
+ *
+ * The worker passes the toolchain's transcript through as it was printed, and
+ * four things in it are not true or not useful to whoever reads the result —
+ * an agent most of all, which reads every byte:
+ *
+ *  * cargo's two start-up debug lines (`TOOLCHAIN_DEBUG_LINES`), in both
+ *    streams, on every compile;
+ *  * cargo's `Finished` line on a build that FAILED, which contradicts the
+ *    `success: false` beside it — it is kept on a build that succeeded, where
+ *    it is true;
+ *  * rustc's linker invocation (`LINKER_INVOCATION`), which is kept only when
+ *    the link failed — the one case where the command line is evidence;
+ *  * carriage returns, which are resolved to what a terminal would show
+ *    (`download`'s progress bar redraws its line with one).
+ *
+ * And one thing the worker cannot say: a link failure has no rustc
+ * diagnostic, so each `wasm-ld: error|warning:` line becomes a `link-error`
+ * or `link-warning` diagnostic, ahead of the worker's own (whose
+ * `artifact-missing` is what a failed link otherwise surfaces as, with the
+ * reason only in `stderr`). Unlocated, like `artifact-missing`: `file` is
+ * `''` and `line`/`column` are `0`.
+ *
+ * Shaping happens HERE, at the protocol boundary, and not in the worker or
+ * the toolchain: the lines come from rubrc's prebuilt cargo and rustc, which
+ * this repo does not build, and the worker ships inside the published
+ * compiler dist, which only a pin bump and a rebuild can change.
+ *
+ * Pure, and exported for its unit test (`test/compile_output.test.mjs`).
+ *
+ * @param {{ success: boolean, stdout: string, stderr: string,
+ *           diagnostics: Diagnostic[] }} raw  a validated `result` message
+ * @returns {{ stdout: string, stderr: string, diagnostics: Diagnostic[] }}
+ */
+export function shapeCompileOutput(raw) {
+  // A carriage return is resolved first, the way the terminal the transcript
+  // was written for would: a line shows what follows its last one.
+  // `download`'s progress bar redraws itself with `\r`, and every rule below
+  // is about the line as it would have been SEEN.
+  const stdoutLines = raw.stdout.split('\n').map(asDisplayed);
+  const stderrLines = raw.stderr.split('\n').map(asDisplayed);
+
+  const linkerDiagnostics = [];
+  let linkFailed = false;
+  for (const line of stderrLines) {
+    const found = LINKER_MESSAGE.exec(line);
+    if (!found) {
+      continue;
+    }
+    const severity = found[1];
+    if (severity === 'error') {
+      linkFailed = true;
+    }
+    linkerDiagnostics.push({
+      file: '',
+      line: 0,
+      column: 0,
+      severity,
+      code: severity === 'error' ? 'link-error' : 'link-warning',
+      message: 'wasm-ld: ' + found[2]
+    });
+  }
+
+  const keep = (line) => {
+    if (TOOLCHAIN_DEBUG_LINES.has(line)) {
+      return false;
+    }
+    if (!raw.success && CARGO_FINISHED.test(line)) {
+      return false;
+    }
+    if (!linkFailed && LINKER_INVOCATION.test(line)) {
+      return false;
+    }
+    return true;
+  };
+  // Blank lines left at either end by a dropped line go too; a line's own
+  // indentation does not — cargo right-aligns its status verbs, and the first
+  // line kept is often one of them.
+  const shape = (lines) =>
+    lines
+      .filter(keep)
+      .join('\n')
+      .replace(/^(?:[ \t]*\n)+/, '')
+      .trimEnd();
+
+  return {
+    stdout: shape(stdoutLines),
+    stderr: shape(stderrLines),
+    diagnostics: linkerDiagnostics.concat(raw.diagnostics)
+  };
+}
+
+/** One transcript line as a terminal leaves it: whatever follows its last `\r`. */
+function asDisplayed(line) {
+  const content = line.replace(/\r+$/, '');
+  return content.slice(content.lastIndexOf('\r') + 1);
+}
+
+/**
  * A diagnostic, exactly as `protocol.ts` defines it.
  *
  * @typedef {{ file: string, line: number, column: number,
@@ -129,6 +267,13 @@ const INIT_SILENCE_TIMEOUT_MS = 360000;
  * the normal case in a sandbox — so `compile` resolves with it rather than
  * rejecting. It rejects only when the adapter itself cannot go on: a protocol
  * violation, a worker that failed to start, a disposed compiler.
+ *
+ * `stdout`, `stderr` and `diagnostics` are the worker's, after
+ * `shapeCompileOutput`: no toolchain debug lines, no `Finished` on a failed
+ * build, no linker command line unless the link failed, and a diagnostic for
+ * each linker error or warning. `elapsedMs` is the worker's own figure for
+ * the build — from the worker taking the `compile` to it answering — and
+ * excludes the toolchain start-up a compile may have waited for first.
  *
  * @typedef {{
  *   buildId: string,
@@ -820,15 +965,16 @@ export class BrowserRustCompiler {
       artifact = new Uint8Array(message.artifact);
       artifactSha256 = await sha256Hex(message.artifact);
     }
+    const shaped = shapeCompileOutput(message);
     entry.resolve({
       buildId: message.id,
       success: message.success === true,
       cancelled: message.cancelled === true,
       artifact,
       artifactSha256,
-      stdout: message.stdout,
-      stderr: message.stderr,
-      diagnostics: message.diagnostics,
+      stdout: shaped.stdout,
+      stderr: shaped.stderr,
+      diagnostics: shaped.diagnostics,
       elapsedMs: message.elapsedMs,
       compilerVersion: this.#rustcVersion,
       guestVersion: this.#guestVersion()

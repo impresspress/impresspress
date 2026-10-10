@@ -36,7 +36,8 @@ import { execute, registeredTools, structured, toolNames, waitForTool } from './
  *    a block that declares an agent tool used to collide with its own tool
  *    name on its second compile, and the only way out was to remove it.
  * 5. A broken edit is an ANSWER — a diagnostic with a line number — and the
- *    previously compiled block keeps serving.
+ *    previously compiled block keeps serving. So is a crate that compiles and
+ *    then fails to LINK, which this toolchain reports only as text.
  * 6. Rolling back to the generation before the compile removes the block, its
  *    route and its tool.
  *
@@ -99,7 +100,7 @@ const BROKEN = 'let email = email.trim()';
  * Records what the page sent to `POST /b/dev/api/builds/stage`.
  *
  * The artifact's size has no other source: `dev_compile_block` reports
- * `elapsed_ms` and diagnostics, and the staged module is content-addressed,
+ * timings and diagnostics, and the staged module is content-addressed,
  * not measured. It is read off the request the page makes anyway; the wrapper
  * only observes and forwards.
  *
@@ -151,6 +152,7 @@ type Compile = {
   stdout: string;
   stderr: string;
   elapsed_ms: number;
+  timings: { sources_ms: number; toolchain_ms: number; compile_ms: number; stage_ms: number };
   compiler_version: string | null;
   progress: Array<{ phase: string; ms: number }>;
 };
@@ -257,7 +259,22 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   const firstCompileMs = Date.now() - compileStarted;
   expect(compiled.success, JSON.stringify(compiled.diagnostics)).toBe(true);
   expect(compiled.cancelled).toBe(false);
-  expect(compiled.elapsed_ms).toBeGreaterThan(0);
+  // `elapsed_ms` is the call's whole wall clock, so it cannot be less than
+  // the build plus the activation it also waited for — the shape of the
+  // `elapsed_ms: 813` an agent was once given for a fifty-second call.
+  expect(compiled.timings.compile_ms).toBeGreaterThan(0);
+  expect(compiled.timings.stage_ms).toBeGreaterThan(0);
+  expect(compiled.elapsed_ms).toBeGreaterThanOrEqual(
+    compiled.timings.compile_ms + compiled.timings.stage_ms,
+  );
+  expect(compiled.elapsed_ms).toBeLessThanOrEqual(firstCompileMs);
+  // The output is the build, not the toolchain's chatter: rubrc's cargo
+  // prints two `DEBUG:` lines on every run and its rustc the whole wasm-ld
+  // command line on every link, and neither reaches a build that worked.
+  expect(compiled.stdout).not.toContain('DEBUG:');
+  expect(compiled.stderr).not.toContain('DEBUG:');
+  expect(compiled.stderr).not.toContain('Linking using');
+  expect(compiled.stderr).toContain('Finished `release` profile');
   // No ERROR-severity diagnostic, rather than none at all: rustc at a future
   // pin may warn on the `table` template — a lint that turned on, an import
   // that stopped being needed — and a warning is a yellow checkpoint, not a
@@ -288,11 +305,13 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   // build of that guest crate — measured from just before the scaffold call
   // that starts it to the page's `compiler: ready` log line. It includes the
   // part of the scaffold that runs before the warm-up begins, and the log line
-  // is polled, so it can read late by both, never early. `compile_ms` is the
-  // worker's own figure for the build (cargo's clock plus the shell round
-  // trip); `artifact_bytes` is the module the page staged. `first_compile_ms`
-  // is the whole first `dev_compile_block` call against the already started
-  // toolchain.
+  // is polled, so it can read late by both, never early. `compile_ms` is
+  // `dev_compile_block`'s `timings.compile_ms`: the build in the worker, as
+  // the page waited for it (cargo plus the shell round trips around it, the
+  // message hops and the artifact's digest); `artifact_bytes` is
+  // the module the page staged. `first_compile_ms` is the whole first
+  // `dev_compile_block` call against the already started toolchain, timed
+  // from here — `elapsed_ms` is the tool's own figure for the same wait.
   const probe = await page.evaluate(
     () =>
       (window as unknown as { __devStageProbe: { artifactBytes: number; stages: number } })
@@ -300,8 +319,9 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   );
   expect(probe.stages).toBe(1);
   console.log(
-    `dev-compile: ready_ms=${readyMs} compile_ms=${compiled.elapsed_ms} ` +
-      `artifact_bytes=${probe.artifactBytes} first_compile_ms=${firstCompileMs}`,
+    `dev-compile: ready_ms=${readyMs} compile_ms=${compiled.timings.compile_ms} ` +
+      `artifact_bytes=${probe.artifactBytes} first_compile_ms=${firstCompileMs} ` +
+      `elapsed_ms=${compiled.elapsed_ms}`,
   );
 
   // --- 4. The table exists, because the guest's `init` created it ----------
@@ -430,13 +450,58 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   expect(error?.file).toBe('src/lib.rs');
   expect(error?.line ?? 0).toBeGreaterThan(0);
   expect(error?.column ?? 0).toBeGreaterThan(0);
+  // rustc's rendering of that error leads `stderr`, and cargo's `Finished` —
+  // which the real cargo prints after rustc has failed — does not follow it.
+  expect(brokenBuild.stderr).toMatch(/^error: /);
+  expect(brokenBuild.stderr).toContain(`--> src/lib.rs:${error?.line}:${error?.column}`);
+  expect(brokenBuild.stderr).not.toContain('Finished');
+  expect(brokenBuild.stderr).not.toContain('DEBUG:');
+  expect(brokenBuild.timings.stage_ms).toBe(0);
   console.log(
-    `dev-compile: broken_compile_ms=${brokenBuild.elapsed_ms} ` +
+    `dev-compile: broken_compile_ms=${brokenBuild.timings.compile_ms} ` +
       `diagnostic=${error?.file}:${error?.line}:${error?.column} ${JSON.stringify(error?.message)}`,
   );
 
   // Nothing was staged, so the generation that compiled is still the live one
   // — routes, table and rows intact.
+  expect(await subscriberEmails(page)).toEqual([BY_VISITOR, BY_ADMIN]);
+
+  // --- 8b. A link failure is a diagnostic too ------------------------------
+  //
+  // rustc compiles this and wasm-ld then cannot find the library. In this
+  // toolchain the linker's complaint is a plain line after rustc's
+  // `Linking using …` command, not a JSON diagnostic, so it reaches the agent
+  // as a `link-error` only because the adapter reads it out of the
+  // transcript — and the command line, dropped from every build that linked,
+  // is kept for the one that did not.
+  const linkSource = structured<FileRead>(
+    await execute(page, 'dev_read_file', { path: `blocks/${BLOCK}/src/lib.rs` }),
+  );
+  structured(
+    await execute(page, 'dev_write_file', {
+      path: `blocks/${BLOCK}/src/lib.rs`,
+      content:
+        linkSource.content.replace(BROKEN, INTACT) +
+        '\n#[link(name = "doesnotexist")]\nextern "C" {\n    fn from_missing_lib() -> i32;\n}\n\n' +
+        '#[no_mangle]\npub extern "C" fn use_missing_lib() -> i32 {\n    unsafe { from_missing_lib() }\n}\n',
+      expected_sha256: linkSource.sha256,
+    }),
+  );
+  const unlinked = structured<Compile>(await execute(page, 'dev_compile_block', { name: BLOCK }));
+  expect(unlinked.success, JSON.stringify(unlinked.diagnostics)).toBe(false);
+  expect(unlinked.diagnostics[0], JSON.stringify(unlinked.diagnostics)).toEqual({
+    severity: 'error',
+    code: 'link-error',
+    message: 'wasm-ld: unable to find library -ldoesnotexist',
+    file: null,
+    line: null,
+    column: null,
+  });
+  expect(unlinked.stderr).toContain('Linking using');
+  expect(unlinked.stderr).toContain('wasm-ld: error: unable to find library -ldoesnotexist');
+  expect(unlinked.stderr).not.toContain('Finished');
+  expect(unlinked.stderr).not.toContain('DEBUG:');
+  expect(unlinked.build_id).toBeNull();
   expect(await subscriberEmails(page)).toEqual([BY_VISITOR, BY_ADMIN]);
 
   // --- 9. Rollback removes the block, its route and its tool ---------------
