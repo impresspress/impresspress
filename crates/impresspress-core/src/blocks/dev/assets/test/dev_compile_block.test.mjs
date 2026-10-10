@@ -316,6 +316,45 @@ const BUILT = {
   guestVersion: 1
 };
 
+test('a call with no block name, or an empty one, is refused before anything compiles', async () => {
+  let compiles = 0;
+  const { tools, fetchCalls } = instantiate({
+    hasModelContext: true,
+    compilerManifest: MANIFEST,
+    workspace: HELLO,
+    compiler: fakeCompiler(() => {
+      compiles += 1;
+      return BUILT;
+    })
+  });
+  await settle();
+  fetchCalls.length = 0;
+
+  // No `name` at all: the schema's `required` says so, and the page checks
+  // it the way it checks a manifest tool's — Chrome does not. Unchecked, the
+  // call compiled a block named `undefined`.
+  assert.deepEqual(await tools.get('dev_compile_block').execute({}), {
+    isError: true,
+    content: [{ type: 'text', text: 'Missing required argument: name' }]
+  });
+  // An empty or non-string name is present, so it passes that check;
+  // `compileBlock` is what refuses it — there is no `blocks//` to read, and
+  // `null` is not the name of a block.
+  for (const name of ['', null, 7]) {
+    const refused = await tools.get('dev_compile_block').execute({ name });
+    assert.equal(refused.isError, true, String(name));
+    assert.equal(
+      refused.content[0].text,
+      'dev_compile_block: the block name must be a non-empty string',
+      String(name)
+    );
+    assert.equal(refused.structuredContent, undefined, String(name));
+  }
+
+  assert.equal(compiles, 0);
+  assert.deepEqual(fetchCalls, []);
+});
+
 test('a crate that does not compile is a result, and the diagnostics keep rustc shape', async () => {
   const { tools } = instantiate({
     hasModelContext: true,

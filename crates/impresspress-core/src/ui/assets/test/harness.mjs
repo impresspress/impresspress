@@ -119,7 +119,6 @@ return {
   get registered() { return registered.slice() },
   refresh,
   whenControlled,
-  buildRequest,
   toolOptions
 };`
   );

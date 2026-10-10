@@ -610,10 +610,19 @@ var registered = [];
 // panel is live for the whole call — `registerFromManifest` has already
 // wrapped the manifest tools' `execute` in `withSessionCheck`, which has to
 // see the raw result.
+//
+// The argument check (`withArgumentCheck`, webmcp-core.js) goes on outside
+// even that, for the same one-rule reason: Chrome does not check a call
+// against `inputSchema`, and a page-local tool's `required` is as binding as
+// a manifest tool's. A refused call never reaches the tool, so it opens no
+// panel and starts no catch-up. A manifest tool has already been checked in
+// full by `toolOptions`, which alone knows its path arguments; this repeats
+// only the `required` half for it, which finds nothing new.
 function registerPageTool(options) {
   if (MUTATING.test(options.name)) {
     options.execute = withProgress(options.execute);
   }
+  options.execute = withArgumentCheck(options.inputSchema, [], options.execute);
   // Before the WebMCP call, not after: a tool the browser's registrar
   // rejects is still a tool this page can run from the console.
   pageTools.push(options);
@@ -1833,6 +1842,14 @@ async function compileBlock(name) {
   // running one. A throw rather than a `success: false`, per the split
   // `runCompile` documents — a refused request is a failure of the
   // machinery, not a verdict on the block, and reaches an agent as `isError`.
+  // An empty name, or one that is not a string at all (`null`, a number),
+  // passes the tool's `required` check — the key is there — but names no
+  // block: `blocks//` has nothing in it to compile, and `String(null)` would
+  // compile a block called `null`. Refused here, before the lock, as the
+  // same kind of failure as the one below.
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('the block name must be a non-empty string');
+  }
   if (compileInFlight) {
     throw new Error('a compile is already running — wait for it to finish');
   }
@@ -2021,7 +2038,7 @@ Only one compile runs at a time.',
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Block name, as used in blocks/<name>/' }
+        name: { type: 'string', minLength: 1, description: 'Block name, as used in blocks/<name>/' }
       },
       required: ['name'],
       additionalProperties: false
@@ -2044,7 +2061,7 @@ Only one compile runs at a time.',
     },
     execute: async function (args) {
       try {
-        var result = await compileBlock(String(args && args.name));
+        var result = await compileBlock(args.name);
         // Both halves, because an agent may read either: the text block is
         // what a client without `outputSchema` support shows, and
         // `structuredContent` is what one with it reads.
@@ -2273,8 +2290,8 @@ exportButton.addEventListener('click', function () {
 async function compileSelected() {
   // `updateCompileButton` keeps the button disabled unless there is both a
   // toolchain and a block, so this is unreachable through the UI — it is here
-  // because `compileBlock` would otherwise be handed an empty name and spend
-  // a request finding out.
+  // so that case is logged as what it is, rather than thrown by
+  // `compileBlock`'s empty-name refusal.
   var name = compileSelect.value;
   if (!name) {
     log('nothing to compile: the workspace has no blocks');

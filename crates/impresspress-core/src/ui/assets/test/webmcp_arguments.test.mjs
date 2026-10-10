@@ -10,8 +10,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { instantiate, settle } from './harness.mjs';
 
-// The shape `shop_publish_offer` has in the served manifest
-// (`tests/snapshots/dev.tools.json`): two path arguments, both required.
+// `shop_publish_offer` as the served manifest has it
+// (`tests/snapshots/dev.tools.json`), its schema trimmed to the two path
+// arguments, both required.
 const PUBLISH_OFFER = {
   name: 'shop_publish_offer',
   description: 'Publish an offer.',
@@ -22,14 +23,15 @@ const PUBLISH_OFFER = {
   },
   invocation: {
     method: 'post',
-    path: '/b/products/products/{product_id}/offers/{offer_id}/publish',
+    path: '/b/products/api/admin/products/{product_id}/offers/{offer_id}/publish',
     path_params: ['offer_id', 'product_id'],
     query_params: [],
     body_params: []
   }
 };
 
-// A required argument that travels in the body, beside optional ones.
+// `shop_create_product` as the served manifest has it, trimmed to one
+// required argument that travels in the body and one optional one.
 const CREATE_PRODUCT = {
   name: 'shop_create_product',
   description: 'Create a product.',
@@ -40,7 +42,7 @@ const CREATE_PRODUCT = {
   },
   invocation: {
     method: 'post',
-    path: '/b/products/products',
+    path: '/b/products/api/admin/products',
     path_params: [],
     query_params: [],
     body_params: ['name', 'description']
@@ -126,7 +128,7 @@ test('present required arguments go through: an empty body string is the serverâ
   const { result, fetchCalls } = await run(CREATE_PRODUCT, { name: '', description: null });
   assert.deepEqual(result, { content: [{ type: 'text', text: '{}' }] });
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0][0], '/b/products/products');
+  assert.equal(fetchCalls[0][0], '/b/products/api/admin/products');
   assert.deepEqual(JSON.parse(fetchCalls[0][1].body), { name: '', description: null });
 });
 
@@ -134,7 +136,7 @@ test('complete path arguments, including a number, fill the URL', async () => {
   const { result, fetchCalls } = await run(PUBLISH_OFFER, { offer_id: 7, product_id: 'p/1' });
   assert.equal(result.isError, undefined);
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0][0], '/b/products/products/p%2F1/offers/7/publish');
+  assert.equal(fetchCalls[0][0], '/b/products/api/admin/products/p%2F1/offers/7/publish');
 });
 
 test('an inherited name is not a present argument', async () => {

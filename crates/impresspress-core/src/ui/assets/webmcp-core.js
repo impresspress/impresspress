@@ -54,35 +54,35 @@ function buildRequest(invocation, args) {
 // not check them against `inputSchema`. Unchecked, a missing path argument
 // becomes the text `undefined` in the URL, and the agent is told the server's
 // answer to that (`404 Product not found`) — a claim about the data, when the
-// fault is in its own call. So the call is checked here first, from the
-// tool's own manifest entry and nothing else:
+// fault is in its own call. So the call is checked first, from what the tool
+// itself declares and nothing else:
 //
 // - every name in `inputSchema.required` must be present. Present is the
 //   JSON Schema meaning — the key is there with a value; whether that value
-//   is acceptable (an empty string in a body, say) is the endpoint's to
-//   judge, with its own message.
-// - every path argument must be a string, a finite number or a boolean,
-//   whether or not `required` lists it: the URL segment has to be filled,
-//   and those are the values that become one segment of text. An empty
-//   string would leave the segment empty, and `null` or `undefined` would be
-//   spelled into it as text, so each counts as missing; an object or array
-//   would be stringified (`[object Object]`), and a NaN or an infinity
-//   spelled as a word, so those are refused as invalid.
-function argumentError(tool, args) {
+//   is acceptable (an empty string in a body, say) is the tool's to judge,
+//   with its own message. This half needs only the schema, so it applies to
+//   any tool, an HTTP one or one the page implements itself.
+// - every name in `pathParams` must be a string, a finite number or a
+//   boolean, whether or not `required` lists it: the URL segment has to be
+//   filled, and those are the values that become one segment of text. An
+//   empty string would leave the segment empty, and `null` or `undefined`
+//   would be spelled into it as text, so each counts as missing; an object
+//   or array would be stringified (`[object Object]`), and a NaN or an
+//   infinity spelled as a word, so those are refused as invalid. Only an
+//   HTTP tool has path arguments; any other tool passes `[]`.
+function argumentError(inputSchema, pathParams, args) {
   var has = function (name) {
     return Object.prototype.hasOwnProperty.call(args, name);
   };
   var missing = [];
   var invalid = [];
-  var required = tool.inputSchema && Array.isArray(tool.inputSchema.required)
-    ? tool.inputSchema.required
-    : [];
+  var required = inputSchema && Array.isArray(inputSchema.required) ? inputSchema.required : [];
   required.forEach(function (name) {
     if (!has(name) || args[name] === undefined) {
       missing.push(name);
     }
   });
-  (tool.invocation.path_params || []).forEach(function (name) {
+  pathParams.forEach(function (name) {
     var value = has(name) ? args[name] : undefined;
     if (value === undefined || value === null || value === '') {
       if (missing.indexOf(name) < 0) {
@@ -107,6 +107,20 @@ function argumentError(tool, args) {
   return null;
 }
 
+// `execute`, refusing a call `argumentError` finds fault with before it
+// runs. The refusal is an `isError` result, like a refused request, so the
+// agent reads it as its own call failing and can correct the arguments.
+function withArgumentCheck(inputSchema, pathParams, execute) {
+  return async function (args) {
+    args = args || {};
+    var refusal = argumentError(inputSchema, pathParams, args);
+    if (refusal !== null) {
+      return { isError: true, content: [{ type: 'text', text: refusal }] };
+    }
+    return execute(args);
+  };
+}
+
 function toolOptions(tool) {
   // `outputSchema` is optional in the manifest — the producer only
   // projects it when the endpoint's declared response schema is a
@@ -118,15 +132,8 @@ function toolOptions(tool) {
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
-    execute: async function (args) {
-      args = args || {};
-      // Refused before any request: see `argumentError`. An `isError`
-      // result, like a refused request, so the agent reads it as its own
-      // call failing and can correct the arguments.
-      var refusal = argumentError(tool, args);
-      if (refusal !== null) {
-        return { isError: true, content: [{ type: 'text', text: refusal }] };
-      }
+    // Checked before any request is built: see `argumentError`.
+    execute: withArgumentCheck(tool.inputSchema, tool.invocation.path_params || [], async function (args) {
       var req = buildRequest(tool.invocation, args);
       var response = await fetch(req.url, req.init);
       var text = await response.text();
@@ -168,7 +175,7 @@ function toolOptions(tool) {
       }
 
       return result;
-    }
+    })
   };
   if (tool.outputSchema) {
     options.outputSchema = tool.outputSchema;
