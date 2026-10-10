@@ -16,10 +16,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use impresspress_core::blocks::dev::tools::SELECTIONS;
 
-/// Tools the workspace page registers itself rather than projecting from
-/// `/b/dev/api/tools.json`: they run in the page (the in-browser compiler,
-/// the bundle download), so they have no `SELECTIONS` row.
-const PAGE_LOCAL_TOOLS: &[&str] = &["dev_compile_block", "dev_export"];
+mod dev_page_tools;
 
 fn seeds_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/dev-sandbox/seeds")
@@ -35,12 +32,15 @@ fn tool_tokens(text: &str) -> BTreeSet<&str> {
         .collect()
 }
 
-/// Every tool the workspace page publishes.
-fn published() -> BTreeSet<&'static str> {
+/// Every tool the workspace page publishes: the `tools.json` selections, and
+/// the tools `dev.js` registers itself, read off the script the block serves
+/// ([`dev_page_tools`]) rather than listed here — so a tool added to either
+/// is a tool seed prose may name, with no edit to this file.
+fn published() -> BTreeSet<String> {
     SELECTIONS
         .iter()
-        .map(|(_, _, _, name, _)| *name)
-        .chain(PAGE_LOCAL_TOOLS.iter().copied())
+        .map(|(_, _, _, name, _)| name.to_string())
+        .chain(dev_page_tools::dev_page_tool_names())
         .collect()
 }
 
@@ -131,7 +131,7 @@ fn every_seed_llms_txt_is_the_preamble_then_the_guide_as_the_manifest_declares()
     // a tool added to the manifest fails here until the preamble names it.
     let dev_tools: BTreeSet<&str> = published
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|tool| tool.starts_with("dev_"))
         .collect();
     let named: BTreeSet<&str> = tool_tokens(&preamble)

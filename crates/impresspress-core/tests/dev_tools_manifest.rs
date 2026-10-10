@@ -12,6 +12,7 @@ use impresspress_core::{
 use wafer_run::context::Context;
 
 mod descriptions;
+mod dev_page_tools;
 
 /// Host passed to [`discovery_json_as`] — arbitrary, but shared with the
 /// other discovery-document tests (`openapi_document`,
@@ -205,8 +206,8 @@ async fn tools_json_descriptions_carry_no_maintainer_notes() {
     )
     .await;
 
-    let page = descriptions::dev_page_tools();
-    let page_tools = descriptions::dev_page_tool_names();
+    let page = dev_page_tools::dev_page_tools();
+    let page_tools = dev_page_tools::dev_page_tool_names();
     let failures = descriptions::check(&[
         descriptions::Scope::new("dev.tools", &doc, &[], &page_tools),
         descriptions::Scope::new("dev.page", &page, &[&doc], &[]),
@@ -225,7 +226,7 @@ async fn tools_json_descriptions_carry_no_maintainer_notes() {
 /// description, the input field's description, and no `execute`.
 #[tokio::test]
 async fn the_page_tool_reader_reads_every_published_part() {
-    let page = descriptions::dev_page_tools();
+    let page = dev_page_tools::dev_page_tools();
     let tools = page["tools"].as_array().expect("tools");
     let compile = tools
         .iter()
