@@ -222,9 +222,10 @@ extern "C" {
     #[wasm_bindgen(js_name = llmUnloadEngine, catch)]
     pub async fn llm_unload_engine(model_id: &str) -> Result<JsValue, JsValue>;
 
-    /// Start a streaming chat completion. Returns the stream id as a JS string.
+    /// Start a streaming chat completion on the page that holds `model_id`.
+    /// Returns the stream id as a JS string.
     #[wasm_bindgen(js_name = llmChatStream, catch)]
-    pub async fn llm_chat_stream(body_json: &str) -> Result<JsValue, JsValue>;
+    pub async fn llm_chat_stream(model_id: &str, body_json: &str) -> Result<JsValue, JsValue>;
 
     /// Pull the next frame from an LLM chat stream.
     /// Frame JSON: `{kind:'chunk', payload:<openai chunk json>}` |
@@ -243,14 +244,14 @@ extern "C" {
     #[wasm_bindgen(js_name = imageLoadEngine, catch)]
     pub async fn image_load_engine(model_id: &str) -> Result<JsValue, JsValue>;
 
-    /// Unload the page-side T2I engine.
+    /// Unload `model_id` from the page that holds it (a no-op when none does).
     #[wasm_bindgen(js_name = imageUnloadEngine, catch)]
-    pub async fn image_unload_engine() -> Result<JsValue, JsValue>;
+    pub async fn image_unload_engine(model_id: &str) -> Result<JsValue, JsValue>;
 
-    /// Start an image generation. Returns the request id as a JS string. Pump
-    /// frames with `imageNextFrame`.
+    /// Start an image generation on the page that holds `model_id`. Returns
+    /// the request id as a JS string. Pump frames with `imageNextFrame`.
     #[wasm_bindgen(js_name = imageStartGenerate, catch)]
-    pub async fn image_start_generate(body_json: &str) -> Result<JsValue, JsValue>;
+    pub async fn image_start_generate(model_id: &str, body_json: &str) -> Result<JsValue, JsValue>;
 
     /// Pull the next frame from an image generation. Frame JSON:
     ///   `{kind:'progress', payload:{stage, bytes_downloaded?, bytes_total?}}` |
@@ -303,6 +304,21 @@ pub fn describe(err: &JsValue) -> String {
         return s;
     }
     format!("{err:?}")
+}
+
+/// The `code` bridge.js gives every refusal of a page-side engine request
+/// (`ENGINE_UNAVAILABLE` in `js/bridge.js`): no open page runs the engine,
+/// none holds the model, or the page running the request went away. Its
+/// message is written for the caller.
+pub const ENGINE_UNAVAILABLE: &str = "engine-unavailable";
+
+/// The caller-facing message of an engine refusal (a rejection whose `code`
+/// is [`ENGINE_UNAVAILABLE`]), or `None` for any other rejection. The LLM,
+/// image and embedding bridges turn it into their service's
+/// `EngineUnavailable`, which the runtime answers as a 503 carrying it.
+pub fn engine_unavailable(err: &JsValue) -> Option<String> {
+    let code = js_sys::Reflect::get(err, &JsValue::from_str("code")).ok()?;
+    (code.as_string().as_deref() == Some(ENGINE_UNAVAILABLE)).then(|| describe(err))
 }
 
 /// The `.name` property of a rejected `JsValue`, if present. `DOMException`
@@ -367,5 +383,75 @@ mod tests {
         Reflect::set(&obj, &JsValue::from_str("name"), &JsValue::from_f64(1.0)).unwrap();
         let val: JsValue = obj.into();
         assert_eq!(error_name(&val), None);
+    }
+
+    /// A worker with no open window: what bridge.js's engine host sees when
+    /// every tab of the app is closed. Installed as the global `self`, which
+    /// is where bridge.js asks for its clients.
+    fn worker_with_no_windows() {
+        let clients = Object::new();
+        let match_all = js_sys::Function::new_no_args("return Promise.resolve([]);");
+        Reflect::set(&clients, &JsValue::from_str("matchAll"), &match_all).unwrap();
+        let worker = Object::new();
+        Reflect::set(&worker, &JsValue::from_str("clients"), &clients).unwrap();
+        Reflect::set(&js_sys::global(), &JsValue::from_str("self"), &worker).unwrap();
+    }
+
+    /// bridge.js's refusal of an engine request arrives in each service's
+    /// typed `EngineUnavailable`, carrying the caller-facing message — not a
+    /// backend/internal fault wrapping the JS error's debug text.
+    #[wasm_bindgen_test]
+    async fn an_engine_refusal_is_engine_unavailable_in_every_bridge() {
+        use wafer_core::interfaces::{
+            image::service::ImageError, llm::service::LlmError, vector::service::VectorError,
+        };
+        worker_with_no_windows();
+
+        match crate::vector::embedding_bridge::run("multilingual-e5-small", &["x".into()]).await {
+            Err(VectorError::EngineUnavailable(message)) => assert_eq!(
+                message,
+                "no open page runs the embedding engine — open the app in a tab and try again"
+            ),
+            other => panic!("embedding: {other:?}"),
+        }
+        match crate::llm::bridge::start_chat_stream("m", "{}").await {
+            Err(LlmError::EngineUnavailable(message)) => assert_eq!(
+                message,
+                "no open page runs the LLM engine — open the app in a tab and try again"
+            ),
+            other => panic!("llm: {:?}", other.map(|_| ())),
+        }
+        match crate::image::bridge::load_engine("janus-pro-1b").await {
+            Err(ImageError::EngineUnavailable(message)) => assert_eq!(
+                message,
+                "no open page runs the image engine — open the app in a tab and try again"
+            ),
+            other => panic!("image: {other:?}"),
+        }
+        Reflect::delete_property(&js_sys::global(), &JsValue::from_str("self")).unwrap();
+    }
+
+    /// Any other rejection stays what it was: not a refusal, so not
+    /// `EngineUnavailable`.
+    #[wasm_bindgen_test]
+    fn only_the_engine_unavailable_code_is_a_refusal() {
+        let refused: JsValue = js_sys::Error::new("closed").into();
+        Reflect::set(
+            &refused,
+            &JsValue::from_str("code"),
+            &JsValue::from_str(ENGINE_UNAVAILABLE),
+        )
+        .unwrap();
+        assert_eq!(engine_unavailable(&refused).as_deref(), Some("closed"));
+
+        let other: JsValue = js_sys::Error::new("boom").into();
+        assert_eq!(engine_unavailable(&other), None);
+        Reflect::set(
+            &other,
+            &JsValue::from_str("code"),
+            &JsValue::from_str("EPIPE"),
+        )
+        .unwrap();
+        assert_eq!(engine_unavailable(&other), None);
     }
 }

@@ -87,6 +87,13 @@ fn llm_error_response(context: &str, e: LlmError) -> OutputStream {
         LlmError::RateLimited => ErrorCode::Unavailable,
         LlmError::Unauthorized => ErrorCode::Unauthenticated,
         LlmError::Cancelled => ErrorCode::Cancelled,
+        // The engine cannot take the request now (no page runs it, or none
+        // holds the model). The message is written for the caller — that is
+        // the variant's contract — so it is the whole answer, as on the
+        // service block's own wire.
+        LlmError::EngineUnavailable(message) => {
+            return OutputStream::error(WaferError::new(ErrorCode::Unavailable, message.clone()))
+        }
         // `BackendError` and `Network` carry a provider's own transport text,
         // which is deployment topology and must not reach the client. The
         // wildcard is required — `LlmError` is `#[non_exhaustive]` upstream —
@@ -2336,6 +2343,20 @@ mod discovery_error_shape_tests {
 
         assert_eq!(e.code, ErrorCode::Unauthenticated, "got {e:?}");
         assert_eq!(e.message, "unauthorized");
+    }
+
+    /// An engine that cannot take the request is a 503 that says why, as
+    /// the service block's wire answers it — not the sanitized 500 the
+    /// wildcard gives an unclassified error.
+    #[tokio::test]
+    async fn an_unavailable_engine_is_a_503_that_says_why() {
+        let e = discover_against(|| {
+            LlmError::EngineUnavailable("no open page runs the LLM engine".into())
+        })
+        .await;
+
+        assert_eq!(e.code, ErrorCode::Unavailable, "got {e:?}");
+        assert_eq!(e.message, "no open page runs the LLM engine");
     }
 
     /// A transport failure keeps the sanitized 500: the text is the

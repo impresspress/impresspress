@@ -13,12 +13,15 @@
 // github.com/huggingface/transformers.js-examples/tree/main/janus-pro-webgpu
 //
 // SW → Page request shapes (see bridge.js for the producing side):
+//   { type: 'engine-probe',                id, family }   // answered when family is 'image'
 //   { type: 'image-load-request',          id, modelId }
 //   { type: 'image-unload-request',        id }
 //   { type: 'image-generate-stream-request', id, body }   // body = JSON ImageRequest
 //   { type: 'image-stream-cancel',         id }
 //
 // Page → SW reply shapes:
+//   { type: 'engine-present',        id, loaded, loading }    // runs the image engine;
+//                                     // loaded / loading = [modelId] or []
 //   { type: 'image-load-response',   id, error? }
 //   { type: 'image-unload-response', id, error? }
 //   { type: 'image-stream-frame',    id, kind, payload? }
@@ -83,8 +86,34 @@ async function swStreamFrame(id, kind, payload) {
     await swPost({ type: 'image-stream-frame', id, kind, payload });
 }
 
+// The load in progress, if any: `{ modelId, promise }`. The probe answer lists
+// its model in `loading`, so bridge.js sends this page every request for that
+// model while it loads; each waits for it here instead of failing ("model not
+// loaded") or loading the model a second time.
+let _loading = null;
+
 async function ensureLoaded(modelId, onProgress) {
+    // One load at a time: a load of another model finishes (or fails) first.
+    while (_loading && _loading.modelId !== modelId) {
+        await _loading.promise.catch(() => {});
+    }
+    if (_loading) return _loading.promise;
     if (_processor && _model && _modelId === modelId) return;
+    const promise = loadModel(modelId, onProgress);
+    _loading = { modelId, promise };
+    try {
+        await promise;
+    } finally {
+        if (_loading?.promise === promise) _loading = null;
+    }
+}
+
+/** Wait out a load in progress, whatever its outcome. */
+async function settledLoad() {
+    while (_loading) await _loading.promise.catch(() => {});
+}
+
+async function loadModel(modelId, onProgress) {
     if (_model) {
         try { await _model.dispose?.(); } catch (_e) {}
         _model = null;
@@ -144,6 +173,7 @@ async function handleLoadEngine(msg) {
 
 async function handleUnloadEngine(msg) {
     try {
+        await settledLoad();
         if (_model) {
             try { await _model.dispose?.(); } catch (_e) {}
         }
@@ -196,13 +226,20 @@ async function generateOnce(prompt, { onProgress, signal } = {}) {
 }
 
 async function handleGenerateStream(msg) {
-    if (!_processor || !_model) {
-        await swStreamFrame(msg.id, 'error', 'model not loaded; call load_model first');
-        return;
-    }
+    // Registered before the wait for a load in progress, so a cancel that
+    // arrives during the load is honoured: the generation never starts.
     const ac = new AbortController();
     _activeStreams.set(msg.id, ac);
     try {
+        await settledLoad();
+        if (ac.signal.aborted) {
+            await swStreamFrame(msg.id, 'error', 'cancelled');
+            return;
+        }
+        if (!_processor || !_model) {
+            await swStreamFrame(msg.id, 'error', 'model not loaded; call load_model first');
+            return;
+        }
         const req = JSON.parse(msg.body);
         const pngBytes = await generateOnce(req.prompt, {
             signal: ac.signal,
@@ -239,6 +276,16 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || !msg.type) return;
     switch (msg.type) {
+        case 'engine-probe':
+            if (msg.family === 'image') {
+                swPost({
+                    type: 'engine-present',
+                    id: msg.id,
+                    loaded: _model && _modelId ? [_modelId] : [],
+                    loading: _loading ? [_loading.modelId] : [],
+                });
+            }
+            break;
         case 'image-load-request':             handleLoadEngine(msg); break;
         case 'image-unload-request':           handleUnloadEngine(msg); break;
         case 'image-generate-stream-request':  handleGenerateStream(msg); break;
@@ -261,6 +308,7 @@ export async function loadEngine(modelId, onProgress) {
 }
 
 export async function unloadEngine() {
+    await settledLoad();
     if (_model) {
         try { await _model.dispose?.(); } catch (_e) {}
     }

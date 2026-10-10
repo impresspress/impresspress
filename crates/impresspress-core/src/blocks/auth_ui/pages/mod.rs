@@ -484,6 +484,37 @@ mod tests {
         );
     }
 
+    /// The runtime's page engines come first and are never dropped, and an
+    /// operator script that repeats one is rendered once. A browser database
+    /// seeded before the engines became runtime-owned still holds
+    /// `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS = "/webllm-engine.js"`; that row
+    /// must neither duplicate the tag nor stand in for the other engines.
+    #[tokio::test]
+    async fn site_config_renders_the_runtime_page_engines_before_operator_scripts() {
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(
+            crate::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY,
+            "/webllm-engine.js,/embed-engine.js,/t2i-engine.js",
+        );
+        ctx.set_config(
+            EMBEDDED_SCRIPTS_KEY,
+            "/webllm-engine.js, https://a.example.com/a.js",
+        );
+
+        let cfg = site_config(&ctx).await.expect("site config");
+        assert_eq!(
+            cfg.embedded_scripts,
+            [
+                "/webllm-engine.js",
+                "/embed-engine.js",
+                "/t2i-engine.js",
+                "https://a.example.com/a.js",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn oauth_provider_configured_requires_all_three_keys() {
         let mut ctx = TestContext::new()

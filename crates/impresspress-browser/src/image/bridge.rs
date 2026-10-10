@@ -13,11 +13,14 @@ use crate::bridge::{
     image_unload_engine,
 };
 
+/// A refusal (no page can run the generation now) is
+/// [`ImageError::EngineUnavailable`] with bridge.js's caller-facing message;
+/// anything else is a backend fault.
 fn js_err(e: wasm_bindgen::JsValue) -> ImageError {
-    ImageError::BackendError(format!(
-        "image bridge: {}",
-        e.as_string().unwrap_or_else(|| format!("{e:?}"))
-    ))
+    match crate::bridge::engine_unavailable(&e) {
+        Some(message) => ImageError::EngineUnavailable(message),
+        None => ImageError::BackendError(format!("image bridge: {}", crate::bridge::describe(&e))),
+    }
 }
 
 pub async fn load_engine(model_id: &str) -> Result<(), ImageError> {
@@ -27,12 +30,17 @@ pub async fn load_engine(model_id: &str) -> Result<(), ImageError> {
         .map_err(js_err)
 }
 
-pub async fn unload_engine() -> Result<(), ImageError> {
-    image_unload_engine().await.map(|_| ()).map_err(js_err)
+pub async fn unload_engine(model_id: &str) -> Result<(), ImageError> {
+    image_unload_engine(model_id)
+        .await
+        .map(|_| ())
+        .map_err(js_err)
 }
 
-pub async fn start_generate(body_json: &str) -> Result<String, ImageError> {
-    let v = image_start_generate(body_json).await.map_err(js_err)?;
+pub async fn start_generate(model_id: &str, body_json: &str) -> Result<String, ImageError> {
+    let v = image_start_generate(model_id, body_json)
+        .await
+        .map_err(js_err)?;
     v.as_string()
         .ok_or_else(|| ImageError::BackendError("image bridge: request id not a string".into()))
 }
@@ -93,6 +101,19 @@ pub async fn next_frame(request_id: &str) -> Result<Frame, ImageError> {
                 .unwrap_or("image/png")
                 .to_string();
             Ok(Frame::Done { bytes, mime_type })
+        }
+        // The page running the generation went away mid-stream: bridge.js
+        // ends the stream with the refusal's code and caller-facing message.
+        "error"
+            if frame.get("code").and_then(|v| v.as_str())
+                == Some(crate::bridge::ENGINE_UNAVAILABLE) =>
+        {
+            Err(ImageError::EngineUnavailable(
+                payload
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ))
         }
         "error" => Ok(Frame::Error(
             payload

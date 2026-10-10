@@ -9,11 +9,24 @@
 // 2. SW-routed chat / unload / cancel: receives postMessages from the SW via
 //    navigator.serviceWorker.message, runs WebLLM, streams frames back.
 //
-// SW → Page message shapes (see bridge.js for the consuming side):
+// SW → Page request shapes (see bridge.js for the producing side):
+//   { type: 'engine-probe',            id, family }   // answered when family is 'llm'
+//   { type: 'llm-unload-request',      id, modelId }
+//   { type: 'llm-chat-stream-request', id, body }     // body = JSON chat request
+//   { type: 'llm-stream-cancel',       id }
+//
+// Page → SW reply shapes:
+//   { type: 'engine-present',      id, loaded, loading }   // runs the LLM engine;
+//                                                          // loaded / loading = [modelId] or []
 //   { type: 'llm-unload-response', id, error? }            // one-shot
 //   { type: 'llm-stream-frame',    id, kind, payload? }    // streams
 //     `kind` ∈ {'chunk','done','error'}; chat emits 'chunk' frames per token
 //     and a terminal 'done' / 'error'.
+//
+// bridge.js sends a request only to a page that answered its probe, and a
+// chat or an unload only to the page whose answer lists the model: the
+// engine loaded page-direct lives in this tab alone. The answer costs nothing
+// (no model is loaded to give it) and must not wait for anything.
 //
 // The @mlc-ai/web-llm import is lazy: a top-level static import would block
 // DOMContentLoaded for every page that loads this script (it's a multi-MB
@@ -43,6 +56,7 @@ async function swStreamFrame(id, kind, payload) {
 
 async function handleUnload(msg) {
     try {
+        await settledLoad();
         if (_engine) {
             await _engine.unload();
             _engine = null;
@@ -55,13 +69,20 @@ async function handleUnload(msg) {
 }
 
 async function handleChatStream(msg) {
-    if (!_engine) {
-        await swStreamFrame(msg.id, 'error', 'no engine loaded');
-        return;
-    }
+    // Registered before the wait for a load in progress, so a cancel that
+    // arrives during the load is honoured: the chat never starts.
     const ac = new AbortController();
     _activeStreams.set(msg.id, ac);
     try {
+        await settledLoad();
+        if (ac.signal.aborted) {
+            await swStreamFrame(msg.id, 'error', 'cancelled');
+            return;
+        }
+        if (!_engine) {
+            await swStreamFrame(msg.id, 'error', 'no engine loaded');
+            return;
+        }
         const body = JSON.parse(msg.body);
         const iterator = await _engine.chat.completions.create({
             messages: body.messages,
@@ -104,10 +125,37 @@ function handleCancel(msg) {
 // `import { loadEngine } from '/webllm-engine.js'` from another script that
 // lives in the same window shares this state.
 // ---------------------------------------------------------------------------
+// The load in progress, if any: `{ modelId, promise }`. The probe answer lists
+// its model in `loading`, so bridge.js sends this page every request for that
+// model while it loads; a chat or an unload waits for it here instead of
+// answering "no engine loaded", and a second `loadEngine` of the same model
+// shares it instead of loading the model twice.
+let _loading = null;
+
+/** Wait out a load in progress, whatever its outcome. */
+async function settledLoad() {
+    while (_loading) await _loading.promise.catch(() => {});
+}
+
 export async function loadEngine(modelId, onProgress) {
+    // One load at a time: a load of another model finishes (or fails) first.
+    while (_loading && _loading.modelId !== modelId) {
+        await _loading.promise.catch(() => {});
+    }
+    if (_loading) return _loading.promise;
     if (_engineModel === modelId && _engine) {
         return; // already loaded
     }
+    const promise = createEngine(modelId, onProgress);
+    _loading = { modelId, promise };
+    try {
+        await promise;
+    } finally {
+        if (_loading?.promise === promise) _loading = null;
+    }
+}
+
+async function createEngine(modelId, onProgress) {
     if (_engine) {
         try { await _engine.unload(); } catch (_e) {}
         _engine = null;
@@ -128,6 +176,7 @@ export async function loadEngine(modelId, onProgress) {
 // weights intact. Used by the picker's "Download" action: load → unload
 // caches the model without keeping it as the active engine.
 export async function unloadEngine() {
+    await settledLoad();
     if (!_engine) return;
     try { await _engine.unload(); } catch (_e) {}
     _engine = null;
@@ -138,6 +187,16 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || !msg.type) return;
     switch (msg.type) {
+        case 'engine-probe':
+            if (msg.family === 'llm') {
+                swPost({
+                    type: 'engine-present',
+                    id: msg.id,
+                    loaded: _engine && _engineModel ? [_engineModel] : [],
+                    loading: _loading ? [_loading.modelId] : [],
+                });
+            }
+            break;
         case 'llm-unload-request':      handleUnload(msg); break;
         case 'llm-chat-stream-request': handleChatStream(msg); break;
         case 'llm-stream-cancel':       handleCancel(msg); break;

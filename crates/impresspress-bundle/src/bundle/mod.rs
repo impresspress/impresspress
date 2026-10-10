@@ -416,6 +416,22 @@ fn build_template_vars(
     // data `initialize()` hands the runtime — both from the one value.
     vars.insert("BYPASS_CONDITION".to_string(), bypass.render_condition());
     vars.insert("BYPASS_RULES".to_string(), bypass.render_data());
+    // The page engines, from their one list (`assets::PAGE_ENGINES`): as the
+    // JSON array `sw.js` hands `initialize({ pageEngines })`, and as the boot
+    // shell's module script tags.
+    let engines: Vec<String> = crate::assets::page_engine_scripts().collect();
+    vars.insert(
+        "PAGE_ENGINES".to_string(),
+        serde_json::to_string(&engines).expect("a list of strings serializes"),
+    );
+    vars.insert(
+        "PAGE_ENGINE_TAGS".to_string(),
+        engines
+            .iter()
+            .map(|src| format!(r#"<script type="module" src="{src}"></script>"#))
+            .collect::<Vec<_>>()
+            .join("\n    "),
+    );
     vars.insert("APP_NAME".to_string(), app_name);
     // `index.html` is the only template that shows the title, and it shows
     // it as text: in `<title>` and between `APP_TITLE_OPEN`/`_CLOSE`.

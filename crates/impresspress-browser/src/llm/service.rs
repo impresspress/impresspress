@@ -88,9 +88,12 @@ impl LlmService for BrowserLlmService {
         };
 
         let (mut tx, rx) = mpsc::channel::<Result<ChatChunk, LlmError>>(16);
+        // The chat runs on the page that holds this model (bridge.js routes
+        // by it), the one the model was loaded into page-direct.
+        let model = req.model;
 
         wasm_bindgen_futures::spawn_local(async move {
-            let stream_id = match bridge::start_chat_stream(&body_json).await {
+            let stream_id = match bridge::start_chat_stream(&model, &body_json).await {
                 Ok(id) => id,
                 Err(e) => {
                     let _ = tx.send(Err(e)).await;

@@ -611,96 +611,253 @@ export function _completeAssetLoad(correlationId, reply) {
 
 globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 
-// ─── LLM (SW → page postMessage bridge) ─────────────────────────────────────
+// ─── Page-side engines (SW → page postMessage bridge) ───────────────────────
 //
-// Mirrors the loadAsset pattern: correlation-id keyed postMessage to a window
-// client; resolvers kept in a Map; sw.js routes replies via globalThis hook.
+// The LLM, image and embedding services run their models in a window, not in
+// this worker (WebGPU is window-only). Each request is posted to an open page
+// whose engine script — `webllm-engine.js`, `t2i-engine.js`,
+// `embed-engine.js` — runs it and posts the answer back; sw.js hands that
+// answer to the family's `globalThis.__impresspressComplete*` hook below,
+// which routes it by request id.
 //
-// One-shot operations (currently only `llmUnloadEngine`) use
-// `_pendingLlmRequests`. Streamed operations (chat, create-engine) share a
-// single `_activeLlmStreams` Map and a single page→SW frame envelope:
-//   { type: 'llm-stream-frame', id, kind: 'chunk'|'progress'|'done'|'error', payload? }
-// Each stream is a queue + waiter list so Rust can `await` one frame at a
-// time while many frames are buffered in flight.
+// Which page matters, twice over. A page answers only for the engine scripts
+// it loaded — a request posted to a page without that engine's listener is
+// never answered at all — and a model lives in ONE page: WebLLM is loaded
+// page-direct in the tab that called `loadEngine`, Janus in the tab that took
+// the image load, so a chat or a generation sent to another tab that also
+// runs the engine finds no model there. So before each request every open
+// window is asked (`{type:'engine-probe', id, family}`) whether it runs the
+// engine and which models it holds or is loading
+// (`{type:'engine-present', id, loaded, loading}`), and the request goes where
+// its model is. A page "holds" a model it has loaded or is loading: its
+// engine makes every request for a model it is loading wait for that load,
+// so a second load shares the first instead of loading the model again in
+// another tab, and a chat or a generation sent mid-load runs once it is in.
+//
+// - `need: 'model'` (a chat, a generation): a page holding the model. None
+//   holding it refuses the request — the model has to be loaded first.
+// - `need: 'engine'` (a load, an embedding, which loads on demand): a page
+//   holding the model, else the first page that runs the engine — once one
+//   has answered, a holder among the rest has ENGINE_HOLDER_GRACE_MS to say
+//   so, rather than the whole probe bound: a page with no engine script
+//   (a site page, a JSON document) never answers at all.
+// - `need: 'unload'`: the page holding the model; none holding it means there
+//   is nothing to unload, and nothing is sent.
+//
+// A page that runs the engine answers a probe at once, with nothing to load
+// first, so ENGINE_PROBE_TIMEOUT_MS bounds the wait for pages that never will
+// (a frozen tab, a page without the script). No page answering at all refuses
+// the request.
+//
+// Every refusal — no page runs the engine, no page holds the model, the page
+// running the request went away — is an `Error` whose `code` is
+// ENGINE_UNAVAILABLE and whose message is written for the person or agent
+// that made the request. The Rust bridges (`impresspress-browser`'s
+// `bridge::engine_unavailable`) turn exactly that code into the services'
+// `EngineUnavailable` error, which the runtime answers as a 503 carrying the
+// message. A stream refused after it started ends with an error frame that
+// carries the same `code`.
+//
+// While a request is in flight its page is watched. A page that is closed or
+// navigated away is no longer among the worker's clients and will never
+// answer, so the request fails instead of waiting for it. A stream stays on
+// the page it started on: its frames and its cancel go there.
 
-const _pendingLlmRequests = new Map();   // id -> { resolve, reject } (one-shot)
-const _activeLlmStreams   = new Map();   // id -> { push, closeOk, closeErr, queue, waiters }
+/** How long a probe waits for a page that runs the engine. */
+export const ENGINE_PROBE_TIMEOUT_MS = 2_000;
 
-async function _postToWindowClient(payload) {
-    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false });
-    if (clients.length === 0) {
-        throw new Error('no active page — open the app in a tab');
-    }
-    clients[0].postMessage(payload);
+/**
+ * The `code` of every refusal of an engine request (see above). Matched by
+ * `bridge::ENGINE_UNAVAILABLE` on the Rust side.
+ */
+export const ENGINE_UNAVAILABLE = 'engine-unavailable';
+
+/** A refusal of an engine request: `message` is for the caller. */
+function _engineUnavailable(message) {
+    return Object.assign(new Error(message), { code: ENGINE_UNAVAILABLE });
 }
+/**
+ * How long a request that may run on any page (`need: 'engine'`) waits, after
+ * the first page that runs the engine has answered, for a page holding its
+ * model. Pages answer a probe from their message handler, in milliseconds.
+ */
+const ENGINE_HOLDER_GRACE_MS = 250;
+/** How often an in-flight request's page is checked for still being open. */
+const ENGINE_WATCH_INTERVAL_MS = 1_000;
 
-function _mkLlmId(prefix) {
+/** The engine each request family runs, as messages name it. */
+const ENGINE_NAMES = { llm: 'LLM', image: 'image', embed: 'embedding' };
+
+const _pendingProbes = new Map(); // probe id -> (holds: string[]) => void
+const _inFlight = new Map();      // request id -> { family, clientId, fail(Error) }
+let _watchTimer = null;
+
+function _mkEngineId(prefix) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Create the queue/waiter pair for a new stream and register it. */
-function _registerStream(id) {
+/**
+ * The open window a request for `route` goes to, or `null` for an unload
+ * whose model no page holds. Rejects when no page can take the request.
+ * @param {{family:'llm'|'image'|'embed', model:string, need:'model'|'engine'|'unload'}} route
+ * @returns {Promise<WindowClient|null>}
+ */
+async function _engineHost({ family, model, need }) {
+    const engine = ENGINE_NAMES[family];
+    const noEngine = () => _engineUnavailable(
+        `no open page runs the ${engine} engine — open the app in a tab and try again`,
+    );
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false });
+    if (clients.length === 0) throw noEngine();
+    return await new Promise((resolve, reject) => {
+        const probeIds = [];
+        let firstRunner = null; // the first page that answered, holding the model or not
+        let answered = 0;
+        let timer = null;
+        let grace = null;
+        const settle = (finish) => {
+            clearTimeout(timer);
+            clearTimeout(grace);
+            for (const id of probeIds) _pendingProbes.delete(id);
+            finish();
+        };
+        // Every page that will answer has, and none holds the model.
+        const decideWithoutHolder = () => {
+            if (firstRunner === null) return settle(() => reject(noEngine()));
+            if (need === 'engine') return settle(() => resolve(firstRunner));
+            if (need === 'unload') return settle(() => resolve(null));
+            settle(() => reject(_engineUnavailable(
+                `no open page has the ${engine} model '${model}' loaded — load it first`,
+            )));
+        };
+        timer = setTimeout(decideWithoutHolder, ENGINE_PROBE_TIMEOUT_MS);
+        for (const client of clients) {
+            const id = _mkEngineId('engine-probe');
+            probeIds.push(id);
+            _pendingProbes.set(id, (holds) => {
+                if (holds.includes(model)) return settle(() => resolve(client));
+                answered += 1;
+                const first = firstRunner === null;
+                if (first) firstRunner = client;
+                if (answered === clients.length) return decideWithoutHolder();
+                if (first && need === 'engine') {
+                    grace = setTimeout(decideWithoutHolder, ENGINE_HOLDER_GRACE_MS);
+                }
+            });
+            client.postMessage({ type: 'engine-probe', id, family });
+        }
+    });
+}
+
+/**
+ * Called by sw.js when a page answers a probe:
+ * `{type:'engine-present', id, loaded: [modelId, …], loading: [modelId, …]}`.
+ * The page holds every model in either list. Answers to a probe whose request
+ * has already picked its page find nothing pending.
+ */
+export function _completeEngineProbe(msg) {
+    const answer = _pendingProbes.get(msg.id);
+    const list = (value) => (Array.isArray(value) ? value : []);
+    if (answer) answer([...list(msg.loaded), ...list(msg.loading)]);
+}
+
+globalThis.__impresspressCompleteEngineProbe = _completeEngineProbe;
+
+function _watch(id, family, clientId, fail) {
+    _inFlight.set(id, { family, clientId, fail });
+    if (_watchTimer === null) _watchTimer = setInterval(_checkEngineHosts, ENGINE_WATCH_INTERVAL_MS);
+}
+
+function _unwatch(id) {
+    _inFlight.delete(id);
+    if (_inFlight.size === 0 && _watchTimer !== null) {
+        clearInterval(_watchTimer);
+        _watchTimer = null;
+    }
+}
+
+/** Fail every in-flight request whose page is no longer open. */
+async function _checkEngineHosts() {
+    for (const [id, entry] of [..._inFlight]) {
+        if (await self.clients.get(entry.clientId)) continue;
+        // Answered while this check awaited: nothing to fail.
+        if (!_inFlight.has(id)) continue;
+        _unwatch(id);
+        entry.fail(_engineUnavailable(
+            `the page running the ${ENGINE_NAMES[entry.family]} engine was closed before it answered`,
+        ));
+    }
+}
+
+/**
+ * Post a one-shot request to the page `route` picks and await its reply,
+ * which the family's completion hook settles through `pending`. An unload no
+ * page holds the model for resolves without sending anything.
+ */
+async function _engineRequest(route, pending, payload) {
+    const host = await _engineHost(route);
+    if (host === null) return undefined;
+    const reply = new Promise((resolve, reject) => {
+        pending.set(payload.id, { resolve, reject });
+    });
+    _watch(payload.id, route.family, host.id, (err) => {
+        const p = pending.get(payload.id);
+        if (!p) return;
+        pending.delete(payload.id);
+        p.reject(err);
+    });
+    host.postMessage(payload);
+    try {
+        return await reply;
+    } finally {
+        _unwatch(payload.id);
+    }
+}
+
+/**
+ * Create the queue/waiter pair for a new stream and register it in `streams`.
+ * A terminal frame (`closeOk`/`closeErr`) means the page is done with it, so
+ * it also stops watching that page.
+ */
+function _registerStream(streams, id) {
     const queue = [];
     const waiters = [];
     const push = (frame) => {
         if (waiters.length > 0) waiters.shift()(frame);
         else queue.push(frame);
     };
-    _activeLlmStreams.set(id, {
+    streams.set(id, {
         push,
-        closeOk: () => push({ kind: 'done' }),
-        closeErr: (err) => push({ kind: 'error', payload: err }),
+        closeOk: (payload) => {
+            _unwatch(id);
+            push(payload === undefined ? { kind: 'done' } : { kind: 'done', payload });
+        },
+        closeErr: (err, code) => {
+            _unwatch(id);
+            push(code === undefined ? { kind: 'error', payload: err } : { kind: 'error', payload: err, code });
+        },
         queue,
         waiters,
     });
 }
 
-/** Start a streamed LLM operation. Returns the stream id. */
-async function _startLlmStream(requestType, idPrefix, extraPayload) {
-    const id = _mkLlmId(idPrefix);
-    _registerStream(id);
-    await _postToWindowClient({ type: requestType, id, ...extraPayload });
-    return id;
+/** Start a stream on the page `route` picks. Returns its id. */
+async function _engineStream(route, streams, payload) {
+    const host = await _engineHost(route);
+    _registerStream(streams, payload.id);
+    _watch(payload.id, route.family, host.id, (err) => streams.get(payload.id)?.closeErr(err.message, err.code));
+    host.postMessage(payload);
+    return payload.id;
 }
 
 /**
- * Unload the engine on the page.
- * @param {string} modelId
- * @returns {Promise<void>}
+ * Pull the next frame from a stream. Blocks until a frame arrives. After a
+ * terminal frame (done/error) the stream entry is removed.
  */
-export async function llmUnloadEngine(modelId) {
-    const id = _mkLlmId('llm-unload');
-    const replyPromise = new Promise((resolve, reject) => {
-        _pendingLlmRequests.set(id, { resolve, reject });
-    });
-    await _postToWindowClient({ type: 'llm-unload-request', id, modelId });
-    return await replyPromise;
-}
-
-/**
- * Start a streaming chat completion. Returns a stream id; pump with
- * `llmNextStreamFrame`. Frames are `{kind:'chunk', payload:<openai chunk
- * JSON>}` then a terminal `{kind:'done'}` or `{kind:'error', payload}`.
- * @param {string} bodyJson - JSON request body as built by Rust
- *   `impresspress_core::llm_wire::openai::encode_chat_body`
- * @returns {Promise<string>} stream id
- */
-export async function llmChatStream(bodyJson) {
-    return _startLlmStream('llm-chat-stream-request', 'llm-chat', { body: bodyJson });
-}
-
-/**
- * Pull the next frame from any LLM stream (chat OR create-engine). Blocks
- * until a frame arrives. After a terminal frame (done/error) the stream
- * entry is removed.
- * @param {string} id
- * @returns {Promise<string>} JSON-encoded frame:
- *   {kind:'chunk',payload}|{kind:'progress',payload}|{kind:'done'}|{kind:'error',payload}
- */
-export async function llmNextStreamFrame(id) {
-    const stream = _activeLlmStreams.get(id);
+async function _nextStreamFrame(streams, id, unknown) {
+    const stream = streams.get(id);
     if (!stream) {
-        return JSON.stringify({ kind: 'error', payload: 'unknown stream id' });
+        return JSON.stringify({ kind: 'error', payload: unknown });
     }
     let frame;
     if (stream.queue.length > 0) {
@@ -709,9 +866,103 @@ export async function llmNextStreamFrame(id) {
         frame = await new Promise((resolve) => stream.waiters.push(resolve));
     }
     if (frame.kind === 'done' || frame.kind === 'error') {
-        _activeLlmStreams.delete(id);
+        streams.delete(id);
     }
     return JSON.stringify(frame);
+}
+
+/**
+ * Cancel an in-flight stream: end it here, and tell the page running it to
+ * stop. A stream that has already ended has no page working on it.
+ */
+async function _cancelStream(streams, id, cancelType) {
+    const clientId = _inFlight.get(id)?.clientId;
+    const stream = streams.get(id);
+    if (stream) {
+        // Terminate any pending awaiter with an error frame (no-op if the
+        // Rust side has already broken out of its loop), and remove the entry
+        // now rather than waiting for the (possibly never called) next pump
+        // call to notice the terminal frame — the Rust side breaks its loop
+        // immediately after calling cancel.
+        stream.closeErr('cancelled');
+        streams.delete(id);
+    }
+    if (clientId === undefined) return;
+    const host = await self.clients.get(clientId);
+    host?.postMessage({ type: cancelType, id });
+}
+
+/** Route a stream frame from the page to its stream. */
+function _completeStreamFrame(streams, msg) {
+    const stream = streams.get(msg.id);
+    if (!stream) return;
+    if (msg.kind === 'done') stream.closeOk(msg.payload);
+    else if (msg.kind === 'error') stream.closeErr(msg.payload ?? 'unknown error');
+    else stream.push({ kind: msg.kind, payload: msg.payload });
+}
+
+/** Settle a one-shot request from the page's `{id, error?}` reply. */
+function _completeOneShot(pending, msg, value) {
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    if (msg.error) p.reject(new Error(msg.error));
+    else p.resolve(value);
+}
+
+// ─── LLM ────────────────────────────────────────────────────────────────────
+//
+// One-shot operations (currently only `llmUnloadEngine`) use
+// `_pendingLlmRequests`. Chat streams use `_activeLlmStreams` and the page→SW
+// frame envelope:
+//   { type: 'llm-stream-frame', id, kind: 'chunk'|'progress'|'done'|'error', payload? }
+// Each stream is a queue + waiter list so Rust can `await` one frame at a
+// time while many frames are buffered in flight.
+
+const _pendingLlmRequests = new Map();   // id -> { resolve, reject } (one-shot)
+const _activeLlmStreams   = new Map();   // id -> { push, closeOk, closeErr, queue, waiters }
+
+/**
+ * Unload `modelId` on the page that holds it; a no-op when none does.
+ * @param {string} modelId
+ * @returns {Promise<void>}
+ */
+export async function llmUnloadEngine(modelId) {
+    await _engineRequest({ family: 'llm', model: modelId, need: 'unload' }, _pendingLlmRequests, {
+        type: 'llm-unload-request',
+        id: _mkEngineId('llm-unload'),
+        modelId,
+    });
+}
+
+/**
+ * Start a streaming chat completion on the page that holds `modelId` (WebLLM
+ * models are loaded page-direct, so that is the tab that loaded it). Returns a
+ * stream id; pump with `llmNextStreamFrame`. Frames are `{kind:'chunk',
+ * payload:<openai chunk JSON>}` then a terminal `{kind:'done'}` or
+ * `{kind:'error', payload}`.
+ * @param {string} modelId
+ * @param {string} bodyJson - JSON request body as built by Rust
+ *   `impresspress_core::llm_wire::openai::encode_chat_body`
+ * @returns {Promise<string>} stream id
+ */
+export async function llmChatStream(modelId, bodyJson) {
+    return _engineStream({ family: 'llm', model: modelId, need: 'model' }, _activeLlmStreams, {
+        type: 'llm-chat-stream-request',
+        id: _mkEngineId('llm-chat'),
+        body: bodyJson,
+    });
+}
+
+/**
+ * Pull the next frame from an LLM stream. Blocks until a frame arrives.
+ * After a terminal frame (done/error) the stream entry is removed.
+ * @param {string} id
+ * @returns {Promise<string>} JSON-encoded frame:
+ *   {kind:'chunk',payload}|{kind:'progress',payload}|{kind:'done'}|{kind:'error',payload}
+ */
+export async function llmNextStreamFrame(id) {
+    return _nextStreamFrame(_activeLlmStreams, id, 'unknown stream id');
 }
 
 /**
@@ -719,17 +970,7 @@ export async function llmNextStreamFrame(id) {
  * @param {string} id
  */
 export async function llmCancelStream(id) {
-    const stream = _activeLlmStreams.get(id);
-    if (stream) {
-        // Terminate any pending awaiter with an error frame (no-op if the
-        // Rust side has already broken out of its loop).
-        stream.closeErr('cancelled');
-        // Remove the entry now rather than waiting for the (possibly never
-        // called) next pump call to notice the terminal frame — the Rust
-        // side breaks its loop immediately after calling cancel_stream.
-        _activeLlmStreams.delete(id);
-    }
-    await _postToWindowClient({ type: 'llm-stream-cancel', id });
+    await _cancelStream(_activeLlmStreams, id, 'llm-stream-cancel');
 }
 
 /**
@@ -743,97 +984,67 @@ export async function llmCancelStream(id) {
  *     `payload` is the chunk/progress/error string (omitted for 'done').
  */
 export function _completeLlmMessage(msg) {
-    if (msg.type === 'llm-unload-response') {
-        const pending = _pendingLlmRequests.get(msg.id);
-        if (!pending) return;
-        _pendingLlmRequests.delete(msg.id);
-        if (msg.error) pending.reject(new Error(msg.error));
-        else pending.resolve();
-        return;
-    }
-    if (msg.type === 'llm-stream-frame') {
-        const stream = _activeLlmStreams.get(msg.id);
-        if (!stream) return;
-        if (msg.kind === 'done') stream.closeOk();
-        else if (msg.kind === 'error') stream.closeErr(msg.payload ?? 'unknown error');
-        else stream.push({ kind: msg.kind, payload: msg.payload });
-    }
+    if (msg.type === 'llm-unload-response') _completeOneShot(_pendingLlmRequests, msg, undefined);
+    else if (msg.type === 'llm-stream-frame') _completeStreamFrame(_activeLlmStreams, msg);
 }
 
 globalThis.__impresspressCompleteLlmMessage = _completeLlmMessage;
 
-// ─── Image (SW → page postMessage bridge) ───────────────────────────────────
+// ─── Image ──────────────────────────────────────────────────────────────────
 //
-// Mirrors the LLM bridge. One-shot operations (`imageLoadEngine`,
-// `imageUnloadEngine`) use `_pendingImageRequests`. Streamed generation
-// (`imageStartGenerate` + `imageNextFrame`) shares `_activeImageStreams` with
-// a page→SW frame envelope:
+// One-shot operations (`imageLoadEngine`, `imageUnloadEngine`) use
+// `_pendingImageRequests`. Streamed generation (`imageStartGenerate` +
+// `imageNextFrame`) uses `_activeImageStreams` and the page→SW frame envelope:
 //   { type: 'image-stream-frame', id, kind: 'progress'|'done'|'error', payload? }
 
 const _pendingImageRequests = new Map(); // id -> { resolve, reject }
 const _activeImageStreams   = new Map(); // id -> { push, closeOk, closeErr, queue, waiters }
 
-function _mkImageId(prefix) {
-    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function _registerImageStream(id) {
-    const queue = [];
-    const waiters = [];
-    const push = (frame) => {
-        if (waiters.length > 0) waiters.shift()(frame);
-        else queue.push(frame);
-    };
-    _activeImageStreams.set(id, {
-        push,
-        closeOk: (payload) => push({ kind: 'done', payload }),
-        closeErr: (err) => push({ kind: 'error', payload: err }),
-        queue,
-        waiters,
-    });
-}
-
 /**
- * Load the page-side T2I engine for `modelId`. Resolves when the model is
- * fully loaded onto the WebGPU device. One-shot.
+ * Load the page-side T2I engine for `modelId` — on a page that already holds
+ * it, else on the first page that runs the image engine. Resolves when the
+ * model is fully loaded onto the WebGPU device. One-shot.
  * @param {string} modelId
  * @returns {Promise<void>}
  */
 export async function imageLoadEngine(modelId) {
-    const id = _mkImageId('image-load');
-    const replyPromise = new Promise((resolve, reject) => {
-        _pendingImageRequests.set(id, { resolve, reject });
+    await _engineRequest({ family: 'image', model: modelId, need: 'engine' }, _pendingImageRequests, {
+        type: 'image-load-request',
+        id: _mkEngineId('image-load'),
+        modelId,
     });
-    await _postToWindowClient({ type: 'image-load-request', id, modelId });
-    return await replyPromise;
 }
 
 /**
- * Unload the page-side T2I engine. One-shot.
+ * Unload `modelId` on the page that holds it; a no-op when none does.
+ * One-shot.
+ * @param {string} modelId
  * @returns {Promise<void>}
  */
-export async function imageUnloadEngine() {
-    const id = _mkImageId('image-unload');
-    const replyPromise = new Promise((resolve, reject) => {
-        _pendingImageRequests.set(id, { resolve, reject });
+export async function imageUnloadEngine(modelId) {
+    await _engineRequest({ family: 'image', model: modelId, need: 'unload' }, _pendingImageRequests, {
+        type: 'image-unload-request',
+        id: _mkEngineId('image-unload'),
     });
-    await _postToWindowClient({ type: 'image-unload-request', id });
-    return await replyPromise;
 }
 
 /**
- * Start a streamed image generation. Returns a request id; pump with
- * `imageNextFrame`. Frames are `{kind:'progress',payload}` (rare on SD-Turbo)
- * then a terminal `{kind:'done', payload:{data:<base64>, mime_type}}` or
+ * Start a streamed image generation on the page that holds `modelId` (the
+ * one its `imageLoadEngine` loaded it into). Returns a request id; pump with
+ * `imageNextFrame`. Frames are `{kind:'progress',payload}` while the page
+ * generates (`t2i-engine.js` says what a payload carries) then a terminal
+ * `{kind:'done', payload:{data:<base64>, mime_type}}` or
  * `{kind:'error', payload:<string>}`.
+ * @param {string} modelId
  * @param {string} bodyJson - JSON-encoded ImageRequest
  * @returns {Promise<string>} request id
  */
-export async function imageStartGenerate(bodyJson) {
-    const id = _mkImageId('image-gen');
-    _registerImageStream(id);
-    await _postToWindowClient({ type: 'image-generate-stream-request', id, body: bodyJson });
-    return id;
+export async function imageStartGenerate(modelId, bodyJson) {
+    return _engineStream({ family: 'image', model: modelId, need: 'model' }, _activeImageStreams, {
+        type: 'image-generate-stream-request',
+        id: _mkEngineId('image-gen'),
+        body: bodyJson,
+    });
 }
 
 /**
@@ -843,20 +1054,7 @@ export async function imageStartGenerate(bodyJson) {
  * @returns {Promise<string>} JSON-encoded frame
  */
 export async function imageNextFrame(id) {
-    const stream = _activeImageStreams.get(id);
-    if (!stream) {
-        return JSON.stringify({ kind: 'error', payload: 'unknown request id' });
-    }
-    let frame;
-    if (stream.queue.length > 0) {
-        frame = stream.queue.shift();
-    } else {
-        frame = await new Promise((resolve) => stream.waiters.push(resolve));
-    }
-    if (frame.kind === 'done' || frame.kind === 'error') {
-        _activeImageStreams.delete(id);
-    }
-    return JSON.stringify(frame);
+    return _nextStreamFrame(_activeImageStreams, id, 'unknown request id');
 }
 
 /**
@@ -864,12 +1062,7 @@ export async function imageNextFrame(id) {
  * @param {string} id
  */
 export async function imageCancelStream(id) {
-    const stream = _activeImageStreams.get(id);
-    if (stream) {
-        stream.closeErr('cancelled');
-        _activeImageStreams.delete(id);
-    }
-    await _postToWindowClient({ type: 'image-stream-cancel', id });
+    await _cancelStream(_activeImageStreams, id, 'image-stream-cancel');
 }
 
 /**
@@ -884,49 +1077,34 @@ export async function imageCancelStream(id) {
  */
 export function _completeImageMessage(msg) {
     if (msg.type === 'image-load-response' || msg.type === 'image-unload-response') {
-        const pending = _pendingImageRequests.get(msg.id);
-        if (!pending) return;
-        _pendingImageRequests.delete(msg.id);
-        if (msg.error) pending.reject(new Error(msg.error));
-        else pending.resolve();
-        return;
-    }
-    if (msg.type === 'image-stream-frame') {
-        const stream = _activeImageStreams.get(msg.id);
-        if (!stream) return;
-        if (msg.kind === 'done') stream.closeOk(msg.payload);
-        else if (msg.kind === 'error') stream.closeErr(msg.payload ?? 'unknown error');
-        else stream.push({ kind: msg.kind, payload: msg.payload });
+        _completeOneShot(_pendingImageRequests, msg, undefined);
+    } else if (msg.type === 'image-stream-frame') {
+        _completeStreamFrame(_activeImageStreams, msg);
     }
 }
 
 globalThis.__impresspressCompleteImageMessage = _completeImageMessage;
 
-// ─── Embed (SW → page postMessage bridge) ───────────────────────────────────
-//
-// Mirrors the LLM bridge pattern: correlation-id keyed postMessage to a window
-// client; resolvers kept in a Map; sw.js routes replies via globalThis hook.
+// ─── Embed ──────────────────────────────────────────────────────────────────
 
 const _pendingEmbedRequests = new Map(); // id -> { resolve, reject }
 
-function _mkEmbedId(prefix) {
-    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 /**
- * Embed `texts` using the page-resident Transformers.js pipeline for `modelId`.
+ * Embed `texts` using the page-resident Transformers.js pipeline for `modelId`,
+ * on a page that already holds it, else on the first page that runs the
+ * embedding engine (which loads the pipeline on demand).
  * Resolves to a JSON string `{"vectors":[[...]],"dims":<n>}`.
  * @param {string} modelId
  * @param {string} textsJson - JSON array of strings
  * @returns {Promise<string>}
  */
 export async function embedRun(modelId, textsJson) {
-    const id = _mkEmbedId('embed-run');
-    const replyPromise = new Promise((resolve, reject) => {
-        _pendingEmbedRequests.set(id, { resolve, reject });
+    return _engineRequest({ family: 'embed', model: modelId, need: 'engine' }, _pendingEmbedRequests, {
+        type: 'embed-run-request',
+        id: _mkEngineId('embed-run'),
+        modelId,
+        texts: textsJson,
     });
-    await _postToWindowClient({ type: 'embed-run-request', id, modelId, texts: textsJson });
-    return await replyPromise;
 }
 
 /**
@@ -936,26 +1114,25 @@ export async function embedRun(modelId, textsJson) {
  * @returns {Promise<void>}
  */
 export async function embedCreatePipeline(modelId) {
-    const id = _mkEmbedId('embed-create');
-    const replyPromise = new Promise((resolve, reject) => {
-        _pendingEmbedRequests.set(id, { resolve, reject });
+    await _engineRequest({ family: 'embed', model: modelId, need: 'engine' }, _pendingEmbedRequests, {
+        type: 'embed-create-request',
+        id: _mkEngineId('embed-create'),
+        modelId,
     });
-    await _postToWindowClient({ type: 'embed-create-request', id, modelId });
-    return await replyPromise;
 }
 
 /**
- * Free the page-resident pipeline for `modelId`. Optional.
+ * Free the page-resident pipeline for `modelId` on the page that holds it; a
+ * no-op when none does. Optional.
  * @param {string} modelId
  * @returns {Promise<void>}
  */
 export async function embedUnload(modelId) {
-    const id = _mkEmbedId('embed-unload');
-    const replyPromise = new Promise((resolve, reject) => {
-        _pendingEmbedRequests.set(id, { resolve, reject });
+    await _engineRequest({ family: 'embed', model: modelId, need: 'unload' }, _pendingEmbedRequests, {
+        type: 'embed-unload-request',
+        id: _mkEngineId('embed-unload'),
+        modelId,
     });
-    await _postToWindowClient({ type: 'embed-unload-request', id, modelId });
-    return await replyPromise;
 }
 
 /**
@@ -968,11 +1145,7 @@ export async function embedUnload(modelId) {
  *   { type: 'embed-unload-response', id, result?, error? }
  */
 export function _completeEmbedMessage(msg) {
-    const pending = _pendingEmbedRequests.get(msg.id);
-    if (!pending) return;
-    _pendingEmbedRequests.delete(msg.id);
-    if (msg.error) pending.reject(new Error(msg.error));
-    else pending.resolve(msg.result ?? null);
+    _completeOneShot(_pendingEmbedRequests, msg, msg.result ?? null);
 }
 
 globalThis.__impresspressCompleteEmbedMessage = _completeEmbedMessage;

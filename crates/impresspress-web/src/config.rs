@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use impresspress_core::{
     blocks::auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
-    config_vars::{EMBEDDED_SCRIPTS_KEY, HAS_LANDING_PAGE_KEY},
+    config_vars::HAS_LANDING_PAGE_KEY,
 };
 use wafer_core::interfaces::database::service::DatabaseService;
 
@@ -40,14 +40,15 @@ pub async fn seed_and_load_variables(
     db: &Arc<dyn DatabaseService>,
     mode: SandboxMode,
 ) -> Result<HashMap<String, String>, String> {
-    // Browser-only defaults. All three keys ARE declared — the bootstrap pair
-    // by `auth::config::auth_config_vars`, `EMBEDDED_SCRIPTS` by
-    // `config_vars::shared_config_vars` — but every one of them declares an
-    // EMPTY default, so nothing else supplies a value: `admin::settings::
-    // seed_defaults` skips an empty declared default, `seed_auto_generated`
-    // seeds only `auto_generate` vars, and the browser has no process
-    // environment to source one from. It ships a self-contained local admin +
-    // WebLLM wiring instead, so it seeds those values here.
+    // Browser-only defaults. Both keys ARE declared, by
+    // `auth::config::auth_config_vars`, but each declares an EMPTY default,
+    // so nothing else supplies a value: `admin::settings::seed_defaults` skips
+    // an empty declared default, `seed_auto_generated` seeds only
+    // `auto_generate` vars, and the browser has no process environment to
+    // source one from. It ships a self-contained local admin instead, so it
+    // seeds those values here. (The page-side engine scripts are not seeded
+    // config: `lib.rs` publishes them as the runtime-owned
+    // `ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`.)
     //
     // A stated flag rather than the create default, and the declarations are
     // why that is safe: `seed_if_absent` builds the `NewVariable` itself, and
@@ -71,17 +72,6 @@ pub async fn seed_and_load_variables(
         "Admin Password",
         "Admin account password",
         true,
-    )
-    .await?;
-    // Inject the page-side WebLLM engine into every SSR-rendered page.
-    // Native/server targets leave this var unset and skip the injection.
-    impresspress_core::platform_state::variables::seed_if_absent(
-        db,
-        EMBEDDED_SCRIPTS_KEY,
-        "/webllm-engine.js",
-        "Embedded Scripts",
-        "Module-type script URLs embedded in every page",
-        false,
     )
     .await?;
 

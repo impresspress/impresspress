@@ -63,7 +63,7 @@ const IMPRESSPRESS_CSP: &str = concat!(
     "style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' data: blob: https:; ",
     "font-src 'self' https:; ",
-    "connect-src 'self' https://cdn.jsdelivr.net https://esm.run https://huggingface.co ",
+    "connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co ",
         "https://raw.githubusercontent.com https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co; ",
     "base-uri 'self'; ",
     "form-action 'self'",
@@ -132,6 +132,7 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
 
     let factory = RuntimeFactory::new(RuntimeOptions {
         dev_enabled: dev_requested,
+        page_engine_scripts: page_engines_option(&options),
     })
     .map_err(|e| JsValue::from_str(&e))?;
 
@@ -205,6 +206,41 @@ fn bypass_rules_option(options: &JsValue) -> impresspress_core::blocks::dev::Byp
     })
 }
 
+/// The `pageEngines` option of `initialize()`: the page-side model engines the
+/// bundle ships, as URL paths, rendered by `impresspress-bundle` from its one
+/// list (`PAGE_ENGINES` in `sw.js.tmpl`). The runtime's pages load exactly
+/// these, so the runtime publishes what the bundle actually shipped rather
+/// than a list of its own.
+///
+/// Missing or malformed — a `sw.js` rendered before the option existed — is
+/// NO engines, with a console warning: the pages then carry no engine
+/// scripts, and `bridge.js` refuses each model request at once ("no open page
+/// runs the … engine") rather than the runtime failing to boot.
+fn page_engines_option(options: &JsValue) -> Vec<String> {
+    let value = js_sys::Reflect::get(options, &JsValue::from_str("pageEngines"))
+        .unwrap_or(JsValue::UNDEFINED);
+    let parsed: Result<Vec<String>, String> = if value.is_undefined() || value.is_null() {
+        Err("initialize() was not handed any".to_string())
+    } else {
+        js_sys::JSON::stringify(&value)
+            .ok()
+            .and_then(|json| json.as_string())
+            .ok_or_else(|| "the option is not JSON-serializable".to_string())
+            .and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
+    };
+    parsed.unwrap_or_else(|reason| {
+        web_sys::console::warn_1(
+            &format!(
+                "impresspress: no page engine scripts ({reason}); pages will load no model \
+                 engine and every LLM, image and embedding request will be refused — \
+                 rebuild the bundle with a current impresspress-bundle"
+            )
+            .into(),
+        );
+        Vec::new()
+    })
+}
+
 /// [`BootHooks`](impresspress_core::builder::BootHooks) impl for the browser
 /// target. After `init_block(admin)` has created the variables /
 /// block_settings tables, this seeds them (auto-gen + JWT + browser-only
@@ -234,6 +270,10 @@ struct BrowserBootHooks {
     /// sandbox's own variables are seeded — see
     /// `config::seed_and_load_variables`.
     mode: SandboxMode,
+    /// The bundle's page engines, comma-joined
+    /// ([`RuntimeOptions::page_engine_scripts`]), published as
+    /// `impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`.
+    page_engine_scripts: String,
 }
 
 #[wafer_block::wafer_async_trait]
@@ -281,6 +321,12 @@ impl builder::BootHooks for BrowserBootHooks {
             .both(
                 impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
                 features.to_config_json(),
+            )
+            // The pages the runtime renders load the engines its services
+            // post to: the ones the bundle shipped (`initialize({ pageEngines })`).
+            .both(
+                impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY,
+                self.page_engine_scripts.clone(),
             );
         // `csrf` and `auth::service` read the secret per request off the
         // synchronous snapshot; seeding just generated it if it was absent.

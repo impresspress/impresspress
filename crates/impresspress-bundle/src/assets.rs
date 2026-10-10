@@ -10,8 +10,47 @@ pub struct Asset {
     pub bytes: &'static [u8],
 }
 
-pub fn static_assets() -> &'static [Asset] {
-    ASSETS
+/// Every file the framework ships: the shell's own, then the page engines
+/// ([`PAGE_ENGINES`]).
+pub fn static_assets() -> impl Iterator<Item = &'static Asset> {
+    ASSETS.iter().chain(PAGE_ENGINES)
+}
+
+/// The page-side model engines: the scripts that run the runtime's LLM,
+/// embedding and image models in a window (WebGPU is window-only), answering
+/// the requests the service worker's `bridge.js` posts to an open page.
+///
+/// This is the ONE list of them. Everything else is generated from it:
+/// - their exact bypass rules ([`page_engine_scripts`] in
+///   `bundle::BypassRules::for_bundle`), so the static host serves them;
+/// - the boot shell's `<script type="module">` tags (`index.html.tmpl`'s
+///   `__PAGE_ENGINE_TAGS__`);
+/// - the `PAGE_ENGINES` constant `sw.js` hands the runtime as
+///   `initialize({ pageEngines })`, from which the browser runtime publishes
+///   the scripts every page it renders loads
+///   (`impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`);
+/// - the engine-probe test's list (`tests/sw/engine_probe.test.mjs`, handed
+///   these paths by `bundle_integration.rs`).
+///
+/// Shell order: the LLM engine, then embeddings, then images.
+pub const PAGE_ENGINES: &[Asset] = &[
+    Asset {
+        path: "webllm-engine.js",
+        bytes: include_bytes!("../assets/webllm-engine.js"),
+    },
+    Asset {
+        path: "embed-engine.js",
+        bytes: include_bytes!("../assets/embed-engine.js"),
+    },
+    Asset {
+        path: "t2i-engine.js",
+        bytes: include_bytes!("../assets/t2i-engine.js"),
+    },
+];
+
+/// The URL path each of the [`PAGE_ENGINES`] is served at (`/webllm-engine.js`, …).
+pub fn page_engine_scripts() -> impl Iterator<Item = String> {
+    PAGE_ENGINES.iter().map(|asset| format!("/{}", asset.path))
 }
 
 /// The directory the shell's own third-party files ship under.
@@ -32,7 +71,6 @@ pub const VENDOR_DIR: &str = "vendor/";
 /// rename here must change it too, or the runtime's database cannot load.
 pub fn vendor_files() -> impl Iterator<Item = &'static str> {
     static_assets()
-        .iter()
         .map(|asset| asset.path)
         .filter(|path| path.starts_with(VENDOR_DIR))
 }
@@ -69,18 +107,6 @@ const ASSETS: &[Asset] = &[
         path: "vendor/sql-wasm.wasm",
         bytes: include_bytes!("../assets/vendor/sql-wasm.wasm"),
     },
-    Asset {
-        path: "webllm-engine.js",
-        bytes: include_bytes!("../assets/webllm-engine.js"),
-    },
-    Asset {
-        path: "embed-engine.js",
-        bytes: include_bytes!("../assets/embed-engine.js"),
-    },
-    Asset {
-        path: "t2i-engine.js",
-        bytes: include_bytes!("../assets/t2i-engine.js"),
-    },
 ];
 
 #[cfg(test)]
@@ -89,15 +115,36 @@ mod tests {
 
     #[test]
     fn static_assets_is_non_empty_and_has_expected_paths() {
-        let paths: Vec<&str> = static_assets().iter().map(|a| a.path).collect();
+        let paths: Vec<&str> = static_assets().map(|a| a.path).collect();
         assert!(paths.contains(&"sw.js.tmpl"));
         assert!(paths.contains(&"loader.js.tmpl"));
         assert!(paths.contains(&"index.html.tmpl"));
         assert!(paths.contains(&"vendor/sql-wasm-esm.js"));
         assert!(paths.contains(&"vendor/sql-wasm.wasm"));
-        assert!(paths.contains(&"webllm-engine.js"));
-        assert!(paths.contains(&"embed-engine.js"));
-        assert!(paths.contains(&"t2i-engine.js"));
+        for engine in PAGE_ENGINES {
+            assert!(
+                paths.contains(&engine.path),
+                "{} is not shipped",
+                engine.path
+            );
+        }
+    }
+
+    /// Every engine script in `assets/` is one of the [`PAGE_ENGINES`]: an
+    /// engine file added beside them but not to the list would ship nowhere
+    /// and load on no page, and its requests would always be refused.
+    #[test]
+    fn every_engine_script_in_assets_is_a_page_engine() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{dir}: {e}"))
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with("-engine.js"))
+            .collect();
+        on_disk.sort();
+        let mut listed: Vec<String> = PAGE_ENGINES.iter().map(|a| a.path.to_string()).collect();
+        listed.sort();
+        assert_eq!(on_disk, listed);
     }
 
     /// `bridge.js` loads sql.js by literal path; every `/vendor/` path it
