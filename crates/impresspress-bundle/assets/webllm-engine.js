@@ -69,14 +69,20 @@ async function handleUnload(msg) {
 }
 
 async function handleChatStream(msg) {
-    await settledLoad();
-    if (!_engine) {
-        await swStreamFrame(msg.id, 'error', 'no engine loaded');
-        return;
-    }
+    // Registered before the wait for a load in progress, so a cancel that
+    // arrives during the load is honoured: the chat never starts.
     const ac = new AbortController();
     _activeStreams.set(msg.id, ac);
     try {
+        await settledLoad();
+        if (ac.signal.aborted) {
+            await swStreamFrame(msg.id, 'error', 'cancelled');
+            return;
+        }
+        if (!_engine) {
+            await swStreamFrame(msg.id, 'error', 'no engine loaded');
+            return;
+        }
         const body = JSON.parse(msg.body);
         const iterator = await _engine.chat.completions.create({
             messages: body.messages,

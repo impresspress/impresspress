@@ -226,14 +226,20 @@ async function generateOnce(prompt, { onProgress, signal } = {}) {
 }
 
 async function handleGenerateStream(msg) {
-    await settledLoad();
-    if (!_processor || !_model) {
-        await swStreamFrame(msg.id, 'error', 'model not loaded; call load_model first');
-        return;
-    }
+    // Registered before the wait for a load in progress, so a cancel that
+    // arrives during the load is honoured: the generation never starts.
     const ac = new AbortController();
     _activeStreams.set(msg.id, ac);
     try {
+        await settledLoad();
+        if (ac.signal.aborted) {
+            await swStreamFrame(msg.id, 'error', 'cancelled');
+            return;
+        }
+        if (!_processor || !_model) {
+            await swStreamFrame(msg.id, 'error', 'model not loaded; call load_model first');
+            return;
+        }
         const req = JSON.parse(msg.body);
         const pngBytes = await generateOnce(req.prompt, {
             signal: ac.signal,

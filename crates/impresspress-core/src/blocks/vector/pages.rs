@@ -486,7 +486,7 @@ pub(super) async fn query(ctx: &dyn Context, input: InputStream) -> OutputStream
                     Some(v) => v,
                     None => return err_internal_no_cause("embedding block returned no vectors"),
                 },
-                Err(e) => return embed_failed(e),
+                Err(e) => return embed_failed(e, ModelNamedBy::Index),
             }
         }
         _ => return err_bad_request("either 'text' or 'vector' is required"),
@@ -774,7 +774,7 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
     let (_model_name, _dims, vectors) =
         match vclient::embed(ctx, embedding_block, chunks.clone()).await {
             Ok(tuple) => tuple,
-            Err(e) => return embed_failed(e),
+            Err(e) => return embed_failed(e, ModelNamedBy::Index),
         };
 
     if vectors.len() != chunks.len() {
@@ -850,14 +850,30 @@ pub(super) async fn embed(ctx: &dyn Context, input: InputStream) -> OutputStream
             dimensions,
             vectors,
         }),
-        Err(e) => embed_failed(e),
+        Err(e) => embed_failed(e, ModelNamedBy::Caller),
     }
+}
+
+/// Who named the model an `embedding` call embedded with — which decides
+/// whose mistake an `InvalidArgument` from the embedding block is.
+#[derive(Clone, Copy)]
+enum ModelNamedBy {
+    /// The request did (`POST /b/vector/api/embed`'s `model`, or its
+    /// default): an unknown model there is the caller's input.
+    Caller,
+    /// The index's stored metadata did (query by text, ingest): the model was
+    /// recorded when the index was created, so the embedding block refusing it
+    /// is this deployment disagreeing with its own data, not the caller's
+    /// mistake.
+    Index,
 }
 
 /// The answer to a failed `embedding` call, for every route that embeds.
 ///
-/// - `InvalidArgument` is the caller's input (an unknown model, say): a 400
-///   with the block's message.
+/// - `InvalidArgument` (an unknown model, say) is the caller's input when the
+///   caller named the model ([`ModelNamedBy::Caller`]): a 400 with the
+///   block's message. When the index named it ([`ModelNamedBy::Index`]) it is
+///   a server inconsistency, a fault like the last arm.
 /// - `Unavailable` is the embedding engine unable to take the request now —
 ///   in the browser, no open page runs it (`VectorError::EngineUnavailable`,
 ///   whose message `wafer-core`'s embedding handler returns as written for
@@ -865,10 +881,10 @@ pub(super) async fn embed(ctx: &dyn Context, input: InputStream) -> OutputStream
 ///   scrubbed): a 503 with that message, so the caller learns what to do
 ///   rather than reading an opaque 500.
 /// - Anything else is a fault, logged and answered with the sanitized 500.
-fn embed_failed(e: WaferError) -> OutputStream {
-    match e.code {
-        ErrorCode::InvalidArgument => err_bad_request(&e.message),
-        ErrorCode::Unavailable => OutputStream::error(e),
+fn embed_failed(e: WaferError, named_by: ModelNamedBy) -> OutputStream {
+    match (e.code, named_by) {
+        (ErrorCode::InvalidArgument, ModelNamedBy::Caller) => err_bad_request(&e.message),
+        (ErrorCode::Unavailable, _) => OutputStream::error(e),
         _ => crud::db_error_internal(e, "embed failed"),
     }
 }
@@ -2058,6 +2074,99 @@ mod embedding_block_resolution_tests {
             "message was {:?}",
             err.message
         );
+    }
+
+    /// An embedding service that does not know the model it is asked for:
+    /// wafer-core answers its `UnknownModel` as `InvalidArgument`.
+    struct UnknownModelEmbeddingService;
+
+    #[wafer_block::wafer_async_trait]
+    impl EmbeddingService for UnknownModelEmbeddingService {
+        fn model(&self) -> &str {
+            "multilingual-e5-small"
+        }
+        fn dimensions(&self) -> u32 {
+            384
+        }
+        async fn embed(&self, _texts: Vec<String>) -> VectorResult<Vec<Vec<f32>>> {
+            Err(
+                wafer_core::interfaces::vector::service::VectorError::UnknownModel(
+                    "multilingual-e5-small".into(),
+                ),
+            )
+        }
+    }
+
+    fn register_unknown_model_embedder(ctx: &mut TestContext) {
+        ctx.register_block(
+            "impresspress/transformers-embed",
+            Arc::new(TransformersEmbedBlock::new(Arc::new(
+                UnknownModelEmbeddingService,
+            ))),
+        );
+    }
+
+    /// `POST /b/vector/api/embed` embeds with the model the CALLER named (or
+    /// its default): an embedding block that does not know it is answering
+    /// the caller's input, a 400 that says so.
+    #[tokio::test]
+    async fn an_unknown_model_on_embed_is_the_callers_400() {
+        let mut ctx = TestContext::with_vector().await;
+        register_unknown_model_embedder(&mut ctx);
+        let out = embed(&ctx, json_input(serde_json::json!({ "texts": ["a"] }))).await;
+        assert_eq!(output_http_status(out).await, 400);
+    }
+
+    /// A query by text embeds with the model the INDEX was created with. The
+    /// embedding block refusing that model is this deployment disagreeing
+    /// with its own stored data — not something the caller can fix — so it
+    /// is the sanitized 500, not a 400 blaming the request.
+    #[tokio::test]
+    async fn an_unknown_model_on_query_is_a_server_fault() {
+        let mut ctx = TestContext::with_vector().await;
+        seed_registry_row(&ctx, &service::prefixed_index_name("docs")).await;
+        let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
+        ctx.register_block(
+            "wafer-run/vector",
+            Arc::new(RecordingVectorBlock {
+                ops: ops.clone(),
+                prior_ids: Vec::new(),
+            }),
+        );
+        register_unknown_model_embedder(&mut ctx);
+        let out = query(
+            &ctx,
+            json_input(serde_json::json!({ "index": "docs", "text": "find me", "top_k": 1 })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 500);
+        // The embed is what failed: the search itself was never asked for.
+        assert!(ops.lock().expect("ops mutex poisoned").is_empty());
+    }
+
+    /// Ingest embeds with the index's model too: the same server fault.
+    #[tokio::test]
+    async fn an_unknown_model_on_ingest_is_a_server_fault() {
+        let mut ctx = TestContext::with_vector().await;
+        seed_registry_row(&ctx, &service::prefixed_index_name("docs")).await;
+        ctx.register_block(
+            "wafer-run/vector",
+            Arc::new(RecordingVectorBlock {
+                ops: Arc::new(std::sync::Mutex::new(Vec::new())),
+                prior_ids: Vec::new(),
+            }),
+        );
+        register_unknown_model_embedder(&mut ctx);
+        let out = ingest(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "docs",
+                "document_id": "doc-1",
+                "text": "a document with real words in it",
+            })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 500);
     }
 
     /// An embedding service that cannot run the model now — in the browser,

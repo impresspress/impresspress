@@ -22,9 +22,8 @@ import { pathToFileURL } from 'node:url';
 import { register } from 'node:module';
 
 // The engines import their model libraries from cdn.jsdelivr.net, which Node
-// cannot load. Every such import is answered with a stand-in whose
-// `pipeline()` (Transformers.js's entry point, the one the embedding engine
-// calls) counts its calls and waits on a gate the test opens.
+// cannot load. Every such import is answered with `cdn-stub.mjs`, whose model
+// loads wait on a gate the test opens and whose model work is recorded.
 //
 // And every engine loads as an ES module, as a page's `<script type="module">`
 // loads it. Node would otherwise take a script with no `import`/`export` of
@@ -33,9 +32,13 @@ import { register } from 'node:module';
 register(
     'data:text/javascript,' +
         encodeURIComponent(`
+let stubUrl;
+export async function initialize(data) {
+    stubUrl = data.stubUrl;
+}
 export async function resolve(specifier, context, next) {
     if (specifier.startsWith('https://cdn.jsdelivr.net/')) {
-        return { url: 'stub:transformers', shortCircuit: true };
+        return { url: stubUrl, shortCircuit: true };
     }
     return next(specifier, context);
 }
@@ -43,17 +46,9 @@ export async function load(url, context, next) {
     if (url.startsWith('file:') && /-engine[.]js([?]|$)/.test(url)) {
         return { ...(await next(url, { ...context, format: 'module' })), format: 'module' };
     }
-    if (url === 'stub:transformers') {
-        return {
-            format: 'module',
-            shortCircuit: true,
-            source: 'export async function pipeline(task, model) {' +
-                ' globalThis.__pipelineCalls.push(model); await globalThis.__pipelineGate;' +
-                ' return async () => ({ tolist: () => [] }); }',
-        };
-    }
     return next(url, context);
 }`),
+    { data: { stubUrl: new URL('./cdn-stub.mjs', import.meta.url).href } },
 );
 
 const FAMILIES = ['llm', 'image', 'embed'];
@@ -87,12 +82,24 @@ function serviceWorkerContainer() {
 async function loadEngine(script) {
     const sw = serviceWorkerContainer();
     Object.defineProperty(globalThis, 'navigator', {
-        value: { serviceWorker: sw.container },
+        // A WebGPU adapter without `shader-f16`, for the image engine.
+        value: {
+            serviceWorker: sw.container,
+            gpu: { requestAdapter: async () => ({ features: new Set() }) },
+        },
         configurable: true,
     });
     // A query string makes each load its own module instance.
-    await import(`${pathToFileURL(script).href}?probe=${Math.random()}`);
+    sw.module = await import(`${pathToFileURL(script).href}?probe=${Math.random()}`);
     return sw;
+}
+
+/** A closed model gate, and the function that opens it. */
+function closeModelGate() {
+    let open;
+    globalThis.__modelCalls = [];
+    globalThis.__modelGate = new Promise((resolve) => { open = resolve; });
+    return open;
 }
 
 /** The families `script` answers a probe for, and what each answer said. */
@@ -137,9 +144,7 @@ test('a model being loaded is reported as loading, and a second load shares the 
     // The embedding engine is the one whose load the worker drives over
     // messages alone, so it is where this is observable without a GPU.
     const sw = await loadEngine(await engineFor('embed'));
-    let open;
-    globalThis.__pipelineCalls = [];
-    globalThis.__pipelineGate = new Promise((resolve) => { open = resolve; });
+    const open = closeModelGate();
     const model = 'multilingual-e5-small';
 
     await sw.deliver({ type: 'embed-create-request', id: 'load-1', modelId: model });
@@ -154,7 +159,7 @@ test('a model being loaded is reported as loading, and a second load shares the 
     await sw.deliver({ type: 'embed-create-request', id: 'load-2', modelId: model });
     open();
     await new Promise((r) => setTimeout(r, 10));
-    assert.equal(globalThis.__pipelineCalls.length, 1, 'the model was loaded twice');
+    assert.deepEqual(globalThis.__modelCalls, [`pipeline:Xenova/${model}`], 'the model was loaded twice');
     const replies = sw.posted.filter((m) => m.type === 'embed-create-response');
     assert.deepEqual(replies.map((m) => [m.id, m.result]).sort(), [['load-1', 'ok'], ['load-2', 'ok']]);
 
@@ -165,4 +170,43 @@ test('a model being loaded is reported as loading, and a second load shares the 
         loaded: [model],
         loading: [],
     });
+});
+
+/** The frames `sw` posted for stream `id`. */
+const framesOf = (sw, type, id) => sw.posted.filter((m) => m.type === type && m.id === id);
+
+test('a chat cancelled while its model is still loading never starts', async () => {
+    const sw = await loadEngine(await engineFor('llm'));
+    const open = closeModelGate();
+    const loading = sw.module.loadEngine('Llama-3.2-1B'); // page-direct, as a page loads WebLLM
+
+    await sw.deliver({ type: 'llm-chat-stream-request', id: 'c1', body: '{"messages":[]}' });
+    await sw.deliver({ type: 'llm-stream-cancel', id: 'c1' });
+    open();
+    await loading;
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.ok(!globalThis.__modelCalls.includes('chat'), `the chat ran: ${globalThis.__modelCalls}`);
+    assert.deepEqual(
+        framesOf(sw, 'llm-stream-frame', 'c1').map((f) => [f.kind, f.payload]),
+        [['error', 'cancelled']],
+    );
+});
+
+test('a generation cancelled while its model is still loading never starts', async () => {
+    const sw = await loadEngine(await engineFor('image'));
+    const open = closeModelGate();
+
+    await sw.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
+    await sw.deliver({ type: 'image-generate-stream-request', id: 'g1', body: '{"prompt":"x"}' });
+    await sw.deliver({ type: 'image-stream-cancel', id: 'g1' });
+    open();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.deepEqual(framesOf(sw, 'image-load-response', 'l1'), [{ type: 'image-load-response', id: 'l1' }]);
+    assert.ok(!globalThis.__modelCalls.includes('generate'), `the generation ran: ${globalThis.__modelCalls}`);
+    assert.deepEqual(
+        framesOf(sw, 'image-stream-frame', 'g1').map((f) => [f.kind, f.payload]),
+        [['error', 'cancelled']],
+    );
 });
