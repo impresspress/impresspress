@@ -141,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_round_trips_under_the_hash_of_its_content() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let wasm = b"\0asm\x01\0\0\0";
         let sha = put(&ctx, wasm).await.expect("put");
         assert_eq!(sha, sha256_hex(wasm));
@@ -157,7 +157,7 @@ mod tests {
     /// the folder and the key.
     #[tokio::test]
     async fn a_context_free_read_finds_what_the_block_stored() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let wasm = b"\0asm\x01\0\0\0direct";
         let sha = put(&ctx, wasm).await.expect("put");
 
@@ -188,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_is_idempotent() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let sha = put(&ctx, b"\0asm\x01\0\0\0gone").await.expect("put");
         delete(&ctx, &sha).await.expect("delete");
         assert!(!exists(&ctx, &sha).await.expect("exists"));
@@ -197,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_absent_artifact_is_not_reported_present() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         assert!(!exists(&ctx, &sha256_hex(b"never stored"))
             .await
             .expect("exists"));

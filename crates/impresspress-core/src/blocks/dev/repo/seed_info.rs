@@ -173,13 +173,13 @@ mod tests {
     /// The migration seeds the row empty; empty reads as "no sandbox block".
     #[tokio::test]
     async fn migration_seeds_an_empty_row_that_reads_as_none() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         assert_eq!(read(&ctx).await.expect("read"), None);
     }
 
     #[tokio::test]
     async fn write_then_read_round_trips_every_field() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let info = SeedInfo {
             template: "bootstrap".to_string(),
             suggested_prompt: "Build me a shop.".to_string(),
@@ -194,7 +194,7 @@ mod tests {
     /// comes back as the same string — no backend decodes it behind our back.
     #[tokio::test]
     async fn json_shaped_text_round_trips_as_the_same_string() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let info = SeedInfo {
             template: "bootstrap".to_string(),
             suggested_prompt: "[1,2]".to_string(),
@@ -208,7 +208,7 @@ mod tests {
     /// A missing row is `NotFound` from both readers, not `None` from one.
     #[tokio::test]
     async fn a_missing_row_is_not_found_from_read_and_template_alike() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         db::delete_by_filters(&ctx, TABLE, vec![singleton_filter()])
             .await
             .expect("delete the seeded row");
@@ -221,7 +221,7 @@ mod tests {
     /// The narrow read, and the two single-column writes beside it.
     #[tokio::test]
     async fn the_llms_columns_are_read_and_written_without_the_rest_of_the_row() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let empty = LlmsRow {
             template: None,
             text: None,
@@ -265,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_is_none_until_a_write_then_the_written_name() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         assert_eq!(template(&ctx).await.expect("template"), None);
         write(
             &ctx,

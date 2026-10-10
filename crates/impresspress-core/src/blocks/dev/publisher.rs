@@ -97,7 +97,7 @@ use std::collections::BTreeMap;
 use wafer_core::clients::storage;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use super::{blobs, contracts::SiteManifest, repo::seed_info, seed, workspace::FileEntry};
+use super::{blobs, generation::SiteManifest, repo::seed_info, seed, workspace::FileEntry};
 
 /// The cross-block folder the published site lives in.
 ///
@@ -386,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_publish_writes_every_file() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let next = SiteManifest {
             files: vec![
                 entry(&ctx, "index.html", b"<h1>hi</h1>").await,
@@ -406,7 +406,7 @@ mod tests {
     /// the publisher used.
     #[tokio::test]
     async fn the_entrypoint_is_written_after_everything_else() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         // `a.css` sorts before `index.html`, `z.css` after — so a publisher
         // that simply iterated the manifest in path order would write
         // `index.html` before `z.css` and fail this.
@@ -434,7 +434,7 @@ mod tests {
     /// it lands before the new entrypoint, not after it.
     #[tokio::test]
     async fn deletions_land_before_the_new_entrypoint() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let prev = SiteManifest {
             files: vec![
                 entry(&ctx, "index.html", b"one").await,
@@ -469,7 +469,7 @@ mod tests {
     /// point of content addressing is that "same sha" is exact.
     #[tokio::test]
     async fn an_unchanged_file_is_not_rewritten() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let prev = SiteManifest {
             files: vec![
                 entry(&ctx, "index.html", b"one").await,
@@ -501,7 +501,7 @@ mod tests {
     /// backend refuses the write and the publisher wedges for good.
     #[tokio::test]
     async fn a_deletion_that_frees_a_name_for_a_write_lands_first() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let prev = SiteManifest {
             files: vec![
                 entry(&ctx, "index.html", b"one").await,
@@ -534,7 +534,7 @@ mod tests {
     /// The reverse direction: a file becomes a directory.
     #[tokio::test]
     async fn a_file_that_becomes_a_directory_is_deleted_before_the_children_land() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let prev = SiteManifest {
             files: vec![
                 entry(&ctx, "index.html", b"one").await,
@@ -568,7 +568,7 @@ mod tests {
     /// page rather than a broken one.
     #[tokio::test]
     async fn an_unrelated_deletion_still_lands_after_the_writes() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let prev = SiteManifest {
             files: vec![
                 entry(&ctx, "index.html", b"one").await,
@@ -601,7 +601,7 @@ mod tests {
     /// interrupted run had already removed.
     #[tokio::test]
     async fn removing_a_file_that_is_already_gone_succeeds() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let prev = SiteManifest {
             files: vec![entry(&ctx, "gone.css", b"g{}").await],
         };
@@ -618,7 +618,7 @@ mod tests {
 
     /// A dev context whose seed import recorded [`SANDBOX_LLMS`].
     async fn seeded_sandbox() -> TestContext {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         seed_info::write(
             &ctx,
             &seed_info::SeedInfo {
@@ -667,7 +667,7 @@ mod tests {
     /// has no sandbox block — publishes its site and nothing else.
     #[tokio::test]
     async fn an_instance_with_no_sandbox_llms_publishes_only_its_site() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let next = SiteManifest {
             files: vec![entry(&ctx, "index.html", b"<h1>hi</h1>").await],
         };
@@ -747,7 +747,7 @@ mod tests {
     /// in the folder is read from the record, not assumed from the row.
     #[tokio::test]
     async fn a_text_recorded_after_the_last_publish_is_written_by_the_next_one() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let site = SiteManifest {
             files: vec![entry(&ctx, "index.html", b"<h1>hi</h1>").await],
         };
@@ -817,7 +817,7 @@ mod tests {
     /// surface rather than publish a partial site quietly.
     #[tokio::test]
     async fn a_missing_blob_fails_the_publish() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let next = SiteManifest {
             files: vec![FileEntry {
                 path: "a.css".to_string(),

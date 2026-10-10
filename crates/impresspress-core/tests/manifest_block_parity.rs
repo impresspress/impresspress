@@ -53,13 +53,25 @@ const DIVERGENT: &[(&str, &[&str], &str)] = &[
     (
         "block-dev",
         &["impresspress-core", "impresspress-web"],
-        "The browser development sandbox's own control plane (compile, stage, \
-         activate, export). Its security model is that the block is ABSENT \
-         from every normal bundle, not merely switched off in one, so \
-         impresspress-web reaches it only through its opt-in \
-         `browser-devtools` feature, while impresspress-cloudflare and the \
-         native `impresspress` binary do not offer it at all — there is \
-         neither a Worker-side nor a server-side sandbox.",
+        "The browser development sandbox's workspace: the `/b/dev` page and \
+         its API (compile, stage, activate, export). Its security model is \
+         that this code is ABSENT from every build that is not the sandbox, \
+         not merely switched off in one, so impresspress-web reaches it only \
+         through its opt-in `browser-devtools` feature, while \
+         impresspress-cloudflare and the native `impresspress` binary do not \
+         offer it at all — there is neither a Worker-side nor a server-side \
+         sandbox.",
+    ),
+    (
+        "site-runtime",
+        &["impresspress-core"],
+        "The runtime half of the sandbox's block (ledger, seed import, \
+         activation, the published site) — what a site exported from the \
+         browser sandbox runs. Browser-only for the same reason `block-dev` \
+         is: impresspress-cloudflare and the native `impresspress` binary \
+         host no sandbox and serve no exported one. impresspress-web does not \
+         name it: its one route to it is `browser-devtools`, whose \
+         `impresspress-core/block-dev` implies it.",
     ),
     (
         "block-fastembed",
@@ -72,6 +84,19 @@ const DIVERGENT: &[(&str, &[&str], &str)] = &[
          instead.",
     ),
 ];
+
+/// Features that gate a block without the `block-` prefix.
+///
+/// `site-runtime` is the runtime half of the dev block, which `block-dev`
+/// implies: named for what it is (the half an exported site runs), not as a
+/// block of its own. It gates block code all the same, so the gate holds it
+/// to the same rules as every `block-*` feature.
+const UNPREFIXED_BLOCK_FEATURES: &[&str] = &["site-runtime"];
+
+/// Whether `name` is a feature this gate compares across the four crates.
+fn is_block_feature(name: &str) -> bool {
+    name.starts_with("block-") || UNPREFIXED_BLOCK_FEATURES.contains(&name)
+}
 
 fn manifest(crate_dir: &str) -> toml::Table {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -133,7 +158,7 @@ fn core_dependency_features(manifest: &toml::Table) -> Vec<String> {
 fn core_blocks() -> BTreeSet<String> {
     features(&manifest("impresspress-core"))
         .into_keys()
-        .filter(|name| name.starts_with("block-"))
+        .filter(|name| is_block_feature(name))
         .collect()
 }
 
@@ -145,7 +170,7 @@ fn core_blocks() -> BTreeSet<String> {
 fn passthrough_blocks(crate_dir: &str) -> BTreeSet<String> {
     features(&manifest(crate_dir))
         .into_keys()
-        .filter(|name| name.starts_with("block-"))
+        .filter(|name| is_block_feature(name))
         .collect()
 }
 
@@ -156,11 +181,11 @@ fn web_blocks() -> BTreeSet<String> {
     let manifest = manifest("impresspress-web");
     let mut blocks: BTreeSet<String> = core_dependency_features(&manifest)
         .into_iter()
-        .filter(|name| name.starts_with("block-"))
+        .filter(|name| is_block_feature(name))
         .collect();
     for implied in features(&manifest).into_values().flatten() {
         if let Some(block) = implied.strip_prefix("impresspress-core/") {
-            if block.starts_with("block-") {
+            if is_block_feature(block) {
                 blocks.insert(block.to_string());
             }
         }
@@ -261,7 +286,7 @@ fn no_consumer_crate_names_a_block_feature_that_does_not_exist() {
 fn every_passthrough_forwards_its_own_name() {
     for crate_dir in ["impresspress-cloudflare", "impresspress"] {
         for (name, implied) in features(&manifest(crate_dir)) {
-            if !name.starts_with("block-") {
+            if !is_block_feature(&name) {
                 continue;
             }
             assert_eq!(

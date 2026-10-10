@@ -2,7 +2,8 @@
 //! `shop_*` projected from the dev and products blocks' typed contracts.
 //!
 //! The whole file is gated on `block-dev`, like the rest of the dev block's
-//! integration tests: the block does not exist in a default-feature build.
+//! workspace tests: the manifest is the workspace half of the block, which no
+//! build without that feature compiles.
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{

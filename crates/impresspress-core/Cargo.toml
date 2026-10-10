@@ -121,19 +121,35 @@ block-products = []
 # WebRTC signalling rooms for blockfarming's online play (`impresspress/signal`).
 # No sub-dependencies of its own: typed `db::*` client, no crypto, no HTTP client.
 block-signal = []
-# Browser development sandbox control plane (`impresspress/dev`).
+# The runtime half of `impresspress/dev`: what a site exported from the
+# browser development sandbox needs to boot and keep running — the
+# generation ledger and its migrations, seed import (`seed/data.json`
+# included), activation and boot convergence, the published site, and the
+# stores and maintenance behind them. No HTTP surface: a build with this
+# feature and without `block-dev` declares and routes nothing under
+# `/b/dev`, and the workspace modules (`blocks::dev`'s module list says
+# which) are not compiled at all.
 #
-# Deliberately OFF in `default`: the block is the sandbox's own control
+# Deliberately OFF in `default`, like `block-dev`: only the browser runtime
+# (`impresspress-web`) registers the block, and native and Cloudflare builds
+# never compile it.
+site-runtime = []
+# Browser development sandbox control plane (`impresspress/dev`) — the
+# workspace: the `/b/dev` page and its JSON API (files, scaffolding,
+# compile staging, generations, status, the page-scoped tool manifest) and
+# the export. Built on `site-runtime`, which it implies.
+#
+# Deliberately OFF in `default`: the workspace is the sandbox's own control
 # plane (compile, stage, activate, export) and must be absent from every
-# normal bundle — the security model in the design doc turns on the block
-# not existing outside `examples/dev-sandbox`. Consumers that want it opt
-# in explicitly, and a second runtime gate (`IMPRESSPRESS__DEV__ENABLED`)
-# is checked before its routes are registered.
+# build that is not the sandbox (`examples/dev-sandbox`, through
+# `impresspress-web`'s `browser-devtools`) — the security model in the design
+# doc turns on the code not existing there, not on it being switched off.
+# Consumers that want it opt in explicitly.
 #
 # Pulls in `crc32fast` and `miniz_oxide`, used solely by `blocks::dev::zip`
 # (the export bundle's checksums and its DEFLATE entries) — no other block
 # needs a CRC-32 or a compressor.
-block-dev = ["dep:crc32fast", "dep:miniz_oxide"]
+block-dev = ["site-runtime", "dep:crc32fast", "dep:miniz_oxide"]
 # `block-fastembed` pulls in `wafer-block-fastembed` (ONNX Runtime, ~100 MB
 # of native deps). The `native-embedding` feature implies this — leaving
 # this on without `native-embedding` is fine and just installs the block

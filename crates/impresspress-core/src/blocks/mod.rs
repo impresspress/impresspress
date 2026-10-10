@@ -4,13 +4,16 @@ pub mod auth_ui;
 pub mod body_limit;
 pub mod config;
 pub mod crud;
-// The browser development sandbox control plane. Deliberately absent from
-// `default` features and from `feature_block_manifest!` below: its
-// constructor takes a `RuntimeControl` handle, and the sandbox's security
-// model turns on the block not existing outside `examples/dev-sandbox`
-// rather than on an admin toggle. Registration comes from the consumer via
-// `ImpresspressBuilder::extra_block` + `add_route`.
-#[cfg(feature = "block-dev")]
+// The browser development sandbox's block: its runtime half under
+// `site-runtime`, its workspace half under `block-dev` (which implies
+// `site-runtime`; `dev`'s own module list says which module is which).
+// Deliberately absent from `default` features and from
+// `feature_block_manifest!` below: its constructor takes a `RuntimeControl`
+// handle, and the sandbox's security model turns on the block not existing
+// in a build that does not need it rather than on an admin toggle.
+// Registration comes from the consumer via `ImpresspressBuilder::extra_block`
+// (+ `add_route` for the workspace's routes).
+#[cfg(feature = "site-runtime")]
 pub mod dev;
 pub mod email;
 pub mod errors;

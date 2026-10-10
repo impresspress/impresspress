@@ -1,9 +1,12 @@
 //! The data snapshot — `seed/data.json` (design §10.1, amendment 9).
 //!
 //! An export is not just files and blocks: a shop has rows — products,
-//! offers, the owner's own account. [`export`] reads an explicit table
+//! offers, the owner's own account. `export` reads an explicit table
 //! allowlist into a [`DataSnapshot`]; [`import`] applies it back through the
-//! typed database client. **No SQL text is generated or executed anywhere in
+//! typed database client. The two halves sit in different builds: `export`,
+//! with `OWNED_TABLES` and `variable_is_exportable`, is the workspace's
+//! (`block-dev`); [`import`] — what a seed's `data.json` goes through on a
+//! cold boot — is the runtime's (`site-runtime`). **No SQL text is generated or executed anywhere in
 //! this module** — the import is one `db::batch` of typed writes, exactly as
 //! amendment 9 requires and as
 //! `CLAUDE.md`'s "no raw SQL in block code" rule already demands of every
@@ -50,6 +53,8 @@ use wafer_block::{
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
+#[cfg(feature = "block-dev")]
+use crate::blocks::products::list_live_products;
 // A standalone, unbraced import so the text `products::TABLE` — the pattern
 // `blocks/products/tests/repo_door_test.rs`'s `only_the_allowlist_names_the_products_table_via_the_const`
 // scans for — appears here plainly rather than hidden inside the larger
@@ -64,14 +69,13 @@ use crate::{
             orgs, pats, provider_links, rate_limits, sessions, tokens, users,
         },
         products::{
-            archive_offers_write, list_live_products, money, product_snapshot_upsert,
-            unarchived_offer_ids, validate_imported_variables, CHECKOUT_PRESETS_TABLE,
-            DISPUTES_TABLE, ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE,
-            LINE_ITEMS_TABLE, OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE,
-            PRODUCT_TEMPLATES_TABLE, PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE,
-            PURCHASES_TABLE, REFUNDS_TABLE, SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE,
-            SUBSCRIPTIONS_TABLE, SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE,
-            VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
+            archive_offers_write, money, product_snapshot_upsert, unarchived_offer_ids,
+            validate_imported_variables, CHECKOUT_PRESETS_TABLE, DISPUTES_TABLE,
+            ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE, LINE_ITEMS_TABLE,
+            OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE, PRODUCT_TEMPLATES_TABLE,
+            PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE,
+            SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE,
+            SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE, VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
         },
     },
     // audit-allow: names the platform tables for the export allowlist/exclusion bookkeeping below — the two it reads (`variables`, `user_roles`) are granted by `dev::wrap_grants()`, which maps every `TABLE_ALLOWLIST` entry to `read_write(BLOCK_NAME, table)` and which the runtime honours from its flat grant list, and the audit attributes grants to the declaring file's block and cannot see it
@@ -342,6 +346,7 @@ pub const TABLE_EXCLUDED: &[&str] = &[
 /// So an importing site starts with its block-scoped config unset and
 /// configures it on its own admin page, rather than starting with another
 /// deployment's and having to notice.
+#[cfg(feature = "block-dev")]
 pub fn variable_is_exportable(row: &serde_json::Map<String, Value>) -> bool {
     let Some(key) = row.get("key").and_then(Value::as_str) else {
         return false;
@@ -381,7 +386,7 @@ pub fn variable_is_exportable(row: &serde_json::Map<String, Value>) -> bool {
         && crate::config_vars::check_variable_key(key).is_ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "block-dev"))]
 mod variable_is_exportable_tests {
     use super::*;
 
@@ -568,6 +573,7 @@ mod variable_is_exportable_tests {
 /// complete is the worse failure. A snapshot too large to import is refused
 /// whole instead: `super::export` checks the serialized snapshot against
 /// [`super::seed::MAX_DATA_BYTES`], the bound the importer applies.
+#[cfg(feature = "block-dev")]
 pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
     let mut tables = BTreeMap::new();
     // The ids each owning table actually exported: the live products, and the
@@ -664,6 +670,7 @@ pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
 /// applies to the allowlist itself. A table added to the allowlist with a
 /// dangling reference nobody thought about fails the build rather than
 /// exporting orphans.
+#[cfg(feature = "block-dev")]
 pub const OWNED_TABLES: &[(&str, &str, &str)] = &[
     (PRODUCT_VERSIONS_TABLE, "product_id", PRODUCTS_COLLECTION),
     (OFFERS_TABLE, "product_id", PRODUCTS_COLLECTION),
@@ -691,6 +698,7 @@ pub const OWNED_TABLES: &[(&str, &str, &str)] = &[
 /// schema declares all five `TEXT NOT NULL`, so a row this cannot read is one
 /// this build does not understand, and carrying it would be exporting a
 /// dangling reference on the strength of not having looked.
+#[cfg(feature = "block-dev")]
 fn owner_was_exported(
     table: &str,
     row: &serde_json::Map<String, Value>,
@@ -718,6 +726,7 @@ fn owner_was_exported(
 }
 
 /// The `id` of every row in `rows`.
+#[cfg(feature = "block-dev")]
 fn ids_of(rows: &[serde_json::Map<String, Value>]) -> BTreeSet<String> {
     rows.iter()
         .filter_map(|row| row.get("id").and_then(Value::as_str))
@@ -725,7 +734,7 @@ fn ids_of(rows: &[serde_json::Map<String, Value>]) -> BTreeSet<String> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "block-dev"))]
 mod owned_table_tests {
     use super::*;
 
@@ -756,6 +765,7 @@ mod owned_table_tests {
 /// explicitly from `record.id` anyway — the field the typed client treats as
 /// authoritative should be the one the snapshot is built from, not whatever
 /// a backend happened to also put in `data`.
+#[cfg(feature = "block-dev")]
 fn record_to_row(record: db::Record) -> serde_json::Map<String, Value> {
     let mut row: serde_json::Map<String, Value> = record.data.into_iter().collect();
     row.insert("id".to_string(), Value::String(record.id));
@@ -776,6 +786,7 @@ fn record_to_row(record: db::Record) -> serde_json::Map<String, Value> {
 /// carries the identical `TEXT NOT NULL DEFAULT ''` shape (migration
 /// `005_commerce_v2`) for the same reason `offers.stripe_price_id` does — a
 /// per-component Stripe Price, not a per-offer one.
+#[cfg(feature = "block-dev")]
 fn reset_provider_linkage(table: &str, row: &mut serde_json::Map<String, Value>) {
     const EMPTY: &str = "";
     let set = |row: &mut serde_json::Map<String, Value>, key: &str, value: &str| {
@@ -818,53 +829,6 @@ pub struct ImportReport {
 /// `BTreeMap` order — `"impresspress__admin__user_roles"` sorts before
 /// `"wafer_run__auth__users"`, which is exactly backwards.
 const REPLACE_ORDER: &[&str] = &[users::TABLE, local_credentials::TABLE, user_roles::TABLE];
-
-#[cfg(test)]
-mod replace_order_tests {
-    use super::*;
-
-    /// The two lists this const and `TABLE_ALLOWLIST`'s `Mode::Replace`
-    /// entries form have to agree, in both directions: a table in
-    /// `REPLACE_ORDER` that `TABLE_ALLOWLIST` doesn't mark `Replace` is
-    /// meaningless (nothing would ever route it through the `Replace` loop
-    /// in `import` in the first place), and a `Replace` table missing from
-    /// `REPLACE_ORDER` is worse — `import`'s loop below only ever applies
-    /// `Mode::Upsert` to a table outside `REPLACE_ORDER`, so a forgotten
-    /// entry would silently *upsert* a table meant to be replaced instead of
-    /// erroring anywhere.
-    #[test]
-    fn replace_order_is_exactly_the_allowlists_replace_entries() {
-        let allowlist_replace: std::collections::BTreeSet<&str> = TABLE_ALLOWLIST
-            .iter()
-            .filter(|(_, mode)| *mode == Mode::Replace)
-            .map(|(table, _)| *table)
-            .collect();
-        let replace_order: std::collections::BTreeSet<&str> =
-            REPLACE_ORDER.iter().copied().collect();
-
-        for table in &replace_order {
-            assert!(
-                allowlist_replace.contains(table),
-                "{table:?} is in REPLACE_ORDER but is not a Mode::Replace entry on \
-                 TABLE_ALLOWLIST"
-            );
-        }
-        for table in &allowlist_replace {
-            assert!(
-                replace_order.contains(table),
-                "{table:?} is a Mode::Replace entry on TABLE_ALLOWLIST but is missing from \
-                 REPLACE_ORDER"
-            );
-        }
-        // A duplicate entry in `REPLACE_ORDER` would otherwise pass the two
-        // set-membership checks above silently.
-        assert_eq!(
-            REPLACE_ORDER.len(),
-            replace_order.len(),
-            "REPLACE_ORDER has a duplicate entry"
-        );
-    }
-}
 
 /// Apply `snapshot`'s rows through typed database writes.
 ///
@@ -1373,4 +1337,51 @@ fn upsert_op(
         conflict_columns: conflict,
         on_conflict: OnConflict::SetColumns(update_columns),
     }))
+}
+
+#[cfg(test)]
+mod replace_order_tests {
+    use super::*;
+
+    /// The two lists this const and `TABLE_ALLOWLIST`'s `Mode::Replace`
+    /// entries form have to agree, in both directions: a table in
+    /// `REPLACE_ORDER` that `TABLE_ALLOWLIST` doesn't mark `Replace` is
+    /// meaningless (nothing would ever route it through the `Replace` loop
+    /// in `import` in the first place), and a `Replace` table missing from
+    /// `REPLACE_ORDER` is worse — `import`'s loop below only ever applies
+    /// `Mode::Upsert` to a table outside `REPLACE_ORDER`, so a forgotten
+    /// entry would silently *upsert* a table meant to be replaced instead of
+    /// erroring anywhere.
+    #[test]
+    fn replace_order_is_exactly_the_allowlists_replace_entries() {
+        let allowlist_replace: std::collections::BTreeSet<&str> = TABLE_ALLOWLIST
+            .iter()
+            .filter(|(_, mode)| *mode == Mode::Replace)
+            .map(|(table, _)| *table)
+            .collect();
+        let replace_order: std::collections::BTreeSet<&str> =
+            REPLACE_ORDER.iter().copied().collect();
+
+        for table in &replace_order {
+            assert!(
+                allowlist_replace.contains(table),
+                "{table:?} is in REPLACE_ORDER but is not a Mode::Replace entry on \
+                 TABLE_ALLOWLIST"
+            );
+        }
+        for table in &allowlist_replace {
+            assert!(
+                replace_order.contains(table),
+                "{table:?} is a Mode::Replace entry on TABLE_ALLOWLIST but is missing from \
+                 REPLACE_ORDER"
+            );
+        }
+        // A duplicate entry in `REPLACE_ORDER` would otherwise pass the two
+        // set-membership checks above silently.
+        assert_eq!(
+            REPLACE_ORDER.len(),
+            replace_order.len(),
+            "REPLACE_ORDER has a duplicate entry"
+        );
+    }
 }

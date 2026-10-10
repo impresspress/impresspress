@@ -1408,7 +1408,7 @@ mod variable_key_tests {
         );
         let undeclared_but_stored = [
             crate::blocks::auth::JWT_SECRET_KEY,
-            #[cfg(feature = "block-dev")]
+            #[cfg(feature = "site-runtime")]
             crate::blocks::dev::seed::SEED_ERROR_KEY,
         ];
         for key in declared

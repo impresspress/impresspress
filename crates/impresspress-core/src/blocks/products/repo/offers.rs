@@ -143,7 +143,7 @@ fn variable_from_record(record: &Record) -> Result<VariableDefinition, WaferErro
 /// [`build_offer`], so without this an offer whose key is `kilo-grams` would
 /// land, and every preview and checkout of it would then be refused.
 /// `InvalidArgument`, naming the offer, for the first violation.
-#[cfg(feature = "block-dev")]
+#[cfg(feature = "site-runtime")]
 pub(crate) fn validate_imported_variables<'a>(
     rows: impl IntoIterator<Item = &'a serde_json::Map<String, Value>>,
 ) -> Result<(), WaferError> {
@@ -182,7 +182,7 @@ pub(crate) fn validate_imported_variables<'a>(
 /// archived — what a data-snapshot import reads to find the offers a product
 /// it carries no longer has. The caller bounds `product_ids` to what one
 /// statement may bind.
-#[cfg(feature = "block-dev")]
+#[cfg(feature = "site-runtime")]
 pub(crate) async fn unarchived_offer_ids(
     ctx: &dyn Context,
     product_ids: &[String],
@@ -225,7 +225,7 @@ pub(crate) async fn unarchived_offer_ids(
 /// no offer there gained a Payment Link, whose creation it also refuses. What
 /// the browser can do is what this does: take the offer out of its own
 /// catalog.
-#[cfg(feature = "block-dev")]
+#[cfg(feature = "site-runtime")]
 pub(crate) fn archive_offers_write(
     offer_ids: &[String],
 ) -> wafer_block::wire::database::BatchWrite {

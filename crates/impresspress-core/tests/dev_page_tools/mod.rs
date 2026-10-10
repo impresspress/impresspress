@@ -10,8 +10,8 @@
 //!
 //! Included with `mod dev_page_tools;` from each test root that needs it.
 //! `tests/dev_page_tools/` has no `main.rs`, so cargo does not build it as a
-//! test target of its own. Gated on `block-dev`: without it there is no dev
-//! block and no `dev.js`.
+//! test target of its own. Gated on `block-dev`: without it there is no
+//! `dev.js` (a `site-runtime` build has the dev block's runtime half only).
 #![cfg(feature = "block-dev")]
 
 use serde_json::Value;

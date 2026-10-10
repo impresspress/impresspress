@@ -19,9 +19,9 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use wafer_block::db::{Filter, FilterOp, SortField};
-// `snapshot_upsert`'s only import, and it is `block-dev`-gated with it:
+// `snapshot_upsert`'s only import, and it is `site-runtime`-gated with it:
 // nothing else in this module upserts.
-#[cfg(feature = "block-dev")]
+#[cfg(feature = "site-runtime")]
 use wafer_block::wire::database::{BatchWrite, OnConflict, UpsertRequest};
 use wafer_core::clients::database::{self as db, Record, RecordList};
 use wafer_run::{context::Context, ErrorCode, WaferError};
@@ -530,15 +530,15 @@ pub(crate) async fn restore(ctx: &dyn Context, id: &str) -> Result<Record, Wafer
 /// a different operation from all of them and is not exposed more generally
 /// — `data`/`conflict`/`update_columns` come from the snapshot row and the
 /// allowlist entry verbatim, so this function does not itself decide what
-/// "wholesale" means — and it is `block-dev`-gated because that caller is the
-/// sandbox's, absent from every default build.
+/// "wholesale" means — and it is `site-runtime`-gated because that caller is
+/// the data snapshot's import, absent from every default build.
 ///
 /// `conflict` is passed in rather than hardcoded here. The allowlist already
 /// declares this table's conflict target (`Mode::Upsert(BY_ID)`) and
 /// `data_snapshot::upsert_op` already computes the update set from it; a
 /// second `vec!["id"]` written here would be the same fact stated twice, in
 /// two files, with nothing keeping them equal.
-#[cfg(feature = "block-dev")]
+#[cfg(feature = "site-runtime")]
 pub(crate) fn snapshot_upsert(
     data: Vec<(String, Value)>,
     conflict: Vec<String>,

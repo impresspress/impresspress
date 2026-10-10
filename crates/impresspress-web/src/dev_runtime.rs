@@ -1181,7 +1181,7 @@ async fn seed_on_boot(ctx: &dyn Context, shared: &Arc<DevShared>) -> Result<(), 
     Ok(())
 }
 
-/// A [`GenerationSummary`](impresspress_core::blocks::dev::contracts::GenerationSummary)
+/// A [`GenerationSummary`](impresspress_core::blocks::dev::generation::GenerationSummary)
 /// count for the console. Null only for a ledger row whose manifest cannot be
 /// read, which an activation's summary never is; printed rather than assumed.
 fn count(n: Option<u32>) -> String {

@@ -1,9 +1,11 @@
 //! `GET /b/dev/api/status` — the sandbox control plane's read model.
 //!
-//! The whole file is gated on `block-dev`: the block does not exist in a
-//! default-feature build, so these tests must not even compile there (that
-//! absence is itself asserted by `cargo test -p impresspress-core` passing
-//! with default features).
+//! The whole file is gated on `block-dev`: it drives the workspace half of
+//! the block — the `/b/dev` routes and the `TestContext::with_dev*` fixtures
+//! that register them — which no build without that feature compiles. A
+//! default-feature build has no block at all; a `site-runtime` build has its
+//! runtime half and none of this surface, which `tests/site_runtime.rs`
+//! asserts on that build.
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{

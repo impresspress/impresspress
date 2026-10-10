@@ -1,8 +1,8 @@
 //! Retention, garbage collection and the storage figures `dev_status` reports.
 //!
-//! Gated on `block-dev` for the same reason `dev_activation.rs` is: the block
-//! does not exist in a default-feature build, so these tests must not compile
-//! there.
+//! Gated on `block-dev` for the same reason `dev_activation.rs` is: these
+//! tests drive the workspace half of the block, which no build without that
+//! feature compiles.
 //!
 //! Everything here is driven through the HTTP surface an agent uses, because
 //! the property under test is a whole-loop one: a write publishes a
@@ -16,10 +16,9 @@ use impresspress_core::{
     blocks::dev::{
         activation::{self, ActivationIntent},
         artifacts, blobs,
-        contracts::SiteManifest,
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
         gc::{self, GcInterleave},
-        generation::{self, GenerationManifest},
+        generation::{self, GenerationManifest, SiteManifest},
         paths,
         repo::{
             self,

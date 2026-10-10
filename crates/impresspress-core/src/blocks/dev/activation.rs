@@ -50,15 +50,15 @@ use std::{
 
 use futures::{channel::oneshot, lock::MutexGuard};
 use serde::{Deserialize, Serialize};
-use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
+use wafer_run::{context::Context, WaferError};
+#[cfg(feature = "block-dev")]
+use wafer_run::{ErrorCode, OutputStream};
 
 use super::{
     blobs,
-    contracts::{GenerationSummary, SiteManifest},
     control::{DynamicBlockSpec, GenerationAnnouncement},
     gc,
-    generation::{self, GenerationManifest},
-    no_store_error_status,
+    generation::{self, GenerationManifest, GenerationSummary, SiteManifest},
     publisher::publish_site,
     repo::{
         self,
@@ -141,6 +141,10 @@ impl ActivationError {
 
     /// The refusal as a `/b/dev` response.
     ///
+    /// Workspace only (`block-dev`): a build without the HTTP surface
+    /// activates at boot alone, where a refusal is logged and recorded, never
+    /// answered.
+    ///
     /// The single place `ActivationError` becomes HTTP, so every endpoint that
     /// activates answers the same status for the same failure. Built through
     /// [`super::no_store_error_status`] rather than [`crate::http::err_internal`]
@@ -150,6 +154,7 @@ impl ActivationError {
     /// its agent, and a sanitized "internal error" would delete the only thing
     /// the caller can act on. The route is admin-only at the router, so the
     /// detail never reaches an unauthenticated caller.
+    #[cfg(feature = "block-dev")]
     pub fn into_response(self) -> OutputStream {
         let code = match self {
             Self::Validation(_) => ErrorCode::InvalidArgument,
@@ -157,7 +162,7 @@ impl ActivationError {
                 ErrorCode::Internal
             }
         };
-        no_store_error_status(code, self.status(), &self.to_string())
+        super::no_store_error_status(code, self.status(), &self.to_string())
     }
 }
 
@@ -1641,7 +1646,7 @@ mod tests {
     /// wipe.
     #[tokio::test]
     async fn adopting_a_site_replaces_only_the_site_half() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut ws = Workspace::default();
         ws.insert("site/index.html", "new".to_string(), 4);
         ws.insert("site/added-later.css", "css".to_string(), 4);

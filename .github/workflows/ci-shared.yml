@@ -222,13 +222,26 @@ jobs:
         run: cargo clippy --locked -p impresspress-core --features block-fastembed,test-support --all-targets -- -D warnings
 
       # `block-dev` is deliberately absent from `default` (the dev sandbox's
-      # control plane must not exist in a normal bundle), so the workspace
-      # clippy above compiles none of it — not the block, and not the ~4 200
-      # lines of `#![cfg(feature = "block-dev")]` integration tests that pin
-      # its rules. `--all-targets` is what reaches those, and `test-support`
-      # is what lets them link `FakeControl`.
+      # workspace must not exist in a normal bundle). The workspace clippy
+      # above does reach it, but only by accident: `crates/impresspress`'s
+      # dev-dependency asks for `block-dev`, and cargo unifies that into
+      # `impresspress-core` for the whole `--workspace --all-targets` build.
+      # This step lints it on purpose, in this crate's own feature set, so it
+      # does not depend on another crate's test needs. `--all-targets` is what
+      # reaches the `#![cfg(feature = "block-dev")]` integration tests that
+      # pin its rules, and `test-support` is what lets them link `FakeControl`.
       - name: Clippy (block-dev)
         run: cargo clippy --locked -p impresspress-core --features block-dev,test-support --all-targets -- -D warnings
+
+      # The dev block's runtime half alone — `site-runtime` without
+      # `block-dev`, the build a site exported from the sandbox runs. No other
+      # step lints it: every other clippy that turns `site-runtime` on also
+      # turns on `block-dev` (directly, or through the unification described
+      # above). This is the step that fails when a runtime module reaches into
+      # the workspace half — the module list in `blocks/dev/mod.rs` is the
+      # compile-time guarantee, and this is where it is checked with lints on.
+      - name: Clippy (site-runtime)
+        run: cargo clippy --locked -p impresspress-core --features site-runtime,test-support --all-targets -- -D warnings
 
   test:
     name: Tests
@@ -277,16 +290,33 @@ jobs:
       # `rust-toolchain.toml` lists the target, and IMPRESSPRESS_GUEST_GOLDEN
       # below turns that skip into a failure should it ever go missing.
       #
-      # The other half of the `block-dev` gap: `--workspace` above skips every
-      # `dev_*.rs` integration test, because all five are `#![cfg]`-gated on a
-      # feature nothing turns on. `wasm` is load-bearing rather than
-      # incidental — `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
+      # `--workspace` above does run the `#![cfg(feature = "block-dev")]`
+      # integration tests — `crates/impresspress`'s dev-dependency turns the
+      # feature on for this crate — but without `wasm`. This step runs them
+      # with it, and `wasm` is load-bearing rather than incidental:
+      # `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
       # `tests/wafer_guest_golden.rs` runs the compiled templates through it,
       # and `-p impresspress-core --features block-dev` alone leaves it red.
       - name: Run the block-dev suite
         env:
           IMPRESSPRESS_GUEST_GOLDEN: "1"
         run: cargo test --locked -p impresspress-core --features block-dev,wasm
+
+      # `tests/site_runtime.rs` is `#![cfg(all(feature = "site-runtime",
+      # not(feature = "block-dev")))]`: it proves the dev block's runtime half
+      # boots a seed into a live site with no workspace code compiled in. No
+      # other step runs it — `--workspace` unifies `block-dev` on, the
+      # block-dev suite asks for `block-dev`, and `Clippy (site-runtime)`
+      # compiles the file but runs nothing — so it runs here, in its own `-p`
+      # invocation. A compiled-out file reports `0 passed` and exits 0, so the
+      # grep is what makes this step fail if the file ever stops running (a
+      # `block-dev` added to the features, a gate changed): it demands at
+      # least one passing test.
+      - name: Run the site-runtime tests
+        run: |
+          set -o pipefail
+          cargo test --locked -p impresspress-core --features site-runtime,test-support --test site_runtime 2>&1 | tee "$RUNNER_TEMP/site-runtime.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/site-runtime.log"
 
       # `dev.js` is a TAIL composed into an IIFE with nothing on `window`
       # (see the file's own header comment), so its internal logic has no
@@ -920,7 +950,8 @@ jobs:
   # this job is where it runs. It is also the only place the `browser-devtools`
   # feature set is compiled at all — `block-dev` itself is covered by the
   # `Clippy (block-dev)` and `Run the block-dev suite` steps above, which lint
-  # and run `impresspress-core`'s half on the host.
+  # and run `impresspress-core`'s half on the host, and its runtime half alone
+  # by `Clippy (site-runtime)` and `Run the site-runtime tests`.
   e2e-dev-sandbox:
     name: E2E dev sandbox (browser WASM + wasmi guest)
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`

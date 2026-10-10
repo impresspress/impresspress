@@ -2,8 +2,8 @@
 //! `POST /b/dev/api/blocks`, `GET /b/dev/api/reference` and `GET /b/dev/api/guest`.
 //!
 //! Gated on `block-dev` for the same reason the other `dev_*.rs` files are:
-//! the block does not exist in a default-feature build, so these tests must
-//! not compile there.
+//! scaffolding is the workspace half of the block, which no build without
+//! that feature compiles.
 #![cfg(feature = "block-dev")]
 
 use base64ct::{Base64, Encoding};

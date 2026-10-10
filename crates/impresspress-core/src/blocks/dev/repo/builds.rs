@@ -579,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_get_round_trips_every_column() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let inserted = insert(&ctx, &new_build("site/newsletter"))
             .await
             .expect("insert");
@@ -595,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_status_replaces_diagnostics_only_when_given_them() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let row = insert(&ctx, &new_build("site/newsletter"))
             .await
             .expect("insert");
@@ -619,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_recent_is_newest_first_and_honours_the_limit() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut rows = Vec::new();
         for name in ["site/a", "site/b", "site/c"] {
             rows.push(insert(&ctx, &new_build(name)).await.expect("insert"));
@@ -643,7 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_reported_block_info_is_written_by_the_call_that_accepts_the_build() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let row = insert(&ctx, &new_build("site/newsletter"))
             .await
             .expect("insert");
@@ -686,7 +686,7 @@ mod tests {
     /// over, and its artifact's fate belongs to the generations.
     #[tokio::test]
     async fn list_in_flight_is_the_staged_rows_and_nothing_else() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut rows = Vec::new();
         for name in ["site/a", "site/b", "site/c"] {
             rows.push(insert(&ctx, &new_build(name)).await.expect("insert"));
@@ -724,7 +724,7 @@ mod tests {
     /// `set_status` short of saying so.
     #[tokio::test]
     async fn retire_in_flight_settles_each_staged_row_against_the_vouched_set() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let orphan = insert(&ctx, &new_build("site/a")).await.expect("insert");
         let mut landed = new_build("site/b");
         landed.artifact_sha256 = "vouched".to_string();
@@ -782,7 +782,7 @@ mod tests {
     /// page boundary.
     #[tokio::test]
     async fn the_artifact_index_deduplicates_by_hash_and_pages_to_the_end() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         // Two rows, one artifact: a re-stage of identical bytes.
         insert(&ctx, &new_build("site/a")).await.expect("insert");
         insert(&ctx, &new_build("site/a")).await.expect("insert");
@@ -802,7 +802,7 @@ mod tests {
     /// page still counts every artifact.
     #[tokio::test]
     async fn the_artifact_index_is_not_bounded_by_one_page() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         for i in 0..250 {
             let mut build = new_build("site/a");
             build.artifact_sha256 = format!("art-{i:04}");
@@ -816,7 +816,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_one_row() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let row = insert(&ctx, &new_build("site/a")).await.expect("insert");
         delete(&ctx, &row.id).await.expect("delete");
         assert_eq!(
@@ -827,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_for_artifact_removes_every_row_naming_it() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         // Two rows for one artifact — a re-stage of identical bytes — plus one
         // for different bytes, which must survive.
         let first = insert(&ctx, &new_build("site/a")).await.expect("insert");

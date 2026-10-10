@@ -58,7 +58,8 @@ fn surface_lines(info: &BlockInfo) -> Vec<String> {
 
 /// Every block whose `info()` the runtime registers. `all_block_infos` covers
 /// the manifest blocks plus `llm`; `dev` has its own constructor and joins
-/// only when compiled in.
+/// only when its workspace half (`block-dev`) is compiled in — the runtime
+/// half alone declares no endpoint, so it has no surface to compare.
 fn surface_block_infos() -> Vec<BlockInfo> {
     #[cfg_attr(
         not(feature = "block-dev"),

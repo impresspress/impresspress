@@ -1,8 +1,8 @@
 //! `GET /b/dev` — the workspace document, and the two static assets it pulls.
 //!
-//! Gated on `block-dev` for the same reason `dev_status.rs` is: the block
-//! does not exist in a default-feature build, so these tests must not even
-//! compile there.
+//! Gated on `block-dev` for the same reason `dev_status.rs` is: the page is
+//! the workspace half of the block, which no build without that feature
+//! compiles.
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{

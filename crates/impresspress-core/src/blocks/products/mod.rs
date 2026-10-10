@@ -18,53 +18,57 @@ mod tests;
 
 // The crate-level door test (`tests/repo_door.rs`) refuses a call site
 // outside `repo::products` that names the table directly — the data
-// snapshot's export allowlist is one, deliberately (it needs the name for
-// its `TABLE_ALLOWLIST`/`TABLE_EXCLUDED` bookkeeping and as the
-// `DataSnapshot` JSON key), and is listed in `IDENT_ALLOWED` there with its
-// own justification rather than routed around the scanner through an extra
+// snapshot's allowlist is one, deliberately (it needs the name for its
+// `TABLE_ALLOWLIST`/`TABLE_EXCLUDED` bookkeeping and as the `DataSnapshot`
+// JSON key), and is listed in `IDENT_ALLOWED` there with its own
+// justification rather than routed around the scanner through an extra
 // same-value constant under a different name. The two functions alongside it
 // are how it reads and writes the live set without a query built directly on
-// the name.
+// the name: the export reads it, the import writes it.
 //
-// `block-dev`-gated because `blocks::dev::data_snapshot` is the ONLY consumer
-// of all three, and the dev block is off in every default build: an
-// ungated re-export is three `unused_imports` warnings (and a dead
-// `snapshot_upsert`) in every build that does not compile the sandbox.
-// The gate says what the re-export is for as well as keeping the default
-// build warning-free.
-// The data snapshot's import, and nothing else, uses these three, so they are
-// `block-dev`-gated for the same reason as the products re-export above:
+// Gated by the half of `blocks::dev::data_snapshot` that is each item's only
+// consumer, and the dev block is off in every default build: an ungated
+// re-export is an `unused_imports` warning (and a dead `snapshot_upsert` or
+// `list_every_live`) in every build that does not compile that half. The
+// gate says what the re-export is for as well as keeping those builds
+// warning-free. The table name and the upsert are the import's
+// (`site-runtime`, which `block-dev` implies); the exhaustive live listing is
+// the export's alone (`block-dev`).
+//
+// The data snapshot's import, and nothing else, uses the three offer helpers
+// below, so they are `site-runtime`-gated with the import:
 // `validate_imported_variables` is the import-side twin of the offer write's
 // variable check, for the one write path that bypasses
 // `repo::offers::build_offer`; `unarchived_offer_ids` and
 // `archive_offers_write` find and archive the offers a product the import
 // carries no longer has, by the same write `repo::offers::archive` makes.
-#[cfg(feature = "block-dev")]
+#[cfg(feature = "site-runtime")]
 pub(crate) use repo::offers::{
     archive_offers_write, unarchived_offer_ids, validate_imported_variables,
 };
 #[cfg(feature = "block-dev")]
-pub(crate) use repo::products::{
-    list_every_live as list_live_products, snapshot_upsert as product_snapshot_upsert, TABLE,
-};
+pub(crate) use repo::products::list_every_live as list_live_products;
+#[cfg(feature = "site-runtime")]
+pub(crate) use repo::products::{snapshot_upsert as product_snapshot_upsert, TABLE};
 // `stripe_events` has two non-production readers and no production one, so
 // its re-export carries both of their cfgs rather than claiming the name is
-// always live: `blocks::dev::data_snapshot`'s closed-list bookkeeping under
-// `block-dev`, and, under the lib's own `cfg(test)`, the `secret_tables` pin
-// test that holds the admin SQL explorer's literal to this door's constant so
-// a renamed table cannot drop out of the refusal silently.
-#[cfg(any(feature = "block-dev", test))]
+// always live: `blocks::dev::data_snapshot`'s closed-list bookkeeping
+// (`TABLE_EXCLUDED`, compiled with the import under `site-runtime`), and,
+// under the lib's own `cfg(test)`, the `secret_tables` pin test that holds
+// the admin SQL explorer's literal to this door's constant so a renamed table
+// cannot drop out of the refusal silently.
+#[cfg(any(feature = "site-runtime", test))]
 pub(crate) use repo::stripe_events::TABLE as STRIPE_EVENTS_TABLE;
 // `repo` is private to this module (unlike `auth`'s `pub mod repo`, whose
 // table constants are meant to be named from anywhere in the crate) — these
 // re-exports are the curated exception list, extended here so
 // `blocks::dev::data_snapshot` can name every collection this block declares
 // without retyping a table's literal string a second time. Crate-scoped
-// (`pub(crate)`), matching the two re-export blocks above: still nobody
-// outside `impresspress-core` gets to depend on a products table name
-// directly. `block-dev`-gated for the same reason the block above is: the
-// data snapshot's closed-list bookkeeping is their only reader.
-#[cfg(feature = "block-dev")]
+// (`pub(crate)`), matching the re-export blocks above: still nobody outside
+// `impresspress-core` gets to depend on a products table name directly.
+// `site-runtime`-gated: the data snapshot's closed-list bookkeeping, which
+// the import enforces, is their only reader.
+#[cfg(feature = "site-runtime")]
 pub(crate) use repo::{
     checkout_presets::TABLE as CHECKOUT_PRESETS_TABLE, disputes::TABLE as DISPUTES_TABLE,
     entitlements::TABLE as ENTITLEMENTS_TABLE, group_templates::TABLE as GROUP_TEMPLATES_TABLE,

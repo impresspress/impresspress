@@ -1,8 +1,9 @@
 //! `GET /b/dev/api/export` and `GET /b/dev/api/export/manifest` — the sandbox
 //! as a folder anyone can serve.
 //!
-//! Gated on `block-dev` like every other dev-sandbox integration test: the
-//! block does not exist in a default-feature build.
+//! Gated on `block-dev` like every other workspace test of the dev block: the
+//! export is the workspace half, which no build without that feature
+//! compiles.
 //!
 //! # What is under test
 //!

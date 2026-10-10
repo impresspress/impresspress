@@ -1058,7 +1058,7 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
     // The products doors. Four categories:
     //
     // 1. `blocks/products/mod.rs` — `BlockInfo::collections(..)` plus the
-    //    curated `block-dev`-gated re-export list that lets
+    //    curated `site-runtime`-gated re-export list that lets
     //    `blocks::dev::data_snapshot` name every collection this block
     //    declares without retyping a literal. Advisory declarations, not
     //    queries; the same reason `blocks/admin/mod.rs` and

@@ -854,8 +854,8 @@ async fn an_env_export_the_seeder_refuses_does_not_reach_a_blocks_init() {
 
 /// The test discovery documents are built from the build's block manifest
 /// (`impresspress_core::test_support::real_block_infos`, which is
-/// `blocks::all_block_infos()` plus the dev sandbox under `block-dev`), while
-/// production builds them from the runtime it registered,
+/// `blocks::all_block_infos()` plus the dev sandbox where its feature is on),
+/// while production builds them from the runtime it registered,
 /// `wafer.block_infos()`. That substitution is sound only while the two
 /// publish the same endpoints: the runtime may add blocks the manifest lacks
 /// (the service and middleware blocks), but none of them may declare an
