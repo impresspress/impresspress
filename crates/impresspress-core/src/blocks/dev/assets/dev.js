@@ -249,8 +249,8 @@ var outstanding = 0;
 // The interval fires on a timer and the request is not instant, so without
 // this a slow answer is met by another tick, and another. That matters
 // because `/b/dev/api/status` reads the workspace manifest under
-// `DevShared::workspace` (`blocks/dev/gc.rs::storage_usage`): during a
-// collector pass, which holds that mutex across a loop of sequential deletes,
+// `DevShared::workspace_manifest` (`blocks/dev/gc.rs::storage_usage`): during
+// a collector pass, which holds that mutex across a loop of sequential deletes,
 // every tick issued would take a place in a first-in-first-out queue and the
 // user's next save would land behind all of them. With the guard the pass
 // costs one waiter, whatever it takes — and a poll that is skipped loses

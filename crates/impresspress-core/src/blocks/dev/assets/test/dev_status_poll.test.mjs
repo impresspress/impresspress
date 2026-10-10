@@ -18,8 +18,8 @@ const flush = async () => {
 };
 
 // Why this matters beyond tidiness: `/b/dev/api/status` reads the workspace
-// manifest under `DevShared::workspace` (`blocks/dev/gc.rs::storage_usage`),
-// and the collector holds that mutex across a loop of sequential deletes. The
+// manifest under `DevShared::workspace_manifest`
+// (`blocks/dev/gc.rs::storage_usage`), and the collector holds that mutex across a loop of sequential deletes. The
 // mutex is first-in-first-out, so an ungated poll firing every 300 ms through
 // a collector pass puts one waiter per tick ahead of whatever the user does
 // next. The guard makes the pass cost one waiter.

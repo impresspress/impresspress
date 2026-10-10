@@ -606,10 +606,11 @@ pub struct DevShared {
     /// requests, so ordinary editing never waits behind a publish.
     ///
     /// In every build, not only with the workspace: the store is the runtime
-    /// half's (an activation composes from it and the collector reads it),
-    /// and an activation holds this from its compose to its staged row's
-    /// insert so a collection cannot run in between
-    /// (`activation::workspace_site`, `gc`).
+    /// half's (the seed import writes it and the collector reads it), and an
+    /// activation holds this through its staged row's insert, so a
+    /// collection (`gc`) never runs between a manifest and the row that
+    /// keeps its content reachable. A `block-dev` build's site-write intents
+    /// also compose from the store under it (`activation::workspace_site`).
     pub workspace_manifest: futures::lock::Mutex<()>,
     /// Serializes `activation::maintain` — retention's prune and the
     /// collector — against itself.

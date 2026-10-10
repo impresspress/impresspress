@@ -129,6 +129,23 @@ async fn fixture() -> (TestContext, Arc<FakeControl>) {
     (ctx, control)
 }
 
+/// A [`seed::SeedFetch`] that serves no file and counts every request.
+#[derive(Default)]
+struct CountingFetch(std::sync::atomic::AtomicUsize);
+
+impl CountingFetch {
+    fn asked(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl seed::SeedFetch for CountingFetch {
+    fn get<'a>(&'a self, url: &'a str) -> seed::FetchFuture<'a> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { Err(format!("{url}: this bundle serves nothing")) })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // What the runtime half does
 // ---------------------------------------------------------------------------
@@ -268,25 +285,24 @@ async fn no_workspace_path_answers() {
 
 /// A seed that carries a `sandbox` section (a sandbox's guide and
 /// `llms.txt`) is refused by name on a build without the workspace, before
-/// anything is fetched or stored — not imported with the section dropped,
+/// anything is fetched, inspected or stored — not imported with the section dropped,
 /// and not refused as serde's "unknown field" (decision D2). The refusal is
 /// recorded where the site's admin can read it, like any other, and the
 /// instance stays fresh.
 #[tokio::test]
 async fn a_seed_with_a_sandbox_section_is_refused_naming_it() {
     let (ctx, control) = fixture().await;
-    let (mut manifest, fetch) = seed_bundle();
-    const GUIDE: &[u8] = b"# Guide\n";
-    const LLMS: &[u8] = b"# The sandbox\n";
+    let (mut manifest, _bundle) = seed_bundle();
     manifest.sandbox = Some(SandboxSeed {
         template: "blank".to_string(),
         suggested_prompt: "Build me a shop.".to_string(),
-        guide: seed_file("guide.md", GUIDE),
-        llms: seed_file(seed::LLMS_PATH, LLMS),
+        guide: seed_file("guide.md", b"# Guide\n"),
+        llms: seed_file(seed::LLMS_PATH, b"# The sandbox\n"),
     });
-    let fetch = fetch
-        .with("/seed/guide.md", GUIDE)
-        .with("/seed/llms.txt", LLMS);
+    // A bundle that serves nothing and counts what it is asked for: any fetch
+    // before the refusal would be counted, and would fail the import with a
+    // different message than the refusal's.
+    let fetch = CountingFetch::default();
 
     let refused = seed::import(
         &ctx,
@@ -298,12 +314,13 @@ async fn a_seed_with_a_sandbox_section_is_refused_naming_it() {
     .await
     .expect_err("a sandbox's seed is refused");
     assert_eq!(refused, seed::SANDBOX_SEED_REFUSAL);
+    assert_eq!(fetch.asked(), 0, "nothing is fetched before the refusal");
     assert!(
         refused.contains("`sandbox` section") && refused.contains("development sandbox runtime"),
         "{refused}"
     );
 
-    // Refused before the artifact was inspected or anything was stored.
+    // Nor was the artifact inspected or anything stored.
     assert_eq!(control.inspections(), 0);
     assert!(ctx
         .storage_get("wafer-run/web", "site", "index.html")

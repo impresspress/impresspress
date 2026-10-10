@@ -37,7 +37,9 @@ impl BuildStatus {
     ///
     /// The in-flight queries derive their filters from this list and
     /// [`Self::is_in_flight`] rather than restating a status, so a status
-    /// added to the enum cannot be silently left out of either side.
+    /// added to the enum cannot be silently left out of either side:
+    /// `all_lists_every_status` holds this list to the enum's derived schema,
+    /// and `is_in_flight`'s match is exhaustive.
     pub const ALL: [Self; 3] = [Self::Staged, Self::Valid, Self::Invalid];
 
     /// Whether a row in this status says its compile has not reached a
@@ -523,7 +525,8 @@ fn status_is(status: BuildStatus) -> Filter {
 ///
 /// Derived from [`BuildStatus::ALL`] rather than written out, so the in-flight
 /// side and the settled side cannot both forget a status that was added to
-/// the enum — the same construction `super::generations` uses.
+/// the enum (`ALL` is held to the enum by `all_lists_every_status`) — the
+/// same construction `super::generations` uses.
 fn status_in(keep: impl Fn(BuildStatus) -> bool) -> Filter {
     let statuses: Vec<&str> = BuildStatus::ALL
         .iter()
@@ -599,6 +602,23 @@ mod tests {
 
     use super::*;
     use crate::{blocks::dev::test_support::FakeControl, test_support::TestContext};
+
+    /// `ALL` names every status the enum has: the in-flight and settled
+    /// filters are both built from it, so a status missing here would be in
+    /// neither.
+    #[test]
+    fn all_lists_every_status() {
+        let listed: std::collections::BTreeSet<String> = BuildStatus::ALL
+            .iter()
+            .map(|status| status.as_str().to_string())
+            .collect();
+        assert_eq!(listed, super::super::schema_spellings::<BuildStatus>());
+        assert_eq!(
+            listed.len(),
+            BuildStatus::ALL.len(),
+            "ALL lists a status twice"
+        );
+    }
 
     /// JSON-encoded `TEXT` columns in canonical form, read back through
     /// `repo::json_text` like the generation manifests.
