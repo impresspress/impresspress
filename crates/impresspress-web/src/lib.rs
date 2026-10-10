@@ -52,6 +52,21 @@ pub mod runtime_factory;
 
 pub use runtime_factory::{RuntimeFactory, RuntimeOptions, SandboxMode};
 
+/// The page-side halves of this runtime's model services, loaded by every page
+/// drawn with `impresspress_core::ui::SiteConfig::load` (the layout and the
+/// public pages).
+///
+/// `runtime_factory.rs` wires `BrowserLlmService`, `BrowserImageService` and
+/// `BrowserEmbeddingService` into every runtime, and each runs its model in a
+/// window (WebGPU is window-only): `bridge.js` sends the request to an open
+/// page whose engine script answers for it. These are those scripts, served by
+/// the bundle at the site root (`impresspress-bundle`'s `assets.rs`), in the
+/// boot shell's order. Published as the runtime-owned
+/// [`impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`] rather than
+/// seeded into `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS`, where a stored row (or an
+/// admin's edit) decided which of the services the pages could answer.
+const PAGE_ENGINE_SCRIPTS: &str = "/webllm-engine.js,/embed-engine.js,/t2i-engine.js";
+
 /// The operator-level `csp` the browser runtime hands `wafer-run/security-headers`,
 /// which merges it directive by directive over its own baseline and refuses
 /// anything that would weaken it (`'unsafe-eval'`, a `frame-ancestors`
@@ -63,7 +78,7 @@ const IMPRESSPRESS_CSP: &str = concat!(
     "style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' data: blob: https:; ",
     "font-src 'self' https:; ",
-    "connect-src 'self' https://cdn.jsdelivr.net https://esm.run https://huggingface.co ",
+    "connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co ",
         "https://raw.githubusercontent.com https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co; ",
     "base-uri 'self'; ",
     "form-action 'self'",
@@ -281,6 +296,12 @@ impl builder::BootHooks for BrowserBootHooks {
             .both(
                 impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
                 features.to_config_json(),
+            )
+            // The pages the runtime renders load the engines its services
+            // post to (see the constant).
+            .both(
+                impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY,
+                PAGE_ENGINE_SCRIPTS,
             );
         // `csrf` and `auth::service` read the secret per request off the
         // synchronous snapshot; seeding just generated it if it was absent.

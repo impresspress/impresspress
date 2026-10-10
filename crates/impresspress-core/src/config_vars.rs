@@ -177,7 +177,8 @@ pub const HAS_DISPATCHER_BINDING_KEY: &str = "WAFER_RUN_SHARED__HAS_DISPATCHER_B
 pub const HAS_LANDING_PAGE_KEY: &str = "WAFER_RUN_SHARED__HAS_LANDING_PAGE";
 
 /// Shared config key: comma-separated module-script URLs injected into every
-/// server-rendered page.
+/// server-rendered page, after the runtime's own
+/// (`ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`).
 pub const EMBEDDED_SCRIPTS_KEY: &str = "WAFER_RUN_SHARED__EMBEDDED_SCRIPTS";
 
 /// Shared config key: whether signed-in users may create and sell their own
@@ -348,9 +349,9 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Toggle),
         ConfigVar::new(
             EMBEDDED_SCRIPTS_KEY,
-            "Comma-separated module-script URLs injected into every SSR page \
-             (e.g. /webllm-engine.js for browser WebLLM). Native deployments \
-             leave this empty.",
+            "Comma-separated module-script URLs injected into every SSR page, \
+             after the runtime's own (the browser runtime always loads its \
+             page-side model engines; they need not be listed here).",
             "",
         )
         .name("Embedded Scripts")

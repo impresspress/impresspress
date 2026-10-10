@@ -891,10 +891,12 @@ jobs:
       # it is a file of its own for its launch flag. `boot-navigation.spec.ts`
       # serves `pkg/`'s boot shell with a stand-in worker on 8091; its WebKit
       # half is local-only (`E2E_WEBKIT`), since this job installs Chromium
-      # alone.
+      # alone. `page-engines.spec.ts` is the worker's model requests reaching
+      # (or being refused by) the page-side engine scripts, which every browser
+      # bundle ships, so it runs against the ordinary one.
       - name: Run smoke tests (browser WASM, port 8080)
         working-directory: crates/impresspress-web
-        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/insecure-origin.spec.ts tests/e2e/recovery-wipe.spec.ts tests/e2e/boot-navigation.spec.ts
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/insecure-origin.spec.ts tests/e2e/recovery-wipe.spec.ts tests/e2e/boot-navigation.spec.ts tests/e2e/page-engines.spec.ts
 
       - name: Stop server
         if: always()

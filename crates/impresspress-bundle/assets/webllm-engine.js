@@ -9,11 +9,22 @@
 // 2. SW-routed chat / unload / cancel: receives postMessages from the SW via
 //    navigator.serviceWorker.message, runs WebLLM, streams frames back.
 //
-// SW → Page message shapes (see bridge.js for the consuming side):
+// SW → Page request shapes (see bridge.js for the producing side):
+//   { type: 'engine-probe',            id, family }   // answered when family is 'llm'
+//   { type: 'llm-unload-request',      id, modelId }
+//   { type: 'llm-chat-stream-request', id, body }     // body = JSON chat request
+//   { type: 'llm-stream-cancel',       id }
+//
+// Page → SW reply shapes:
+//   { type: 'engine-present',      id }                    // this page runs the LLM engine
 //   { type: 'llm-unload-response', id, error? }            // one-shot
 //   { type: 'llm-stream-frame',    id, kind, payload? }    // streams
 //     `kind` ∈ {'chunk','done','error'}; chat emits 'chunk' frames per token
 //     and a terminal 'done' / 'error'.
+//
+// bridge.js sends a request only to a page that answered its probe, so the
+// probe answer is what makes this page one the worker can use: it costs
+// nothing (no model is loaded to give it) and must not wait for anything.
 //
 // The @mlc-ai/web-llm import is lazy: a top-level static import would block
 // DOMContentLoaded for every page that loads this script (it's a multi-MB
@@ -138,6 +149,9 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || !msg.type) return;
     switch (msg.type) {
+        case 'engine-probe':
+            if (msg.family === 'llm') swPost({ type: 'engine-present', id: msg.id });
+            break;
         case 'llm-unload-request':      handleUnload(msg); break;
         case 'llm-chat-stream-request': handleChatStream(msg); break;
         case 'llm-stream-cancel':       handleCancel(msg); break;

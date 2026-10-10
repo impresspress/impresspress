@@ -955,6 +955,17 @@ fn the_rendered_loader_recovers_once_and_keeps_the_cause() {
     );
 }
 
+/// Each shipped engine script answers the worker's `engine-probe` for its own
+/// engine and no other, which is what makes a page that loaded it one the
+/// worker sends that engine's requests to — `tests/sw/engine_probe.test.mjs`.
+/// The scripts are shipped as they are (not templates), so the test runs on
+/// `assets/` directly.
+#[test]
+fn the_engine_scripts_answer_the_probe_for_their_own_engine() {
+    let test = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sw/engine_probe.test.mjs");
+    node(&["--test".as_ref(), test.as_os_str()], &[]);
+}
+
 /// `sw.js` states what a reload costs from the same build-time flag
 /// `loader.js` acts on: one `AppConfig` field, rendered into both.
 #[test]

@@ -446,7 +446,8 @@ self.addEventListener('activate', (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Message bridge — asset-loader replies from the main thread.
+// Message bridge — replies from pages: the boot shell's, the asset loader's,
+// and the page-side engines' (bridge.js's "Page-side engines" section).
 // ---------------------------------------------------------------------------
 
 self.addEventListener('message', (event) => {
@@ -482,6 +483,15 @@ self.addEventListener('message', (event) => {
                 status: msg.ok ? 'ready' : 'failed',
                 error: msg.ok ? undefined : msg.error,
             });
+        }
+        return;
+    }
+
+    // A page saying it runs the engine a request is waiting to be sent to:
+    // bridge.js sends the request to the first page that says so.
+    if (msg.type === 'engine-present') {
+        if (typeof globalThis.__impresspressCompleteEngineProbe === 'function') {
+            globalThis.__impresspressCompleteEngineProbe(msg);
         }
         return;
     }

@@ -27,6 +27,20 @@ use crate::config_vars::{
     EMBEDDED_SCRIPTS_KEY, FAVICON_URL_KEY, LOGO_ICON_URL_KEY, PRIMARY_COLOR_KEY,
 };
 
+/// The page-side scripts of the runtime's own services, as one comma-separated
+/// list of module-script URLs, rendered into every page drawn with
+/// [`SiteConfig::load`], before `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS`.
+///
+/// The browser adapter (`impresspress-web`) publishes it: its LLM, image and
+/// embedding services run their models in a window, so the pages the runtime
+/// renders carry the engine scripts that answer them. That is a fact of
+/// the build, not configuration — the services are wired unconditionally, so
+/// an admin cannot opt a page out of the scripts they need. Double-underscore
+/// brackets make the key runtime-owned (`config_vars::is_internal_key`): never
+/// set from env or the variables table, and read here off the synchronous
+/// `config_get` snapshot, where the adapter puts it. Servers leave it unset.
+pub const PAGE_ENGINE_SCRIPTS_CONFIG_KEY: &str = "__IMPRESSPRESS_PAGE_ENGINE_SCRIPTS__";
+
 /// Branding/site config loaded from environment variables.
 /// Passed through to layout and sidebar so every page renders consistently.
 pub struct SiteConfig {
@@ -38,9 +52,10 @@ pub struct SiteConfig {
     /// bundled default. Lets an app built on impresspress-core (e.g. a site)
     /// theme the chrome to its own brand instead of inheriting ours.
     pub primary_color: String,
-    /// Extra module-type script URLs appended to every rendered page.
-    /// Browser targets populate this (e.g. `/webllm-engine.js` for the
-    /// page-side LLM engine); native targets leave it empty.
+    /// Module-type script URLs appended to every rendered page, each once:
+    /// the runtime's own page engines ([`PAGE_ENGINE_SCRIPTS_CONFIG_KEY`],
+    /// browser only), then the operator's
+    /// `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS`.
     pub embedded_scripts: Vec<String>,
     /// Headline on the auth-split brand panel (login/signup/reset/etc. left
     /// navy column) — see `ui::components::auth_panel`. Defaults to
@@ -62,7 +77,20 @@ impl SiteConfig {
         ctx: &dyn wafer_run::context::Context,
     ) -> Result<Self, wafer_run::WaferError> {
         use wafer_core::clients::config;
-        let scripts_raw = config::get_default(ctx, EMBEDDED_SCRIPTS_KEY, "").await?;
+        let operator_scripts = config::get_default(ctx, EMBEDDED_SCRIPTS_KEY, "").await?;
+        let mut embedded_scripts: Vec<String> = Vec::new();
+        for src in ctx
+            .config_get(PAGE_ENGINE_SCRIPTS_CONFIG_KEY)
+            .unwrap_or_default()
+            .split(',')
+            .chain(operator_scripts.split(','))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !embedded_scripts.iter().any(|seen| seen == src) {
+                embedded_scripts.push(src.to_string());
+            }
+        }
         Ok(Self {
             app_name: config::get_default(ctx, APP_NAME_KEY, DEFAULT_APP_NAME).await?,
             // Blank = no wordmark image: templates render the app name as
@@ -73,12 +101,7 @@ impl SiteConfig {
                 .await?,
             favicon_url: config::get_default(ctx, FAVICON_URL_KEY, &assets::favicon_url()).await?,
             primary_color: config::get_default(ctx, PRIMARY_COLOR_KEY, "").await?,
-            embedded_scripts: scripts_raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
+            embedded_scripts,
             auth_headline: config::get_default(
                 ctx,
                 AUTH_HEADLINE_KEY,

@@ -1,6 +1,17 @@
-// Page-resident Transformers.js host. Loaded by index.html alongside
-// webllm-engine.js. Listens for `embed-*-request` messages from the SW and
-// runs them through `@huggingface/transformers` v3.
+// Page-resident Transformers.js host, loaded with webllm-engine.js and
+// t2i-engine.js on the boot page and on the pages the runtime renders.
+// Listens for `embed-*-request` messages from the SW and runs them through
+// `@huggingface/transformers` v3.
+//
+// SW → Page request shapes (see bridge.js for the producing side):
+//   { type: 'engine-probe',          id, family }   // answered when family is 'embed'
+//   { type: 'embed-create-request',  id, modelId }
+//   { type: 'embed-unload-request',  id, modelId }
+//   { type: 'embed-run-request',     id, modelId, texts }   // texts = JSON array of strings
+//
+// Page → SW reply shapes:
+//   { type: 'engine-present', id }                // this page runs the embedding engine
+//   { type: 'embed-<op>-response', id, result?, error? }
 
 const PIPELINES = new Map();
 
@@ -13,7 +24,12 @@ async function loadPipeline(modelId) {
     if (PIPELINES.has(modelId)) return PIPELINES.get(modelId);
     const hf = MODEL_HF_PATH[modelId];
     if (!hf) throw new Error(`unknown embedding model: ${modelId}`);
-    const { pipeline } = await import('https://esm.run/@huggingface/transformers@3');
+    // The same module t2i-engine.js imports (one copy per page), and from
+    // cdn.jsdelivr.net: that is the CDN the runtime's pages allow scripts
+    // from (`script-src` in impresspress-web's `IMPRESSPRESS_CSP`), so a
+    // module served from anywhere else is blocked on every page but the boot
+    // shell.
+    const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1');
     const pipe = await pipeline('feature-extraction', hf, { dtype: 'q8' });
     PIPELINES.set(modelId, pipe);
     return pipe;
@@ -27,6 +43,10 @@ async function swReply(payload) {
 navigator.serviceWorker.addEventListener('message', async (event) => {
     const msg = event.data;
     if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type === 'engine-probe') {
+        if (msg.family === 'embed') swReply({ type: 'engine-present', id: msg.id });
+        return;
+    }
     if (!msg.type.startsWith('embed-')) return;
 
     const reply = (result, error) => {

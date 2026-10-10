@@ -13,12 +13,14 @@
 // github.com/huggingface/transformers.js-examples/tree/main/janus-pro-webgpu
 //
 // SW → Page request shapes (see bridge.js for the producing side):
+//   { type: 'engine-probe',                id, family }   // answered when family is 'image'
 //   { type: 'image-load-request',          id, modelId }
 //   { type: 'image-unload-request',        id }
 //   { type: 'image-generate-stream-request', id, body }   // body = JSON ImageRequest
 //   { type: 'image-stream-cancel',         id }
 //
 // Page → SW reply shapes:
+//   { type: 'engine-present',        id }    // this page runs the image engine
 //   { type: 'image-load-response',   id, error? }
 //   { type: 'image-unload-response', id, error? }
 //   { type: 'image-stream-frame',    id, kind, payload? }
@@ -239,6 +241,9 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || !msg.type) return;
     switch (msg.type) {
+        case 'engine-probe':
+            if (msg.family === 'image') swPost({ type: 'engine-present', id: msg.id });
+            break;
         case 'image-load-request':             handleLoadEngine(msg); break;
         case 'image-unload-request':           handleUnloadEngine(msg); break;
         case 'image-generate-stream-request':  handleGenerateStream(msg); break;
