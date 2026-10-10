@@ -383,6 +383,55 @@ test('a refusal is shown as an error result, with the server’s own body', asyn
   assert.equal(result.getAttribute('data-is-error'), 'true');
 });
 
+test('a call missing a required argument shows which one, and makes no request', async () => {
+  // A tool whose argument fills a URL segment, as `dev_get_generation` does.
+  const manifest = {
+    tools: [
+      {
+        name: 'dev_get_generation',
+        description: 'Read one generation.',
+        inputSchema: {
+          type: 'object',
+          properties: { id: { type: 'string' } },
+          required: ['id']
+        },
+        outputSchema: { type: 'object' },
+        invocation: {
+          method: 'get',
+          path: '/b/dev/api/generations/{id}',
+          path_params: ['id'],
+          query_params: [],
+          body_params: []
+        }
+      }
+    ]
+  };
+  const { handle, elements, fetchCalls } = instantiate({ toolsManifest: manifest });
+  await settle();
+  fetchCalls.length = 0;
+
+  elements.get('dev-console-tool').value = 'dev_get_generation';
+  handle.showConsoleTool();
+  // The pre-filled arguments name `id` with an empty placeholder, so Run
+  // with the box unedited sends `id: ""`.
+  assert.deepEqual(JSON.parse(elements.get('dev-console-args').value), { id: '' });
+  for (const args of ['{"id":""}', '{}']) {
+    elements.get('dev-console-args').value = args;
+    await handle.runConsoleTool();
+    // The message `toolOptions` (webmcp-core.js) returns to an agent's call
+    // too — the console is not a second implementation of the check.
+    assert.deepEqual(
+      JSON.parse(elements.get('dev-console-result').textContent),
+      { isError: true, result: 'Missing required argument: id' },
+      args
+    );
+    assert.equal(elements.get('dev-console-status').textContent, 'Run finished: error', args);
+  }
+  assert.deepEqual(fetchCalls, []);
+  // A refused call is not a lost session: the tools stay.
+  assert.equal(elements.get('dev-console-run').disabled, false);
+});
+
 test('arguments that are not a JSON object are refused without calling the tool', async () => {
   const { handle, elements, fetchCalls } = instantiate({ toolsManifest: MANIFEST });
   await settle();

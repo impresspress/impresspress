@@ -118,7 +118,9 @@ return {
   generation: function () { return generation },
   get registered() { return registered.slice() },
   refresh,
-  whenControlled
+  whenControlled,
+  buildRequest,
+  toolOptions
 };`
   );
   const handle = factory(...Object.values(sandbox));

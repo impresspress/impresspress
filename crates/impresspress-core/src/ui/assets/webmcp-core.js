@@ -48,6 +48,65 @@ function buildRequest(invocation, args) {
   return { url: path, init: init };
 }
 
+// Why a call cannot be made as the agent sent it, or `null` when it can.
+//
+// Chrome's WebMCP hands `execute` whatever arguments the agent sent; it does
+// not check them against `inputSchema`. Unchecked, a missing path argument
+// becomes the text `undefined` in the URL, and the agent is told the server's
+// answer to that (`404 Product not found`) — a claim about the data, when the
+// fault is in its own call. So the call is checked here first, from the
+// tool's own manifest entry and nothing else:
+//
+// - every name in `inputSchema.required` must be present. Present is the
+//   JSON Schema meaning — the key is there with a value; whether that value
+//   is acceptable (an empty string in a body, say) is the endpoint's to
+//   judge, with its own message.
+// - every path argument must be a string, a finite number or a boolean,
+//   whether or not `required` lists it: the URL segment has to be filled,
+//   and those are the values that become one segment of text. An empty
+//   string would leave the segment empty, and `null` or `undefined` would be
+//   spelled into it as text, so each counts as missing; an object or array
+//   would be stringified (`[object Object]`), and a NaN or an infinity
+//   spelled as a word, so those are refused as invalid.
+function argumentError(tool, args) {
+  var has = function (name) {
+    return Object.prototype.hasOwnProperty.call(args, name);
+  };
+  var missing = [];
+  var invalid = [];
+  var required = tool.inputSchema && Array.isArray(tool.inputSchema.required)
+    ? tool.inputSchema.required
+    : [];
+  required.forEach(function (name) {
+    if (!has(name) || args[name] === undefined) {
+      missing.push(name);
+    }
+  });
+  (tool.invocation.path_params || []).forEach(function (name) {
+    var value = has(name) ? args[name] : undefined;
+    if (value === undefined || value === null || value === '') {
+      if (missing.indexOf(name) < 0) {
+        missing.push(name);
+      }
+    } else if (
+      typeof value !== 'string' &&
+      typeof value !== 'boolean' &&
+      !(typeof value === 'number' && isFinite(value))
+    ) {
+      invalid.push(name);
+    }
+  });
+  if (missing.length > 0) {
+    return (missing.length === 1 ? 'Missing required argument: ' : 'Missing required arguments: ') +
+      missing.join(', ');
+  }
+  if (invalid.length > 0) {
+    return 'Invalid argument' + (invalid.length === 1 ? ': ' : 's: ') + invalid.join(', ') +
+      ' must be a string, a number or a boolean';
+  }
+  return null;
+}
+
 function toolOptions(tool) {
   // `outputSchema` is optional in the manifest — the producer only
   // projects it when the endpoint's declared response schema is a
@@ -60,7 +119,15 @@ function toolOptions(tool) {
     description: tool.description,
     inputSchema: tool.inputSchema,
     execute: async function (args) {
-      var req = buildRequest(tool.invocation, args || {});
+      args = args || {};
+      // Refused before any request: see `argumentError`. An `isError`
+      // result, like a refused request, so the agent reads it as its own
+      // call failing and can correct the arguments.
+      var refusal = argumentError(tool, args);
+      if (refusal !== null) {
+        return { isError: true, content: [{ type: 'text', text: refusal }] };
+      }
+      var req = buildRequest(tool.invocation, args);
       var response = await fetch(req.url, req.init);
       var text = await response.text();
 

@@ -175,6 +175,27 @@ test.describe('WebMCP registration on an anonymous page', () => {
     expect(result.content[0]?.text).toMatch(/^Request failed \(4\d\d\)/);
     expect(result.structuredContent).toBeUndefined();
   });
+
+  test('a call missing a required argument says which one, and makes no request', async ({ page }) => {
+    await page.goto('/b/auth/login');
+    await registeredTools(page, PUBLIC_TOOLS.length);
+
+    // `get_product`'s `product_id` fills the URL (`/b/products/storefront/
+    // {product_id}`). Chromium's registry does not check arguments against
+    // `inputSchema`, so this reaches the page's `execute`, which must refuse
+    // it itself — not fetch `/b/products/storefront/undefined` and relay the
+    // server's 404 as if the product were missing.
+    const requests: string[] = [];
+    page.on('request', (request) => requests.push(request.url()));
+    for (const args of [{}, { product_id: '' }]) {
+      const result = await execute(page, 'get_product', args);
+      expect(result, JSON.stringify(args)).toEqual({
+        isError: true,
+        content: [{ type: 'text', text: 'Missing required argument: product_id' }],
+      });
+    }
+    expect(requests.filter((url) => new URL(url).pathname.startsWith('/b/products/'))).toEqual([]);
+  });
 });
 
 test.describe('WebMCP tools against a seeded product', () => {
