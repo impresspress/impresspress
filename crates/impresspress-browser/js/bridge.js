@@ -655,8 +655,9 @@ globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 // the person or agent that made the request. The Rust bridges
 // (`impresspress-browser`'s `bridge::engine_unavailable`) turn exactly that
 // code into the services' `EngineUnavailable` error, which `wafer-core`'s
-// service handlers return as `Unavailable` (a 503) carrying the message as
-// written. A stream refused after it started
+// service handlers return as `Unavailable` carrying the message as written
+// (the vector routes answer it as a 503; `/b/llm/api/chat` does not yet, and
+// answers a sanitized 500). A stream refused after it started
 // ends with an error frame that carries the same `code`.
 //
 // The last of those is the page's to say: an engine script whose library,

@@ -13,9 +13,9 @@ use crate::bridge::{
     image_unload_engine,
 };
 
-/// A refusal (no page can run the generation now) is
-/// [`ImageError::EngineUnavailable`] with bridge.js's caller-facing message;
-/// anything else is a backend fault.
+/// A refusal (no page can run the generation now, or the page's engine could
+/// not load) is [`ImageError::EngineUnavailable`] with its caller-facing
+/// message; anything else is a backend fault.
 fn js_err(e: wasm_bindgen::JsValue) -> ImageError {
     match crate::bridge::engine_unavailable(&e) {
         Some(message) => ImageError::EngineUnavailable(message),

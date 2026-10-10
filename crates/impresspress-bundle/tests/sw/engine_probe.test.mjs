@@ -255,10 +255,12 @@ test('the Transformers.js engines run ONNX Runtime on one thread, set before the
     globalThis.__onnxThreadsAtLoad = undefined;
 });
 
-test('an embedding engine that cannot load refuses with the refusal code and its reason', async () => {
+test('an embedding engine that cannot load refuses with the refusal code and a fixed message, not the library error', async () => {
     const sw = await loadEngine(await engineFor('embed'));
     closeModelGate()();
-    globalThis.__modelLoadError = 'no available backend found';
+    // The library's own error names hosts and `blob:` URLs: the caller gets a
+    // fixed message instead, and the page's console the cause.
+    globalThis.__modelLoadError = 'no available backend found. ERR: [wasm] TypeError: Failed to fetch dynamically imported module: blob:http://h/1';
 
     await sw.deliver({ type: 'embed-run-request', id: 'r1', modelId: 'multilingual-e5-small', texts: '["a"]' });
     await sw.deliver({ type: 'embed-create-request', id: 'c1', modelId: 'multilingual-e5-small' });
@@ -268,7 +270,7 @@ test('an embedding engine that cannot load refuses with the refusal code and its
         assert.deepEqual(framesOf(sw, type, id), [{
             type,
             id,
-            error: 'the embedding engine could not load in the page: no available backend found',
+            error: 'the embedding engine could not load in this page (its library, runtime or model failed to load) — reload the page and try again',
             code: ENGINE_UNAVAILABLE,
         }]);
     }
@@ -285,17 +287,17 @@ test('an embedding that fails once its engine has loaded is a fault, not a refus
     assert.equal(reply.code, undefined, 'a failed run was reported as a refusal');
 });
 
-test('an image engine that cannot load refuses with the refusal code and its reason', async () => {
+test('an image engine that cannot load refuses with the refusal code and a fixed message, not the library error', async () => {
     const sw = await loadEngine(await engineFor('image'));
     closeModelGate()();
-    globalThis.__modelLoadError = 'no available backend found';
+    globalThis.__modelLoadError = 'Could not locate file: "https://huggingface.co/x/onnx/model.onnx"';
 
     await sw.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
     await settle();
     assert.deepEqual(framesOf(sw, 'image-load-response', 'l1'), [{
         type: 'image-load-response',
         id: 'l1',
-        error: 'the image engine could not load in the page: no available backend found',
+        error: 'the image engine could not load in this page (its library, runtime or model failed to load) — reload the page and try again',
         code: ENGINE_UNAVAILABLE,
     }]);
 });
@@ -312,7 +314,10 @@ test('a page without WebGPU refuses an image load, keeping the marker callers ma
     await settle();
     const [reply] = framesOf(sw, 'image-load-response', 'l1');
     assert.equal(reply.code, ENGINE_UNAVAILABLE);
-    assert.match(reply.error, /^the image engine could not load in the page: webgpu-unavailable: /);
+    assert.equal(
+        reply.error,
+        'webgpu-unavailable: this browser exposes no WebGPU adapter, which the image engine needs',
+    );
 });
 
 test('a request whose model failed to load in the page is refused, not run', async () => {

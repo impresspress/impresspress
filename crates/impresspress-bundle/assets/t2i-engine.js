@@ -31,7 +31,8 @@
 // A load reply or an error frame whose `code` is ENGINE_UNAVAILABLE is a
 // refusal, as bridge.js's own are: the engine could not load here (no WebGPU,
 // its library or runtime failed to load, the model failed to load), and the
-// message is written for whoever made the request. bridge.js passes it on as a
+// message is a fixed one written for whoever made the request (see
+// `engineUnavailable`). bridge.js passes it on as a
 // refusal, which the image service reports as `EngineUnavailable` with this
 // message; any other error is a fault in the generation itself.
 
@@ -56,12 +57,29 @@ async function loadTransformers() {
     return _transformers;
 }
 
-/** `e` as a refusal: the image engine could not load in this page. */
+/**
+ * `e` as a refusal: the image engine could not load in this page.
+ *
+ * The message is fixed, not the library's or the browser's own error, which
+ * can name hosts, file URLs and `blob:` URLs: `EngineUnavailable`'s message
+ * reaches the caller as written, so it must carry none (wafer-core's contract
+ * for the variant). The cause is logged to this page's console and kept as
+ * the error's `cause` for a page-direct caller of `loadEngine`.
+ *
+ * No WebGPU keeps WEBGPU_UNAVAILABLE_MARKER in its message, which callers
+ * match on, and does not say "reload": reloading gives the page no adapter.
+ * Anything else does say it, because retrying in the same page cannot help
+ * when the failure was ONNX Runtime's backend: onnxruntime-web records a
+ * backend whose `init` failed as aborted and answers every later session with
+ * the same error (`tryResolveAndInitializeBackend`), for as long as the page
+ * keeps the module.
+ */
 function engineUnavailable(e) {
-    return Object.assign(
-        new Error(`the image engine could not load in the page: ${e?.message ?? e}`),
-        { code: ENGINE_UNAVAILABLE },
-    );
+    console.error('t2i-engine.js: the image engine could not load:', e);
+    const message = String(e?.message ?? e).startsWith(WEBGPU_UNAVAILABLE_MARKER)
+        ? `${WEBGPU_UNAVAILABLE_MARKER}: this browser exposes no WebGPU adapter, which the image engine needs`
+        : 'the image engine could not load in this page (its library, runtime or model failed to load) — reload the page and try again';
+    return Object.assign(new Error(message, { cause: e }), { code: ENGINE_UNAVAILABLE });
 }
 
 // Recognizable marker callers (e.g. gizza-ai/imagine) can match on to

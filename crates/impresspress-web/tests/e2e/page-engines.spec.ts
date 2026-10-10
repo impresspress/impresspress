@@ -125,11 +125,13 @@ test('with no page able to run the engine, an embedding request is a 503 that sa
   console.log(`page-engines: embed refused with no engine page: ${ms} ms`);
 });
 
-test('an embedding engine that cannot load in the page is a 503 that says why', async ({ page }) => {
+test('an embedding engine that cannot load in the page is a 503 that says what to do', async ({ page }) => {
   // The page runs the engine, but its library never arrives — as when the
   // pages' CSP refused ONNX Runtime's glue module, which took 37 s to surface
   // as a sanitized "Internal server error (ref: …)". The engine answers with
-  // bridge.js's refusal code, and the caller gets the reason.
+  // bridge.js's refusal code and a fixed message saying what to do; the
+  // library's own error, which names the CDN URL it failed to load, goes to
+  // the page's console and not to the caller.
   await page.route(/^https:\/\/cdn\.jsdelivr\.net\/npm\/@huggingface\/transformers@/, (route) =>
     route.abort('failed'),
   );
@@ -138,7 +140,9 @@ test('an embedding engine that cannot load in the page is a 503 that says why', 
   const { answer, ms } = await embedFromPage(page, ['unreachable']);
   expect(answer, `no answer within ${BOUND_MS} ms: the request hung`).not.toBeNull();
   expect(answer!.status, answer!.body).toBe(503);
-  expect(answer!.body).toContain('the embedding engine could not load in the page: ');
-  expect(answer!.body).not.toContain('Internal server error');
+  expect(JSON.parse(answer!.body).message).toBe(
+    'the embedding engine could not load in this page (its library, runtime or model failed to load) — reload the page and try again',
+  );
+  expect(answer!.body).not.toContain('jsdelivr');
   console.log(`page-engines: embed refused when the engine cannot load: ${ms} ms`);
 });

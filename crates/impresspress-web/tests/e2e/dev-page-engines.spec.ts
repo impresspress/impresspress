@@ -62,9 +62,17 @@ test('the real embedding engine loads on a cross-origin-isolated page under the 
   ]);
 
   // The conditions the incident needed, so this cannot pass by testing
-  // something milder: the page is cross-origin isolated (ONNX Runtime goes
-  // multi-threaded), and its CSP allows no `blob:` script.
+  // something milder: the page is cross-origin isolated, on a machine with
+  // enough cores that ONNX Runtime's default would be several threads, and
+  // its CSP allows no `blob:` script. (On an isolated page ONNX Runtime's
+  // default is `min(4, ceil(hardwareConcurrency / 2))` threads: on two cores
+  // that is one, the `blob:` import never happens, and this would pass with
+  // the defect back in.)
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
+  expect(
+    await page.evaluate(() => navigator.hardwareConcurrency),
+    'too few cores for ONNX Runtime to default to more than one thread',
+  ).toBeGreaterThanOrEqual(3);
   const scriptSrc = (await adminPage.headerValue('content-security-policy'))
     ?.split(';')
     .map((directive) => directive.trim())

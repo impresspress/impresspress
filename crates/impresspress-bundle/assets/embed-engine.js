@@ -16,13 +16,29 @@
 //
 // A reply whose `code` is ENGINE_UNAVAILABLE is a refusal, as bridge.js's own
 // are: the engine could not load here (its library, its runtime or the
-// model), and `error` is written for whoever made the request. bridge.js
-// passes it on as a refusal, which the embedding service reports as
+// model), and `error` is UNABLE_TO_LOAD, written for whoever made the request.
+// bridge.js passes it on as a refusal, which the embedding service reports as
 // `EngineUnavailable` and the vector block's routes answer as a 503 carrying
 // this message; any other `error` is a fault in the run itself.
 
 /** bridge.js's `ENGINE_UNAVAILABLE`: the `code` of a refusal. */
 const ENGINE_UNAVAILABLE = 'engine-unavailable';
+
+/**
+ * What a caller is told when the engine could not load here. Fixed, not the
+ * library's own error: that names hosts, file URLs and `blob:` URLs, and
+ * `EngineUnavailable`'s message reaches the caller as written, so it must
+ * carry none (wafer-core's contract for the variant). The cause is logged to
+ * this page's console instead.
+ *
+ * "Reload" because retrying in the same page cannot help when the failure was
+ * ONNX Runtime's backend: onnxruntime-web records a backend whose `init`
+ * failed as aborted and answers every later session with the same error
+ * (`tryResolveAndInitializeBackend`), for as long as the page keeps the
+ * module.
+ */
+const UNABLE_TO_LOAD =
+    'the embedding engine could not load in this page (its library, runtime or model failed to load) — reload the page and try again';
 
 const PIPELINES = new Map();
 // Pipelines being created, by model id. The probe answer lists them in
@@ -88,10 +104,8 @@ async function createPipeline(modelId) {
         const { pipeline } = await importTransformers();
         pipe = await pipeline('feature-extraction', hf, { dtype: 'q8' });
     } catch (e) {
-        throw Object.assign(
-            new Error(`the embedding engine could not load in the page: ${e?.message ?? e}`),
-            { code: ENGINE_UNAVAILABLE },
-        );
+        console.error(`embed-engine.js: ${modelId} could not load:`, e);
+        throw Object.assign(new Error(UNABLE_TO_LOAD, { cause: e }), { code: ENGINE_UNAVAILABLE });
     }
     PIPELINES.set(modelId, pipe);
     return pipe;

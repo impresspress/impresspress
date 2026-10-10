@@ -274,10 +274,11 @@ test('a cancel reaches the page running the stream', async () => {
 
 test("a page's refusal reaches the caller as a refusal, with the page's own message", async () => {
     // An engine whose library, runtime or model could not load in the page
-    // answers with the refusal code (embed-engine.js, t2i-engine.js); the
-    // Rust bridges turn exactly that code into `EngineUnavailable`, a 503
-    // that says why.
-    const said = 'the embedding engine could not load in the page: no available backend found';
+    // answers with the refusal code and a fixed message (embed-engine.js,
+    // t2i-engine.js); the Rust bridges turn exactly that code into the
+    // services' `EngineUnavailable`, which the vector routes answer as a 503
+    // carrying the message.
+    const said = 'the embedding engine could not load in this page (its library, runtime or model failed to load) — reload the page and try again';
     worker([page('a', { embed: [] }, {
         handle: (msg, reply) => reply({ type: 'embed-run-response', id: msg.id, error: said, code: ENGINE_UNAVAILABLE }),
     })]);

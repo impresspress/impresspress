@@ -4,9 +4,9 @@ use wafer_core::interfaces::vector::service::VectorError;
 
 use crate::bridge;
 
-/// A refusal (no page can run the embedding now) is
-/// [`VectorError::EngineUnavailable`] with bridge.js's caller-facing message;
-/// anything else is an internal fault.
+/// A refusal (no page can run the embedding now, or the page's engine could
+/// not load) is [`VectorError::EngineUnavailable`] with its caller-facing
+/// message; anything else is an internal fault.
 fn js_err(e: wasm_bindgen::JsValue) -> VectorError {
     match bridge::engine_unavailable(&e) {
         Some(message) => VectorError::EngineUnavailable(message),

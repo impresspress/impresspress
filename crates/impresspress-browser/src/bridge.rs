@@ -317,7 +317,8 @@ pub const ENGINE_UNAVAILABLE: &str = "engine-unavailable";
 /// is [`ENGINE_UNAVAILABLE`]), or `None` for any other rejection. The LLM,
 /// image and embedding bridges turn it into their service's
 /// `EngineUnavailable`, which `wafer-core`'s service handlers return as
-/// `Unavailable` (a 503) carrying it as written.
+/// `Unavailable` carrying it as written (the vector routes answer it as a
+/// 503; `/b/llm/api/chat` does not yet, and answers a sanitized 500).
 pub fn engine_unavailable(err: &JsValue) -> Option<String> {
     let code = js_sys::Reflect::get(err, &JsValue::from_str("code")).ok()?;
     (code.as_string().as_deref() == Some(ENGINE_UNAVAILABLE)).then(|| describe(err))
