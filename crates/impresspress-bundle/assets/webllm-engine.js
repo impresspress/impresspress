@@ -27,8 +27,9 @@
 // bridge.js's own are: the engine cannot take the chat here (the model it
 // was sent for is not loaded in this page), and the payload is written for
 // whoever made the request. bridge.js passes it on as a refusal, which the
-// LLM service reports as `EngineUnavailable` with this message; any other
-// error is a fault in the chat itself. A failed `loadEngine` is not reported here at all: the load is
+// LLM service reports as `EngineUnavailable` with this message, and the chat
+// routes answer as a 503 carrying it; any other error is a fault in the chat
+// itself. A failed `loadEngine` is not reported here at all: the load is
 // page-direct, so it rejects to the page script that called it.
 //
 // bridge.js sends a request only to a page that answered its probe, and a

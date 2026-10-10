@@ -283,7 +283,12 @@ async fn a_refused_thread_override_is_403() {
 /// A chat fixture: the messages block, one thread owned by `user-a`, a
 /// default provider and model, and `service` as `wafer-run/llm`. Returns the
 /// context and the thread id.
-async fn chat_fixture(service: StubLlmServiceBlock) -> (TestContext, String) {
+async fn chat_fixture(service: impl Block + 'static) -> (TestContext, String) {
+    chat_fixture_with(Arc::new(service)).await
+}
+
+/// [`chat_fixture`] with an already-shared `wafer-run/llm` block.
+async fn chat_fixture_with(service: Arc<dyn Block>) -> (TestContext, String) {
     let mut ctx = TestContext::with_llm().await;
     crate::migration_helper::apply_migrations(
         &ctx,
@@ -299,7 +304,7 @@ async fn chat_fixture(service: StubLlmServiceBlock) -> (TestContext, String) {
     );
     ctx.set_config(DEFAULT_PROVIDER_VAR, "stub-backend");
     ctx.set_config(DEFAULT_MODEL_VAR, "stub-model");
-    ctx.register_block("wafer-run/llm", Arc::new(service));
+    ctx.register_block("wafer-run/llm", service);
     let thread = crate::blocks::messages::service::create_context(
         &ctx.fixture(),
         "user-a",
@@ -673,4 +678,129 @@ async fn renaming_a_provider_onto_a_taken_name_is_a_409_naming_the_name() {
         .await
         .expect("the renamed provider");
     assert_eq!(crate::util::RecordExt::str_field(&stored, "name"), "backup");
+}
+
+// ---------------------------------------------------------------------------
+// The chat's own service failures
+// ---------------------------------------------------------------------------
+//
+// These register `wafer-core`'s real `wafer-run/llm` block over a service
+// that fails, so what reaches the route is what the handler really sends for
+// each `LlmError` — its code, its `llm.chat: ` prefix, and the provider text
+// it keeps out of the message — not a code a stub was told to answer.
+
+/// Both chat routes. A refusal is the model's first item, so the streaming
+/// route answers it before its status line, the same as the buffered one.
+const CHAT_ROUTES: [&str; 2] = ["/b/llm/api/chat", "/b/llm/api/chat/stream"];
+
+/// A chat on `path` whose `wafer-run/llm` fails with `error`, as the HTTP
+/// response it becomes, its JSON body, and the body as text.
+async fn chat_failing_with(
+    path: &str,
+    error: wafer_core::interfaces::llm::service::LlmError,
+) -> (u16, serde_json::Value, String) {
+    let (ctx, thread) =
+        chat_fixture_with(super::routes::test_support::llm_block_failing_with(error)).await;
+    let out = api(
+        &ctx,
+        auth_msg("create", path, "user-a"),
+        &chat_body(&thread),
+    )
+    .await;
+    let parts = wafer_block::http_codec::collect_http_response(out).await;
+    let text = String::from_utf8_lossy(&parts.body).into_owned();
+    let body = serde_json::from_str(&text).unwrap_or_default();
+    (parts.status, body, text)
+}
+
+/// The message of a JSON error body, or `""`.
+fn message_of(body: &serde_json::Value) -> &str {
+    body["message"].as_str().unwrap_or_default()
+}
+
+/// An engine that cannot take the chat — the browser's page-run model with
+/// no page holding it — says why, and the caller reads that reason in a 503
+/// instead of a sealed 500 that tells them nothing to do.
+#[tokio::test]
+async fn an_engine_refusal_is_a_503_with_its_reason() {
+    use wafer_core::interfaces::llm::service::LlmError;
+
+    const REASON: &str = "no open page has the LLM model 'stub-model' loaded — load it first";
+    for path in CHAT_ROUTES {
+        let (status, body, _) =
+            chat_failing_with(path, LlmError::EngineUnavailable(REASON.into())).await;
+        assert_eq!(status, 503, "{path}: {body}");
+        assert!(
+            message_of(&body).ends_with(REASON),
+            "{path}: the engine's own reason reaches the caller: {body}"
+        );
+    }
+}
+
+/// A provider the server could not reach is the same 503, saying only that:
+/// the transport's text, which names hosts, addresses and URLs, stays in the
+/// log (wafer-core's handler drops it).
+#[tokio::test]
+async fn an_unreachable_provider_is_a_503_without_its_text() {
+    use wafer_core::interfaces::llm::{handler::PROVIDER_UNREACHABLE, service::LlmError};
+
+    const TRANSPORT: &str = "error sending request for url \
+         (http://internal.corp:11434/v1/chat/completions): tcp connect error: \
+         connection refused (10.0.0.5:11434)";
+    for path in CHAT_ROUTES {
+        let (status, body, text) =
+            chat_failing_with(path, LlmError::Network(TRANSPORT.into())).await;
+        assert_eq!(status, 503, "{path}: {text}");
+        assert!(
+            message_of(&body).ends_with(PROVIDER_UNREACHABLE),
+            "{path}: {text}"
+        );
+        for leak in [
+            "10.0.0.5",
+            "11434",
+            "internal.corp",
+            "error sending request",
+        ] {
+            assert!(!text.contains(leak), "{path}: {leak:?} leaked: {text}");
+        }
+    }
+}
+
+/// A provider's 429 is the server's own quota running out, not the caller's,
+/// so it is the 503 "try again later" too, with the handler's fixed text.
+#[tokio::test]
+async fn a_rate_limited_provider_is_a_503() {
+    use wafer_core::interfaces::llm::service::LlmError;
+
+    for path in CHAT_ROUTES {
+        let (status, body, text) = chat_failing_with(path, LlmError::RateLimited).await;
+        assert_eq!(status, 503, "{path}: {text}");
+        assert!(
+            message_of(&body).ends_with("rate limited"),
+            "{path}: {text}"
+        );
+    }
+}
+
+/// A backend fault (`BackendError`, which reaches the route as `Internal`) is
+/// logged under a ref and answered with the sealed 500, whatever the
+/// provider's text said: that text can be a provider's own error body, so it
+/// never reaches the caller.
+#[tokio::test]
+async fn a_backend_fault_stays_the_sealed_500() {
+    use wafer_core::interfaces::llm::service::LlmError;
+
+    for path in CHAT_ROUTES {
+        let (status, body, text) = chat_failing_with(
+            path,
+            LlmError::BackendError("upstream 502 from 10.0.0.5: bad gateway".into()),
+        )
+        .await;
+        assert_eq!(status, 500, "{path}: {text}");
+        assert!(
+            message_of(&body).starts_with("Internal server error (ref: "),
+            "{path}: {text}"
+        );
+        assert!(!text.contains("10.0.0.5"), "{path}: {text}");
+    }
 }

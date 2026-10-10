@@ -444,3 +444,90 @@ pub(in crate::blocks::llm) fn form_request(mut msg: Message) -> Message {
     );
     msg
 }
+
+/// What a test feeds a [`fed_llm_block`]'s chat, and what it reads back.
+pub(crate) struct ChatFeed {
+    /// Each item is one item of the service's chat stream, sent when the test
+    /// sends it; dropping the sender ends the stream.
+    pub(crate) items: futures::channel::mpsc::UnboundedSender<Result<ChatChunk, LlmError>>,
+    /// The cancellation token `wafer-core`'s llm handler gave the chat — the
+    /// one that fires when whoever reads the handler's output drops it.
+    pub(crate) cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+}
+
+impl ChatFeed {
+    /// Whether the chat's cancellation token has fired. `false` before the
+    /// chat reached the service.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancel
+            .lock()
+            .expect("cancel lock")
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+    }
+
+    /// Whether the chat has reached the service.
+    pub(crate) fn started(&self) -> bool {
+        self.cancel.lock().expect("cancel lock").is_some()
+    }
+}
+
+/// An `LlmService` whose one chat streams whatever its [`ChatFeed`] sends.
+struct FedLlmService {
+    items: Mutex<Option<futures::channel::mpsc::UnboundedReceiver<Result<ChatChunk, LlmError>>>>,
+    cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+}
+
+#[async_trait::async_trait]
+impl wafer_core::interfaces::llm::service::LlmService for FedLlmService {
+    async fn chat_stream(
+        &self,
+        _req: wafer_core::interfaces::llm::service::ChatRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> futures::stream::BoxStream<'static, Result<ChatChunk, LlmError>> {
+        *self.cancel.lock().expect("cancel lock") = Some(cancel);
+        let items = self
+            .items
+            .lock()
+            .expect("items lock")
+            .take()
+            .expect("a fed llm service answers one chat");
+        Box::pin(items)
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        Ok(Vec::new())
+    }
+
+    async fn status(&self, _backend_id: &str, _model_id: &str) -> Result<ModelStatus, LlmError> {
+        Ok(ModelStatus::ready())
+    }
+}
+
+/// The production `wafer-run/llm` block — `wafer-core`'s own service block
+/// and handler — over a service whose chat the test feeds item by item.
+///
+/// A route test that registers this instead of [`StubLlmServiceBlock`] sees
+/// what the handler really puts on the wire for a service's `LlmError`: its
+/// code, its `llm.chat: ` prefix, and the provider text it drops.
+pub(crate) fn fed_llm_block() -> (Arc<dyn Block>, ChatFeed) {
+    let (items, rx) = futures::channel::mpsc::unbounded();
+    let cancel = Arc::new(Mutex::new(None));
+    let service = FedLlmService {
+        items: Mutex::new(Some(rx)),
+        cancel: cancel.clone(),
+    };
+    let block: Arc<dyn Block> = Arc::new(wafer_core::service_blocks::llm::LlmBlock::new(Arc::new(
+        service,
+    )));
+    (block, ChatFeed { items, cancel })
+}
+
+/// [`fed_llm_block`] whose chat fails with `error` as its first item.
+pub(crate) fn llm_block_failing_with(error: LlmError) -> Arc<dyn Block> {
+    let (block, feed) = fed_llm_block();
+    feed.items
+        .unbounded_send(Err(error))
+        .expect("the service holds the receiver");
+    block
+}

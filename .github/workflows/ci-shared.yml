@@ -359,7 +359,8 @@ jobs:
       # place. What these pin: the cards carry the shared card and badge
       # classes and no inline style, a user turn is text and never markup,
       # and on a phone showing the thread list a thread link navigates (a
-      # real history entry) instead of being swapped into a hidden pane.
+      # real history entry) instead of being swapped into a hidden pane; a
+      # chat the server refuses shows the refusal's message, not "No response".
       - name: Run LLM chat unit tests (node --test)
         run: node --test crates/impresspress-core/src/blocks/llm/assets/test/*.test.mjs
 

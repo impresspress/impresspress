@@ -95,7 +95,10 @@ async fn send_sse_content_type(sink: &OutputSink) {
 ///
 /// A service error or encode failure terminates the stream with an error
 /// frame and skips persistence — the same outcome as `handle_chat`, which
-/// returns a 500 without persisting when the stream errors.
+/// answers a failed stream with an error status and stores nothing. A
+/// failure that is the model's first item never reaches this function:
+/// `handle_chat_stream` reads that item before the response starts and
+/// answers it with a status, as `handle_chat` does.
 ///
 /// Generic over the chunk stream (rather than taking
 /// [`NativeTypedFrameStream`]`<ChatChunk>` directly, whose constructor is

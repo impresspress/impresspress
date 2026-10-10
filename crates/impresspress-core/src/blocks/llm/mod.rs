@@ -82,6 +82,8 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         .output(response_schema_of::<contracts::ChatResponse>),
     // Same request as `/api/chat`; the response is `text/event-stream`, one
     // `data:` frame per `ChatChunk`, then `data: [DONE]` (or `event: error`).
+    // A chat that fails before its first frame is answered with a status
+    // instead, the one `/api/chat` answers it with.
     // No `.output(..)`: it would publish an `application/json` schema for a
     // body this endpoint never sends, and the frame type is wafer-run's
     // `ChatChunk`, which carries no JsonSchema derive to mirror.
