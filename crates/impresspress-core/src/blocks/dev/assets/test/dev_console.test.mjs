@@ -197,6 +197,32 @@ test('with the site’s tools already registered, the page states both counts an
   assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(14, 4, 10));
 });
 
+test('a refused tool with no number for the site’s tools: still being registered, then none', async () => {
+  const registrar = site(null);
+  const { elements, fireWindow } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    refuseTool: (name) => name === 'dev_write_file',
+    siteRegistrar: registrar
+  });
+  await settle();
+  const workspaceClause =
+    'This browser has WebMCP: the 3 workspace tools are registered for an agent in this tab. ' +
+    'The Tool console below runs them, and the 1 the browser refused. ';
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    workspaceClause + "The site's own tools are still being registered."
+  );
+
+  registrar.count = () => 0;
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    workspaceClause + 'The site has registered none of its own.'
+  );
+  assert.equal(statedWorkspaceCount(elements).logged, 3);
+});
+
 test('the site’s tools arriving later, or changing, update the sentence', async () => {
   const registrar = site(null);
   const { elements, fireWindow } = instantiate({

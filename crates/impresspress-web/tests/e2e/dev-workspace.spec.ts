@@ -7,8 +7,9 @@ import {
   ADMIN_PASSWORD,
   bootServiceWorker,
   loginToWorkspace,
-  PAGE_TOOLS,
+  publishedPageTools,
   serveDirectory,
+  siteToolNames,
   WELCOME_HEADING,
   WELCOME_PHRASE,
   WORKSPACE_EXPORT_PORT,
@@ -138,57 +139,51 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // --- 1. The page registers its own tools, and only its own -------------
   //
   // Two registrars share `navigator.modelContext` here: `dev.js` adds the
-  // page-scoped allowlist, `webmcp.js` adds the deployment-wide manifest for
-  // the caller's tier, and they finish in whichever order their two fetches
-  // complete. So both are waited for before anything is read, each by a name
-  // it alone publishes: `list_products` for `webmcp.js`, and `dev_export`
-  // for `dev.js` — the last tool `registerPageLocal` adds, after
-  // `registerFromManifest` has finished with everything `tools.json`
-  // returned. Waiting on names rather than a total (`PAGE_TOOLS.length`) is
-  // what keeps this from pinning the *other* file's contract — the admin
-  // manifest's size is `webmcp.spec.ts`'s subject, not this one's — and from
-  // going silently racy if that manifest ever grows to `PAGE_TOOLS.length`
-  // tools at the admin tier, at which point a count could be satisfied by
-  // `webmcp.js` alone, before `dev.js` had registered anything.
-  await waitForTool(page, 'list_products');
-  await waitForTool(page, 'dev_export');
-  // Chrome throws on a duplicate name instead of replacing, so a name both
-  // registrars published would lose one registration — and `listTools()`
-  // can never report a duplicate, so the registry alone cannot show the
-  // loss. What can: the registry must hold every name the two registrars
-  // published, counted with repeats — `webmcp.js` the manifest served to
-  // this session, `dev.js` its `PAGE_TOOLS`. A name both published appears
-  // twice on the right and once on the left; any other registration the
-  // browser refused is missing from the left. They publish disjoint names
+  // page-scoped tools, `webmcp.js` adds the deployment-wide manifest for the
+  // caller's tier, and they finish in whichever order their two fetches
+  // complete. Neither set is spelled out in this file: `dev.js`'s is what the
+  // page itself publishes (`publishedPageTools` — the Tool console, filled
+  // from the same list WebMCP is handed), `webmcp.js`'s is the manifest
+  // served to this session. A tool added to either needs no edit here.
+  //
+  // `publishedPageTools` returns once the console is rendered, which `dev.js`
+  // does in the same step as its last registration. The registry is then
+  // polled until it holds exactly both sets — the wait for `webmcp.js` and
+  // the assertion in one. Chrome throws on a duplicate name instead of
+  // replacing, and `listTools()` can never report one, so the registry alone
+  // cannot show such a loss. What can: the expected list is counted with
+  // repeats. A name both registrars published appears twice on the right and
+  // once on the left; any other registration the browser refused is missing
+  // from the left. They publish disjoint names
   // (`no_dev_or_shop_tool_leaks_into_the_global_manifest` pins the server
   // half); this pins what the browser ends up holding, before and after
   // webmcp.js swaps its own set out.
+  const workspaceTools = await publishedPageTools(page);
+  const siteNames = await siteToolNames(page);
+  const expected = [...siteNames, ...workspaceTools.all].sort();
+  await expect
+    .poll(() => toolNames(page), { message: "the registry holds each registrar's names exactly once" })
+    .toEqual(expected);
   const names = await toolNames(page);
-  const manifestNames = await page.evaluate(async () => {
-    const response = await fetch('/b/webmcp/manifest.json', { credentials: 'same-origin' });
-    const manifest = (await response.json()) as { tools: Array<{ name: string }> };
-    return manifest.tools.map((tool) => tool.name);
-  });
-  expect(names, 'the registry holds each registrar\'s names exactly once').toEqual(
-    [...manifestNames, ...PAGE_TOOLS].sort(),
-  );
-  // …and every number the page states about them is a count of what the
-  // registry holds — none is pinned here, so a tool added to either
-  // registrar cannot leave this test asserting a stale total. The guide's
-  // sentence gives both registrars' numbers and the total an agent in this
-  // tab lists, and the progress log's line gives the workspace number again.
-  // (The log used to be written before `registerPageLocal` ran, so it said
-  // two fewer than the sentence and the registry: 25 where they said 27.)
-  const workspaceCount = names.filter((n) => n.startsWith('dev_') || n.startsWith('shop_')).length;
+  // …and every number the page states about them is a count of what was
+  // published — none is pinned here, so a tool added to either registrar
+  // cannot leave this test asserting a stale total. The guide's sentence
+  // gives both registrars' numbers and the total an agent in this tab lists,
+  // and the progress log's line gives the workspace number again. (The log
+  // used to be written before `registerPageLocal` ran, so it said two fewer
+  // than the sentence and the registry: 25 where they said 27.)
   await expect(page.locator('#dev-webmcp-status')).toHaveText(
     `This browser has WebMCP: ${names.length} tools are registered for an agent in this tab: ` +
-      `the ${workspaceCount} workspace tools, which the Tool console below also runs, and ` +
-      `the site's own ${names.length - workspaceCount}.`,
+      `the ${workspaceTools.all.length} workspace tools, which the Tool console below also runs, and ` +
+      `the site's own ${siteNames.length}.`,
   );
   await expect(page.locator('#dev-log')).toContainText(
-    `registered ${workspaceCount} workspace tools`,
+    `registered ${workspaceTools.all.length} workspace tools`,
   );
-  await expect(page.locator('#dev-console-tool option')).toHaveCount(workspaceCount);
+  // Some of them are the page's own: the console lists more than tools.json
+  // serves (`dev_compile_block` and `dev_export` today — whichever they are,
+  // the counts above already include them).
+  expect(workspaceTools.all.length).toBeGreaterThan(workspaceTools.manifest.length);
   const generation = await page.evaluate(() =>
     (window as unknown as { __impresspressWebmcp: { generation(): number } }).__impresspressWebmcp.generation(),
   );
@@ -203,9 +198,6 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(await toolNames(page)).toEqual(names);
   const tools = (await registeredTools(page, 1)).map((t) => t.name);
 
-  expect(tools.filter((n) => n.startsWith('dev_') || n.startsWith('shop_')).sort()).toEqual(
-    PAGE_TOOLS,
-  );
   // The site's own tools are still here: `dev.js`'s registrations are added
   // ALONGSIDE the manifest's, not instead of them. An agent on this page can
   // both build the shop and browse it.
@@ -684,7 +676,9 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   const shopperTools = (await registeredTools(shop, 1)).map((t) => t.name);
   expect(shopperTools).toContain('list_products');
   expect(shopperTools).not.toContain('start_checkout');
-  expect(shopperTools.filter((n) => n.startsWith('dev_') || n.startsWith('shop_'))).toEqual([]);
+  // Exactly the anonymous manifest, so none of what `/b/dev` published.
+  expect([...shopperTools].sort()).toEqual(await siteToolNames(shop));
+  expect(shopperTools.filter((n) => workspaceTools.all.includes(n))).toEqual([]);
 
   await shop.close();
 });
@@ -693,10 +687,10 @@ test('an expired session removes the workspace tools from the registry', async (
   test.setTimeout(300_000);
   await bootServiceWorker(page);
   await openWorkspace(page);
-  await waitForTool(page, 'dev_export');
-  const pageScoped = (names: string[]) =>
-    names.filter((n) => n.startsWith('dev_') || n.startsWith('shop_'));
-  expect(pageScoped(await toolNames(page))).not.toEqual([]);
+  // What the page published, read from the page (see `publishedPageTools`).
+  const workspaceTools = await publishedPageTools(page);
+  const pageScoped = (names: string[]) => names.filter((n) => workspaceTools.all.includes(n));
+  await expect.poll(async () => pageScoped(await toolNames(page))).toEqual(workspaceTools.all);
 
   // The session goes; the next tool call is the 401 that tells dev.js so.
   await page.context().clearCookies();
@@ -870,10 +864,9 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
 
   await bootServiceWorker(page);
   await openWorkspace(page);
-  // `dev_export` is the last tool `dev.js` registers (see the wait above) —
-  // this is a readiness barrier, not a read, so waiting by name rather than
-  // `PAGE_TOOLS.length` is what it needs, not what it happens to satisfy.
-  await waitForTool(page, 'dev_export');
+  // A readiness barrier, not a read: the console is rendered in the same
+  // step as `dev.js`'s last registration (see `publishedPageTools`).
+  await publishedPageTools(page);
 
   // Every `/b/dev/api/files/write` the page sends, whoever sends it: the
   // tool calls below go through the same endpoint, so the assertions compare

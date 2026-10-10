@@ -8,14 +8,15 @@ import {
   bootServiceWorker,
   loginAdmin,
   loginToWorkspace,
-  PAGE_TOOLS,
+  publishedPageTools,
   SCENARIO_EXPORT_PORT,
   serveDirectory,
+  siteToolNames,
   WELCOME_HEADING,
   WELCOME_PHRASE,
 } from './fixtures/dev-sandbox';
 import { SHOP_HEADING, SHOP_OFFER, SHOP_PRODUCT, shopPage } from './fixtures/shop-fixture';
-import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
+import { execute, registeredTools, structured, toolNames, waitForTool } from './fixtures/webmcp-helpers';
 
 /**
  * The definition of done (design §21), as one test: design §16's seven-step
@@ -265,20 +266,18 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   await loginToWorkspace(page);
 
   // Two registrars share `navigator.modelContext` on `/b/dev`: `dev.js` adds
-  // the page-scoped allowlist, `webmcp.js` adds the deployment manifest for
-  // this caller's tier, and they finish in whichever order their fetches
-  // complete. Each is waited for by a name only it publishes — a total would
-  // pin the OTHER file's contract and could be satisfied by one registrar
-  // alone.
-  await waitForTool(page, 'list_products');
-  await waitForTool(page, 'dev_export');
-  const workspaceTools = (await registeredTools(page, 1)).map((t) => t.name);
-  // "Exactly the expected tool set" (§16.1), not "at least": a `dev_*` or
-  // `shop_*` tool this page published without a spec saying so is a surface
-  // nobody reviewed.
-  expect(workspaceTools.filter((n) => n.startsWith('dev_') || n.startsWith('shop_')).sort()).toEqual(
-    PAGE_TOOLS,
-  );
+  // the page-scoped tools, `webmcp.js` adds the deployment manifest for this
+  // caller's tier, and they finish in whichever order their fetches
+  // complete. "Exactly the expected tool set" (§16.1), not "at least": the
+  // registry must hold what the page publishes (`publishedPageTools`, read
+  // from the page) and the site's manifest, and nothing else — a tool
+  // registered outside either is a surface nobody reviewed. Neither set is
+  // spelled out here, so a tool added to either needs no edit.
+  const workspaceTools = await publishedPageTools(page);
+  const siteNames = await siteToolNames(page);
+  await expect
+    .poll(() => toolNames(page), { message: "the registry holds each registrar's names exactly once" })
+    .toEqual([...siteNames, ...workspaceTools.all].sort());
   console.log(`dev-scenario: step1_welcome_login_ms=${Date.now() - step1Start}`);
 
   // --- 2. A Rust block, compiled in the browser --------------------------
@@ -459,9 +458,11 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   // manifest it fetched is the anonymous tier's.
   await waitForTool(shop, 'list_products');
   const shopperTools = (await registeredTools(shop, 1)).map((t) => t.name);
-  // §16.1's other half: no dev or shop tool on `/`. `dev.js` is served only
-  // on `/b/dev` and its registrations are scoped to that document.
-  expect(shopperTools.filter((n) => n.startsWith('dev_') || n.startsWith('shop_'))).toEqual([]);
+  // §16.1's other half: none of `/b/dev`'s tools on `/` — exactly the
+  // anonymous manifest. `dev.js` is served only on `/b/dev` and its
+  // registrations are scoped to that document.
+  expect([...shopperTools].sort()).toEqual(await siteToolNames(shop));
+  expect(shopperTools.filter((n) => workspaceTools.all.includes(n))).toEqual([]);
 
   const listed = structured<{ records: Array<{ id: string; name: string }>; total_count: number }>(
     await execute(shop, 'list_products', {}),

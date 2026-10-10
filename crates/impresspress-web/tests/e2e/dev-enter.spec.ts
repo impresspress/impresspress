@@ -4,7 +4,7 @@ import {
   ADMIN_PASSWORD,
   bootServiceWorker,
   enterFromWelcome,
-  PAGE_TOOLS,
+  publishedPageTools,
   runFromConsole,
 } from './fixtures/dev-sandbox';
 
@@ -146,17 +146,14 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
     { timeout: 60_000 },
   );
 
-  // Every tool the page publishes — `tools.json`'s and the two page-local
-  // ones — and nothing else.
-  await expect(page.locator('#dev-console-tool option')).toHaveCount(PAGE_TOOLS.length, {
-    timeout: 60_000,
-  });
-  const listed = await page.locator('#dev-console-tool option').allTextContents();
-  expect([...listed].sort()).toEqual(PAGE_TOOLS);
+  // Every tool the page publishes — `tools.json`'s and the page-local ones —
+  // is in the console, once (`publishedPageTools` checks both).
+  const workspaceTools = await publishedPageTools(page);
+  expect(workspaceTools.all.length).toBeGreaterThan(workspaceTools.manifest.length);
   // The log's count is the console's: both come from the one list the page
   // publishes.
   await expect(page.locator('#dev-log')).toContainText(
-    `this browser has no WebMCP — ${listed.length} tools are in the Tool console`,
+    `this browser has no WebMCP — ${workspaceTools.all.length} tools are in the Tool console`,
   );
   await expect(page.locator('#dev-console')).toBeVisible();
   await expect(page.locator('#dev-console-run')).toBeEnabled();

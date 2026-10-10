@@ -977,45 +977,39 @@ function describeTools() {
   var workspace = counts.registered;
   var refused = counts.refused;
   var site = siteToolCount();
-  if (site === null || site === 0) {
-    var siteSentence =
-      site === null
-        ? "The site's own tools are still being registered."
-        : 'The site has registered none of its own.';
-    webmcpStatus.textContent =
-      refused === 0
-        ? 'This browser has WebMCP: the ' +
-          workspace +
-          ' workspace tools are registered for an agent in this tab, and the Tool console ' +
-          'below runs the same tools. ' +
-          siteSentence
-        : 'This browser has WebMCP: the ' +
-          workspace +
-          ' workspace tools are registered for an agent in this tab. The Tool console below ' +
-          'runs them, and the ' +
-          refused +
-          ' the browser refused. ' +
-          siteSentence;
-    return;
+  // The tools the console runs that an agent was not handed, said after
+  // whatever the agent has — `whom` names the ones the agent does have.
+  function refusedSentence(whom) {
+    return 'The Tool console below runs ' + whom + ', and the ' + refused + ' the browser refused.';
   }
-  webmcpStatus.textContent =
-    refused === 0
-      ? 'This browser has WebMCP: ' +
-        (workspace + site) +
-        ' tools are registered for an agent in this tab: the ' +
-        workspace +
-        " workspace tools, which the Tool console below also runs, and the site's own " +
-        site +
-        '.'
-      : 'This browser has WebMCP: ' +
-        (workspace + site) +
-        ' tools are registered for an agent in this tab: the ' +
-        workspace +
-        " workspace tools and the site's own " +
-        site +
-        '. The Tool console below runs the workspace tools, and the ' +
-        refused +
-        ' the browser refused.';
+  var sentence;
+  if (site === null || site === 0) {
+    // No number for the site's tools: the workspace clause stands alone,
+    // and the site gets a sentence of its own.
+    sentence =
+      'the ' +
+      workspace +
+      ' workspace tools are registered for an agent in this tab' +
+      (refused === 0
+        ? ', and the Tool console below runs the same tools. '
+        : '. ' + refusedSentence('them') + ' ') +
+      (site === null
+        ? "The site's own tools are still being registered."
+        : 'The site has registered none of its own.');
+  } else {
+    // Both registrars have a number: the total, then each one's share.
+    sentence =
+      (workspace + site) +
+      ' tools are registered for an agent in this tab: the ' +
+      workspace +
+      ' workspace tools' +
+      (refused === 0 ? ', which the Tool console below also runs,' : '') +
+      " and the site's own " +
+      site +
+      '.' +
+      (refused === 0 ? '' : ' ' + refusedSentence('the workspace tools'));
+  }
+  webmcpStatus.textContent = 'This browser has WebMCP: ' + sentence;
 }
 
 // The page's tools are in: say so in the guide, and once in the log. Called
