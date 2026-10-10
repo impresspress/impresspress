@@ -31,7 +31,7 @@
 //! of "what an export contains" — a preview computed from a second reading of
 //! the same stores is a preview that can drift from the archive it claims to
 //! describe, and the whole point of the preview is that an agent can trust it
-//! without downloading 15 MB. The cost is that the preview reads the shell
+//! without downloading the archive. The cost is that the preview reads the shell
 //! too; it is a browser-local read of a handful of files the service worker
 //! already has, on an explicit call.
 //!

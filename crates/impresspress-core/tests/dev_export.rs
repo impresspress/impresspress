@@ -1181,6 +1181,72 @@ async fn the_manifest_describes_the_archive_entry_for_entry() {
     assert!(manifest.tables.contains_key(variables::TABLE));
 }
 
+/// The archive is compressed: the runtime wasm, which is nine tenths of a
+/// real export, goes in DEFLATEd and comes back out byte for byte, and the
+/// download is much smaller than the content it carries. The manifest still
+/// reports each entry's own size, which is what the archive unpacks to.
+#[tokio::test]
+async fn the_archive_deflates_the_runtime_and_the_manifest_reports_content_sizes() {
+    // Shaped like a real runtime in the one respect that matters here: it
+    // compresses (a real one shrinks by about two thirds).
+    let runtime: Vec<u8> = b"\0asm\x01\0\0\0"
+        .iter()
+        .copied()
+        .chain((0..256 * 1024).map(|i| (i % 251) as u8 & 0x3f))
+        .collect();
+    let control = FakeControl::new();
+    let ctx = shop_instance_with_shell(
+        &control,
+        std::sync::Arc::new(FakeShell::new().with("impresspress_web_bg-abc123.wasm", &runtime)),
+    )
+    .await;
+
+    let manifest: ExportManifest = serde_json::from_value(
+        output_json(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export/manifest"))
+                .await,
+        )
+        .await,
+    )
+    .expect("an ExportManifest");
+    let archive = output_body(
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+            .await,
+    )
+    .await;
+
+    let listed = manifest
+        .files
+        .iter()
+        .find(|f| f.path == "impresspress_web_bg-abc123.wasm")
+        .expect("the runtime is in the manifest");
+    assert_eq!(
+        listed.bytes,
+        runtime.len() as u64,
+        "the content size, not the compressed one"
+    );
+    assert!(
+        (archive.len() as u64) < manifest.total_bytes / 2,
+        "a {}-byte archive of {} content bytes is not compressed",
+        archive.len(),
+        manifest.total_bytes
+    );
+
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a readable zip");
+    let mut entry = zip
+        .by_name("impresspress_web_bg-abc123.wasm")
+        .expect("the runtime is in the archive");
+    assert_eq!(entry.compression(), zip::CompressionMethod::Deflated);
+    let mut unpacked = Vec::new();
+    entry
+        .read_to_end(&mut unpacked)
+        .expect("inflate the runtime");
+    assert!(
+        unpacked == runtime,
+        "the runtime does not unpack to the bytes that went in"
+    );
+}
+
 /// Nothing published, nothing to export — and the refusal says what to do
 /// about it rather than 500ing on an absent generation.
 #[tokio::test]

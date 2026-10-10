@@ -130,9 +130,10 @@ block-signal = []
 # in explicitly, and a second runtime gate (`IMPRESSPRESS__DEV__ENABLED`)
 # is checked before its routes are registered.
 #
-# Pulls in `crc32fast`, used solely by `blocks::dev::zip`'s stored-entry
-# writer (the export bundle's checksums) — no other block needs a CRC-32.
-block-dev = ["dep:crc32fast"]
+# Pulls in `crc32fast` and `miniz_oxide`, used solely by `blocks::dev::zip`
+# (the export bundle's checksums and its DEFLATE entries) — no other block
+# needs a CRC-32 or a compressor.
+block-dev = ["dep:crc32fast", "dep:miniz_oxide"]
 # `block-fastembed` pulls in `wafer-block-fastembed` (ONNX Runtime, ~100 MB
 # of native deps). The `native-embedding` feature implies this — leaving
 # this on without `native-embedding` is fine and just installs the block
@@ -178,9 +179,11 @@ wafer-block-fastembed = { workspace = true, optional = true }
 # `rusqlite` connection, so both deps come in together.
 wafer-block-sqlite = { workspace = true, optional = true, features = ["vectors"] }
 rusqlite = { workspace = true, optional = true }
-# CRC-32 for `blocks::dev::zip`'s stored-entry writer (gated behind
-# `block-dev` — see the feature comment above).
+# CRC-32 and DEFLATE for `blocks::dev::zip`'s writer (gated behind
+# `block-dev` — see the feature comment above). `miniz_oxide` is pure Rust,
+# so it builds for the browser runtime's wasm32 target as it is.
 crc32fast = { version = "1", optional = true }
+miniz_oxide = { version = "0.8", optional = true }
 
 # Middleware blocks (always registered by the builder).
 wafer-block-cors = { workspace = true }
@@ -314,10 +317,10 @@ wiremock = "0.6"
 # Guard test (ui::mod::tests::pages_carry_no_static_inline_styles) walks
 # src/blocks and src/ui looking for stray inline `style=` attributes.
 walkdir = "2"
-# Reads back `blocks::dev::zip`'s stored-entry archives in its own tests
-# (`default-features = false` — the writer needs no compression backend, so
-# the reader shouldn't pull one in either).
-zip = { version = "2", default-features = false }
+# Reads back `blocks::dev::zip`'s archives in its own tests and in
+# `tests/dev_export.rs` — an independent reader, so it has to inflate the
+# DEFLATE entries the writer emits (`deflate`); every other method stays off.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # `tests/manifest_block_parity.rs` reads this crate's, impresspress-web's and
 # impresspress-cloudflare's `Cargo.toml` and compares their `block-*` sets. It
 # parses them rather than grepping: a hand-rolled line matcher on a manifest is

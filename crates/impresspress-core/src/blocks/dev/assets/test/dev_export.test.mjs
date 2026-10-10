@@ -54,7 +54,7 @@ test('exportSite asks for the manifest, then the archive, and downloads it', asy
 
   // Manifest first, archive second. The order is load-bearing: the download's
   // filename comes out of the manifest, so a page that fetched the archive
-  // first would hold 15 MB while it worked out what to call it.
+  // first would hold megabytes while it worked out what to call it.
   const exportCalls = fetchCalls
     .map(([url]) => String(url))
     .filter((url) => url.startsWith('/b/dev/api/export'));

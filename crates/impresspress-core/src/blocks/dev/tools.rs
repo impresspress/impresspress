@@ -145,7 +145,7 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
     ),
     // `dev_export` itself is NOT here: its result is a file the browser
     // downloads, not a tool result, so `dev.js` registers it page-locally
-    // (there is no HTTP tool call whose answer is a 15 MB zip). Its manifest
+    // (there is no HTTP tool call whose answer is a multi-megabyte zip). Its manifest
     // is a different matter — it is small JSON, it is a read, and it is the
     // only way an agent can see what an export would contain before asking
     // for one.

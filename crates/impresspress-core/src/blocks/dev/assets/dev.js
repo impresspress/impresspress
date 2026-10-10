@@ -700,7 +700,7 @@ function registerFromManifest(manifest) {
 // `dev_compile_block` and `dev_export` are the two tools with no HTTP tool
 // call behind them, for opposite reasons: compiling happens in a worker on
 // this page and never reaches the server as one request, while exporting
-// DOES have an endpoint (`GET /b/dev/api/export`) whose answer is a 15 MB zip
+// DOES have an endpoint (`GET /b/dev/api/export`) whose answer is a multi-megabyte zip
 // — a file for the browser to download, not a tool result to hand an agent.
 // Both are therefore registered here rather than projected from
 // `/b/dev/api/tools.json`. (`dev_export_manifest`, which IS small JSON, is in

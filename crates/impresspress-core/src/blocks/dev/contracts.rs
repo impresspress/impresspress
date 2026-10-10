@@ -636,8 +636,9 @@ pub struct WarmupCrate {
 pub struct ExportFile {
     /// Path inside the archive (`sw.js`, `seed/site/index.html`).
     pub path: String,
-    /// The entry's uncompressed size in bytes. The archive stores entries
-    /// uncompressed, so this is also what it costs in the zip.
+    /// The entry's uncompressed size in bytes: what it unpacks to. The
+    /// archive DEFLATEs an entry when that makes it smaller and stores it
+    /// otherwise, so this is the most it costs in the zip.
     pub bytes: u64,
 }
 
@@ -651,9 +652,11 @@ pub struct ExportManifest {
     pub generation_id: String,
     /// Every entry of the archive, in the order it is written.
     pub files: Vec<ExportFile>,
-    /// Total size of every entry's content. The archive itself is slightly
-    /// larger: each entry carries a local header and a central directory
-    /// record naming it.
+    /// Total size of every entry's content, unpacked. The archive itself is
+    /// usually much smaller, because entries are DEFLATEd where that helps
+    /// (the runtime wasm to about a third). Only when nothing compresses is
+    /// it slightly larger: each entry carries a local header and a central
+    /// directory record naming it.
     pub total_bytes: u64,
     /// How many of `files` are the runtime shell (the service worker, the
     /// wasm, the loader — everything that makes the folder runnable).
