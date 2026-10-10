@@ -127,6 +127,27 @@ export function forwardSandboxDiagnostics(page: Page) {
 }
 
 /**
+ * What Playwright rejects an `evaluate` with when a navigation replaced the
+ * document it ran in before it answered. playwright-core writes it in
+ * `server/frames.js` (`Frame._contextCreated` and `Frame._contextDestroyed`)
+ * and in each browser's `rewriteError` (`server/chromium/crExecutionContext.js`,
+ * `server/webkit/wkExecutionContext.js`, `server/firefox/ffExecutionContext.js`),
+ * which add a full stop. The constant leaves the full stop off so that the
+ * match covers both spellings.
+ */
+const NAVIGATED_AWAY = 'Execution context was destroyed, most likely because of a navigation';
+
+/**
+ * The `.catch` for a polled `evaluate`. A call whose document a navigation
+ * replaced answers `'navigated away'`, which matches no expectation, so
+ * `expect.poll` asks again. Any other rejection is rethrown.
+ */
+function ifNavigatedAway(error: unknown): 'navigated away' {
+  if (error instanceof Error && error.message.includes(NAVIGATED_AWAY)) return 'navigated away';
+  throw error;
+}
+
+/**
  * Load `/` and wait until the service worker is serving it.
  *
  * The first load of an origin gets the static boot shell: `loader.js`
@@ -162,12 +183,34 @@ export async function bootServiceWorker(page: Page) {
   // Polled from the test side: `page.waitForFunction` does not await its
   // predicate, so an async one returns a promise, which is truthy — the wait
   // ends on the first call, resolved with whatever that one fetch answered
-  // (`false` for the static host's 404) and never asks again. A request the
-  // page's reload interrupts throws, and `expect.poll` asks again.
+  // (`false` for the static host's 404) and never asks again.
+  //
+  // The probe can be in flight when `loader.js` reloads the page (it reloads
+  // once the runtime has answered its own probe). When the reload commits,
+  // the old document's fetch is aborted and its context destroyed, and which
+  // of the two reaches Playwright first is a race. The fetch's rejection
+  // arrives as `TypeError: Failed to fetch`; the destroyed context arrives
+  // as Playwright's own rejection of the `evaluate`. Neither may escape the
+  // callback: `expect.poll` awaits it outside the `try` that retries a failed
+  // match, so a rejection fails the whole wait on the spot. So the page
+  // answers a failed fetch with its error's text, `ifNavigatedAway` answers
+  // the destroyed context with a value of its own, both fail the match, and
+  // the poll asks again in the new document. Any other Playwright error
+  // still fails the wait, and a fetch that keeps failing shows its error as
+  // the value the wait timed out on.
   await expect
-    .poll(() => page.evaluate(async () => (await fetch('/b/auth/login')).status), {
-      timeout: 120_000,
-    })
+    .poll(
+      () =>
+        page
+          .evaluate(() =>
+            fetch('/b/auth/login').then(
+              (response) => response.status,
+              (error) => String(error),
+            ),
+          )
+          .catch(ifNavigatedAway),
+      { timeout: 120_000 },
+    )
     .toBe(200);
   // …and wait for the boot shell to be replaced. `loader.js` reloads the page
   // once the runtime has answered its probe, on a `setTimeout(…, 0)` this

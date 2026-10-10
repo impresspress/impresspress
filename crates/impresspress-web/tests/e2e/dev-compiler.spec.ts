@@ -345,6 +345,35 @@ test('the compiler adapter queues compiles, cancels one, and recovers from a bro
         (error: Error) => ({ ok: false, message: error.message }),
       );
 
+    // A compile that has reached the worker. The fake posts a `compiling`
+    // progress (a stage `protocol.ts` defines) the moment it takes a build,
+    // and the adapter hands a progress only to the request it names: this
+    // compile's, which it records as in flight before posting it. So once
+    // `compiling` is seen, a `cancel` has this build to name. Waited for, not
+    // assumed after a delay: a compile still queued behind its `initialize`
+    // has nothing for a cancel to hit, and the cancel would be a no-op.
+    // Bounded, so a build that never starts fails here with its name.
+    const compiling = (crateName: string, files: Record<string, string>) => {
+      let started!: () => void;
+      const running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const result = compiler.compile({
+        crateName,
+        files,
+        onProgress: (progress: { stage: string }) => {
+          if (progress.stage === 'compiling') started();
+        },
+      });
+      const begun = Promise.race([
+        running,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${crateName} never started compiling`)), 30_000),
+        ),
+      ]);
+      return { result, begun };
+    };
+
     await compiler.initialize();
 
     // --- the queue --------------------------------------------------------
@@ -359,11 +388,11 @@ test('the compiler adapter queues compiles, cancels one, and recovers from a bro
 
     // --- cancel -----------------------------------------------------------
     // `slow` keeps the fake worker busy for five seconds, so there is
-    // something in flight to cancel.
-    const slow = compiler.compile({ crateName: 'slow', files: { 'src/lib.rs': '// ok' } });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // something in flight to cancel once it has started.
+    const slow = compiling('slow', { 'src/lib.rs': '// ok' });
+    await slow.begun;
     await compiler.cancel();
-    const cancelled = await slow;
+    const cancelled = await slow.result;
     // The worker is spent, so the adapter must have terminated it and be
     // willing to build another. Nothing here calls `initialize` again: the
     // point is that `compile` alone is enough.
@@ -377,14 +406,14 @@ test('the compiler adapter queues compiles, cancels one, and recovers from a bro
     // lands on the build in flight, and the one waiting its turn has to end up
     // on a worker that does not exist yet. If `#destroy` left the instance in
     // a state the queue could not start from, this is where it would hang.
-    const doomed = compiler.compile({ crateName: 'slow', files: { 'src/lib.rs': '// ok' } });
+    const doomed = compiling('slow', { 'src/lib.rs': '// ok' });
     const queuedBehind = compiler.compile({
       crateName: 'behind-cancel',
       files: { 'src/lib.rs': '// ok' },
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await doomed.begun;
     await compiler.cancel();
-    const doomedResult = await doomed;
+    const doomedResult = await doomed.result;
     const behindResult = await queuedBehind;
 
     // --- the protocol violations ------------------------------------------

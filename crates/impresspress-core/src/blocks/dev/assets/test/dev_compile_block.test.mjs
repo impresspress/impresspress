@@ -559,10 +559,28 @@ test('elapsed_ms is the whole wait, toolchain start-up included, and timings say
   // with the toolchain start-up it had waited behind left out. Here start-up
   // takes 300 ms, the build 100 ms and staging 100 ms, while the worker
   // claims 7 ms for its part, so nothing below can pass on that number.
+  //
+  // The page asks the toolchain to start on load (`warmCompiler`), before
+  // the call below. A start-up that began then would have run for however
+  // long a loaded runner takes to reach the call, and only what was left of
+  // it would fall inside the call — a floor on the call's share would then
+  // be a guess about the runner. So this toolchain is asked on load but
+  // holds its 300 ms until the compile itself joins the start-up (the
+  // second `initialize`): the whole start-up is inside the call, whatever
+  // happened before it.
+  let initializeCalls = 0;
+  let beginStartup;
+  const startupBegun = new Promise((resolve) => {
+    beginStartup = resolve;
+  });
   class SlowStart {
     async initialize() {
+      initializeCalls += 1;
+      if (initializeCalls === 2) {
+        beginStartup();
+      }
       if (!this.started) {
-        this.started = sleep(300).then(() => 'rustc 1.90.0-nightly (fake)');
+        this.started = startupBegun.then(() => sleep(300)).then(() => 'rustc 1.90.0-nightly (fake)');
       }
       return this.started;
     }
@@ -590,12 +608,19 @@ test('elapsed_ms is the whole wait, toolchain start-up included, and timings say
     }
   });
   await settle();
+  // The warm-up has asked, so the call below joins a start-up already
+  // requested — the path a real session's first compile takes.
+  assert.equal(initializeCalls, 1, 'the page did not start the toolchain on load');
 
   const started = performance.now();
   const result = (await tools.get('dev_compile_block').execute({ name: 'hello' })).structuredContent;
   const waited = performance.now() - started;
+  assert.ok(initializeCalls >= 2, 'the compile did not wait on the toolchain');
   assert.equal(result.success, true);
   assert.ok(Number.isInteger(result.elapsed_ms));
+  // Start-up, build and staging all ran inside the call, so the floors are
+  // their sleeps less a few milliseconds for timer precision — nothing in
+  // them depends on how long the runner took to get here.
   assert.ok(result.elapsed_ms >= 490, `elapsed_ms ${result.elapsed_ms} leaves out part of the wait`);
   assert.ok(result.elapsed_ms <= Math.ceil(waited), `elapsed_ms ${result.elapsed_ms} > the ${waited} ms waited`);
   const { sources_ms, toolchain_ms, compile_ms, stage_ms } = result.timings;
