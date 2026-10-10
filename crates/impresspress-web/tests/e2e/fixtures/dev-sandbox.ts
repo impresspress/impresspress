@@ -260,74 +260,58 @@ export async function runFromConsole(
 // Both halves below are read by more than one spec — `dev-workspace.spec.ts`
 // pins them as its own subject, and `dev-scenario.spec.ts` walks the whole of
 // design §16 through them — so they live here rather than in whichever file
-// happened to need them first. A second copy of a twenty-seven name allowlist,
-// or of "spawn a static host and wait for the port", is a second thing to keep
-// in step with the contract it describes.
+// happened to need them first. A second copy of "read what the page
+// publishes", or of "spawn a static host and wait for the port", is a second
+// thing to keep in step with the contract it describes.
 // ---------------------------------------------------------------------------
 
 /**
- * The thirteen `dev_*` tools `/b/dev/api/tools.json` projects, plus the two
- * `dev.js` registers itself.
+ * The tools the `/b/dev` page publishes, read from the page itself — never
+ * from a list kept in a spec, so a tool added to `/b/dev/api/tools.json` or
+ * to `dev.js`'s page-local registrar needs no test edit.
  *
- * `dev_read_reference` and `dev_create_block` are Plan 3's — the guest-API
- * reference an agent reads before writing Rust, and the scaffolder that lays
- * a block down from a template. Both are ordinary HTTP tools
- * (`blocks/dev/tools.rs`'s `SELECTIONS`), so both are in `tools.json`.
- *
- * `dev_compile_block` and `dev_export` are not, for opposite reasons:
- * compiling happens in a page worker and never reaches the server as one
- * request, while exporting DOES have an endpoint whose answer is a multi-
- * megabyte zip — a file for the browser to download, not a tool result. Both
- * are page-local, which is why they belong in this list rather than in
- * `tools.json`. `dev_export_manifest` — what an export WOULD contain, as
- * small JSON — is an ordinary HTTP tool and is in the manifest.
+ * `all` is the Tool console's options: `dev.js` fills the console from
+ * `pageTools`, the one list every tool it publishes goes through, WebMCP
+ * registration included. `manifest` is the part of it `tools.json` serves
+ * this session; the rest are the page-local tools (`dev_compile_block`,
+ * `dev_export` — they run in the page, so the server has no endpoint to
+ * project). Waits for the console to be rendered first: Run is enabled only
+ * once it lists a tool.
  */
-export const DEV_TOOLS = [
-  'dev_status',
-  'dev_list_files',
-  'dev_read_file',
-  'dev_read_reference',
-  'dev_write_file',
-  'dev_write_files',
-  'dev_delete_file',
-  'dev_list_generations',
-  'dev_get_generation',
-  'dev_rollback',
-  'dev_create_block',
-  'dev_remove_block',
-  'dev_export_manifest',
-  'dev_compile_block',
-  'dev_export',
-];
-
-/** The products admin API, projected as the shop-building half of the page. */
-export const SHOP_TOOLS = [
-  'shop_list_products',
-  'shop_create_product',
-  'shop_update_product',
-  'shop_delete_product',
-  'shop_restore_product',
-  'shop_list_groups',
-  'shop_create_group',
-  'shop_list_offers',
-  'shop_create_offer',
-  'shop_update_offer',
-  'shop_publish_offer',
-  'shop_archive_offer',
-];
-
-/** The two `dev.js` registers locally rather than from the manifest. */
-export const PAGE_LOCAL_TOOLS = ['dev_compile_block', 'dev_export'];
-
-/** Everything the `/b/dev` page itself registers, in either half. */
-export const PAGE_TOOLS = [...DEV_TOOLS, ...SHOP_TOOLS].sort();
+export async function publishedPageTools(
+  page: Page,
+): Promise<{ all: string[]; manifest: string[] }> {
+  await expect(page.locator('#dev-console-run')).toBeEnabled({ timeout: 60_000 });
+  const all = (
+    await page
+      .locator('#dev-console-tool option')
+      .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))
+  ).sort();
+  const manifest = (
+    await page.evaluate(async () => {
+      const response = await fetch('/b/dev/api/tools.json', { credentials: 'same-origin' });
+      const served = (await response.json()) as { tools: Array<{ name: string }> };
+      return served.tools.map((tool) => tool.name);
+    })
+  ).sort();
+  expect(new Set(all).size, 'the page publishes each name once').toBe(all.length);
+  expect(all, 'every tool tools.json serves is published').toEqual(expect.arrayContaining(manifest));
+  return { all, manifest };
+}
 
 /**
- * What `/b/dev/api/tools.json` publishes — `PAGE_TOOLS` minus the two stubs.
- * `dev.js` logs this count after it registers the manifest, which is how the
- * page reports the size of the surface it was given.
+ * The site's own tools for this session: what `webmcp.js`, the other
+ * registrar on every page, is handed (`/b/webmcp/manifest.json`).
  */
-export const MANIFEST_TOOLS = PAGE_TOOLS.filter((name) => !PAGE_LOCAL_TOOLS.includes(name));
+export async function siteToolNames(page: Page): Promise<string[]> {
+  return (
+    await page.evaluate(async () => {
+      const response = await fetch('/b/webmcp/manifest.json', { credentials: 'same-origin' });
+      const manifest = (await response.json()) as { tools: Array<{ name: string }> };
+      return manifest.tools.map((tool) => tool.name);
+    })
+  ).sort();
+}
 
 /**
  * Serve an unpacked export bundle from `dir` on `port` with Python's

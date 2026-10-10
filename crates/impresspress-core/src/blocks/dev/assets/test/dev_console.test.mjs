@@ -81,6 +81,11 @@ test('without WebMCP the console still lists every tool, and the guide says to u
     elements.get('dev-webmcp-status').textContent,
     'This browser has no WebMCP: use the Tool console below, or the file editor.'
   );
+  // The log counts what the console lists — the page-local tools included.
+  assert.match(
+    elements.get('dev-log').textContent,
+    new RegExp(`this browser has no WebMCP — ${optionNames(elements).length} tools are in the Tool console`)
+  );
   // The first tool is selected and described, and Run is on.
   assert.equal(elements.get('dev-console-tool').value, 'dev_status');
   assert.equal(elements.get('dev-console-description').textContent, 'Read the sandbox state.');
@@ -110,9 +115,66 @@ test('with WebMCP the console lists exactly the objects the registrar was handed
       "and the Tool console below runs the same tools. The site's own tools are still being " +
       'registered.'
   );
-  // The log line the workspace e2e reads is still written, with the
-  // manifest's own count.
-  assert.match(elements.get('dev-log').textContent, /registered 2 workspace tools/);
+});
+
+// Every number the page states about its own tools — the guide's sentence and
+// the progress log's line — is a count of what the registrar actually holds.
+// The log used to be written when `tools.json` had been registered and before
+// the page's own two (`dev_compile_block`, `dev_export`) were, so it said two
+// fewer than the sentence and the browser's registry did.
+const statedWorkspaceCount = (elements) => {
+  const logged = /registered (\d+) workspace tools/.exec(elements.get('dev-log').textContent);
+  const said = /the (\d+) workspace tools/.exec(elements.get('dev-webmcp-status').textContent);
+  assert.ok(logged, 'the log states how many workspace tools were registered');
+  assert.ok(said, 'the guide states how many workspace tools were registered');
+  return { logged: Number(logged[1]), said: Number(said[1]) };
+};
+
+test('the log, the guide and the registry agree on the workspace tool count', async () => {
+  const { handle, elements, tools } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST
+  });
+  await settle();
+
+  const { logged, said } = statedWorkspaceCount(elements);
+  assert.equal(logged, tools.size, 'the log counts every tool the registrar holds');
+  assert.equal(said, tools.size, 'the guide counts every tool the registrar holds');
+  // …which, with nothing refused, is every tool the console lists.
+  assert.equal(tools.size, handle.pageTools.length);
+  // Said once: a later load of the site's tools rewrites the sentence, but
+  // this page's own registration happened once.
+  assert.equal(
+    elements.get('dev-log').textContent.match(/workspace tools/g).length,
+    1,
+    elements.get('dev-log').textContent
+  );
+});
+
+test('a tool the browser refused is not counted as registered, and the console still runs it', async () => {
+  const { handle, elements, tools } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    refuseTool: (name) => name === 'dev_write_file',
+    siteRegistrar: site(10)
+  });
+  await settle();
+
+  assert.equal(tools.size, 3);
+  assert.equal(handle.pageTools.length, 4);
+  const { logged, said } = statedWorkspaceCount(elements);
+  assert.equal(logged, 3);
+  assert.equal(said, 3);
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    'This browser has WebMCP: 13 tools are registered for an agent in this tab: the 3 workspace ' +
+      "tools and the site's own 10. The Tool console below runs the workspace tools, and the 1 " +
+      'the browser refused.'
+  );
+  assert.match(
+    elements.get('dev-log').textContent,
+    /registered 3 workspace tools; the browser refused 1, which the Tool console still runs/
+  );
 });
 
 // The tab's agent has two registrars' tools: this page's and the site's own
@@ -133,6 +195,32 @@ test('with the site’s tools already registered, the page states both counts an
   });
   await settle();
   assert.equal(elements.get('dev-webmcp-status').textContent, BOTH(14, 4, 10));
+});
+
+test('a refused tool with no number for the site’s tools: still being registered, then none', async () => {
+  const registrar = site(null);
+  const { elements, fireWindow } = instantiate({
+    hasModelContext: true,
+    toolsManifest: MANIFEST,
+    refuseTool: (name) => name === 'dev_write_file',
+    siteRegistrar: registrar
+  });
+  await settle();
+  const workspaceClause =
+    'This browser has WebMCP: the 3 workspace tools are registered for an agent in this tab. ' +
+    'The Tool console below runs them, and the 1 the browser refused. ';
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    workspaceClause + "The site's own tools are still being registered."
+  );
+
+  registrar.count = () => 0;
+  fireWindow('impresspress:webmcp-loaded', {});
+  assert.equal(
+    elements.get('dev-webmcp-status').textContent,
+    workspaceClause + 'The site has registered none of its own.'
+  );
+  assert.equal(statedWorkspaceCount(elements).logged, 3);
 });
 
 test('the site’s tools arriving later, or changing, update the sentence', async () => {

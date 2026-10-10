@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 mod baselines;
 mod descriptions;
+mod dev_page_tools;
 
 /// Blocks under migration, mapped to the URL prefixes they actually serve.
 ///
@@ -765,7 +766,7 @@ async fn descriptions_carry_no_maintainer_notes() {
                 impresspress_core::blocks::dev::tools::SELECTIONS
                     .iter()
                     .map(|selection| selection.3.to_string())
-                    .chain(descriptions::dev_page_tool_names())
+                    .chain(dev_page_tools::dev_page_tool_names())
                     .collect()
             } else {
                 Vec::new()
