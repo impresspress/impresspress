@@ -875,11 +875,12 @@ enum ModelNamedBy {
 ///   block's message. When the index named it ([`ModelNamedBy::Index`]) it is
 ///   a server inconsistency, a fault like the last arm.
 /// - `Unavailable` is the embedding engine unable to take the request now —
-///   in the browser, no open page runs it (`VectorError::EngineUnavailable`,
-///   whose message `wafer-core`'s embedding handler returns as written for
-///   the caller; its other `Unavailable`, a store fault, arrives already
-///   scrubbed): a 503 with that message, so the caller learns what to do
-///   rather than reading an opaque 500.
+///   in the browser, no open page runs it, or the page's engine could not
+///   load (`VectorError::EngineUnavailable`, whose message `wafer-core`'s
+///   embedding handler returns as written for the caller; its other
+///   `Unavailable`, a store fault, arrives already scrubbed): a 503 with that
+///   message, so the caller learns what to do rather than reading an opaque
+///   500.
 /// - Anything else is a fault, logged and answered with the sanitized 500.
 fn embed_failed(e: WaferError, named_by: ModelNamedBy) -> OutputStream {
     match (e.code, named_by) {

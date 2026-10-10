@@ -53,6 +53,18 @@ export async function load(url, context, next) {
 
 const FAMILIES = ['llm', 'image', 'embed'];
 
+// The refusal code of the worker's bridge (`ENGINE_UNAVAILABLE` in
+// impresspress-browser's `js/bridge.js`), read from bridge.js's own source, so
+// an engine whose copy of it drifts fails here. (Read, not imported: bridge.js
+// imports the site's `/vendor/sql-wasm-esm.js`, which only a worker resolves.)
+const BRIDGE_JS = new URL('../../../impresspress-browser/js/bridge.js', import.meta.url);
+const ENGINE_UNAVAILABLE = readFileSync(BRIDGE_JS, 'utf8').match(
+    /^export const ENGINE_UNAVAILABLE = '([^']+)';$/m,
+)?.[1];
+assert.ok(ENGINE_UNAVAILABLE, `no ENGINE_UNAVAILABLE in ${BRIDGE_JS}`);
+// The stand-in Transformers.js module's `env`: the instance the engines import.
+const { env: transformersEnv } = await import(new URL('./cdn-stub.mjs', import.meta.url).href);
+
 const listPath = process.env.PAGE_ENGINES_JSON;
 assert.ok(listPath, 'PAGE_ENGINES_JSON is not set: run this through bundle_integration.rs');
 const ENGINES = JSON.parse(readFileSync(listPath, 'utf8'));
@@ -98,6 +110,7 @@ async function loadEngine(script) {
 function closeModelGate() {
     let open;
     globalThis.__modelCalls = [];
+    globalThis.__modelLoadError = undefined;
     globalThis.__modelGate = new Promise((resolve) => { open = resolve; });
     return open;
 }
@@ -209,4 +222,125 @@ test('a generation cancelled while its model is still loading never starts', asy
         framesOf(sw, 'image-stream-frame', 'g1').map((f) => [f.kind, f.payload]),
         [['error', 'cancelled']],
     );
+});
+
+/** Let the engine settle what it was sent: its replies go out asynchronously. */
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
+test('the Transformers.js engines run ONNX Runtime on one thread, set before their first model loads', async () => {
+    // With more than one, a cross-origin-isolated page has ONNX Runtime import
+    // its wasm glue from a `blob:` URL, which the runtime's pages refuse as a
+    // script source, and no backend loads (embed-engine.js says why). ONNX
+    // Runtime reads the setting once, when it creates its first session, so
+    // it has to be in place before the first model is created — on whichever
+    // engine the page asks first.
+    const loads = [
+        ['embed', (sw) => sw.deliver({ type: 'embed-create-request', id: 'e1', modelId: 'multilingual-e5-small' })],
+        ['image', (sw) => sw.deliver({ type: 'image-load-request', id: 'i1', modelId: 'janus-pro-1b' })],
+    ];
+    for (const [family, startLoad] of loads) {
+        const sw = await loadEngine(await engineFor(family));
+        closeModelGate()();
+        delete transformersEnv.backends.onnx.wasm.numThreads;
+        globalThis.__onnxThreadsAtLoad = [];
+        await startLoad(sw);
+        await settle();
+        assert.ok(globalThis.__onnxThreadsAtLoad.length > 0, `${family}: no model was loaded`);
+        assert.deepEqual(
+            [...new Set(globalThis.__onnxThreadsAtLoad)],
+            [1],
+            `${family}: numThreads when its models loaded`,
+        );
+    }
+    globalThis.__onnxThreadsAtLoad = undefined;
+});
+
+test('an embedding engine that cannot load refuses with the refusal code and its reason', async () => {
+    const sw = await loadEngine(await engineFor('embed'));
+    closeModelGate()();
+    globalThis.__modelLoadError = 'no available backend found';
+
+    await sw.deliver({ type: 'embed-run-request', id: 'r1', modelId: 'multilingual-e5-small', texts: '["a"]' });
+    await sw.deliver({ type: 'embed-create-request', id: 'c1', modelId: 'multilingual-e5-small' });
+    await settle();
+
+    for (const [type, id] of [['embed-run-response', 'r1'], ['embed-create-response', 'c1']]) {
+        assert.deepEqual(framesOf(sw, type, id), [{
+            type,
+            id,
+            error: 'the embedding engine could not load in the page: no available backend found',
+            code: ENGINE_UNAVAILABLE,
+        }]);
+    }
+});
+
+test('an embedding that fails once its engine has loaded is a fault, not a refusal', async () => {
+    const sw = await loadEngine(await engineFor('embed'));
+    closeModelGate()();
+    // Not a JSON array: the run itself throws, after the pipeline loaded.
+    await sw.deliver({ type: 'embed-run-request', id: 'bad', modelId: 'multilingual-e5-small', texts: 'not json' });
+    await settle();
+    const [reply] = framesOf(sw, 'embed-run-response', 'bad');
+    assert.ok(reply.error, `no error: ${JSON.stringify(reply)}`);
+    assert.equal(reply.code, undefined, 'a failed run was reported as a refusal');
+});
+
+test('an image engine that cannot load refuses with the refusal code and its reason', async () => {
+    const sw = await loadEngine(await engineFor('image'));
+    closeModelGate()();
+    globalThis.__modelLoadError = 'no available backend found';
+
+    await sw.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
+    await settle();
+    assert.deepEqual(framesOf(sw, 'image-load-response', 'l1'), [{
+        type: 'image-load-response',
+        id: 'l1',
+        error: 'the image engine could not load in the page: no available backend found',
+        code: ENGINE_UNAVAILABLE,
+    }]);
+});
+
+test('a page without WebGPU refuses an image load, keeping the marker callers match on', async () => {
+    const sw = await loadEngine(await engineFor('image'));
+    closeModelGate()();
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { serviceWorker: globalThis.navigator.serviceWorker },
+        configurable: true,
+    });
+
+    await sw.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
+    await settle();
+    const [reply] = framesOf(sw, 'image-load-response', 'l1');
+    assert.equal(reply.code, ENGINE_UNAVAILABLE);
+    assert.match(reply.error, /^the image engine could not load in the page: webgpu-unavailable: /);
+});
+
+test('a request whose model failed to load in the page is refused, not run', async () => {
+    // Sent while its page reported the model as loading, which the worker
+    // routes to that page; the load then failed. The engine cannot take it.
+    const image = await loadEngine(await engineFor('image'));
+    let open = closeModelGate();
+    globalThis.__modelLoadError = 'download failed';
+    await image.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
+    await image.deliver({ type: 'image-generate-stream-request', id: 'g1', body: '{"prompt":"x"}' });
+    open();
+    await settle();
+    assert.deepEqual(
+        framesOf(image, 'image-stream-frame', 'g1').map((f) => [f.kind, f.code]),
+        [['error', ENGINE_UNAVAILABLE]],
+    );
+
+    const llm = await loadEngine(await engineFor('llm'));
+    open = closeModelGate();
+    globalThis.__modelLoadError = 'download failed';
+    const loading = llm.module.loadEngine('Llama-3.2-1B').catch(() => {});
+    await llm.deliver({ type: 'llm-chat-stream-request', id: 'c1', body: '{"messages":[]}' });
+    open();
+    await loading;
+    await settle();
+    assert.deepEqual(
+        framesOf(llm, 'llm-stream-frame', 'c1').map((f) => [f.kind, f.code]),
+        [['error', ENGINE_UNAVAILABLE]],
+    );
+    assert.ok(!globalThis.__modelCalls.includes('chat'), 'the chat ran');
 });

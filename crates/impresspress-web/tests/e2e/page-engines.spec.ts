@@ -16,11 +16,15 @@ import { test, expect, type Page } from '@playwright/test';
  * reproduced). And had the script been there, its Transformers.js import came
  * from `esm.run`, which the pages' CSP does not allow as a script source.
  *
- * Both tests go through the real path — the worker, the wasm runtime, the
+ * These tests go through the real path — the worker, the wasm runtime, the
  * vector block, `bridge.js`'s postMessage and the page's engine script. Only
- * the model is a stand-in: the Transformers.js module the engine imports is
- * answered by a route that returns a fixed vector per text, so nothing is
- * downloaded.
+ * the model library is a stand-in: the Transformers.js module the engine
+ * imports is answered by a route that returns a fixed vector per text, so
+ * nothing is downloaded. That stand-in runs none of the library's own loading
+ * (ONNX Runtime, its wasm glue, the module that glue is imported from), so it
+ * cannot say whether the library loads under the pages' CSP; the real library
+ * does that in `dev-page-engines.spec.ts`, on the cross-origin-isolated pages
+ * where it once could not.
  */
 
 /** Dimensions of the runtime's default embedding model (`multilingual-e5-small`). */
@@ -30,6 +34,7 @@ const DIMS = 384;
 const BOUND_MS = 20_000;
 
 const FAKE_TRANSFORMERS = `
+export const env = { backends: { onnx: { wasm: {} } } };
 export async function pipeline(task, model) {
   if (task !== 'feature-extraction') throw new Error('unexpected task ' + task);
   return async (texts) => ({
@@ -118,4 +123,22 @@ test('with no page able to run the engine, an embedding request is a 503 that sa
   );
   expect(answer!.body).not.toContain('Internal server error');
   console.log(`page-engines: embed refused with no engine page: ${ms} ms`);
+});
+
+test('an embedding engine that cannot load in the page is a 503 that says why', async ({ page }) => {
+  // The page runs the engine, but its library never arrives — as when the
+  // pages' CSP refused ONNX Runtime's glue module, which took 37 s to surface
+  // as a sanitized "Internal server error (ref: …)". The engine answers with
+  // bridge.js's refusal code, and the caller gets the reason.
+  await page.route(/^https:\/\/cdn\.jsdelivr\.net\/npm\/@huggingface\/transformers@/, (route) =>
+    route.abort('failed'),
+  );
+  await loginAsAdmin(page);
+
+  const { answer, ms } = await embedFromPage(page, ['unreachable']);
+  expect(answer, `no answer within ${BOUND_MS} ms: the request hung`).not.toBeNull();
+  expect(answer!.status, answer!.body).toBe(503);
+  expect(answer!.body).toContain('the embedding engine could not load in the page: ');
+  expect(answer!.body).not.toContain('Internal server error');
+  console.log(`page-engines: embed refused when the engine cannot load: ${ms} ms`);
 });

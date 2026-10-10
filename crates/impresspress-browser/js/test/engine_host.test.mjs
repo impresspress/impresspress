@@ -271,3 +271,49 @@ test('a cancel reaches the page running the stream', async () => {
     assert.equal(other.received.filter((m) => m.type === 'image-stream-cancel').length, 0);
     assert.equal(JSON.parse(await imageNextFrame(id)).kind, 'error');
 });
+
+test("a page's refusal reaches the caller as a refusal, with the page's own message", async () => {
+    // An engine whose library, runtime or model could not load in the page
+    // answers with the refusal code (embed-engine.js, t2i-engine.js); the
+    // Rust bridges turn exactly that code into `EngineUnavailable`, a 503
+    // that says why.
+    const said = 'the embedding engine could not load in the page: no available backend found';
+    worker([page('a', { embed: [] }, {
+        handle: (msg, reply) => reply({ type: 'embed-run-response', id: msg.id, error: said, code: ENGINE_UNAVAILABLE }),
+    })]);
+    const embed = await within(embedRun('multilingual-e5-small', '["x"]'), 1_000);
+    assert.equal(embed.err?.message, said);
+    assert.equal(embed.err?.code, ENGINE_UNAVAILABLE);
+
+    worker([page('a', { image: [] }, {
+        handle: (msg, reply) => reply({ type: 'image-load-response', id: msg.id, error: 'no WebGPU', code: ENGINE_UNAVAILABLE }),
+    })]);
+    const load = await within(imageLoadEngine('janus-pro-1b'), 1_000);
+    assert.equal(load.err?.message, 'no WebGPU');
+    assert.equal(load.err?.code, ENGINE_UNAVAILABLE);
+});
+
+test('any other error a page replies with is a fault, not a refusal', async () => {
+    worker([page('a', { embed: [] }, {
+        handle: (msg, reply) => reply({ type: 'embed-run-response', id: msg.id, error: 'out of memory' }),
+    })]);
+    const result = await within(embedRun('multilingual-e5-small', '["x"]'), 1_000);
+    assert.equal(result.err?.message, 'out of memory');
+    assert.equal(result.err?.code, undefined);
+});
+
+test("a stream the page refuses ends with an error frame carrying the refusal code; another error frame carries none", async () => {
+    worker([page('a', { llm: ['m'] }, {
+        handle: (msg, reply) => reply({
+            type: 'llm-stream-frame', id: msg.id, kind: 'error', payload: 'model gone', code: ENGINE_UNAVAILABLE,
+        }),
+    })]);
+    const refused = JSON.parse((await within(llmNextStreamFrame(await llmChatStream('m', '{"messages":[]}')), 1_000)).ok);
+    assert.deepEqual(refused, { kind: 'error', payload: 'model gone', code: ENGINE_UNAVAILABLE });
+
+    worker([page('a', { image: ['janus-pro-1b'] }, {
+        handle: (msg, reply) => reply({ type: 'image-stream-frame', id: msg.id, kind: 'error', payload: 'decode failed' }),
+    })]);
+    const failed = JSON.parse((await within(imageNextFrame(await imageStartGenerate('janus-pro-1b', '{"prompt":"x"}')), 1_000)).ok);
+    assert.deepEqual(failed, { kind: 'error', payload: 'decode failed' });
+});

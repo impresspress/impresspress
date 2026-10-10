@@ -650,13 +650,20 @@ globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 // the request.
 //
 // Every refusal — no page runs the engine, no page holds the model, the page
-// running the request went away — is an `Error` whose `code` is
-// ENGINE_UNAVAILABLE and whose message is written for the person or agent
-// that made the request. The Rust bridges (`impresspress-browser`'s
-// `bridge::engine_unavailable`) turn exactly that code into the services'
-// `EngineUnavailable` error, which the runtime answers as a 503 carrying the
-// message. A stream refused after it started ends with an error frame that
-// carries the same `code`.
+// running the request went away, the page's engine could not load — is an
+// `Error` whose `code` is ENGINE_UNAVAILABLE and whose message is written for
+// the person or agent that made the request. The Rust bridges
+// (`impresspress-browser`'s `bridge::engine_unavailable`) turn exactly that
+// code into the services' `EngineUnavailable` error, which `wafer-core`'s
+// service handlers return as `Unavailable` (a 503) carrying the message as
+// written. A stream refused after it started
+// ends with an error frame that carries the same `code`.
+//
+// The last of those is the page's to say: an engine script whose library,
+// runtime or model fails to load replies with the same `code` (a one-shot
+// `{id, error, code}`, a stream's `{kind:'error', payload, code}`) and a
+// message of its own for the caller, and it is passed on as it came. Any
+// other error a page replies with is a fault in the work itself.
 //
 // While a request is in flight its page is watched. A page that is closed or
 // navigated away is no longer among the worker's clients and will never
@@ -897,16 +904,22 @@ function _completeStreamFrame(streams, msg) {
     const stream = streams.get(msg.id);
     if (!stream) return;
     if (msg.kind === 'done') stream.closeOk(msg.payload);
-    else if (msg.kind === 'error') stream.closeErr(msg.payload ?? 'unknown error');
-    else stream.push({ kind: msg.kind, payload: msg.payload });
+    else if (msg.kind === 'error') {
+        stream.closeErr(msg.payload ?? 'unknown error', msg.code === ENGINE_UNAVAILABLE ? ENGINE_UNAVAILABLE : undefined);
+    } else stream.push({ kind: msg.kind, payload: msg.payload });
 }
 
-/** Settle a one-shot request from the page's `{id, error?}` reply. */
+/**
+ * Settle a one-shot request from the page's `{id, error?, code?}` reply: an
+ * `error` with the ENGINE_UNAVAILABLE `code` is the page refusing, anything
+ * else with an `error` is a fault.
+ */
 function _completeOneShot(pending, msg, value) {
     const p = pending.get(msg.id);
     if (!p) return;
     pending.delete(msg.id);
-    if (msg.error) p.reject(new Error(msg.error));
+    if (msg.error && msg.code === ENGINE_UNAVAILABLE) p.reject(_engineUnavailable(msg.error));
+    else if (msg.error) p.reject(new Error(msg.error));
     else p.resolve(value);
 }
 
@@ -979,9 +992,10 @@ export async function llmCancelStream(id) {
  *
  * Page → SW message shapes:
  *   { type: 'llm-unload-response', id, error? }                         (one-shot)
- *   { type: 'llm-stream-frame', id, kind, payload? }                    (streams)
+ *   { type: 'llm-stream-frame', id, kind, payload?, code? }             (streams)
  *     where `kind` is 'chunk' | 'progress' | 'done' | 'error' and
- *     `payload` is the chunk/progress/error string (omitted for 'done').
+ *     `payload` is the chunk/progress/error string (omitted for 'done');
+ *     an error frame's `code` is ENGINE_UNAVAILABLE when the page refuses.
  */
 export function _completeLlmMessage(msg) {
     if (msg.type === 'llm-unload-response') _completeOneShot(_pendingLlmRequests, msg, undefined);
@@ -1070,10 +1084,11 @@ export async function imageCancelStream(id) {
  * one-shot or active stream by id.
  *
  * Page → SW message shapes:
- *   { type: 'image-load-response',   id, error? }                      (one-shot)
+ *   { type: 'image-load-response',   id, error?, code? }               (one-shot)
  *   { type: 'image-unload-response', id, error? }                      (one-shot)
- *   { type: 'image-stream-frame',    id, kind, payload? }              (streams)
+ *   { type: 'image-stream-frame',    id, kind, payload?, code? }       (streams)
  *     `kind` ∈ {'progress','done','error'}; payload shape varies by kind.
+ *     `code` is ENGINE_UNAVAILABLE when the page refuses.
  */
 export function _completeImageMessage(msg) {
     if (msg.type === 'image-load-response' || msg.type === 'image-unload-response') {
@@ -1140,9 +1155,10 @@ export async function embedUnload(modelId) {
  * request by id.
  *
  * Page → SW message shapes:
- *   { type: 'embed-run-response',    id, result? (JSON string), error? }
- *   { type: 'embed-create-response', id, result?, error? }
+ *   { type: 'embed-run-response',    id, result? (JSON string), error?, code? }
+ *   { type: 'embed-create-response', id, result?, error?, code? }
  *   { type: 'embed-unload-response', id, result?, error? }
+ *   `code` is ENGINE_UNAVAILABLE when the page refuses.
  */
 export function _completeEmbedMessage(msg) {
     _completeOneShot(_pendingEmbedRequests, msg, msg.result ?? null);

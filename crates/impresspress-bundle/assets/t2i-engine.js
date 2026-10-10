@@ -22,19 +22,46 @@
 // Page → SW reply shapes:
 //   { type: 'engine-present',        id, loaded, loading }    // runs the image engine;
 //                                     // loaded / loading = [modelId] or []
-//   { type: 'image-load-response',   id, error? }
+//   { type: 'image-load-response',   id, error?, code? }
 //   { type: 'image-unload-response', id, error? }
-//   { type: 'image-stream-frame',    id, kind, payload? }
+//   { type: 'image-stream-frame',    id, kind, payload?, code? }
 //     `kind` ∈ {'progress','done','error'}. Progress frames carry
 //     `{ stage, count?, total? }` during autoregressive token generation.
+//
+// A load reply or an error frame whose `code` is ENGINE_UNAVAILABLE is a
+// refusal, as bridge.js's own are: the engine could not load here (no WebGPU,
+// its library or runtime failed to load, the model failed to load), and the
+// message is written for whoever made the request. bridge.js passes it on as a
+// refusal, which the image service reports as `EngineUnavailable` with this
+// message; any other error is a fault in the generation itself.
+
+/** bridge.js's `ENGINE_UNAVAILABLE`: the `code` of a refusal. */
+const ENGINE_UNAVAILABLE = 'engine-unavailable';
 
 let _transformers = null;
 async function loadTransformers() {
     if (_transformers) return _transformers;
     // Janus-Pro requires MultiModalityCausalLM, which was added in 3.7.x.
-    // Pin to 3.7.1 (the version HF's official janus-pro-webgpu example uses).
-    _transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1');
+    // Pin to 3.7.1 (the version HF's official janus-pro-webgpu example uses),
+    // the same module embed-engine.js imports: one copy per page.
+    const transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1');
+    // One ONNX Runtime thread, as embed-engine.js's `importTransformers` sets
+    // and explains: with more, a cross-origin-isolated page (every page of a
+    // dev-sandbox deployment) has ONNX Runtime import its wasm glue from a
+    // `blob:` URL, which the pages' `script-src` refuses, and no backend loads
+    // — not even for the WebGPU sessions, which run on the same wasm runtime.
+    // Set before the first model is created, which is when it is read.
+    transformers.env.backends.onnx.wasm.numThreads = 1;
+    _transformers = transformers;
     return _transformers;
+}
+
+/** `e` as a refusal: the image engine could not load in this page. */
+function engineUnavailable(e) {
+    return Object.assign(
+        new Error(`the image engine could not load in the page: ${e?.message ?? e}`),
+        { code: ENGINE_UNAVAILABLE },
+    );
 }
 
 // Recognizable marker callers (e.g. gizza-ai/imagine) can match on to
@@ -120,8 +147,15 @@ async function loadModel(modelId, onProgress) {
         _processor = null;
         _modelId = null;
     }
-    const adapter = await requireWebGpuAdapter();
-    const { AutoProcessor, MultiModalityCausalLM } = await loadTransformers();
+    let adapter;
+    let AutoProcessor;
+    let MultiModalityCausalLM;
+    try {
+        adapter = await requireWebGpuAdapter();
+        ({ AutoProcessor, MultiModalityCausalLM } = await loadTransformers());
+    } catch (e) {
+        throw engineUnavailable(e);
+    }
     const fp16 = await detectFp16(adapter);
     const dtype = fp16
         ? {
@@ -155,10 +189,14 @@ async function loadModel(modelId, onProgress) {
               onProgress(String(report?.status ?? report?.file ?? ''));
           }
         : undefined;
-    [_processor, _model] = await Promise.all([
-        AutoProcessor.from_pretrained(modelId, { progress_callback }),
-        MultiModalityCausalLM.from_pretrained(modelId, { dtype, device, progress_callback }),
-    ]);
+    try {
+        [_processor, _model] = await Promise.all([
+            AutoProcessor.from_pretrained(modelId, { progress_callback }),
+            MultiModalityCausalLM.from_pretrained(modelId, { dtype, device, progress_callback }),
+        ]);
+    } catch (e) {
+        throw engineUnavailable(e);
+    }
     _modelId = modelId;
 }
 
@@ -167,7 +205,12 @@ async function handleLoadEngine(msg) {
         await ensureLoaded(msg.modelId);
         await swPost({ type: 'image-load-response', id: msg.id });
     } catch (e) {
-        await swPost({ type: 'image-load-response', id: msg.id, error: String(e?.message ?? e) });
+        await swPost({
+            type: 'image-load-response',
+            id: msg.id,
+            error: String(e?.message ?? e),
+            ...(e?.code === ENGINE_UNAVAILABLE ? { code: ENGINE_UNAVAILABLE } : {}),
+        });
     }
 }
 
@@ -237,7 +280,16 @@ async function handleGenerateStream(msg) {
             return;
         }
         if (!_processor || !_model) {
-            await swStreamFrame(msg.id, 'error', 'model not loaded; call load_model first');
+            // Sent here because this page held the model, or was loading it,
+            // when it was probed: the load has since failed, or the model was
+            // unloaded. The engine cannot take it — a refusal, not a fault.
+            await swPost({
+                type: 'image-stream-frame',
+                id: msg.id,
+                kind: 'error',
+                payload: 'the page that took this request no longer holds the image model (its load failed, or it was unloaded) — load it again',
+                code: ENGINE_UNAVAILABLE,
+            });
             return;
         }
         const req = JSON.parse(msg.body);

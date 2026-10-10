@@ -12,7 +12,17 @@
 // Page → SW reply shapes:
 //   { type: 'engine-present', id, loaded, loading }  // runs the embedding engine; model ids with a
 //                                                    // pipeline / with one being created
-//   { type: 'embed-<op>-response', id, result?, error? }
+//   { type: 'embed-<op>-response', id, result?, error?, code? }
+//
+// A reply whose `code` is ENGINE_UNAVAILABLE is a refusal, as bridge.js's own
+// are: the engine could not load here (its library, its runtime or the
+// model), and `error` is written for whoever made the request. bridge.js
+// passes it on as a refusal, which the embedding service reports as
+// `EngineUnavailable` and the vector block's routes answer as a 503 carrying
+// this message; any other `error` is a fault in the run itself.
+
+/** bridge.js's `ENGINE_UNAVAILABLE`: the `code` of a refusal. */
+const ENGINE_UNAVAILABLE = 'engine-unavailable';
 
 const PIPELINES = new Map();
 // Pipelines being created, by model id. The probe answer lists them in
@@ -37,16 +47,52 @@ async function loadPipeline(modelId) {
     }
 }
 
+/**
+ * Transformers.js, with its ONNX Runtime set to run on the page's own thread.
+ *
+ * The same module t2i-engine.js imports (one copy per page), and from
+ * cdn.jsdelivr.net: that is the CDN the runtime's pages allow scripts from
+ * (`script-src` in impresspress-web's `IMPRESSPRESS_CSP`), so a module served
+ * from anywhere else is blocked on every page but the boot shell.
+ *
+ * `numThreads = 1` is what keeps ONNX Runtime's own code on that CDN too. On
+ * a cross-origin-isolated page — every page a dev-sandbox deployment serves,
+ * which is isolated deployment-wide for the in-browser compiler
+ * (`cross_origin_isolation` in impresspress-web's `runtime_factory.rs`) —
+ * ONNX Runtime defaults to several threads, and its threads are workers
+ * started from its wasm glue module (`ort-wasm-simd-threaded.jsep.mjs`).
+ * A worker's script must be same-origin, so for a glue module on a CDN it
+ * fetches the file and imports it from a `blob:` URL instead
+ * (`importWasmModule` in onnxruntime-web: `needPreload` is "multi-threaded
+ * and cross-origin"). The pages' `script-src` has no `blob:`, so that import
+ * fails and no backend loads ("no available backend found"). With one thread
+ * there is no worker to start, and the glue is imported from the CDN as it
+ * is. One thread is also what every page that is NOT cross-origin isolated
+ * already ran: without `SharedArrayBuffer` ONNX Runtime falls back to it.
+ *
+ * Set before the first model is created: ONNX Runtime reads it once, when its
+ * wasm backend initializes, and both engines set it, as either may be the
+ * first to create a model on the page.
+ */
+async function importTransformers() {
+    const transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1');
+    transformers.env.backends.onnx.wasm.numThreads = 1;
+    return transformers;
+}
+
 async function createPipeline(modelId) {
     const hf = MODEL_HF_PATH[modelId];
     if (!hf) throw new Error(`unknown embedding model: ${modelId}`);
-    // The same module t2i-engine.js imports (one copy per page), and from
-    // cdn.jsdelivr.net: that is the CDN the runtime's pages allow scripts
-    // from (`script-src` in impresspress-web's `IMPRESSPRESS_CSP`), so a
-    // module served from anywhere else is blocked on every page but the boot
-    // shell.
-    const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1');
-    const pipe = await pipeline('feature-extraction', hf, { dtype: 'q8' });
+    let pipe;
+    try {
+        const { pipeline } = await importTransformers();
+        pipe = await pipeline('feature-extraction', hf, { dtype: 'q8' });
+    } catch (e) {
+        throw Object.assign(
+            new Error(`the embedding engine could not load in the page: ${e?.message ?? e}`),
+            { code: ENGINE_UNAVAILABLE },
+        );
+    }
     PIPELINES.set(modelId, pipe);
     return pipe;
 }
@@ -76,7 +122,12 @@ navigator.serviceWorker.addEventListener('message', async (event) => {
         swReply({
             type: msg.type.replace('-request', '-response'),
             id: msg.id,
-            ...(error ? { error: String(error.message ?? error) } : { result }),
+            ...(error
+                ? {
+                      error: String(error.message ?? error),
+                      ...(error.code === ENGINE_UNAVAILABLE ? { code: ENGINE_UNAVAILABLE } : {}),
+                  }
+                : { result }),
         });
     };
 
