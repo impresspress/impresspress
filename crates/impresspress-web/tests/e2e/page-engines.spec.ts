@@ -17,8 +17,8 @@ import { test, expect, type Page } from '@playwright/test';
  * from `esm.run`, which the pages' CSP does not allow as a script source.
  *
  * These tests go through the real path — the worker, the wasm runtime, the
- * vector block, `bridge.js`'s postMessage and the page's engine script. Only
- * the model library is a stand-in: the Transformers.js module the engine
+ * vector or llm block, `bridge.js`'s postMessage and the page's engine
+ * script. Only the embedding model library is a stand-in: the Transformers.js module the engine
  * imports is answered by a route that returns a fixed vector per text, so
  * nothing is downloaded. That stand-in runs none of the library's own loading
  * (ONNX Runtime, its wasm glue, the module that glue is imported from), so it
@@ -145,4 +145,69 @@ test('an embedding engine that cannot load in the page is a 503 that says what t
   );
   expect(answer!.body).not.toContain('jsdelivr');
   console.log(`page-engines: embed refused when the engine cannot load: ${ms} ms`);
+});
+
+/** A model in the browser runtime's WebLLM catalog. Never loaded here: nothing is downloaded. */
+const WEBLLM_MODEL = 'SmolLM2-1.7B-Instruct-q4f32_1-MLC';
+
+test('a chat for a model no page holds is a 503 that says why, on both chat routes', async ({
+  page,
+}) => {
+  // The page runs the LLM engine (`webllm-engine.js`) but has loaded no
+  // model, so it answers bridge.js's probe holding nothing, and the chat is
+  // refused with the `engine-unavailable` code. The LLM bridge turns that
+  // into `LlmError::EngineUnavailable`, wafer-core's llm handler returns it
+  // as `Unavailable` with its reason, and the chat routes answer it as a 503
+  // carrying that reason — the streaming one too, because the refusal is the
+  // model's first item and is read before the route commits its status line.
+  // It used to be a sanitized "Internal server error (ref: …)".
+  await loginAsAdmin(page);
+  const answers = await page.evaluate(
+    async ({ model, bound }) => {
+      const json = { 'content-type': 'application/json' };
+      const created = await fetch('/b/messages/api/contexts', {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ type: 'conversation', title: 'refused chat' }),
+      });
+      const thread = await created.json();
+      const threadId = thread.id ?? thread.data?.id;
+      const chat = (path: string) =>
+        Promise.race([
+          fetch(path, {
+            method: 'POST',
+            headers: json,
+            body: JSON.stringify({ thread_id: threadId, message: 'hi', provider: 'webllm', model }),
+          }).then(async (r) => ({
+            status: r.status,
+            type: r.headers.get('content-type'),
+            body: await r.text(),
+          })),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), bound)),
+        ]);
+      return {
+        created: created.status,
+        threadId,
+        buffered: await chat('/b/llm/api/chat'),
+        streamed: await chat('/b/llm/api/chat/stream'),
+      };
+    },
+    { model: WEBLLM_MODEL, bound: BOUND_MS },
+  );
+  expect(answers.created).toBe(200);
+  expect(answers.threadId).toBeTruthy();
+
+  const reason = `no open page has the LLM model '${WEBLLM_MODEL}' loaded — load it first`;
+  for (const [route, answer] of [
+    ['/b/llm/api/chat', answers.buffered],
+    ['/b/llm/api/chat/stream', answers.streamed],
+  ] as const) {
+    expect(answer, `${route}: no answer within ${BOUND_MS} ms: the request hung`).not.toBeNull();
+    expect(answer!.status, `${route}: ${answer!.body}`).toBe(503);
+    expect(answer!.type, route).toContain('application/json');
+    const message: string = JSON.parse(answer!.body).message;
+    expect(message.endsWith(reason), `${route}: ${message}`).toBe(true);
+    expect(answer!.body, route).not.toContain('Internal server error');
+  }
+  console.log('page-engines: chat refused with no page holding the model: 503 on both routes');
 });
