@@ -114,16 +114,18 @@ test('a link failure keeps the linker command, drops Finished, and becomes a lin
   assert.doesNotMatch(shaped.stderr, DEBUG);
   assert.doesNotMatch(shaped.stdout, DEBUG);
   // The reason, as a diagnostic an agent can read without scanning stderr —
-  // ahead of the worker's own.
-  assert.deepEqual(shaped.diagnostics[0], {
-    file: '',
-    line: 0,
-    column: 0,
-    severity: 'error',
-    code: 'link-error',
-    message: 'wasm-ld: unable to find library -ldoesnotexist'
-  });
-  assert.deepEqual(shaped.diagnostics.slice(1), raw.diagnostics);
+  // in place of the worker's `artifact-missing`, whose "failed without a
+  // diagnostic" it would otherwise contradict.
+  assert.deepEqual(shaped.diagnostics, [
+    {
+      file: '',
+      line: 0,
+      column: 0,
+      severity: 'error',
+      code: 'link-error',
+      message: 'wasm-ld: unable to find library -ldoesnotexist'
+    }
+  ]);
 });
 
 test('a manifest cargo cannot parse keeps cargo\'s error in both streams, minus the debug lines', () => {
@@ -136,6 +138,34 @@ test('a manifest cargo cannot parse keeps cargo\'s error in both streams, minus 
   assert.doesNotMatch(shaped.stderr, DEBUG);
   assert.doesNotMatch(shaped.stdout, DEBUG);
   assert.deepEqual(shaped.diagnostics, raw.diagnostics);
+});
+
+test('artifact-missing stays when nothing explains it, and when the linker only warned', () => {
+  const missing = {
+    file: '',
+    line: 0,
+    column: 0,
+    severity: 'error',
+    code: 'artifact-missing',
+    message: 'the build produced no /target/wasm32-wasip1/release/hello.wasm'
+  };
+  const withoutLinker = shapeCompileOutput({
+    success: false,
+    stdout: '',
+    stderr: '   Compiling hello v0.1.0 (/blocks/hello)',
+    diagnostics: [missing]
+  });
+  assert.deepEqual(withoutLinker.diagnostics, [missing]);
+  const warnedOnly = shapeCompileOutput({
+    success: false,
+    stdout: '',
+    stderr: 'wasm-ld: warning: something odd',
+    diagnostics: [missing]
+  });
+  assert.deepEqual(
+    warnedOnly.diagnostics.map((d) => d.code),
+    ['link-warning', 'artifact-missing']
+  );
 });
 
 test('a line is dropped only when it IS a debug line, not when it mentions one', () => {

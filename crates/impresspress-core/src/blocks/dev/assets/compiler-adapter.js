@@ -155,6 +155,12 @@ const LINKER_MESSAGE = /^wasm-ld: (error|warning): (.+)$/;
 const CARGO_FINISHED = /^\s*Finished `/;
 
 /**
+ * The code `worker-entry.ts` gives a build that left no module and reported
+ * no diagnostic it could parse — what a link failure looks like from there.
+ */
+const ARTIFACT_MISSING = 'artifact-missing';
+
+/**
  * Turn the worker's raw output into what a compile result reports.
  *
  * The worker passes the toolchain's transcript through as it was printed, and
@@ -173,10 +179,11 @@ const CARGO_FINISHED = /^\s*Finished `/;
  *
  * And one thing the worker cannot say: a link failure has no rustc
  * diagnostic, so each `wasm-ld: error|warning:` line becomes a `link-error`
- * or `link-warning` diagnostic, ahead of the worker's own (whose
- * `artifact-missing` is what a failed link otherwise surfaces as, with the
- * reason only in `stderr`). Unlocated, like `artifact-missing`: `file` is
- * `''` and `line`/`column` are `0`.
+ * or `link-warning` diagnostic, ahead of the worker's own. Unlocated, like
+ * the worker's `artifact-missing`: `file` is `''` and `line`/`column` are `0`.
+ * When there is a `link-error`, the worker's `artifact-missing` is dropped:
+ * it is what a failed link surfaced as before, and it says the build failed
+ * "without a diagnostic" — which, next to the `link-error`, is no longer true.
  *
  * Shaping happens HERE, at the protocol boundary, and not in the worker or
  * the toolchain: the lines come from rubrc's prebuilt cargo and rustc, which
@@ -243,7 +250,11 @@ export function shapeCompileOutput(raw) {
   return {
     stdout: shape(stdoutLines),
     stderr: shape(stderrLines),
-    diagnostics: linkerDiagnostics.concat(raw.diagnostics)
+    diagnostics: linkerDiagnostics.concat(
+      linkFailed
+        ? raw.diagnostics.filter((diagnostic) => diagnostic.code !== ARTIFACT_MISSING)
+        : raw.diagnostics
+    )
   };
 }
 

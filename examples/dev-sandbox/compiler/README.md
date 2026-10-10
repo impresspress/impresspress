@@ -598,6 +598,22 @@ Everything above was measured. These were not, and should not be assumed:
 Change `PIN.json`, run `build-compiler.sh`, run the probe, and update the
 numbers above.
 
+**Then re-capture the compile outputs the page's filters are tested on.**
+`crates/impresspress-core/src/blocks/dev/assets/compiler-adapter.js`
+(`shapeCompileOutput`) strips what this toolchain prints that is not the
+build — cargo's `DEBUG: main started` / `DEBUG: logger setup done`, cargo's
+`Finished` after a failed build, rustc's `Linking using …` command line — and
+reads `wasm-ld: error:` lines as link failures. It matches those lines by
+their EXACT text, and its unit test
+(`…/assets/test/compile_output.test.mjs`) runs on `result` messages captured
+from the pinned compiler in `…/assets/test/fixtures/compile-outputs.json`. A
+new rubrc can print different words, and the test would keep passing on the
+old captures while the new noise reached agents. So on a rubrc bump, compile
+the five crates that file describes (each entry's `what`) against the new
+`dist/` — posting `compile` at the worker started with the guest, as
+`src/probe.html` does — replace the file's entries with what came back, and
+adjust the filters until the test passes on the new text.
+
 `version` is `<rubrc sha at eight characters>.<packaging revision>` — today
 `807ace9e.2`. The sha names the toolchain; the revision names what we wrapped
 around it. A change to `src/**` or `scripts/**` changes what ships in `dist/`

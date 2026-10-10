@@ -2117,13 +2117,14 @@ that whole wait and timings says where it went. Only one compile runs at a time.
 points at. A compiler diagnostic carries the code rustc gave it, if any (E0425, unused_variables); \
 a linker failure is link-error, a build that left no module is artifact-missing, a compile over \
 the 120 s budget is compile-timeout, and the validator adds codes of its own. A diagnostic about \
-no particular place in the source, like those three, has a null file and line.'
+no particular place in the source, like those three, has a null file, line and column.'
         },
         stdout: {
           type: 'string',
           description:
-            'The toolchain session around the build: cleaning the previous build and reading the \
-module back out. Rarely needed.'
+            "The toolchain session around the build: cleaning the previous build and reading the \
+module back out. Usually housekeeping, but cargo's own errors can appear here too: a Cargo.toml it \
+cannot parse is reported while cleaning, before the build starts."
         },
         stderr: {
           type: 'string',

@@ -264,10 +264,12 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   // `elapsed_ms: 813` an agent was once given for a fifty-second call.
   expect(compiled.timings.compile_ms).toBeGreaterThan(0);
   expect(compiled.timings.stage_ms).toBeGreaterThan(0);
+  // Each figure is rounded to the millisecond on its own, so the comparisons
+  // allow for that rounding and nothing more.
   expect(compiled.elapsed_ms).toBeGreaterThanOrEqual(
-    compiled.timings.compile_ms + compiled.timings.stage_ms,
+    compiled.timings.compile_ms + compiled.timings.stage_ms - 2,
   );
-  expect(compiled.elapsed_ms).toBeLessThanOrEqual(firstCompileMs);
+  expect(compiled.elapsed_ms).toBeLessThanOrEqual(firstCompileMs + 1);
   // The output is the build, not the toolchain's chatter: rubrc's cargo
   // prints two `DEBUG:` lines on every run and its rustc the whole wasm-ld
   // command line on every link, and neither reaches a build that worked.
@@ -497,6 +499,9 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
     line: null,
     column: null,
   });
+  // …and only it: the worker's `artifact-missing` ("failed without a
+  // diagnostic") would contradict it, so the adapter drops that one.
+  expect(unlinked.diagnostics.map((d) => d.code)).toEqual(['link-error']);
   expect(unlinked.stderr).toContain('Linking using');
   expect(unlinked.stderr).toContain('wasm-ld: error: unable to find library -ldoesnotexist');
   expect(unlinked.stderr).not.toContain('Finished');
