@@ -465,6 +465,11 @@ pub struct FakeShell {
 /// could never import the seed shipped beside it). The bypass condition is
 /// laid out the way `impresspress-bundle`'s `BypassRules::render_condition`
 /// renders one: a clause per line, each after the first leading with its `||`.
+/// `PAGE_ENGINES` is declared as the bundler renders it, so the `initialize()`
+/// call reads a constant that exists. `tests/dev_export.rs` holds the rules
+/// and the engines here to what the bundler actually renders
+/// (`the_fake_shell_states_what_the_bundler_renders`), so this copy cannot
+/// drift from it.
 pub const FAKE_SW_JS: &str = concat!(
     "const DEV_ENABLED = true;\n",
     "const BYPASS_RULES = ",
@@ -473,6 +478,8 @@ pub const FAKE_SW_JS: &str = concat!(
     r#""/vendor/sql-wasm-esm.js","/vendor/sql-wasm.wasm"],"#,
     r#""prefixes":["/impresspress_web","/snippets/","/cdn-cgi/","#,
     r#""/__impresspress_dev/compiler/","/seed/"]};"#,
+    "\n",
+    r#"const PAGE_ENGINES = ["/webllm-engine.js","/embed-engine.js","/t2i-engine.js"];"#,
     "\n",
     "await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
     "if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n",
@@ -487,6 +494,7 @@ pub const FAKE_SW_JS: &str = concat!(
 /// (`examples/dev-sandbox/impresspress.toml` — a dev bundle with the compiler
 /// prefix), with [`FakeShell`]'s wasm-pack base name. [`FAKE_SW_JS`] declares
 /// exactly these, and the test fixtures build `DevShared` with them.
+/// `tests/dev_export.rs` checks them against the bundler's own.
 pub fn fake_bypass_rules() -> BypassRules {
     BypassRules {
         exact: [

@@ -20,7 +20,8 @@
 //   { type: 'image-stream-cancel',         id }
 //
 // Page → SW reply shapes:
-//   { type: 'engine-present',        id, loaded }    // runs the image engine; loaded = [modelId] or []
+//   { type: 'engine-present',        id, loaded, loading }    // runs the image engine;
+//                                     // loaded / loading = [modelId] or []
 //   { type: 'image-load-response',   id, error? }
 //   { type: 'image-unload-response', id, error? }
 //   { type: 'image-stream-frame',    id, kind, payload? }
@@ -85,8 +86,34 @@ async function swStreamFrame(id, kind, payload) {
     await swPost({ type: 'image-stream-frame', id, kind, payload });
 }
 
+// The load in progress, if any: `{ modelId, promise }`. The probe answer lists
+// its model in `loading`, so bridge.js sends this page every request for that
+// model while it loads; each waits for it here instead of failing ("model not
+// loaded") or loading the model a second time.
+let _loading = null;
+
 async function ensureLoaded(modelId, onProgress) {
+    // One load at a time: a load of another model finishes (or fails) first.
+    while (_loading && _loading.modelId !== modelId) {
+        await _loading.promise.catch(() => {});
+    }
+    if (_loading) return _loading.promise;
     if (_processor && _model && _modelId === modelId) return;
+    const promise = loadModel(modelId, onProgress);
+    _loading = { modelId, promise };
+    try {
+        await promise;
+    } finally {
+        if (_loading?.promise === promise) _loading = null;
+    }
+}
+
+/** Wait out a load in progress, whatever its outcome. */
+async function settledLoad() {
+    while (_loading) await _loading.promise.catch(() => {});
+}
+
+async function loadModel(modelId, onProgress) {
     if (_model) {
         try { await _model.dispose?.(); } catch (_e) {}
         _model = null;
@@ -146,6 +173,7 @@ async function handleLoadEngine(msg) {
 
 async function handleUnloadEngine(msg) {
     try {
+        await settledLoad();
         if (_model) {
             try { await _model.dispose?.(); } catch (_e) {}
         }
@@ -198,6 +226,7 @@ async function generateOnce(prompt, { onProgress, signal } = {}) {
 }
 
 async function handleGenerateStream(msg) {
+    await settledLoad();
     if (!_processor || !_model) {
         await swStreamFrame(msg.id, 'error', 'model not loaded; call load_model first');
         return;
@@ -243,7 +272,12 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     switch (msg.type) {
         case 'engine-probe':
             if (msg.family === 'image') {
-                swPost({ type: 'engine-present', id: msg.id, loaded: _model && _modelId ? [_modelId] : [] });
+                swPost({
+                    type: 'engine-present',
+                    id: msg.id,
+                    loaded: _model && _modelId ? [_modelId] : [],
+                    loading: _loading ? [_loading.modelId] : [],
+                });
             }
             break;
         case 'image-load-request':             handleLoadEngine(msg); break;
@@ -268,6 +302,7 @@ export async function loadEngine(modelId, onProgress) {
 }
 
 export async function unloadEngine() {
+    await settledLoad();
     if (_model) {
         try { await _model.dispose?.(); } catch (_e) {}
     }

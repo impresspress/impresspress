@@ -627,8 +627,12 @@ globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 // the image load, so a chat or a generation sent to another tab that also
 // runs the engine finds no model there. So before each request every open
 // window is asked (`{type:'engine-probe', id, family}`) whether it runs the
-// engine and which models it holds (`{type:'engine-present', id, loaded}`),
-// and the request goes where its model is:
+// engine and which models it holds or is loading
+// (`{type:'engine-present', id, loaded, loading}`), and the request goes where
+// its model is. A page "holds" a model it has loaded or is loading: its
+// engine makes every request for a model it is loading wait for that load,
+// so a second load shares the first instead of loading the model again in
+// another tab, and a chat or a generation sent mid-load runs once it is in.
 //
 // - `need: 'model'` (a chat, a generation): a page holding the model. None
 //   holding it refuses the request — the model has to be loaded first.
@@ -645,6 +649,15 @@ globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 // (a frozen tab, a page without the script). No page answering at all refuses
 // the request.
 //
+// Every refusal — no page runs the engine, no page holds the model, the page
+// running the request went away — is an `Error` whose `code` is
+// ENGINE_UNAVAILABLE and whose message is written for the person or agent
+// that made the request. The Rust bridges (`impresspress-browser`'s
+// `bridge::engine_unavailable`) turn exactly that code into the services'
+// `EngineUnavailable` error, which the runtime answers as a 503 carrying the
+// message. A stream refused after it started ends with an error frame that
+// carries the same `code`.
+//
 // While a request is in flight its page is watched. A page that is closed or
 // navigated away is no longer among the worker's clients and will never
 // answer, so the request fails instead of waiting for it. A stream stays on
@@ -652,6 +665,17 @@ globalThis.__impresspressCompleteAssetLoad = _completeAssetLoad;
 
 /** How long a probe waits for a page that runs the engine. */
 export const ENGINE_PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * The `code` of every refusal of an engine request (see above). Matched by
+ * `bridge::ENGINE_UNAVAILABLE` on the Rust side.
+ */
+export const ENGINE_UNAVAILABLE = 'engine-unavailable';
+
+/** A refusal of an engine request: `message` is for the caller. */
+function _engineUnavailable(message) {
+    return Object.assign(new Error(message), { code: ENGINE_UNAVAILABLE });
+}
 /**
  * How long a request that may run on any page (`need: 'engine'`) waits, after
  * the first page that runs the engine has answered, for a page holding its
@@ -664,7 +688,7 @@ const ENGINE_WATCH_INTERVAL_MS = 1_000;
 /** The engine each request family runs, as messages name it. */
 const ENGINE_NAMES = { llm: 'LLM', image: 'image', embed: 'embedding' };
 
-const _pendingProbes = new Map(); // probe id -> (loaded: string[]) => void
+const _pendingProbes = new Map(); // probe id -> (holds: string[]) => void
 const _inFlight = new Map();      // request id -> { family, clientId, fail(Error) }
 let _watchTimer = null;
 
@@ -680,7 +704,7 @@ function _mkEngineId(prefix) {
  */
 async function _engineHost({ family, model, need }) {
     const engine = ENGINE_NAMES[family];
-    const noEngine = () => new Error(
+    const noEngine = () => _engineUnavailable(
         `no open page runs the ${engine} engine — open the app in a tab and try again`,
     );
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false });
@@ -702,7 +726,7 @@ async function _engineHost({ family, model, need }) {
             if (firstRunner === null) return settle(() => reject(noEngine()));
             if (need === 'engine') return settle(() => resolve(firstRunner));
             if (need === 'unload') return settle(() => resolve(null));
-            settle(() => reject(new Error(
+            settle(() => reject(_engineUnavailable(
                 `no open page has the ${engine} model '${model}' loaded — load it first`,
             )));
         };
@@ -710,8 +734,8 @@ async function _engineHost({ family, model, need }) {
         for (const client of clients) {
             const id = _mkEngineId('engine-probe');
             probeIds.push(id);
-            _pendingProbes.set(id, (loaded) => {
-                if (loaded.includes(model)) return settle(() => resolve(client));
+            _pendingProbes.set(id, (holds) => {
+                if (holds.includes(model)) return settle(() => resolve(client));
                 answered += 1;
                 const first = firstRunner === null;
                 if (first) firstRunner = client;
@@ -727,12 +751,14 @@ async function _engineHost({ family, model, need }) {
 
 /**
  * Called by sw.js when a page answers a probe:
- * `{type:'engine-present', id, loaded: [modelId, …]}`. Answers to a probe
- * whose request has already picked its page find nothing pending.
+ * `{type:'engine-present', id, loaded: [modelId, …], loading: [modelId, …]}`.
+ * The page holds every model in either list. Answers to a probe whose request
+ * has already picked its page find nothing pending.
  */
 export function _completeEngineProbe(msg) {
     const answer = _pendingProbes.get(msg.id);
-    if (answer) answer(Array.isArray(msg.loaded) ? msg.loaded : []);
+    const list = (value) => (Array.isArray(value) ? value : []);
+    if (answer) answer([...list(msg.loaded), ...list(msg.loading)]);
 }
 
 globalThis.__impresspressCompleteEngineProbe = _completeEngineProbe;
@@ -757,7 +783,7 @@ async function _checkEngineHosts() {
         // Answered while this check awaited: nothing to fail.
         if (!_inFlight.has(id)) continue;
         _unwatch(id);
-        entry.fail(new Error(
+        entry.fail(_engineUnavailable(
             `the page running the ${ENGINE_NAMES[entry.family]} engine was closed before it answered`,
         ));
     }
@@ -806,9 +832,9 @@ function _registerStream(streams, id) {
             _unwatch(id);
             push(payload === undefined ? { kind: 'done' } : { kind: 'done', payload });
         },
-        closeErr: (err) => {
+        closeErr: (err, code) => {
             _unwatch(id);
-            push({ kind: 'error', payload: err });
+            push(code === undefined ? { kind: 'error', payload: err } : { kind: 'error', payload: err, code });
         },
         queue,
         waiters,
@@ -819,7 +845,7 @@ function _registerStream(streams, id) {
 async function _engineStream(route, streams, payload) {
     const host = await _engineHost(route);
     _registerStream(streams, payload.id);
-    _watch(payload.id, route.family, host.id, (err) => streams.get(payload.id)?.closeErr(err.message));
+    _watch(payload.id, route.family, host.id, (err) => streams.get(payload.id)?.closeErr(err.message, err.code));
     host.postMessage(payload);
     return payload.id;
 }

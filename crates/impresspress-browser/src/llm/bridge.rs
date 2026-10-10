@@ -9,11 +9,13 @@ use wafer_core::interfaces::llm::service::LlmError;
 
 use crate::bridge::{llm_cancel_stream, llm_chat_stream, llm_next_stream_frame, llm_unload_engine};
 
+/// A refusal (no page can run the chat now) is [`LlmError::EngineUnavailable`]
+/// with bridge.js's caller-facing message; anything else is a backend fault.
 fn js_err(e: wasm_bindgen::JsValue) -> LlmError {
-    LlmError::BackendError(format!(
-        "webllm bridge: {}",
-        e.as_string().unwrap_or_else(|| format!("{e:?}"))
-    ))
+    match crate::bridge::engine_unavailable(&e) {
+        Some(message) => LlmError::EngineUnavailable(message),
+        None => LlmError::BackendError(format!("webllm bridge: {}", crate::bridge::describe(&e))),
+    }
 }
 
 pub async fn unload_engine(model_id: &str) -> Result<(), LlmError> {
@@ -57,6 +59,14 @@ pub async fn next_chunk(stream_id: &str) -> Result<StreamFrame, LlmError> {
     match kind {
         "chunk" => Ok(StreamFrame::Chunk(payload())),
         "done" => Ok(StreamFrame::Done),
+        // The page running the chat went away mid-stream: bridge.js ends the
+        // stream with the refusal's code and caller-facing message.
+        "error"
+            if frame.get("code").and_then(|v| v.as_str())
+                == Some(crate::bridge::ENGINE_UNAVAILABLE) =>
+        {
+            Err(LlmError::EngineUnavailable(payload()))
+        }
         "error" => Ok(StreamFrame::Error(if payload().is_empty() {
             "unknown".to_string()
         } else {

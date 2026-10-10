@@ -94,13 +94,13 @@ test('an embedding request from a runtime-rendered page is answered', async ({ p
   console.log(`page-engines: embed answered from an SSR page: ${ms} ms`);
 });
 
-test('with no page able to run the engine, an embedding request fails fast', async ({ page }) => {
-  // The response is the runtime's sanitized 500; the cause is logged by the
-  // worker (a console message with no page), which is where this reads it.
-  const workerLog: string[] = [];
-  page.context().on('console', (msg) => {
-    if (msg.page() === null) workerLog.push(msg.text());
-  });
+test('with no page able to run the engine, an embedding request is a 503 that says why', async ({
+  page,
+}) => {
+  // bridge.js refuses it with its `engine-unavailable` code; the embedding
+  // bridge turns that into `VectorError::EngineUnavailable`, which the
+  // runtime answers as a 503 carrying the refusal's own words — what the
+  // caller has to do, not a sanitized "Internal server error (ref: …)".
   await standInTransformers(page);
   await loginAsAdmin(page);
   // A document the worker serves but no engine script runs in: a JSON
@@ -112,9 +112,10 @@ test('with no page able to run the engine, an embedding request fails fast', asy
 
   const { answer, ms } = await embedFromPage(page, ['orphan']);
   expect(answer, `no answer within ${BOUND_MS} ms: the request hung`).not.toBeNull();
-  expect(answer!.status, answer!.body).toBe(500);
-  await expect
-    .poll(() => workerLog.some((line) => line.includes('no open page runs the embedding engine')))
-    .toBe(true);
+  expect(answer!.status, answer!.body).toBe(503);
+  expect(answer!.body).toContain(
+    'no open page runs the embedding engine — open the app in a tab and try again',
+  );
+  expect(answer!.body).not.toContain('Internal server error');
   console.log(`page-engines: embed refused with no engine page: ${ms} ms`);
 });

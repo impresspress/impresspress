@@ -10,10 +10,15 @@
 //   { type: 'embed-run-request',     id, modelId, texts }   // texts = JSON array of strings
 //
 // Page → SW reply shapes:
-//   { type: 'engine-present', id, loaded }        // runs the embedding engine; loaded = model ids with a pipeline
+//   { type: 'engine-present', id, loaded, loading }  // runs the embedding engine; model ids with a
+//                                                    // pipeline / with one being created
 //   { type: 'embed-<op>-response', id, result?, error? }
 
 const PIPELINES = new Map();
+// Pipelines being created, by model id. The probe answer lists them in
+// `loading`, so bridge.js sends this page every request for such a model;
+// each shares the one creation instead of loading the model a second time.
+const LOADING = new Map();
 
 const MODEL_HF_PATH = {
     'multilingual-e5-small':                 'Xenova/multilingual-e5-small',
@@ -22,6 +27,17 @@ const MODEL_HF_PATH = {
 
 async function loadPipeline(modelId) {
     if (PIPELINES.has(modelId)) return PIPELINES.get(modelId);
+    if (LOADING.has(modelId)) return LOADING.get(modelId);
+    const promise = createPipeline(modelId);
+    LOADING.set(modelId, promise);
+    try {
+        return await promise;
+    } finally {
+        LOADING.delete(modelId);
+    }
+}
+
+async function createPipeline(modelId) {
     const hf = MODEL_HF_PATH[modelId];
     if (!hf) throw new Error(`unknown embedding model: ${modelId}`);
     // The same module t2i-engine.js imports (one copy per page), and from
@@ -45,7 +61,12 @@ navigator.serviceWorker.addEventListener('message', async (event) => {
     if (!msg || typeof msg.type !== 'string') return;
     if (msg.type === 'engine-probe') {
         if (msg.family === 'embed') {
-            swReply({ type: 'engine-present', id: msg.id, loaded: [...PIPELINES.keys()] });
+            swReply({
+                type: 'engine-present',
+                id: msg.id,
+                loaded: [...PIPELINES.keys()],
+                loading: [...LOADING.keys()],
+            });
         }
         return;
     }
@@ -64,6 +85,7 @@ navigator.serviceWorker.addEventListener('message', async (event) => {
             await loadPipeline(msg.modelId);
             reply('ok');
         } else if (msg.type === 'embed-unload-request') {
+            await LOADING.get(msg.modelId)?.catch(() => {});
             PIPELINES.delete(msg.modelId);
             reply('ok');
         } else if (msg.type === 'embed-run-request') {

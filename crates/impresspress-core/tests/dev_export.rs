@@ -37,7 +37,9 @@ use impresspress_core::{
         },
         seed::{self, SeedManifest},
         stored_types,
-        test_support::{dev_get, dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
+        test_support::{
+            dev_get, dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell, FAKE_SW_JS,
+        },
         workspace, BypassRules, DevShared, WAFER_GUEST_VERSION,
     },
     platform_state::variables,
@@ -2404,4 +2406,63 @@ async fn a_boot_page_whose_notice_region_is_malformed_is_refused() {
         .await;
         assert_eq!(status, 500, "{page}");
     }
+}
+
+/// [`FAKE_SW_JS`] and [`fake_bypass_rules`] are a copy of what the bundler
+/// renders for the dev sandbox (`examples/dev-sandbox/impresspress.toml`:
+/// `[dev] enabled`, the compiler prefix), kept in `test_support` because the
+/// fixture is feature code that cannot depend on the bundler. This is where
+/// the copy is held to the original: the bypass rules, and the page engines
+/// (`impresspress_bundle::assets::PAGE_ENGINES`), exactly as the bundler
+/// renders them into the worker it builds.
+#[test]
+fn the_fake_shell_states_what_the_bundler_renders() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    impresspress_bundle::assets::write_to(dir.path()).expect("shell assets");
+    impresspress_bundle::bundle::run(
+        dir.path(),
+        dir.path(),
+        impresspress_bundle::bundle::AppConfig {
+            dev_enabled: true,
+            extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("render the shell");
+    let sw = std::fs::read_to_string(dir.path().join("sw.js")).expect("sw.js");
+    let declared = |name: &str, text: &str| -> String {
+        let declaration = format!("const {name} = ");
+        assert_eq!(text.matches(&declaration).count(), 1, "{name} in {text}");
+        let start = text.find(&declaration).unwrap() + declaration.len();
+        text[start..start + text[start..].find(";\n").expect("declaration ends")].to_string()
+    };
+
+    let rendered: serde_json::Value =
+        serde_json::from_str(&declared("BYPASS_RULES", &sw)).expect("BYPASS_RULES is JSON");
+    // The first prefix is the wasm-pack glue's, named after the crate the
+    // bundler finds: the fake shell's is `/impresspress_web`, while this
+    // directory holds no glue and renders the bundler's `/app` fallback.
+    // Every other rule must match exactly.
+    let fake = fake_bypass_rules();
+    let rendered_exact: Vec<String> = serde_json::from_value(rendered["exact"].clone()).unwrap();
+    let rendered_prefixes: Vec<String> =
+        serde_json::from_value(rendered["prefixes"].clone()).unwrap();
+    assert_eq!(fake.exact, rendered_exact);
+    assert_eq!(rendered_prefixes[0], "/app");
+    assert_eq!(fake.prefixes[0], "/impresspress_web");
+    assert_eq!(fake.prefixes[1..], rendered_prefixes[1..]);
+
+    let engines: Vec<String> = impresspress_bundle::assets::page_engine_scripts().collect();
+    assert!(engines.iter().all(|engine| fake.exact.contains(engine)));
+    assert_eq!(
+        declared("PAGE_ENGINES", &sw),
+        serde_json::to_string(&engines).unwrap()
+    );
+    assert_eq!(
+        declared("PAGE_ENGINES", FAKE_SW_JS),
+        declared("PAGE_ENGINES", &sw)
+    );
+    let fake_rules: serde_json::Value =
+        serde_json::from_str(&declared("BYPASS_RULES", FAKE_SW_JS)).unwrap();
+    assert_eq!(fake_rules, serde_json::to_value(&fake).unwrap());
 }
