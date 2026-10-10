@@ -73,13 +73,51 @@ const ENGINES = JSON.parse(readFileSync(listPath, 'utf8'));
 function serviceWorkerContainer() {
     const listeners = [];
     const posted = [];
+    const waiting = [];
+    const post = (msg) => {
+        posted.push(msg);
+        for (const waiter of [...waiting]) {
+            if (waiter.done()) {
+                waiting.splice(waiting.indexOf(waiter), 1);
+                waiter.resolve();
+            }
+        }
+    };
     return {
         posted,
         container: {
             addEventListener(type, fn) {
                 if (type === 'message') listeners.push(fn);
             },
-            ready: Promise.resolve({ active: { postMessage: (msg) => posted.push(msg) } }),
+            ready: Promise.resolve({ active: { postMessage: post } }),
+        },
+        /**
+         * Resolve on the post after which `done()` holds: on the page's own
+         * reply, not after a guess at how long its work takes. The bound is a
+         * hang guard for a reply that never comes, not a wait.
+         */
+        posts(done, what) {
+            if (done()) return Promise.resolve();
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error(`never posted: ${what}`)), 10_000);
+                waiting.push({
+                    done,
+                    resolve: () => {
+                        clearTimeout(timer);
+                        resolve();
+                    },
+                });
+            });
+        },
+        /**
+         * Resolve once the page has answered request `id` of `type`. Every
+         * request handler in the engines ends in exactly one answer (a
+         * response, or a stream's `done` / `error` frame), and makes any model
+         * call it makes before it; so once the answer is out, whatever the
+         * request did is on record.
+         */
+        answered(type, id) {
+            return this.posts(() => posted.some((m) => isAnswer(m, type, id)), `${type} ${id}`);
         },
         /** The worker posting `data` to this page. */
         async deliver(data) {
@@ -88,6 +126,12 @@ function serviceWorkerContainer() {
             await new Promise((r) => setTimeout(r, 0));
         },
     };
+}
+
+/** Whether `m` is the answer to request `id`: its response, or its stream's last frame. */
+function isAnswer(m, type, id) {
+    if (m.type !== type || m.id !== id) return false;
+    return !type.endsWith('-stream-frame') || m.kind === 'done' || m.kind === 'error';
 }
 
 /** Load `script` as a page would, under a fresh stand-in container. */
@@ -171,7 +215,10 @@ test('a model being loaded is reported as loading, and a second load shares the 
 
     await sw.deliver({ type: 'embed-create-request', id: 'load-2', modelId: model });
     open();
-    await new Promise((r) => setTimeout(r, 10));
+    // A create request that started a load of its own would have called
+    // `pipeline` before its answer.
+    await sw.answered('embed-create-response', 'load-1');
+    await sw.answered('embed-create-response', 'load-2');
     assert.deepEqual(globalThis.__modelCalls, [`pipeline:Xenova/${model}`], 'the model was loaded twice');
     const replies = sw.posted.filter((m) => m.type === 'embed-create-response');
     assert.deepEqual(replies.map((m) => [m.id, m.result]).sort(), [['load-1', 'ok'], ['load-2', 'ok']]);
@@ -197,7 +244,7 @@ test('a chat cancelled while its model is still loading never starts', async () 
     await sw.deliver({ type: 'llm-stream-cancel', id: 'c1' });
     open();
     await loading;
-    await new Promise((r) => setTimeout(r, 10));
+    await sw.answered('llm-stream-frame', 'c1');
 
     assert.ok(!globalThis.__modelCalls.includes('chat'), `the chat ran: ${globalThis.__modelCalls}`);
     assert.deepEqual(
@@ -214,7 +261,8 @@ test('a generation cancelled while its model is still loading never starts', asy
     await sw.deliver({ type: 'image-generate-stream-request', id: 'g1', body: '{"prompt":"x"}' });
     await sw.deliver({ type: 'image-stream-cancel', id: 'g1' });
     open();
-    await new Promise((r) => setTimeout(r, 20));
+    await sw.answered('image-load-response', 'l1');
+    await sw.answered('image-stream-frame', 'g1');
 
     assert.deepEqual(framesOf(sw, 'image-load-response', 'l1'), [{ type: 'image-load-response', id: 'l1' }]);
     assert.ok(!globalThis.__modelCalls.includes('generate'), `the generation ran: ${globalThis.__modelCalls}`);
@@ -224,9 +272,6 @@ test('a generation cancelled while its model is still loading never starts', asy
     );
 });
 
-/** Let the engine settle what it was sent: its replies go out asynchronously. */
-const settle = () => new Promise((r) => setTimeout(r, 20));
-
 test('the Transformers.js engines run ONNX Runtime on one thread, set before their first model loads', async () => {
     // With more than one, a cross-origin-isolated page has ONNX Runtime import
     // its wasm glue from a `blob:` URL, which the runtime's pages refuse as a
@@ -235,16 +280,16 @@ test('the Transformers.js engines run ONNX Runtime on one thread, set before the
     // it has to be in place before the first model is created — on whichever
     // engine the page asks first.
     const loads = [
-        ['embed', (sw) => sw.deliver({ type: 'embed-create-request', id: 'e1', modelId: 'multilingual-e5-small' })],
-        ['image', (sw) => sw.deliver({ type: 'image-load-request', id: 'i1', modelId: 'janus-pro-1b' })],
+        ['embed', { type: 'embed-create-request', id: 'e1', modelId: 'multilingual-e5-small' }, 'embed-create-response'],
+        ['image', { type: 'image-load-request', id: 'i1', modelId: 'janus-pro-1b' }, 'image-load-response'],
     ];
-    for (const [family, startLoad] of loads) {
+    for (const [family, request, answer] of loads) {
         const sw = await loadEngine(await engineFor(family));
         closeModelGate()();
         delete transformersEnv.backends.onnx.wasm.numThreads;
         globalThis.__onnxThreadsAtLoad = [];
-        await startLoad(sw);
-        await settle();
+        await sw.deliver(request);
+        await sw.answered(answer, request.id);
         assert.ok(globalThis.__onnxThreadsAtLoad.length > 0, `${family}: no model was loaded`);
         assert.deepEqual(
             [...new Set(globalThis.__onnxThreadsAtLoad)],
@@ -264,7 +309,8 @@ test('an embedding engine that cannot load refuses with the refusal code and a f
 
     await sw.deliver({ type: 'embed-run-request', id: 'r1', modelId: 'multilingual-e5-small', texts: '["a"]' });
     await sw.deliver({ type: 'embed-create-request', id: 'c1', modelId: 'multilingual-e5-small' });
-    await settle();
+    await sw.answered('embed-run-response', 'r1');
+    await sw.answered('embed-create-response', 'c1');
 
     for (const [type, id] of [['embed-run-response', 'r1'], ['embed-create-response', 'c1']]) {
         assert.deepEqual(framesOf(sw, type, id), [{
@@ -281,7 +327,7 @@ test('an embedding that fails once its engine has loaded is a fault, not a refus
     closeModelGate()();
     // Not a JSON array: the run itself throws, after the pipeline loaded.
     await sw.deliver({ type: 'embed-run-request', id: 'bad', modelId: 'multilingual-e5-small', texts: 'not json' });
-    await settle();
+    await sw.answered('embed-run-response', 'bad');
     const [reply] = framesOf(sw, 'embed-run-response', 'bad');
     assert.ok(reply.error, `no error: ${JSON.stringify(reply)}`);
     assert.equal(reply.code, undefined, 'a failed run was reported as a refusal');
@@ -293,7 +339,7 @@ test('an image engine that cannot load refuses with the refusal code and a fixed
     globalThis.__modelLoadError = 'Could not locate file: "https://huggingface.co/x/onnx/model.onnx"';
 
     await sw.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
-    await settle();
+    await sw.answered('image-load-response', 'l1');
     assert.deepEqual(framesOf(sw, 'image-load-response', 'l1'), [{
         type: 'image-load-response',
         id: 'l1',
@@ -311,7 +357,7 @@ test('a page without WebGPU refuses an image load, keeping the marker callers ma
     });
 
     await sw.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
-    await settle();
+    await sw.answered('image-load-response', 'l1');
     const [reply] = framesOf(sw, 'image-load-response', 'l1');
     assert.equal(reply.code, ENGINE_UNAVAILABLE);
     assert.equal(
@@ -329,7 +375,7 @@ test('a request whose model failed to load in the page is refused, not run', asy
     await image.deliver({ type: 'image-load-request', id: 'l1', modelId: 'janus-pro-1b' });
     await image.deliver({ type: 'image-generate-stream-request', id: 'g1', body: '{"prompt":"x"}' });
     open();
-    await settle();
+    await image.answered('image-stream-frame', 'g1');
     assert.deepEqual(
         framesOf(image, 'image-stream-frame', 'g1').map((f) => [f.kind, f.code]),
         [['error', ENGINE_UNAVAILABLE]],
@@ -342,7 +388,7 @@ test('a request whose model failed to load in the page is refused, not run', asy
     await llm.deliver({ type: 'llm-chat-stream-request', id: 'c1', body: '{"messages":[]}' });
     open();
     await loading;
-    await settle();
+    await llm.answered('llm-stream-frame', 'c1');
     assert.deepEqual(
         framesOf(llm, 'llm-stream-frame', 'c1').map((f) => [f.kind, f.code]),
         [['error', ENGINE_UNAVAILABLE]],
