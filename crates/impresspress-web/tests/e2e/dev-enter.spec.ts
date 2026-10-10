@@ -153,6 +153,11 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   });
   const listed = await page.locator('#dev-console-tool option').allTextContents();
   expect([...listed].sort()).toEqual(PAGE_TOOLS);
+  // The log's count is the console's: both come from the one list the page
+  // publishes.
+  await expect(page.locator('#dev-log')).toContainText(
+    `this browser has no WebMCP — ${listed.length} tools are in the Tool console`,
+  );
   await expect(page.locator('#dev-console')).toBeVisible();
   await expect(page.locator('#dev-console-run')).toBeEnabled();
 

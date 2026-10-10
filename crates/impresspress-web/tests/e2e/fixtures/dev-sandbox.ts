@@ -316,18 +316,8 @@ export const SHOP_TOOLS = [
   'shop_archive_offer',
 ];
 
-/** The two `dev.js` registers locally rather than from the manifest. */
-export const PAGE_LOCAL_TOOLS = ['dev_compile_block', 'dev_export'];
-
 /** Everything the `/b/dev` page itself registers, in either half. */
 export const PAGE_TOOLS = [...DEV_TOOLS, ...SHOP_TOOLS].sort();
-
-/**
- * What `/b/dev/api/tools.json` publishes — `PAGE_TOOLS` minus the two stubs.
- * `dev.js` logs this count after it registers the manifest, which is how the
- * page reports the size of the surface it was given.
- */
-export const MANIFEST_TOOLS = PAGE_TOOLS.filter((name) => !PAGE_LOCAL_TOOLS.includes(name));
 
 /**
  * Serve an unpacked export bundle from `dir` on `port` with Python's

@@ -31,6 +31,9 @@ const core = fs.readFileSync(
  * @param {object} [options]
  * @param {boolean} [options.hasModelContext]  give the stub navigator a WebMCP
  *   registrar, as a browser that supports it would.
+ * @param {(name: string) => boolean} [options.refuseTool]  which names that
+ *   registrar refuses: `registerTool` throws for them, as Chrome does for a
+ *   duplicate name or a schema it will not take. None, by default.
  * @param {object|null} [options.compilerManifest]  what
  *   `/__impresspress_dev/compiler/manifest.json` answers with: an object for a
  *   bundle that shipped the browser toolchain, `null` for one that did not
@@ -113,6 +116,7 @@ const unref = (timer) => {
 
 export function instantiate({
   hasModelContext = false,
+  refuseTool = () => false,
   compilerManifest = null,
   manifestGate = null,
   workspace = [],
@@ -335,6 +339,9 @@ export function instantiate({
         ? {
             modelContext: {
               registerTool(options) {
+                if (refuseTool(options.name)) {
+                  throw new Error(`the browser refused ${options.name}`);
+                }
                 tools.set(options.name, options);
               },
               unregisterTool(name) {

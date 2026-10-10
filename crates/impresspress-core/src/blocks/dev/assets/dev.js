@@ -701,9 +701,6 @@ function registerFromManifest(manifest) {
       logError(error);
     }
   });
-  if (hasWebmcp) {
-    log('registered ' + registered.length + ' workspace tools');
-  }
 }
 
 // `dev_compile_block` and `dev_export` are the two tools with no HTTP tool
@@ -930,10 +927,11 @@ consoleRun.addEventListener('click', function () {
   runConsoleTool().catch(logError);
 });
 
-// Whether this page's own tools are in: set once `tools.json` has been
-// registered, and the guide's sentence about them written. Until then the
-// sentence is not this function's to write — and after a lost session the
-// abort handler's sentence stands.
+// Whether this page's own tools are in: set once both of its registrars —
+// `tools.json`'s and the page-local one — have run, and the guide's sentence
+// about them written. Until then the sentence is not the `webmcp.js` load
+// listener's to write — and after a lost session the abort handler's
+// sentence stands.
 var toolsAnnounced = false;
 
 // How many tools `webmcp.js` — the site's own registrar, on every page — has
@@ -946,46 +944,108 @@ function siteToolCount() {
   return site ? site.count() : null;
 }
 
+// How many tools the console runs, how many of them an agent in this tab
+// has, and how many the browser refused — every number the page states about its own tools
+// (the guide's sentence and the log's line) is read here, from the two lists
+// `registerPageTool` fills: `pageTools`, what the console runs, and
+// `registered`, what the browser accepted of it. Only called once both of
+// this page's registrars (`registerFromManifest`, `registerPageLocal`) have
+// run, so a tool added to either is counted without anything here changing.
+function workspaceToolCounts() {
+  return {
+    console: pageTools.length,
+    registered: registered.length,
+    refused: pageTools.length - registered.length
+  };
+}
+
 // Say which way an agent reaches the tools in this browser. The guide is
 // where a person — or an agent reading the page — looks first, so it must not
 // describe tools the browser was never handed — nor miscount the ones it
 // was: an agent in this tab has the site's own tools as well as this page's.
-function announceTools() {
-  toolsAnnounced = true;
+//
+// The sentence's numbers for this page's own tools come from
+// `workspaceToolCounts`, as the log's do; the site's from `webmcp.js`
+// (`siteToolCount`).
+function describeTools() {
   if (!hasWebmcp) {
     webmcpStatus.textContent =
       'This browser has no WebMCP: use the Tool console below, or the file editor.';
-    log('this browser has no WebMCP — ' + pageTools.length + ' tools are in the Tool console');
     return;
   }
-  var workspace = registered.length;
+  var counts = workspaceToolCounts();
+  var workspace = counts.registered;
+  var refused = counts.refused;
   var site = siteToolCount();
   if (site === null || site === 0) {
-    webmcpStatus.textContent =
-      'This browser has WebMCP: the ' +
-      workspace +
-      ' workspace tools are registered for an agent in this tab, and the Tool console below ' +
-      'runs the same tools. ' +
-      (site === null
+    var siteSentence =
+      site === null
         ? "The site's own tools are still being registered."
-        : 'The site has registered none of its own.');
+        : 'The site has registered none of its own.';
+    webmcpStatus.textContent =
+      refused === 0
+        ? 'This browser has WebMCP: the ' +
+          workspace +
+          ' workspace tools are registered for an agent in this tab, and the Tool console ' +
+          'below runs the same tools. ' +
+          siteSentence
+        : 'This browser has WebMCP: the ' +
+          workspace +
+          ' workspace tools are registered for an agent in this tab. The Tool console below ' +
+          'runs them, and the ' +
+          refused +
+          ' the browser refused. ' +
+          siteSentence;
     return;
   }
   webmcpStatus.textContent =
-    'This browser has WebMCP: ' +
-    (workspace + site) +
-    ' tools are registered for an agent in this tab: the ' +
-    workspace +
-    " workspace tools, which the Tool console below also runs, and the site's own " +
-    site +
-    '.';
+    refused === 0
+      ? 'This browser has WebMCP: ' +
+        (workspace + site) +
+        ' tools are registered for an agent in this tab: the ' +
+        workspace +
+        " workspace tools, which the Tool console below also runs, and the site's own " +
+        site +
+        '.'
+      : 'This browser has WebMCP: ' +
+        (workspace + site) +
+        ' tools are registered for an agent in this tab: the ' +
+        workspace +
+        " workspace tools and the site's own " +
+        site +
+        '. The Tool console below runs the workspace tools, and the ' +
+        refused +
+        ' the browser refused.';
+}
+
+// The page's tools are in: say so in the guide, and once in the log. Called
+// only after both of this page's registrars have run (see
+// `workspaceToolCounts`).
+// A later load of the site's tools rewrites the sentence alone — the log
+// records this page's registration, which happened once.
+function announceTools() {
+  toolsAnnounced = true;
+  describeTools();
+  var counts = workspaceToolCounts();
+  if (!hasWebmcp) {
+    log('this browser has no WebMCP — ' + counts.console + ' tools are in the Tool console');
+    return;
+  }
+  log(
+    'registered ' +
+      counts.registered +
+      ' workspace tools' +
+      (counts.refused === 0
+        ? ''
+        : '; the browser refused ' + counts.refused + ', which the Tool console still runs')
+  );
 }
 
 // `webmcp.js` announces every load it finishes — its first, and each
 // refresh after a runtime rebuild (`observe`) — so the count follows it.
 window.addEventListener('impresspress:webmcp-loaded', function () {
   if (toolsAnnounced && hasWebmcp && !abort.signal.aborted) {
-    announceTools();
+    describeTools();
   }
 });
 

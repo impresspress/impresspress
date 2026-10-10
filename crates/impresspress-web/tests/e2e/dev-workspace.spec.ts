@@ -7,7 +7,6 @@ import {
   ADMIN_PASSWORD,
   bootServiceWorker,
   loginToWorkspace,
-  MANIFEST_TOOLS,
   PAGE_TOOLS,
   serveDirectory,
   WELCOME_HEADING,
@@ -173,15 +172,23 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(names, 'the registry holds each registrar\'s names exactly once').toEqual(
     [...manifestNames, ...PAGE_TOOLS].sort(),
   );
-  // …and the guide's sentence about them is what the registry holds: both
-  // registrars, each with its own number, and the total an agent in this
-  // tab lists. (It used to give `dev.js`'s count alone — 27 where Chrome
-  // listed 37.)
+  // …and every number the page states about them is a count of what the
+  // registry holds — none is pinned here, so a tool added to either
+  // registrar cannot leave this test asserting a stale total. The guide's
+  // sentence gives both registrars' numbers and the total an agent in this
+  // tab lists, and the progress log's line gives the workspace number again.
+  // (The log used to be written before `registerPageLocal` ran, so it said
+  // two fewer than the sentence and the registry: 25 where they said 27.)
+  const workspaceCount = names.filter((n) => n.startsWith('dev_') || n.startsWith('shop_')).length;
   await expect(page.locator('#dev-webmcp-status')).toHaveText(
     `This browser has WebMCP: ${names.length} tools are registered for an agent in this tab: ` +
-      `the ${PAGE_TOOLS.length} workspace tools, which the Tool console below also runs, and ` +
-      `the site's own ${manifestNames.length}.`,
+      `the ${workspaceCount} workspace tools, which the Tool console below also runs, and ` +
+      `the site's own ${names.length - workspaceCount}.`,
   );
+  await expect(page.locator('#dev-log')).toContainText(
+    `registered ${workspaceCount} workspace tools`,
+  );
+  await expect(page.locator('#dev-console-tool option')).toHaveCount(workspaceCount);
   const generation = await page.evaluate(() =>
     (window as unknown as { __impresspressWebmcp: { generation(): number } }).__impresspressWebmcp.generation(),
   );
@@ -203,13 +210,6 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // ALONGSIDE the manifest's, not instead of them. An agent on this page can
   // both build the shop and browse it.
   expect(tools).toContain('list_products');
-  // …and the page said so in its own log, with the count `tools.json`
-  // published. This is the only externally visible proof that
-  // `registerFromManifest` consumed the whole manifest rather than losing
-  // entries to its per-tool `try`.
-  await expect(page.locator('#dev-log')).toContainText(
-    `registered ${MANIFEST_TOOLS.length} workspace tools`,
-  );
 
   // --- 2. `dev_status` is the first call the guide tells an agent to make --
   const status = structured<{
