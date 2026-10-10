@@ -105,6 +105,11 @@ pub const CALLER_FACING: &[CallerFacing] = &[
         why: "a compiler diagnostic's position in the caller's source file",
     },
     CallerFacing {
+        scopes: &["dev.page"],
+        fragment: "has a null file, line and column",
+        why: "the three position fields of a dev_compile_block diagnostic the caller reads",
+    },
+    CallerFacing {
         scopes: &["dev", "dev.tools"],
         fragment: "a table created in `init`",
         why: "the `table` template's block creates a database table; that is what it scaffolds",

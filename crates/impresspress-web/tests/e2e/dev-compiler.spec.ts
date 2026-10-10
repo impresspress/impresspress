@@ -192,6 +192,7 @@ test('the compiler adapter reports progress, results and diagnostics', async ({ 
         bytes: Array.from(ok.artifact as Uint8Array),
         sha: ok.artifactSha256,
         stdout: ok.stdout,
+        stderr: ok.stderr,
         compilerVersion: ok.compilerVersion,
         buildId: ok.buildId,
       },
@@ -200,6 +201,8 @@ test('the compiler adapter reports progress, results and diagnostics', async ({ 
         artifact: bad.artifact,
         sha: bad.artifactSha256,
         diagnostics: bad.diagnostics,
+        stdout: bad.stdout,
+        stderr: bad.stderr,
       },
       afterDispose,
     };
@@ -221,6 +224,15 @@ test('the compiler adapter reports progress, results and diagnostics', async ({ 
   // like hex would not prove.
   expect(result.ok.sha).toBe(ARTIFACT_SHA256);
   expect(result.ok.stdout).toContain('hello');
+  // The fake sends the real toolchain's chatter (`fake-compiler-worker.js`),
+  // and what reaches the page is the build without it: cargo's debug lines
+  // gone from both streams, rustc's linker command gone from a build that
+  // linked, and cargo's `Finished` kept, because here it is true.
+  expect(result.ok.stdout).toBe('fake build #1: hello');
+  expect(result.ok.stderr).toBe(
+    '   Compiling hello v0.1.0 (/blocks/hello)\n' +
+      '    Finished `release` profile [optimized] target(s) in 0.06s',
+  );
   // What `POST /b/dev/api/builds/stage` will record as `compiler_version`:
   // the string the worker reported at `ready`.
   expect(result.ok.compilerVersion).toBe(FAKE_RUSTC_VERSION);
@@ -237,6 +249,13 @@ test('the compiler adapter reports progress, results and diagnostics', async ({ 
     severity: 'error',
     code: 'E0425',
   });
+  // rustc's error, then cargo's status — without the `Finished` the real
+  // cargo prints after a rustc failure, which would contradict
+  // `success: false`.
+  expect(result.bad.stdout).toBe('fake build #2: hello');
+  expect(result.bad.stderr).toBe(
+    'error: expected `;`, found `value`\n\n   Compiling hello v0.1.0 (/blocks/hello)',
+  );
 
   expect(result.afterDispose).toContain('disposed');
 });

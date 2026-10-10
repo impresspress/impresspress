@@ -1624,14 +1624,21 @@ function warmCompiler() {
 // One compiler diagnostic, as the sandbox's own wire type.
 //
 // A copy, and deliberately nothing more. The two types carry the same six
-// fields with the same meanings, and `code` is optional on BOTH sides —
-// `compiler/src/protocol.ts` leaves it out when rustc gave the diagnostic no
-// number, and `validation::Diagnostic.code` is an `Option<String>` for
-// exactly that case — so a diagnostic the compiler did not number goes out as
-// `null` rather than being given a value the page made up. The only work here
-// is spelling "absent" the way the wire does (`undefined` → `null`), because
-// `JSON.stringify` drops an undefined field and serde would then see a
-// missing key rather than an explicit one.
+// fields with the same meanings; the only work here is spelling "absent" the
+// way the wire does, which is `null` for each optional field:
+//
+//   * `code` — `compiler/src/protocol.ts` leaves it out when rustc gave the
+//     diagnostic no number, and `validation::Diagnostic.code` is an
+//     `Option<String>` for exactly that case, so `undefined` → `null` rather
+//     than a value the page made up. (`JSON.stringify` drops an undefined
+//     field, and serde would then see a missing key, not an explicit one.)
+//   * `file`, `line`, `column` — the protocol types them as a string and two
+//     numbers with no absent value, so a diagnostic about no place in the
+//     source (the worker's `artifact-missing`, the adapter's `link-error`)
+//     arrives as `''` and `0`. Neither is a place: a file has a name and
+//     rustc's lines and columns are 1-based. They go out as `null`, the same
+//     as the page's own `compile-timeout`, and as `validation::Diagnostic`'s
+//     `Option`s mean.
 //
 // Nothing is re-checked: `compiler-adapter.js` validates every diagnostic's
 // shape before `compile` resolves (`malformedDiagnostic`) and treats a
@@ -1642,9 +1649,9 @@ function stageDiagnostic(diagnostic) {
     severity: diagnostic.severity,
     code: diagnostic.code === undefined ? null : diagnostic.code,
     message: diagnostic.message,
-    file: diagnostic.file,
-    line: diagnostic.line,
-    column: diagnostic.column
+    file: diagnostic.file === '' ? null : diagnostic.file,
+    line: diagnostic.line > 0 ? diagnostic.line : null,
+    column: diagnostic.column > 0 ? diagnostic.column : null
   };
 }
 
@@ -1863,6 +1870,47 @@ async function compileBlock(name) {
   }
 }
 
+// Where a compile's time went, as `dev_compile_block` reports it.
+//
+// `elapsed_ms` is the wall-clock time of the whole call — what the agent (or
+// the human at the button) actually waited, from the moment the page took
+// the request to the moment it answered. `timings` splits it into the four
+// phases `runCompile` runs, each measured on the same clock:
+//
+//   * `sources_ms`   — reading `blocks/<name>/` out of the workspace;
+//   * `toolchain_ms` — waiting for the compiler to be ready: on a session's
+//     first compile the guest crate's fetch and the toolchain's start-up
+//     (download, instantiate, sysroot, the one-time guest build) — or what
+//     was left of a start-up `warmCompiler` had already begun; ~0 once up;
+//   * `compile_ms`   — the build in the worker, as the page waited for it;
+//   * `stage_ms`     — staging: validation, runtime rebuild, publish,
+//     activation.
+//
+// A phase the call never reached is 0, and the four add up to `elapsed_ms`
+// less the page's own bookkeeping. The worker's own figure for the build
+// (`CompileResult.elapsedMs`) is not reported: it is `compile_ms` less the
+// message hops and the artifact's digest, and it is the number that once
+// read `813` for a call an agent waited fifty seconds on.
+function compileClock() {
+  var started = performance.now();
+  var timings = { sources_ms: 0, toolchain_ms: 0, compile_ms: 0, stage_ms: 0 };
+  return {
+    timings: timings,
+    // Run `work` and charge its duration to `phase`, however it ends.
+    time: async function (phase, work) {
+      var from = performance.now();
+      try {
+        return await work();
+      } finally {
+        timings[phase] = Math.round(performance.now() - from);
+      }
+    },
+    elapsed: function () {
+      return Math.round(performance.now() - started);
+    }
+  };
+}
+
 // The three steps themselves, and the result they produce.
 //
 // Every failure that is an ANSWER about the block comes back as
@@ -1893,9 +1941,12 @@ async function runCompile(name) {
   // seconds — the exact lie this line exists to end. `idle` is the phase
   // `renderStatus` itself draws for a sandbox with nothing in flight, and it
   // is not in `PHASES`, so every step comes out `pending`.
+  var clock = compileClock();
   completed = null;
   drawLadder('idle', false);
-  var snapshot = await snapshotBlock(name);
+  var snapshot = await clock.time('sources_ms', function () {
+    return snapshotBlock(name);
+  });
   if (snapshot.diagnostics.length) {
     log(
       'compile refused: ' +
@@ -1915,17 +1966,22 @@ async function runCompile(name) {
       diagnostics: snapshot.diagnostics,
       stdout: '',
       stderr: '',
-      elapsed_ms: 0,
+      elapsed_ms: clock.elapsed(),
+      timings: clock.timings,
       compiler_version: null,
       progress: []
     };
   }
 
-  var session = await ensureCompiler(appendProgress);
-  var built = await session.compile({
-    crateName: name,
-    files: snapshot.files,
-    onProgress: appendProgress
+  var session = await clock.time('toolchain_ms', function () {
+    return ensureCompiler(appendProgress);
+  });
+  var built = await clock.time('compile_ms', function () {
+    return session.compile({
+      crateName: name,
+      files: snapshot.files,
+      onProgress: appendProgress
+    });
   });
   var diagnostics = built.diagnostics.map(stageDiagnostic);
   // A compile the adapter GAVE UP ON, which is not the same failure as a
@@ -1959,7 +2015,7 @@ async function runCompile(name) {
       (built.cancelled ? 'compile cancelled: ' : 'compile failed: ') +
         name +
         ' (' +
-        built.elapsedMs +
+        clock.timings.compile_ms +
         ' ms)'
     );
     return {
@@ -1970,7 +2026,8 @@ async function runCompile(name) {
       diagnostics: diagnostics,
       stdout: built.stdout,
       stderr: built.stderr,
-      elapsed_ms: built.elapsedMs,
+      elapsed_ms: clock.elapsed(),
+      timings: clock.timings,
       compiler_version: built.compilerVersion,
       progress: []
     };
@@ -1988,7 +2045,7 @@ async function runCompile(name) {
   // the ladder is drawn from exactly those phases. Everything above ran in
   // the worker and reported through `appendProgress`; polling the status
   // through it would be a hundred-odd reads of a row that says `idle`.
-  var staged = await withProgress(async function () {
+  var staged = await clock.time('stage_ms', withProgress(async function () {
     return json(
       await api.post('/b/dev/api/builds/stage', {
         block_name: name,
@@ -2002,7 +2059,7 @@ async function runCompile(name) {
         wafer_guest_version: snapshot.legacy ? snapshot.legacyGuestVersion : built.guestVersion
       })
     );
-  })();
+  }));
   if (staged.success) {
     log('compiled ' + name + ' — generation ' + staged.generation.id);
     renderProgress(staged.generation.id, staged.progress);
@@ -2020,7 +2077,8 @@ async function runCompile(name) {
     diagnostics: staged.diagnostics,
     stdout: built.stdout,
     stderr: built.stderr,
-    elapsed_ms: built.elapsedMs,
+    elapsed_ms: clock.elapsed(),
+    timings: clock.timings,
     compiler_version: compilerVersion,
     progress: staged.progress
   };
@@ -2033,8 +2091,10 @@ function registerCompileTool() {
       'Compile blocks/<name>/ with the in-browser Rust toolchain (wasm32-wasip1; the only \
 dependency is the wafer_guest SDK crate, built once per session). On success the block is \
 validated and activated immediately and its routes are live at /b/<name>/; on failure the result \
-carries structured compiler or validator diagnostics and the previous generation keeps serving. \
-Only one compile runs at a time.',
+carries structured compiler, linker or validator diagnostics and the previous generation keeps \
+serving. Read diagnostics first: stderr is the same build as text, for context. The first compile \
+of a session also waits for the toolchain to download and start (tens of seconds); elapsed_ms is \
+that whole wait and timings says where it went. Only one compile runs at a time.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2050,10 +2110,57 @@ Only one compile runs at a time.',
         cancelled: { type: 'boolean' },
         build_id: { type: ['string', 'null'] },
         generation: { type: ['object', 'null'] },
-        diagnostics: { type: 'array' },
-        stdout: { type: 'string' },
-        stderr: { type: 'string' },
-        elapsed_ms: { type: 'integer' },
+        diagnostics: {
+          type: 'array',
+          description:
+            'Every error and warning, structured: severity, code, message, and the file and line it \
+points at. A compiler diagnostic carries the code rustc gave it, if any (E0425, unused_variables); \
+a linker failure is link-error, a build that left no module is artifact-missing, a compile over \
+the 120 s budget is compile-timeout, and the validator adds codes of its own. A diagnostic about \
+no particular place in the source, like those three, has a null file, line and column.'
+        },
+        stdout: {
+          type: 'string',
+          description:
+            "The toolchain session around the build: cleaning the previous build and reading the \
+module back out. Usually housekeeping, but cargo's own errors can appear here too: a Cargo.toml it \
+cannot parse is reported while cleaning, before the build starts."
+        },
+        stderr: {
+          type: 'string',
+          description:
+            "The build as a terminal would show it: rustc's rendered diagnostics, then cargo's \
+status lines. The linker command line appears only when linking failed, and the Finished line only \
+when the build succeeded."
+        },
+        elapsed_ms: {
+          type: 'integer',
+          description:
+            'Wall-clock milliseconds the whole call took, from the request to this result: reading \
+the sources, waiting for the toolchain, the build and activation.'
+        },
+        timings: {
+          type: 'object',
+          description:
+            "elapsed_ms by phase. A phase the call never reached is 0; what the four leave of \
+elapsed_ms is the page's own bookkeeping, usually a few milliseconds.",
+          properties: {
+            sources_ms: { type: 'integer', description: 'Reading blocks/<name>/ from the workspace.' },
+            toolchain_ms: {
+              type: 'integer',
+              description:
+                'Waiting for the in-browser toolchain to be ready. On the first compile of a session \
+this is its download and start-up, including a one-time build of the wafer_guest crate; about 0 \
+once it is running.'
+            },
+            compile_ms: { type: 'integer', description: 'The build itself: rustc, cargo and the link.' },
+            stage_ms: {
+              type: 'integer',
+              description:
+                'Validating the module and activating the generation that serves it.'
+            }
+          }
+        },
         compiler_version: { type: ['string', 'null'] },
         progress: { type: 'array' }
       },

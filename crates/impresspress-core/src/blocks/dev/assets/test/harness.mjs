@@ -57,9 +57,9 @@ const core = fs.readFileSync(
  *   test that is not about the guest never has to build one. A function, for
  *   a test whose subject is a failed fetch: called once per request, it
  *   returns the status (200 when omitted) and the body to answer with.
- * @param {(request: object) => object} [options.stage]  what
+ * @param {(request: object) => object | Promise<object>} [options.stage]  what
  *   `POST /b/dev/api/builds/stage` answers with, given the decoded request
- *   body — a `StageBuildResponse` (`contracts.rs`).
+ *   body — a `StageBuildResponse` (`contracts.rs`), or a promise of one.
  * @param {object|null} [options.exportManifest]  what
  *   `/b/dev/api/export/manifest` answers with — an `ExportManifest`
  *   (`contracts.rs`), or `null` for a 400 (nothing published yet).
@@ -397,7 +397,10 @@ export function instantiate({
         return answer(guest);
       }
       if (url === '/b/dev/api/builds/stage') {
-        return answer(stage(JSON.parse(args[1].body)));
+        // Through a promise, so a `stage` that is itself async — one that
+        // takes time, the way activation does — is awaited like the real
+        // request rather than answered with a pending promise as its body.
+        return Promise.resolve(stage(JSON.parse(args[1].body))).then((body) => answer(body));
       }
       if (url === '/b/dev/api/status') {
         const body = () => (typeof status === 'function' ? status() : status);

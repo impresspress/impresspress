@@ -138,6 +138,7 @@ type Compile = {
   generation: Generation | null;
   diagnostics: Array<{ severity: string; message: string }>;
   elapsed_ms: number;
+  timings: { compile_ms: number };
   compiler_version: string | null;
 };
 
@@ -325,7 +326,8 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   );
   expect(anonManifest.tools.map((t) => t.name)).toContain(TOOL);
   console.log(
-    `dev-scenario: step2_block_ms=${Date.now() - step2Start} compile_ms=${compiled.elapsed_ms}`,
+    `dev-scenario: step2_block_ms=${Date.now() - step2Start} ` +
+      `compile_ms=${compiled.timings.compile_ms} elapsed_ms=${compiled.elapsed_ms}`,
   );
 
   // --- 3. The site the agent writes --------------------------------------

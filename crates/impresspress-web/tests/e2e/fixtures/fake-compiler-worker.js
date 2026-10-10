@@ -65,6 +65,13 @@
 // artifact — a crate that does not compile, which is an ordinary answer and
 // not a failure of the protocol.
 //
+// Those two ordinary answers carry the real toolchain's chatter in their
+// streams, as the real worker passes it through: cargo's two `DEBUG:` lines
+// in both, rustc's `Linking using …` line on a build that linked, and cargo's
+// `Finished` line on BOTH — including the failure, because the real cargo
+// never learns that rustc failed. The adapter's job is to answer with none of
+// that noise and none of that lie, so the fake has to give it some.
+//
 // # Where the artifact comes from
 //
 // Sixteen bytes, by default. That is enough for a spec whose subject is the
@@ -122,6 +129,14 @@ const COMPILE_MS = 60;
 
 /** Bumped per compile so the page can prove the queue preserved its order. */
 let builds = 0;
+
+// The real toolchain's chatter, verbatim from a captured compile of the
+// `hello` template (crates/impresspress-core/src/blocks/dev/assets/test/
+// fixtures/compile-outputs.json), the linker command cut to its head.
+const TOOLCHAIN_DEBUG = 'DEBUG: main started\nDEBUG: logger setup done';
+const COMPILING = (crate) => `   Compiling ${crate} v0.1.0 (/blocks/${crate})`;
+const LINKING = 'Linking using LC_ALL="C" VSLANG="1033" "wasm-ld" "-flavor" "wasm"';
+const FINISHED = '    Finished `release` profile [optimized] target(s) in 0.06s';
 
 const post = (message, transfer = []) => {
   self.postMessage(message, transfer);
@@ -251,6 +266,7 @@ const compile = (message) => {
   setTimeout(
     async () => {
       const stdout = `fake build #${build}: ${message.crateName}`;
+      const noisyStdout = `${TOOLCHAIN_DEBUG}\n${stdout}`;
       const elapsedMs = Date.now() - started;
 
       switch (message.crateName) {
@@ -362,8 +378,10 @@ const compile = (message) => {
           type: 'result',
           id: message.id,
           success: false,
-          stdout,
-          stderr: 'error: expected `;`, found `value`\n',
+          stdout: noisyStdout,
+          stderr:
+            'error: expected `;`, found `value`\n\n' +
+            `${TOOLCHAIN_DEBUG}\n${COMPILING(message.crateName)}\n${FINISHED}`,
           diagnostics,
           elapsedMs,
         });
@@ -377,8 +395,8 @@ const compile = (message) => {
           id: message.id,
           success: true,
           artifact: bytes,
-          stdout,
-          stderr: '',
+          stdout: noisyStdout,
+          stderr: `${TOOLCHAIN_DEBUG}\n${COMPILING(message.crateName)}\n${LINKING}\n${FINISHED}`,
           diagnostics: [],
           elapsedMs,
         },
