@@ -222,9 +222,10 @@ extern "C" {
     #[wasm_bindgen(js_name = llmUnloadEngine, catch)]
     pub async fn llm_unload_engine(model_id: &str) -> Result<JsValue, JsValue>;
 
-    /// Start a streaming chat completion. Returns the stream id as a JS string.
+    /// Start a streaming chat completion on the page that holds `model_id`.
+    /// Returns the stream id as a JS string.
     #[wasm_bindgen(js_name = llmChatStream, catch)]
-    pub async fn llm_chat_stream(body_json: &str) -> Result<JsValue, JsValue>;
+    pub async fn llm_chat_stream(model_id: &str, body_json: &str) -> Result<JsValue, JsValue>;
 
     /// Pull the next frame from an LLM chat stream.
     /// Frame JSON: `{kind:'chunk', payload:<openai chunk json>}` |
@@ -243,14 +244,14 @@ extern "C" {
     #[wasm_bindgen(js_name = imageLoadEngine, catch)]
     pub async fn image_load_engine(model_id: &str) -> Result<JsValue, JsValue>;
 
-    /// Unload the page-side T2I engine.
+    /// Unload `model_id` from the page that holds it (a no-op when none does).
     #[wasm_bindgen(js_name = imageUnloadEngine, catch)]
-    pub async fn image_unload_engine() -> Result<JsValue, JsValue>;
+    pub async fn image_unload_engine(model_id: &str) -> Result<JsValue, JsValue>;
 
-    /// Start an image generation. Returns the request id as a JS string. Pump
-    /// frames with `imageNextFrame`.
+    /// Start an image generation on the page that holds `model_id`. Returns
+    /// the request id as a JS string. Pump frames with `imageNextFrame`.
     #[wasm_bindgen(js_name = imageStartGenerate, catch)]
-    pub async fn image_start_generate(body_json: &str) -> Result<JsValue, JsValue>;
+    pub async fn image_start_generate(model_id: &str, body_json: &str) -> Result<JsValue, JsValue>;
 
     /// Pull the next frame from an image generation. Frame JSON:
     ///   `{kind:'progress', payload:{stage, bytes_downloaded?, bytes_total?}}` |

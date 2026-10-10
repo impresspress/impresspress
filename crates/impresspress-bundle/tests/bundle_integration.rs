@@ -304,24 +304,28 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
         !sw.contains("__BYPASS_CONDITION__"),
         "placeholder not substituted in sw.js"
     );
-    // The whole default condition: the base exact paths, the shell's vendor
-    // files, then the prefixes — one clause per line, each after the first
-    // leading with its `||`, nothing trailing and nothing dangling.
+    // The whole default condition: the base exact paths, the page engines
+    // (from their one list), the shell's vendor files, then the prefixes —
+    // one clause per line, each after the first leading with its `||`,
+    // nothing trailing and nothing dangling.
+    let engines: String = impresspress_bundle::assets::page_engine_scripts()
+        .map(|path| format!("        url.pathname === '{path}' ||\n"))
+        .collect();
+    let expected = [
+        "    if (url.pathname === '/sw.js' ||\n",
+        "        url.pathname === '/loader.js' ||\n",
+        "        url.pathname === '/manifest.json' ||\n",
+        "        url.pathname === '/asset-manifest.json' ||\n",
+        &engines,
+        "        url.pathname === '/vendor/sql-wasm-esm.js' ||\n",
+        "        url.pathname === '/vendor/sql-wasm.wasm' ||\n",
+        "        url.pathname.startsWith('/app') ||\n",
+        "        url.pathname.startsWith('/snippets/') ||\n",
+        "        url.pathname.startsWith('/cdn-cgi/')) {",
+    ]
+    .concat();
     assert!(
-        sw.contains(concat!(
-            "    if (url.pathname === '/sw.js' ||\n",
-            "        url.pathname === '/loader.js' ||\n",
-            "        url.pathname === '/manifest.json' ||\n",
-            "        url.pathname === '/asset-manifest.json' ||\n",
-            "        url.pathname === '/webllm-engine.js' ||\n",
-            "        url.pathname === '/embed-engine.js' ||\n",
-            "        url.pathname === '/t2i-engine.js' ||\n",
-            "        url.pathname === '/vendor/sql-wasm-esm.js' ||\n",
-            "        url.pathname === '/vendor/sql-wasm.wasm' ||\n",
-            "        url.pathname.startsWith('/app') ||\n",
-            "        url.pathname.startsWith('/snippets/') ||\n",
-            "        url.pathname.startsWith('/cdn-cgi/')) {",
-        )),
+        sw.contains(&expected),
         "production bypass condition changed; sw.js = {sw}"
     );
 }
@@ -345,7 +349,9 @@ fn sw_passes_the_dev_flag_to_initialize() {
         "sw.js did not receive the dev flag; sw.js = {sw}"
     );
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
+        sw.contains(
+            "initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+        ),
         "initialize() must read the one constant; sw.js = {sw}"
     );
 }
@@ -362,7 +368,9 @@ fn sw_defaults_the_dev_flag_to_false() {
     // the flag explicitly false, not merely absent.
     assert!(sw.contains("const DEV_ENABLED = false;"), "sw.js = {sw}");
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
+        sw.contains(
+            "initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+        ),
         "initialize() must read the one constant; sw.js = {sw}"
     );
     assert!(
@@ -508,7 +516,7 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
         let handed = sw_initialize_rules(&sw);
 
         assert!(
-            sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });"),
+            sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
             "sw.js = {sw}"
         );
         // Rule for rule, in order.
@@ -955,15 +963,64 @@ fn the_rendered_loader_recovers_once_and_keeps_the_cause() {
     );
 }
 
-/// Each shipped engine script answers the worker's `engine-probe` for its own
-/// engine and no other, which is what makes a page that loaded it one the
-/// worker sends that engine's requests to — `tests/sw/engine_probe.test.mjs`.
-/// The scripts are shipped as they are (not templates), so the test runs on
-/// `assets/` directly.
+/// Each shipped engine script answers the worker's `engine-probe` for one
+/// engine, says which models it holds, and the engines together cover every
+/// family once — `tests/sw/engine_probe.test.mjs`. It is handed the engines
+/// from their one list ([`impresspress_bundle::assets::PAGE_ENGINES`]), as a
+/// JSON file of the shipped scripts' paths on disk (they are not templates).
 #[test]
 fn the_engine_scripts_answer_the_probe_for_their_own_engine() {
+    let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let scripts: Vec<PathBuf> = impresspress_bundle::assets::PAGE_ENGINES
+        .iter()
+        .map(|engine| assets.join(engine.path))
+        .collect();
+    let tmp = tempfile::tempdir().unwrap();
+    let list = tmp.path().join("page-engines.json");
+    fs::write(&list, serde_json::to_string(&scripts).unwrap()).unwrap();
     let test = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sw/engine_probe.test.mjs");
-    node(&["--test".as_ref(), test.as_os_str()], &[]);
+    node(
+        &["--test".as_ref(), test.as_os_str()],
+        &[("PAGE_ENGINES_JSON", &list)],
+    );
+}
+
+/// The boot shell loads exactly the page engines, and the worker hands the
+/// runtime the same list in `initialize({ pageEngines })` — both rendered
+/// from [`impresspress_bundle::assets::PAGE_ENGINES`], with no copy of the
+/// names in either template.
+#[test]
+fn the_shell_and_the_worker_name_the_page_engines_from_their_one_list() {
+    let tmp = production_pkg_copy_with_index();
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+    let engines: Vec<String> = impresspress_bundle::assets::page_engine_scripts().collect();
+    assert!(!engines.is_empty());
+
+    let index = fs::read_to_string(tmp.path().join("index.html")).unwrap();
+    let tags: Vec<&str> = index
+        .match_indices(r#"<script type="module" src=""#)
+        .map(|(at, open)| {
+            let rest = &index[at + open.len()..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .collect();
+    assert_eq!(tags, engines, "index.html = {index}");
+
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+    let declaration = format!(
+        "const PAGE_ENGINES = {};",
+        serde_json::to_string(&engines).unwrap()
+    );
+    assert_eq!(sw.matches(&declaration).count(), 1, "sw.js = {sw}");
+    assert!(sw.contains("pageEngines: PAGE_ENGINES })"), "sw.js = {sw}");
+    // …and the static host serves them: every one is an exact bypass rule.
+    let rules = sw_initialize_rules(&sw);
+    for engine in &engines {
+        assert!(
+            rules.exact.contains(engine),
+            "{engine} is not bypassed: {rules:?}"
+        );
+    }
 }
 
 /// `sw.js` states what a reload costs from the same build-time flag

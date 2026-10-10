@@ -35,18 +35,15 @@ pub const SEED_BYPASS_PREFIX: &str = "/seed/";
 
 /// The exact paths every bundle's service worker bypasses, whatever the app
 /// configures: the worker's own script, the boot loader, the PWA manifest
-/// (which the browser fetches as metadata), the asset manifest, and the three
-/// model engines' page-side scripts. The shell's vendored files are added
-/// after these, from the asset list that ships them — see
+/// (which the browser fetches as metadata) and the asset manifest. The model
+/// engines' page-side scripts and the shell's vendored files are added after
+/// these, from the asset lists that ship them — see
 /// [`BypassRules::for_bundle`].
 const BASE_EXACT: &[&str] = &[
     "/sw.js",
     "/loader.js",
     "/manifest.json",
     "/asset-manifest.json",
-    "/webllm-engine.js",
-    "/embed-engine.js",
-    "/t2i-engine.js",
 ];
 
 /// The prefixes every bundle's service worker bypasses, after the wasm-pack
@@ -80,6 +77,9 @@ impl BypassRules {
     /// `wasm_js_prefix` is the wasm-pack glue's base path (`/impresspress_web`),
     /// which prefixes both halves of the content-hashed pair.
     ///
+    /// The page engines ([`crate::assets::PAGE_ENGINES`]) are bypassed by
+    /// exact path, from the list that ships them.
+    ///
     /// The shell's vendored files (sql.js) are bypassed by EXACT path, from
     /// the asset list that ships them ([`crate::assets::vendor_files`]), never
     /// as a `/vendor/` prefix: `/vendor/` is an ordinary directory for a
@@ -101,6 +101,7 @@ impl BypassRules {
         let exact = BASE_EXACT
             .iter()
             .map(|path| (*path).to_string())
+            .chain(crate::assets::page_engine_scripts())
             .chain(crate::assets::vendor_files().map(|path| format!("/{path}")))
             .chain(app.extra_bypass_exact.iter().cloned());
         for path in exact {
@@ -169,20 +170,13 @@ mod tests {
     #[test]
     fn a_plain_bundle_has_the_base_rules_and_the_shell_vendor_files() {
         let rules = BypassRules::for_bundle("/app", &AppConfig::default());
-        assert_eq!(
-            rules.exact,
-            [
-                "/sw.js",
-                "/loader.js",
-                "/manifest.json",
-                "/asset-manifest.json",
-                "/webllm-engine.js",
-                "/embed-engine.js",
-                "/t2i-engine.js",
-                "/vendor/sql-wasm-esm.js",
-                "/vendor/sql-wasm.wasm",
-            ]
-        );
+        let expected: Vec<String> = BASE_EXACT
+            .iter()
+            .map(|path| (*path).to_string())
+            .chain(crate::assets::page_engine_scripts())
+            .chain(["/vendor/sql-wasm-esm.js", "/vendor/sql-wasm.wasm"].map(String::from))
+            .collect();
+        assert_eq!(rules.exact, expected);
         assert_eq!(rules.prefixes, ["/app", "/snippets/", "/cdn-cgi/"]);
     }
 

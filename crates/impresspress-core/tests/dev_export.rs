@@ -379,7 +379,9 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
     assert!(sw.contains("const DEV_ENABLED = false;"), "{sw}");
     assert!(!sw.contains("const DEV_ENABLED = true;"), "{sw}");
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
+        sw.contains(
+            "initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+        ),
         "{sw}"
     );
     assert!(
@@ -857,7 +859,7 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     );
     assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
     assert!(
-        sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });"),
+        sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
         "{sw}"
     );
 }

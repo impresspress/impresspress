@@ -23,8 +23,8 @@ pub async fn unload_engine(model_id: &str) -> Result<(), LlmError> {
         .map_err(js_err)
 }
 
-pub async fn start_chat_stream(body_json: &str) -> Result<String, LlmError> {
-    let v = llm_chat_stream(body_json).await.map_err(js_err)?;
+pub async fn start_chat_stream(model_id: &str, body_json: &str) -> Result<String, LlmError> {
+    let v = llm_chat_stream(model_id, body_json).await.map_err(js_err)?;
     v.as_string()
         .ok_or_else(|| LlmError::BackendError("webllm bridge: stream id not a string".into()))
 }

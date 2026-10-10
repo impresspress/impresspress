@@ -474,7 +474,7 @@ pub const FAKE_SW_JS: &str = concat!(
     r#""prefixes":["/impresspress_web","/snippets/","/cdn-cgi/","#,
     r#""/__impresspress_dev/compiler/","/seed/"]};"#,
     "\n",
-    "await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });\n",
+    "await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
     "if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n",
     "if (url.pathname.startsWith('/snippets/') ||\n        ",
     "url.pathname.startsWith('/cdn-cgi/') ||\n        ",

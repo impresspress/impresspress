@@ -20,7 +20,7 @@
 //   { type: 'image-stream-cancel',         id }
 //
 // Page → SW reply shapes:
-//   { type: 'engine-present',        id }    // this page runs the image engine
+//   { type: 'engine-present',        id, loaded }    // runs the image engine; loaded = [modelId] or []
 //   { type: 'image-load-response',   id, error? }
 //   { type: 'image-unload-response', id, error? }
 //   { type: 'image-stream-frame',    id, kind, payload? }
@@ -242,7 +242,9 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     if (!msg || !msg.type) return;
     switch (msg.type) {
         case 'engine-probe':
-            if (msg.family === 'image') swPost({ type: 'engine-present', id: msg.id });
+            if (msg.family === 'image') {
+                swPost({ type: 'engine-present', id: msg.id, loaded: _model && _modelId ? [_modelId] : [] });
+            }
             break;
         case 'image-load-request':             handleLoadEngine(msg); break;
         case 'image-unload-request':           handleUnloadEngine(msg); break;

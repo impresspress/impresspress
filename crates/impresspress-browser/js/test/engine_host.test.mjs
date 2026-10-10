@@ -8,8 +8,10 @@
 // without that engine's script — a runtime page that loaded only the LLM
 // engine, a site page with no engine at all — was never answered and the
 // request hung. Now bridge.js asks every open page which of them runs the
-// engine, sends the request to one that says so, refuses at once when none
-// does, and fails the request if that page goes away before it answers.
+// engine and which models it holds, sends the request to the page holding
+// its model (a load or an embedding, which loads on demand, may go to any
+// page running the engine), refuses at once when no page can take it, and
+// fails the request if that page goes away before it answers.
 //
 // The pages here are stand-ins for `navigator.serviceWorker` listeners; what
 // they post back goes through the same `globalThis.__impresspressComplete*`
@@ -22,7 +24,9 @@ import {
     imageStartGenerate,
     imageNextFrame,
     imageCancelStream,
+    embedUnload,
     llmChatStream,
+    llmCancelStream,
     llmNextStreamFrame,
     ENGINE_PROBE_TIMEOUT_MS,
 } from '../bridge.js';
@@ -36,24 +40,31 @@ function deliver(msg) {
 }
 
 /**
- * A window client. `engines` are the families its scripts listen for;
- * `handle(msg)` answers a request of one of them (or not, to leave it
- * pending). Every message it is sent is kept in `received`.
+ * A window client. `engines` maps each family its scripts listen for to the
+ * models it holds (`{ image: ['janus-pro-1b'] }`); it answers a probe after
+ * `probeDelayMs`, as a busy tab does. `handle(msg, reply)` answers a request
+ * of one of its families (or not, to leave it pending). Every message it is
+ * sent is kept in `received`.
  */
-function page(id, engines, handle = () => {}) {
+function page(id, engines, { handle = () => {}, probeDelayMs = 0 } = {}) {
     const received = [];
     return {
         id,
         received,
+        requests: () => received.filter((m) => m.type !== 'engine-probe'),
         postMessage(msg) {
             received.push(msg);
+            if (msg.type === 'engine-probe') {
+                if (!(msg.family in engines)) return;
+                setTimeout(
+                    () => deliver({ type: 'engine-present', id: msg.id, loaded: engines[msg.family] }),
+                    probeDelayMs,
+                );
+                return;
+            }
             queueMicrotask(() => {
-                if (msg.type === 'engine-probe') {
-                    if (engines.includes(msg.family)) deliver({ type: 'engine-present', id: msg.id });
-                    return;
-                }
                 const family = msg.type.split('-')[0];
-                if (engines.includes(family)) handle(msg, deliver);
+                if (family in engines) handle(msg, deliver);
             });
         },
     };
@@ -94,28 +105,81 @@ afterEach(() => {
 });
 
 test('the request goes to the page that runs the engine, not the first page', async () => {
-    const llmOnly = page('a', ['llm']);
-    const embedder = page('b', ['embed'], embedAnswer);
+    const llmOnly = page('a', { llm: [] });
+    const embedder = page('b', { embed: [] }, { handle: embedAnswer });
     worker([llmOnly, embedder]);
 
     const result = await within(embedRun('multilingual-e5-small', '["x"]'), 1_000);
     assert.deepEqual(result, { ok: JSON.stringify({ vectors: [[1, 0]], dims: 2 }) });
-    assert.equal(llmOnly.received.filter((m) => m.type === 'embed-run-request').length, 0);
-    assert.equal(embedder.received.filter((m) => m.type === 'embed-run-request').length, 1);
+    assert.deepEqual(llmOnly.requests(), []);
+    assert.equal(embedder.requests().length, 1);
 });
 
-test('one request is sent once, to one page, even when several run the engine', async () => {
-    const one = page('a', ['embed'], embedAnswer);
-    const two = page('b', ['embed'], embedAnswer);
-    worker([one, two]);
+test('a generation goes to the tab holding the model, though another tab answers first', async () => {
+    // B runs the image engine too and answers the probe at once; the model
+    // was loaded in A, which answers later. Sent to B, the generation would
+    // be answered "model not loaded" (t2i-engine.js).
+    const holder = page('a', { image: ['janus-pro-1b'] }, { probeDelayMs: 50 });
+    const quick = page('b', { image: [] });
+    worker([quick, holder]);
 
+    const id = await imageStartGenerate('janus-pro-1b', '{"prompt":"x"}');
+    await new Promise((r) => setTimeout(r, 100)); // every probe answered
+    assert.deepEqual(holder.requests().map((m) => [m.type, m.id]), [['image-generate-stream-request', id]]);
+    assert.deepEqual(quick.requests(), []);
+    await imageCancelStream(id);
+});
+
+test('an embedding goes to the tab holding its pipeline when it answers within the grace', async () => {
+    const holder = page('a', { embed: ['multilingual-e5-small'] }, { handle: embedAnswer, probeDelayMs: 50 });
+    const quick = page('b', { embed: [] }, { handle: embedAnswer });
+    worker([quick, holder]);
     await embedRun('multilingual-e5-small', '["x"]');
-    const sent = [one, two].flatMap((p) => p.received.filter((m) => m.type === 'embed-run-request'));
-    assert.equal(sent.length, 1);
+    assert.deepEqual(holder.requests().map((m) => m.type), ['embed-run-request']);
+    assert.deepEqual(quick.requests(), []);
+});
+
+test('a chat goes to the tab that loaded the model, though another tab answers first', async () => {
+    const holder = page('a', { llm: ['Llama-3.2-1B'] }, { probeDelayMs: 50 });
+    const quick = page('b', { llm: [] });
+    worker([quick, holder]);
+
+    const id = await llmChatStream('Llama-3.2-1B', '{"messages":[]}');
+    assert.deepEqual(holder.requests().map((m) => m.type), ['llm-chat-stream-request']);
+    assert.deepEqual(quick.requests(), []);
+    await llmCancelStream(id);
+    assert.deepEqual(holder.requests().map((m) => m.type), ['llm-chat-stream-request', 'llm-stream-cancel']);
+});
+
+test('a chat no tab holds the model for is refused, not sent where it cannot run', async () => {
+    const pages = [page('a', { llm: [] }), page('b', { llm: ['another-model'] })];
+    worker(pages);
+    const result = await within(llmChatStream('Llama-3.2-1B', '{"messages":[]}'), 1_000);
+    assert.match(String(result.err?.message), /no open page has the LLM model 'Llama-3.2-1B' loaded — load it first/);
+    assert.deepEqual(pages.flatMap((p) => p.requests()), []);
+});
+
+test('a load no tab holds the model for goes to the first tab that runs the engine', async () => {
+    const first = page('a', { image: [] }, {
+        handle: (msg, reply) => reply({ type: 'image-load-response', id: msg.id }),
+    });
+    const later = page('b', { image: [] }, { probeDelayMs: 50 });
+    worker([later, first]);
+    await imageLoadEngine('janus-pro-1b');
+    assert.deepEqual(first.requests().map((m) => m.type), ['image-load-request']);
+    assert.deepEqual(later.requests(), []);
+});
+
+test('an unload no tab holds the model for sends nothing and succeeds', async () => {
+    const pages = [page('a', { embed: ['another-model'] })];
+    worker(pages);
+    const result = await within(embedUnload('multilingual-e5-small'), 1_000);
+    assert.deepEqual(result, { ok: undefined });
+    assert.deepEqual(pages[0].requests(), []);
 });
 
 test('no page runs the engine: the request is refused within the probe bound', async () => {
-    worker([page('a', ['llm']), page('b', [])]);
+    worker([page('a', { llm: [] }), page('b', {})]);
 
     const started = Date.now();
     const result = await within(embedRun('multilingual-e5-small', '["x"]'), ENGINE_PROBE_TIMEOUT_MS + 1_000);
@@ -131,7 +195,7 @@ test('no page open at all: refused at once', async () => {
 });
 
 test('the page running a request goes away: the request fails instead of waiting', async () => {
-    const pages = worker([page('a', ['embed'] /* never answers */)]);
+    const pages = worker([page('a', { embed: [] } /* never answers the request */)]);
     const request = embedRun('multilingual-e5-small', '["x"]');
     await new Promise((r) => setTimeout(r, 50));
     pages.length = 0; // the tab is closed
@@ -142,14 +206,14 @@ test('the page running a request goes away: the request fails instead of waiting
 });
 
 test('a stream with no page to run it is refused before it starts', async () => {
-    worker([page('a', ['llm'])]);
-    const result = await within(imageStartGenerate('{"prompt":"x"}'), ENGINE_PROBE_TIMEOUT_MS + 1_000);
+    worker([page('a', { llm: [] })]);
+    const result = await within(imageStartGenerate('janus-pro-1b', '{"prompt":"x"}'), ENGINE_PROBE_TIMEOUT_MS + 1_000);
     assert.match(String(result.err?.message), /no open page runs the image engine/);
 });
 
 test('a stream whose page goes away ends with an error frame', async () => {
-    const pages = worker([page('a', ['llm'] /* never answers */)]);
-    const id = await llmChatStream('{"messages":[]}');
+    const pages = worker([page('a', { llm: ['m'] } /* never answers the request */)]);
+    const id = await llmChatStream('m', '{"messages":[]}');
     pages.length = 0;
     const frame = await within(llmNextStreamFrame(id), 5_000);
     assert.notEqual(frame, 'pending', 'the stream hung');
@@ -157,10 +221,10 @@ test('a stream whose page goes away ends with an error frame', async () => {
 });
 
 test('a cancel reaches the page running the stream', async () => {
-    const other = page('a', []);
-    const runner = page('b', ['image']);
+    const other = page('a', {});
+    const runner = page('b', { image: ['janus-pro-1b'] });
     worker([other, runner]);
-    const id = await imageStartGenerate('{"prompt":"x"}');
+    const id = await imageStartGenerate('janus-pro-1b', '{"prompt":"x"}');
     await imageCancelStream(id);
     assert.deepEqual(
         runner.received.filter((m) => m.type === 'image-stream-cancel').map((m) => m.id),

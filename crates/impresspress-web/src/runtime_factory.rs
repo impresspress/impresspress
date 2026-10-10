@@ -53,6 +53,13 @@ pub struct RuntimeOptions {
     /// `dev: false` on a build that HAS the feature is an exported site,
     /// which still needs the sandbox's runtime half.
     pub dev_enabled: bool,
+    /// `initialize({ pageEngines: … })` — the page-side model engines the
+    /// bundle ships (`impresspress-bundle`'s `assets::PAGE_ENGINES`, as URL
+    /// paths). Every page the runtime renders loads them: they are what
+    /// answers the requests the browser LLM, image and embedding services
+    /// post to a page. Published as
+    /// `impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`.
+    pub page_engine_scripts: Vec<String>,
 }
 
 /// What the development sandbox contributes to this runtime.
@@ -199,6 +206,8 @@ pub struct RuntimeFactory {
     /// makes it impossible for a later consumer to key on "the bundle asked
     /// for it" on a build where the sandbox does not exist.
     pub(crate) mode: SandboxMode,
+    /// [`RuntimeOptions::page_engine_scripts`].
+    pub(crate) page_engine_scripts: Vec<String>,
     pub(crate) config_svc: Arc<dyn ConfigService>,
     /// The runtime's per-block [`wafer_run::ConfigSource`]. Built empty and
     /// filled by [`crate::BrowserBootHooks`] once the variables table exists
@@ -266,6 +275,7 @@ impl RuntimeFactory {
 
         Ok(Self {
             mode,
+            page_engine_scripts: options.page_engine_scripts,
             config_svc,
             config_source,
             crypto,
@@ -571,6 +581,7 @@ impl RuntimeFactory {
             jwt_secret_handle,
             crypto: self.crypto.clone(),
             mode: self.mode,
+            page_engine_scripts: self.page_engine_scripts.join(","),
         };
         builder::boot(
             &mut wafer,

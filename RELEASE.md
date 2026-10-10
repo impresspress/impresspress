@@ -19,6 +19,29 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Browser: every page loads the model engines; `EMBEDDED_SCRIPTS` is the operator's alone
+
+**What changes.** The browser runtime's pages load all three page-side model
+engines (`/webllm-engine.js`, `/embed-engine.js`, `/t2i-engine.js`), from the
+list the bundle ships them with (`impresspress-bundle`'s `PAGE_ENGINES`,
+handed to the runtime as `initialize({ pageEngines })`). Before, they loaded
+only the LLM engine, through a `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS` value the
+browser seeded, so an embedding or image request from a page under the
+service worker was never answered. A model request now goes to the open page
+that holds its model, and is refused at once, with a reason, when no page can
+run it.
+
+**Leftover row.** A browser database seeded by an earlier version still holds
+`WAFER_RUN_SHARED__EMBEDDED_SCRIPTS = /webllm-engine.js`. It is harmless — a
+script the runtime already loads is not rendered twice — but it is no longer
+needed: unless it also lists scripts of your own, edit it to an empty value on
+the Variables page (a shared variable cannot be deleted; empty means unset).
+
+**Bundle and runtime together.** A `sw.js` built by an earlier
+`impresspress-bundle` does not pass `pageEngines`; a runtime booted by one
+logs a warning and its pages load no engine, so every model request is
+refused. Rebuild the bundle with the matching CLI.
+
 ### Content types: one table, and the dev sandbox no longer stores them
 
 **What changes.** Every server path types a file by its extension through

@@ -57,7 +57,7 @@ impl ImageService for BrowserImageService {
 
         let body = serde_json::to_string(&req)
             .map_err(|e| ImageError::BackendError(format!("encode request: {e}")))?;
-        let request_id = bridge::start_generate(&body).await?;
+        let request_id = bridge::start_generate(&req.model, &body).await?;
 
         loop {
             if cancel.is_cancelled() {
@@ -134,13 +134,13 @@ impl ImageService for BrowserImageService {
         Box::pin(rx)
     }
 
-    async fn unload_model(&self, backend_id: &str, _model_id: &str) -> Result<(), ImageError> {
+    async fn unload_model(&self, backend_id: &str, model_id: &str) -> Result<(), ImageError> {
         if backend_id != BACKEND_ID {
             return Err(ImageError::InvalidRequest(format!(
                 "backend '{backend_id}' not claimed by {BACKEND_ID}"
             )));
         }
-        bridge::unload_engine().await
+        bridge::unload_engine(model_id).await
     }
 
     fn claims_backend(&self, backend_id: &str) -> bool {

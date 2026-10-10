@@ -10,7 +10,7 @@
 //   { type: 'embed-run-request',     id, modelId, texts }   // texts = JSON array of strings
 //
 // Page → SW reply shapes:
-//   { type: 'engine-present', id }                // this page runs the embedding engine
+//   { type: 'engine-present', id, loaded }        // runs the embedding engine; loaded = model ids with a pipeline
 //   { type: 'embed-<op>-response', id, result?, error? }
 
 const PIPELINES = new Map();
@@ -44,7 +44,9 @@ navigator.serviceWorker.addEventListener('message', async (event) => {
     const msg = event.data;
     if (!msg || typeof msg.type !== 'string') return;
     if (msg.type === 'engine-probe') {
-        if (msg.family === 'embed') swReply({ type: 'engine-present', id: msg.id });
+        if (msg.family === 'embed') {
+            swReply({ type: 'engine-present', id: msg.id, loaded: [...PIPELINES.keys()] });
+        }
         return;
     }
     if (!msg.type.startsWith('embed-')) return;

@@ -27,12 +27,17 @@ pub async fn load_engine(model_id: &str) -> Result<(), ImageError> {
         .map_err(js_err)
 }
 
-pub async fn unload_engine() -> Result<(), ImageError> {
-    image_unload_engine().await.map(|_| ()).map_err(js_err)
+pub async fn unload_engine(model_id: &str) -> Result<(), ImageError> {
+    image_unload_engine(model_id)
+        .await
+        .map(|_| ())
+        .map_err(js_err)
 }
 
-pub async fn start_generate(body_json: &str) -> Result<String, ImageError> {
-    let v = image_start_generate(body_json).await.map_err(js_err)?;
+pub async fn start_generate(model_id: &str, body_json: &str) -> Result<String, ImageError> {
+    let v = image_start_generate(model_id, body_json)
+        .await
+        .map_err(js_err)?;
     v.as_string()
         .ok_or_else(|| ImageError::BackendError("image bridge: request id not a string".into()))
 }

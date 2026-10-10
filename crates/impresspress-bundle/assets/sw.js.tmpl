@@ -28,6 +28,13 @@ const DEV_ENABLED = __DEV_ENABLED__;
 // the ones a newer deployment may already be serving.
 const BYPASS_RULES = __BYPASS_RULES__;
 
+// The page-side model engines this bundle ships (`impresspress-bundle`'s
+// `PAGE_ENGINES`, the same list the boot shell's script tags and the bypass
+// rules above come from), handed to the runtime in `initialize()`: every page
+// it renders loads them, so a model request `bridge.js` posts to a page finds
+// an engine there.
+const PAGE_ENGINES = __PAGE_ENGINES__;
+
 // The runtime binary this worker runs: the hashed `.wasm` the glue above was
 // built for, rendered from the same name the bundler wrote into the glue.
 // Content-addressed, so this URL is this version's runtime and no other's.
@@ -303,7 +310,7 @@ async function ensureInitialized() {
         console.log('[__APP_NAME__] Initializing runtime...');
         await eraseSettled();
         try {
-            await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
+            await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
             throw e;
