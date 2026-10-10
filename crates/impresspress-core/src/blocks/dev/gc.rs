@@ -99,9 +99,9 @@ use std::collections::BTreeSet;
 use wafer_core::clients::storage::{self, ListOptions, ObjectInfo};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use super::{
-    artifacts, blobs, contracts::StorageUsage, generation, repo, retention, workspace, DevShared,
-};
+#[cfg(feature = "block-dev")]
+use super::contracts::StorageUsage;
+use super::{artifacts, blobs, generation, repo, retention, workspace, DevShared};
 
 /// How many objects one storage listing asks for.
 ///
@@ -283,6 +283,9 @@ pub async fn collect_interleaved(
 ///
 /// Deadlock-free on the same rule as the mutators: the lock is held around the
 /// manifest load and nothing else, never across an activation.
+///
+/// Workspace only (`block-dev`): the status endpoint is its one reader.
+#[cfg(feature = "block-dev")]
 pub async fn storage_usage(
     ctx: &dyn Context,
     shared: &DevShared,

@@ -8,8 +8,9 @@
 //! or dropped tool would leave the agent a prompt or a guide that tells it to
 //! call something that is not there.
 //!
-//! Gated on `block-dev` like the other dev tests: `blocks::dev` does not exist
-//! in a default-feature build.
+//! Gated on `block-dev` like the other dev tests: the page's tools are the
+//! workspace half of `blocks::dev`, which no build without that feature
+//! compiles.
 #![cfg(feature = "block-dev")]
 
 use std::{collections::BTreeSet, path::PathBuf};

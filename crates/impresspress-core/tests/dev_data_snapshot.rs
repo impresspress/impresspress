@@ -1,9 +1,10 @@
 //! The data snapshot: the export allowlist's coverage, what it filters out,
 //! and the typed round trip through `seed::import`.
 //!
-//! Gated on `block-dev` for the same reason `dev_seed.rs` is: the block does
-//! not exist in a default-feature build, so these tests must not compile
-//! there.
+//! Gated on `block-dev` for the same reason `dev_seed.rs` is: these tests
+//! use the workspace half of the block — the export side of the snapshot and
+//! the `TestContext::with_dev*` fixtures — which no build without that
+//! feature compiles.
 //!
 //! `PRODUCTS_TABLE`/`OFFERS_TABLE`/`PURCHASES_TABLE`
 //! below restate table names `impresspress-core` keeps `pub(crate)` (the

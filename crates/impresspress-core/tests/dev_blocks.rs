@@ -1,8 +1,8 @@
 //! Staging a compiled guest, refusing it statically, and removing it again.
 //!
 //! Gated on `block-dev` for the same reason `dev_files.rs` and
-//! `dev_activation.rs` are: the block does not exist in a default-feature
-//! build, so these tests must not compile there.
+//! `dev_activation.rs` are: these tests drive the workspace half of the
+//! block, which no build without that feature compiles.
 //!
 //! # Why no real wasm
 //!

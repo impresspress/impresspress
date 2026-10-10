@@ -77,10 +77,9 @@ use wafer_run::context::Context;
 use super::{
     artifacts, blobs,
     bypass::BypassRules,
-    contracts::SiteManifest,
     control::{DynamicBlockSpec, RuntimeControl},
     data_snapshot,
-    generation::GenerationManifest,
+    generation::{GenerationManifest, SiteManifest},
     paths,
     repo::{self, runtime_state, seed_info},
     validation,

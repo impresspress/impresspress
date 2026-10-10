@@ -135,8 +135,7 @@ mod tests {
     use super::*;
     use crate::{
         blocks::dev::{
-            contracts::SiteManifest,
-            generation::{self, GenerationManifest},
+            generation::{self, GenerationManifest, SiteManifest},
             repo,
             repo::generations::{GenerationCause, GenerationStatus, NewGeneration},
             test_support::FakeControl,
@@ -186,7 +185,7 @@ mod tests {
     /// save instead of one per generation.
     #[tokio::test]
     async fn a_pass_deletes_its_page_in_one_batch() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         for _ in 0..RETAINED_GENERATIONS + 5 {
             row(&ctx, GenerationStatus::Superseded).await;
         }
@@ -204,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_ledger_inside_the_window_is_left_alone() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         for _ in 0..RETAINED_GENERATIONS {
             row(&ctx, GenerationStatus::Superseded).await;
         }
@@ -218,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn rows_past_the_window_are_deleted_newest_first_and_the_pass_is_idempotent() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut ids = Vec::new();
         for _ in 0..(RETAINED_GENERATIONS + 3) {
             ids.push(row(&ctx, GenerationStatus::Superseded).await.id);
@@ -241,7 +240,7 @@ mod tests {
     /// the second page is what finishes the job.
     #[tokio::test]
     async fn a_ledger_deeper_than_one_page_is_pruned_in_full() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         for _ in 0..250 {
             row(&ctx, GenerationStatus::Superseded).await;
         }
@@ -253,7 +252,7 @@ mod tests {
     /// neither the pass nor the retained set may lose sight of it.
     #[tokio::test]
     async fn the_serving_generation_survives_however_far_down_it_has_fallen() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let active = row(&ctx, GenerationStatus::Active).await;
         let staged = row(&ctx, GenerationStatus::Staged).await;
         for _ in 0..(RETAINED_GENERATIONS + 5) {
@@ -300,7 +299,7 @@ mod tests {
     /// that is serving, a capped listing for the rest — it cannot.
     #[tokio::test]
     async fn the_serving_generation_survives_more_in_flight_rows_than_a_page_holds() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let active = row(&ctx, GenerationStatus::Active).await;
         // Ordinary history between them, so the pass below has work to do.
         for _ in 0..20 {
@@ -343,7 +342,7 @@ mod tests {
     /// Retention deletes by age; it never rewrites how a generation ended.
     #[tokio::test]
     async fn a_failed_row_inside_the_window_keeps_its_status() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let failed = row(&ctx, GenerationStatus::Failed).await;
         for _ in 0..(RETAINED_GENERATIONS - 1) {
             row(&ctx, GenerationStatus::Superseded).await;

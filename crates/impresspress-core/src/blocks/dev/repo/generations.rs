@@ -663,7 +663,7 @@ mod tests {
     /// that is being defended.
     #[tokio::test]
     async fn generations_minted_in_the_same_millisecond_have_a_stable_order() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let minted_at = "2026-09-03T00:00:00.000Z";
         for id in ["b-second", "a-first", "c-third"] {
             db::create(
@@ -714,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_get_round_trips_every_column() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let inserted = insert(&ctx, &new_generation(GenerationCause::BlockCompile))
             .await
             .expect("insert");
@@ -734,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_status_records_the_failure_and_the_activation_time() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let row = insert(&ctx, &new_generation(GenerationCause::SiteWrite))
             .await
             .expect("insert");
@@ -781,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_recent_is_newest_first_and_honours_the_limit() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut ids = Vec::new();
         for _ in 0..3 {
             ids.push(
@@ -857,7 +857,7 @@ mod tests {
     /// however old it is.
     #[tokio::test]
     async fn list_prunable_offers_the_rows_older_than_the_boundary() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut rows = Vec::new();
         for _ in 0..4 {
             rows.push(
@@ -899,7 +899,7 @@ mod tests {
     /// the timestamp itself and a tie cannot be produced through it.
     #[tokio::test]
     async fn a_created_at_tie_is_split_by_id_on_both_sides_of_the_boundary() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let minted_at = "2026-09-03T00:00:00.000Z";
         for id in ["a", "b", "c"] {
             db::create(
@@ -933,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_serving_and_in_flight_rows_are_found_by_status_not_by_age() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let staged = insert(&ctx, &new_generation(GenerationCause::SiteWrite))
             .await
             .expect("insert");
@@ -967,14 +967,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_ledger_is_serving_nothing() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         assert_eq!(find_active(&ctx).await.expect("find"), None);
         assert!(list_in_flight(&ctx).await.expect("list").is_empty());
     }
 
     #[tokio::test]
     async fn delete_many_removes_exactly_the_named_rows_from_the_ledger() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let mut rows = Vec::new();
         for _ in 0..3 {
             rows.push(

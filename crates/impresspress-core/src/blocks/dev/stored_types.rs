@@ -46,8 +46,8 @@ use wafer_core::clients::storage;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use super::{
-    contracts::SiteManifest,
-    generation, publisher,
+    generation::{self, SiteManifest},
+    publisher,
     repo::{self, generations},
     workspace,
 };

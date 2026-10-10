@@ -567,13 +567,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_manifest_loads_as_an_empty_workspace() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         assert_eq!(load(&ctx).await.expect("load"), Workspace::default());
     }
 
     #[tokio::test]
     async fn the_manifest_round_trips_through_storage() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let ws = populated();
         save(&ctx, &ws).await.expect("save");
         assert_eq!(load(&ctx).await.expect("load"), ws);
@@ -583,7 +583,7 @@ mod tests {
     /// then save a manifest that had silently dropped every entry.
     #[tokio::test]
     async fn a_manifest_that_does_not_parse_is_an_error_not_an_empty_workspace() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         storage::put(&ctx, FOLDER, KEY, b"{ not json", MANIFEST_CONTENT_TYPE)
             .await
             .expect("put");

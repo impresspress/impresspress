@@ -342,8 +342,10 @@ pub fn name_format_diagnostic(name: &str) -> Diagnostic {
 /// Every route prefix the built-in router already owns.
 ///
 /// `crate::routing::ROUTES` plus the sandbox's own [`super::ROUTE_PREFIX`],
-/// which is registered as a `crate::routing::ExtraRoute` and so is absent
-/// from the built-in table. A deployment that adds further extra routes
+/// which a workspace registers as a `crate::routing::ExtraRoute` and so is
+/// absent from the built-in table. Reserved in a `site-runtime` build too,
+/// where nothing routes it: a block a seed carries into an exported site must
+/// not claim the prefix the same seed's workspace serves on. A deployment that adds further extra routes
 /// passes them alongside these — the caller owns that list because
 /// `Context` does not publish one.
 pub fn builtin_route_prefixes() -> Vec<&'static str> {

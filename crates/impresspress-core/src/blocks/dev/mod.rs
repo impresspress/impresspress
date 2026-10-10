@@ -1,10 +1,27 @@
-//! `impresspress/dev` — the browser development sandbox's control plane.
+//! `impresspress/dev` — the browser development sandbox's block.
 //!
 //! The block owns the publication ledger (generations, builds, the activation
-//! journal), validates and activates what the `/b/dev` page produces, and
+//! journal), validates and activates generations — the seed a deployment
+//! boots from and, in a workspace, whatever the `/b/dev` page produces — and
 //! publishes the resulting site into `wafer-run/web/site`. It does **not** own
 //! the runtime: building and swapping a `Wafer` is the host's job, reached
 //! through the [`control::RuntimeControl`] seam.
+//!
+//! # Two halves, two features
+//!
+//! The module list below is the one place the split is stated.
+//!
+//! * The **runtime half** (`site-runtime`): the ledger and its migrations,
+//!   seed import with its data snapshot, activation and boot convergence, the
+//!   publisher, and the stores and maintenance behind them. It is what a site
+//!   exported from the sandbox needs to boot, converge and run its blocks.
+//! * The **workspace half** (`block-dev`, which implies `site-runtime`): the
+//!   block's whole HTTP surface — `ROUTES`, `Route`, `WORKSPACE_ROUTES`,
+//!   `ENTER_PATH`, the `/b/dev` page and its assets, the JSON API handlers
+//!   and their contracts, the page-scoped tool manifest, and the export with
+//!   its zip writer. A build without `block-dev` compiles none of it: its
+//!   [`DevBlock`] declares no endpoint and answers every request it is handed
+//!   with a 404, because it has no dispatch table to look one up in.
 //!
 //! # Why this block is hand-written
 //!
@@ -17,55 +34,72 @@
 //! # Why it is not in the block manifest
 //!
 //! Registration happens from the consumer, via `ImpresspressBuilder::extra_block`
-//! and `add_route`, gated on the `browser-devtools` feature — the block is
-//! registered wherever the feature is compiled in, and only its `/b/dev`
-//! ROUTE is keyed on the deployment being a workspace rather than an exported
-//! bundle (`SandboxMode`, spec amendment 19) — never on a stored variable.
-//! `feature_block_manifest!` only enumerates blocks whose constructors take no
-//! arguments, and — more to the point — the sandbox's security model
-//! (design §13) depends on this block being absent from every normal
-//! deployment, not merely disabled in one.
+//! and `add_route`, gated on `impresspress-web`'s `browser-devtools` feature —
+//! the block is registered wherever the feature is compiled in, and only its
+//! `/b/dev` ROUTE is keyed on the deployment being a workspace rather than an
+//! exported bundle (`SandboxMode`, spec amendment 19) — never on a stored
+//! variable. `feature_block_manifest!` only enumerates blocks whose
+//! constructors take no arguments, and — more to the point — the sandbox's
+//! security model (design §13) depends on this block being absent from every
+//! normal deployment, not merely disabled in one.
 
+// The runtime half (`site-runtime`, this module's own gate).
 pub mod activation;
 pub mod artifacts;
-pub mod assets;
 pub mod blobs;
-pub mod blocks_api;
 pub mod bypass;
-pub mod contracts;
 pub mod control;
 pub mod data_snapshot;
-pub mod enter;
-pub mod export;
-pub mod files;
 pub mod gc;
 pub mod generation;
-pub mod generations_api;
 pub mod migrations;
-pub mod page;
 pub mod paths;
 pub mod publisher;
 pub mod repo;
 pub mod retention;
-pub mod scaffold;
 pub mod seed;
-pub mod status;
 pub mod stored_types;
-pub mod tools;
 pub mod validation;
 pub mod workspace;
+
+// The workspace half: the HTTP surface and everything only it reaches.
+#[cfg(feature = "block-dev")]
+pub mod assets;
+#[cfg(feature = "block-dev")]
+pub mod blocks_api;
+#[cfg(feature = "block-dev")]
+pub mod contracts;
+#[cfg(feature = "block-dev")]
+pub mod enter;
+#[cfg(feature = "block-dev")]
+pub mod export;
+#[cfg(feature = "block-dev")]
+pub mod files;
+#[cfg(feature = "block-dev")]
+pub mod generations_api;
+#[cfg(feature = "block-dev")]
+pub mod page;
+#[cfg(feature = "block-dev")]
+pub mod scaffold;
+#[cfg(feature = "block-dev")]
+pub mod status;
+#[cfg(feature = "block-dev")]
+pub mod tools;
+#[cfg(feature = "block-dev")]
 pub mod zip;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "block-dev"))]
 mod error_mapping_tests;
 
 use std::sync::Arc;
 
+#[cfg(feature = "block-dev")]
+use wafer_run::HttpMethod;
 use wafer_run::{
-    context::Context, Block, BlockInfo, CollectionSchema, HttpMethod, InputStream, InstanceMode,
+    context::Context, Block, BlockInfo, CollectionSchema, InputStream, InstanceMode,
     LifecycleEvent, Message, OutputStream, WaferError,
 };
 
@@ -76,6 +110,7 @@ pub use self::{
         ValidationFailure, ValidationStage,
     },
 };
+#[cfg(feature = "block-dev")]
 use crate::{
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
     http::ResponseBuilder,
@@ -84,13 +119,24 @@ use crate::{
 /// Registered block name.
 pub const BLOCK_NAME: &str = "impresspress/dev";
 
+/// The block's `info()` summary: what this build compiled in.
+#[cfg(feature = "block-dev")]
+const SUMMARY: &str = "Browser development sandbox control plane";
+#[cfg(not(feature = "block-dev"))]
+const SUMMARY: &str = "Site generation ledger and seed import";
+
 /// The route prefix the workspace is served under. Registered as a
 /// [`crate::routing::ExtraRoute`] at `Admin`, so the router — not any handler
 /// in this module — is what keeps the sandbox admin-only.
+///
+/// Defined in a `site-runtime` build as well, where nothing routes it,
+/// because validation reserves it there too
+/// ([`validation::builtin_route_prefixes`]).
 pub const ROUTE_PREFIX: &str = "/b/dev";
 
 /// The one-click entry page (2026-10-02 amendment to design §4): the single
 /// path under [`ROUTE_PREFIX`] an anonymous visitor can reach. See [`enter`].
+#[cfg(feature = "block-dev")]
 pub const ENTER_PATH: &str = "/b/dev/enter";
 
 /// Every route a **workspace** registers for this block, in the order the
@@ -103,7 +149,9 @@ pub const ENTER_PATH: &str = "/b/dev/enter";
 /// has to come first, or the `Admin` prefix would claim it and the page whose
 /// whole purpose is to sign a visitor in would demand a session.
 ///
-/// An exported bundle registers none of them ([`DevBlock::runtime_only`]).
+/// A build without `block-dev` has no such list; a `block-dev` build running
+/// as an exported bundle ([`DevBlock::runtime_only`]) registers none of them.
+#[cfg(feature = "block-dev")]
 pub const WORKSPACE_ROUTES: &[(&str, crate::routing::RouteAccess)] = &[
     (ENTER_PATH, crate::routing::RouteAccess::Public),
     (ROUTE_PREFIX, crate::routing::RouteAccess::Admin),
@@ -116,6 +164,7 @@ pub const WORKSPACE_ROUTES: &[(&str, crate::routing::RouteAccess)] = &[
 pub const WAFER_GUEST_VERSION: u32 = 2;
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
+#[cfg(feature = "block-dev")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     /// `GET /b/dev` — the workspace document.
@@ -165,8 +214,10 @@ pub enum Route {
 }
 
 /// The block's HTTP surface: what `handle()` dispatches on and what the
-/// workspace `info()` generates its endpoints from (an exported bundle
-/// declares none of it; see [`DevBlock::runtime_only`]). Every row but one is
+/// workspace `info()` generates its endpoints from. A build without
+/// `block-dev` has no such table, and a `block-dev` build running as an
+/// exported bundle declares none of it ([`DevBlock::runtime_only`]). Every row
+/// but one is
 /// `Admin` (design §13); the router is the sole gate, so the declaration is
 /// what pins that tier where the router can enforce it. The exception is the
 /// entry page, which is `Public` because signing the visitor in is its job
@@ -178,6 +229,7 @@ pub enum Route {
 /// separators, and putting it in the URL would mean every client had to
 /// percent-encode it correctly to name a file in a subdirectory. The path
 /// travels in the JSON body, where it needs no encoding at all.
+#[cfg(feature = "block-dev")]
 pub const ROUTES: &[EndpointRoute<Route>] = &[
     // The document and its three assets carry no schemas — there is no JSON
     // contract to describe, and `has_schema()` therefore keeps all four out
@@ -373,6 +425,7 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
 /// what makes that unconditional: an `OutputStream`'s meta is fixed when it is
 /// built, so a wrapper would have to buffer the whole (possibly streaming)
 /// response to change it.
+#[cfg(feature = "block-dev")]
 pub(crate) fn no_store() -> ResponseBuilder {
     ResponseBuilder::new().set_header("Cache-Control", "no-store")
 }
@@ -404,6 +457,7 @@ pub(crate) fn no_store_error(code: wafer_run::ErrorCode, message: &str) -> Outpu
 /// lets an explicit `resp.status` on the error's meta win over the
 /// code-derived default, which is how a status outside the enum is expressed
 /// without inventing a code the rest of the runtime would not understand.
+#[cfg(feature = "block-dev")]
 pub(crate) fn no_store_error_status(
     code: wafer_run::ErrorCode,
     status: u16,
@@ -428,6 +482,7 @@ pub(crate) fn no_store_error_status(
 /// is sealed. The `Internal` arm still goes through
 /// [`crate::http::err_internal`], the one deliberate exception
 /// [`no_store_error`] already documents.
+#[cfg(feature = "block-dev")]
 pub(crate) fn no_store_db_error(error: WaferError, not_found: &str, context: &str) -> OutputStream {
     seal_no_store(
         crate::blocks::crud::classify_db_error(error, Some(not_found), context),
@@ -439,6 +494,7 @@ pub(crate) fn no_store_db_error(error: WaferError, not_found: &str, context: &st
 /// — the [`crate::blocks::crud::db_error_internal`] of this pair, and split
 /// for the same reason: a `NotFound` from a listing the block addressed
 /// itself names no generation of the caller's.
+#[cfg(feature = "block-dev")]
 pub(crate) fn no_store_db_error_internal(error: WaferError, context: &str) -> OutputStream {
     seal_no_store(
         crate::blocks::crud::classify_db_error(error, None, context),
@@ -447,6 +503,7 @@ pub(crate) fn no_store_db_error_internal(error: WaferError, context: &str) -> Ou
 }
 
 /// Seal a [`crate::blocks::crud::DbFailure`] as a `/b/dev` response.
+#[cfg(feature = "block-dev")]
 fn seal_no_store(failure: crate::blocks::crud::DbFailure, context: &str) -> OutputStream {
     match failure {
         crate::blocks::crud::DbFailure::Refused(refusal) => {
@@ -615,20 +672,34 @@ impl DevShared {
     }
 }
 
-/// The browser development sandbox control plane (`impresspress/dev`).
+/// The browser development sandbox's block (`impresspress/dev`).
 pub struct DevBlock {
+    // Read only by the workspace dispatch in `handle`. A build without
+    // `block-dev` has no dispatch, and keeps the field so `runtime_only` is
+    // handed the same shared state in every build.
+    #[cfg_attr(
+        not(feature = "block-dev"),
+        expect(
+            dead_code,
+            reason = "only the block-dev dispatch in `handle` reads the shared state"
+        )
+    )]
     shared: Arc<DevShared>,
     /// Whether the runtime that registered this block also routed
     /// [`ROUTE_PREFIX`] — the workspace half of the sandbox.
     ///
-    /// The block is registered in BOTH of `SandboxMode`'s compiled-in modes,
-    /// because its `lifecycle(Init)` is what creates the ledger tables the
-    /// seed import and the generation history write to. Only the workspace
-    /// mode routes it. What this field carries is that difference, into the
-    /// one place that would otherwise describe a surface that is not there:
-    /// [`Block::info`] — whose `endpoints` become `/openapi.json` and whose
-    /// `admin_url` becomes an "Open" button on `/b/admin/blocks`, for every
-    /// registered block, routed or not.
+    /// A `block-dev` build registers the block in BOTH of `SandboxMode`'s
+    /// compiled-in modes, because its `lifecycle(Init)` is what creates the
+    /// ledger tables the seed import and the generation history write to.
+    /// Only the workspace mode routes it. What this field carries is that
+    /// difference, into the one place that would otherwise describe a
+    /// surface that is not there: [`Block::info`] — whose `endpoints` become
+    /// `/openapi.json` and whose `admin_url` becomes an "Open" button on
+    /// `/b/admin/blocks`, for every registered block, routed or not.
+    ///
+    /// A build without `block-dev` has no workspace to carry, so no field:
+    /// its block is always [`Self::runtime_only`].
+    #[cfg(feature = "block-dev")]
     workspace: bool,
 }
 
@@ -636,6 +707,7 @@ impl DevBlock {
     /// The sandbox with its workspace half: this runtime routes
     /// [`ROUTE_PREFIX`], so the endpoints below are real and `/b/dev` is
     /// where an admin goes to reach them.
+    #[cfg(feature = "block-dev")]
     pub fn with_workspace(shared: Arc<DevShared>) -> Self {
         Self {
             shared,
@@ -652,9 +724,12 @@ impl DevBlock {
     /// blocks page — the exact drift
     /// `routes_and_endpoints_stay_in_lockstep` exists to catch, one level up
     /// from where that test can see it.
+    ///
+    /// The only form a build without `block-dev` has.
     pub fn runtime_only(shared: Arc<DevShared>) -> Self {
         Self {
             shared,
+            #[cfg(feature = "block-dev")]
             workspace: false,
         }
     }
@@ -666,41 +741,39 @@ impl Block for DevBlock {
         // The half that is true in both modes: the block exists, it owns
         // these tables, and its migrations ran. An exported bundle's ledger
         // is as real as a workspace's.
-        let base = BlockInfo::new(
-            BLOCK_NAME,
-            "0.1.0",
-            "http-handler@v1",
-            "Browser development sandbox control plane",
-        )
-        .instance_mode(InstanceMode::Singleton)
-        .requires(vec![
-            "wafer-run/database".into(),
-            "wafer-run/storage".into(),
-            "wafer-run/config".into(),
-        ])
-        // Advisory table list — the schema itself lives solely in
-        // `migrations/001_dev_schema.{sqlite,postgres}.sql`.
-        .collections(vec![
-            CollectionSchema::new(repo::generations::TABLE),
-            CollectionSchema::new(repo::builds::TABLE),
-            CollectionSchema::new(repo::runtime_state::TABLE),
-        ])
-        .category(wafer_run::BlockCategory::Feature)
-        // The sandbox is registered only where it is meant to exist; a
-        // deployment turns it off by not building it, not by an admin toggle
-        // that would leave a half-live control plane behind.
-        .can_disable(false);
+        let base = BlockInfo::new(BLOCK_NAME, "0.1.0", "http-handler@v1", SUMMARY)
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec![
+                "wafer-run/database".into(),
+                "wafer-run/storage".into(),
+                "wafer-run/config".into(),
+            ])
+            // Advisory table list — the schema itself lives solely in
+            // `migrations/001_dev_schema.{sqlite,postgres}.sql`.
+            .collections(vec![
+                CollectionSchema::new(repo::generations::TABLE),
+                CollectionSchema::new(repo::builds::TABLE),
+                CollectionSchema::new(repo::runtime_state::TABLE),
+            ])
+            .category(wafer_run::BlockCategory::Feature)
+            // The sandbox is registered only where it is meant to exist; a
+            // deployment turns it off by not building it, not by an admin
+            // toggle that would leave a half-live control plane behind.
+            .can_disable(false);
 
         // The half that depends on a route existing. An exported bundle has
-        // none of it — see `Self::runtime_only`.
-        if !self.workspace {
-            return base;
+        // none of it — see `Self::runtime_only` — and a build without
+        // `block-dev` has no route table to declare it from.
+        #[cfg(feature = "block-dev")]
+        if self.workspace {
+            return base
+                .endpoints(endpoint_match::declare(ROUTES))
+                .admin_url(ROUTE_PREFIX);
         }
-
-        base.endpoints(endpoint_match::declare(ROUTES))
-            .admin_url(ROUTE_PREFIX)
+        base
     }
 
+    #[cfg(feature = "block-dev")]
     async fn handle(
         &self,
         ctx: &dyn Context,
@@ -746,6 +819,14 @@ impl Block for DevBlock {
             Route::ApiExportManifest => export::handle_manifest(ctx, &self.shared).await,
             Route::ApiExport => export::handle_export(ctx, &self.shared).await,
         }
+    }
+
+    /// A build without `block-dev` has no HTTP surface at all: no dispatch
+    /// table, no handler, no route registered for it. Anything that reaches
+    /// the block anyway is answered as a route that does not exist.
+    #[cfg(not(feature = "block-dev"))]
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found")
     }
 
     async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
@@ -951,6 +1032,7 @@ mod tests {
     /// an endpoint for this block. Every row and every declaration but the
     /// entry page's is `Admin`, so the summary is compared too: it is what
     /// proves the rows carry the declaration rather than merely matching it.
+    #[cfg(feature = "block-dev")]
     #[test]
     fn info_endpoints_come_from_the_table() {
         use wafer_run::Block as _;
@@ -974,6 +1056,7 @@ mod tests {
     /// Exactly one row is reachable without a session, and it is the entry
     /// page. A second `Public` row would be an unauthenticated door into the
     /// control plane, so the count is pinned rather than left to review.
+    #[cfg(feature = "block-dev")]
     #[test]
     fn the_entry_page_is_the_only_public_row() {
         let public: Vec<&str> = ROUTES
@@ -989,6 +1072,7 @@ mod tests {
         assert!(ENTER_PATH.starts_with(ROUTE_PREFIX));
     }
 
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn every_response_the_block_builds_is_no_store() {
         let buf = no_store()

@@ -1,17 +1,18 @@
 //! Generations, the activation queue, the site publisher and boot recovery.
 //!
-//! Gated on `block-dev` for the same reason `dev_files.rs` is: the block does
-//! not exist in a default-feature build, so these tests must not compile
-//! there.
+//! Gated on `block-dev` for the same reason `dev_files.rs` is: these tests
+//! drive the workspace half of the block (its routes and the
+//! `TestContext::with_dev*` fixtures), which no build without that feature
+//! compiles. The runtime half's own seed-to-live-site path is
+//! `tests/site_runtime.rs`, on the `site-runtime` build.
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{
     blocks::dev::{
         activation::{self, ActivationError, ActivationIntent},
         artifacts, blobs,
-        contracts::SiteManifest,
         control::{DynamicBlockSpec, DynamicRoute, GenerationAnnouncement, RouteAccessKind},
-        generation::{self, GenerationManifest},
+        generation::{self, GenerationManifest, SiteManifest},
         repo::{
             self,
             generations::{self, GenerationCause, GenerationStatus, NewGeneration},

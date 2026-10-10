@@ -139,10 +139,11 @@ pub struct TestContext {
     /// namespace actually holds.
     storage: Option<Arc<InMemoryStorageService>>,
     /// The shared state the registered `impresspress/dev` block was built
-    /// over, when [`Self::with_dev`] installed one. Handed back by
-    /// [`Self::dev_shared`] so a test can drive the activation queue directly
-    /// rather than only through HTTP.
-    #[cfg(feature = "block-dev")]
+    /// over, when [`Self::with_site_runtime`] or (under `block-dev`)
+    /// `Self::with_dev` installed one. Handed back by [`Self::dev_shared`] so
+    /// a test can drive the activation queue directly rather than only
+    /// through HTTP.
+    #[cfg(feature = "site-runtime")]
     dev_shared: Option<Arc<crate::blocks::dev::DevShared>>,
     /// Whether [`Self::dispatch_resolved_with_input`] and
     /// [`Self::request_with_input`] run each request the way the browser's
@@ -290,7 +291,7 @@ impl TestContext {
             wrap_grants: Arc::default(),
             extra_routes: Vec::new(),
             storage: None,
-            #[cfg(feature = "block-dev")]
+            #[cfg(feature = "site-runtime")]
             dev_shared: None,
             defers_after_response: false,
             _db_file: db_file,
@@ -872,10 +873,72 @@ impl TestContext {
     /// rules themselves, such as an older worker that hands none.
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added_and_bypass(
-        mut self,
+        self,
         control: Arc<dyn crate::blocks::dev::RuntimeControl>,
         shell: Arc<dyn crate::blocks::dev::ShellSource>,
         bypass: crate::blocks::dev::BypassRules,
+    ) -> Self {
+        use crate::blocks::dev;
+
+        let shared = dev::DevShared::new(control, shell, bypass);
+        let block = dev::DevBlock::with_workspace(shared.clone());
+        self.with_dev_block_added(shared, block, dev::WORKSPACE_ROUTES)
+            .await
+    }
+
+    /// Build a `TestContext` with admin + dev-sandbox migrations applied and
+    /// the `impresspress/dev` block registered over `control` the way an
+    /// exported site registers it: the runtime half alone
+    /// ([`crate::blocks::dev::DevBlock::runtime_only`]), with no route.
+    ///
+    /// Everything else is what [`Self::with_dev`] applies — the storage
+    /// wiring, the [`crate::blocks::dev::wrap_grants`] and WRAP enforcement,
+    /// after-response deferral — because the runtime half reaches the same
+    /// stores under the same grants in both builds. Available without
+    /// `block-dev`, which is what lets a `site-runtime`-only build test the
+    /// seed import, activation and publishing on their own.
+    #[cfg(feature = "site-runtime")]
+    pub async fn with_site_runtime(control: Arc<dyn crate::blocks::dev::RuntimeControl>) -> Self {
+        Self::with_admin()
+            .await
+            .with_site_runtime_added(control)
+            .await
+    }
+
+    /// [`Self::with_site_runtime`] on top of an EXISTING fixture — for a test
+    /// that needs another block's tables first (a seed whose `data.json`
+    /// carries products rows needs the products block's), the way
+    /// `with_dev_added` serves the workspace.
+    #[cfg(feature = "site-runtime")]
+    pub async fn with_site_runtime_added(
+        self,
+        control: Arc<dyn crate::blocks::dev::RuntimeControl>,
+    ) -> Self {
+        use crate::blocks::dev;
+
+        // `DevShared` takes a shell in every build today; the runtime half
+        // never reads it (the export is its one reader), so the plausible
+        // default serves.
+        let shared = dev::DevShared::new(
+            control,
+            Arc::new(dev::test_support::FakeShell::new()),
+            dev::test_support::fake_bypass_rules(),
+        );
+        let block = dev::DevBlock::runtime_only(shared.clone());
+        self.with_dev_block_added(shared, block, &[]).await
+    }
+
+    /// The one function that wires the `impresspress/dev` block into a
+    /// fixture, in whichever form the caller built: its migrations, the
+    /// block, the object store behind `wafer-run/storage`, the extra routes
+    /// the form registers (none for the runtime half), the WRAP grants and
+    /// the after-response deferral.
+    #[cfg(feature = "site-runtime")]
+    async fn with_dev_block_added(
+        mut self,
+        shared: Arc<crate::blocks::dev::DevShared>,
+        block: crate::blocks::dev::DevBlock,
+        routes: &[(&str, crate::routing::RouteAccess)],
     ) -> Self {
         use crate::blocks::dev;
 
@@ -885,10 +948,8 @@ impl TestContext {
             dev::migrations::POSTGRES_MIGRATIONS,
         )
         .await;
-        let shared = dev::DevShared::new(control, shell, bypass);
-        self.dev_shared = Some(shared.clone());
-        let block = Arc::new(dev::DevBlock::with_workspace(shared));
-        self.register_block(dev::BLOCK_NAME, block);
+        self.dev_shared = Some(shared);
+        self.register_block(dev::BLOCK_NAME, Arc::new(block));
         // The workspace store (blobs + `workspace.json`) lives in storage,
         // so the fixture needs a real object store behind the production
         // `wafer-run/storage` block — its handler is what turns the block's
@@ -897,7 +958,7 @@ impl TestContext {
         let store = Arc::new(InMemoryStorageService::new());
         self.storage = Some(store.clone());
         self.register_block("wafer-run/storage", crate::blocks::storage::create(store));
-        for (prefix, access) in dev::WORKSPACE_ROUTES {
+        for (prefix, access) in routes {
             self.add_extra_route(ExtraRoute::new(
                 (*prefix).to_string(),
                 dev::BLOCK_NAME.to_string(),
@@ -928,11 +989,11 @@ impl TestContext {
     /// The same `Arc` the block holds — not a copy — so a test that drives
     /// `activation::request` through this handle contends for the very queue
     /// the HTTP handlers use.
-    #[cfg(feature = "block-dev")]
+    #[cfg(feature = "site-runtime")]
     pub fn dev_shared(&self) -> Arc<crate::blocks::dev::DevShared> {
-        self.dev_shared
-            .clone()
-            .expect("this fixture registered no dev block; use TestContext::with_dev")
+        self.dev_shared.clone().expect(
+            "this fixture registered no dev block; use TestContext::with_dev or with_site_runtime",
+        )
     }
 
     /// Read an object out of the fixture's object store *underneath* the
@@ -4211,25 +4272,31 @@ pub async fn output_is_error(out: OutputStream, code: &str) -> bool {
 ))]
 pub fn real_block_infos() -> Vec<BlockInfo> {
     #[cfg_attr(
-        not(feature = "block-dev"),
+        not(feature = "site-runtime"),
         expect(unused_mut, reason = "only the feature-gated dev push below needs it")
     )]
     let mut infos = crate::blocks::all_block_infos();
 
     // The dev sandbox is registered by the browser runtime alone
     // (`impresspress-web`), so it is not in the build's block manifest, and
-    // ships only under its own (non-default) feature. Its `info()` is
-    // declarative — neither the `RuntimeControl` nor the `ShellSource` handle
-    // it is built with is ever called here, so the test doubles suffice.
-    #[cfg(feature = "block-dev")]
-    infos.push(
-        crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
+    // ships only under its own (non-default) features — in the form each
+    // build registers: the workspace under `block-dev`, the runtime half
+    // alone under `site-runtime` without it. Its `info()` is declarative —
+    // neither the `RuntimeControl` nor the `ShellSource` handle it is built
+    // with is ever called here, so the test doubles suffice.
+    #[cfg(feature = "site-runtime")]
+    {
+        let shared = crate::blocks::dev::DevShared::new(
             crate::blocks::dev::test_support::FakeControl::new(),
             Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
             crate::blocks::dev::test_support::fake_bypass_rules(),
-        ))
-        .info(),
-    );
+        );
+        #[cfg(feature = "block-dev")]
+        let block = crate::blocks::dev::DevBlock::with_workspace(shared);
+        #[cfg(not(feature = "block-dev"))]
+        let block = crate::blocks::dev::DevBlock::runtime_only(shared);
+        infos.push(block.info());
+    }
 
     infos
 }

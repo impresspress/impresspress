@@ -1,8 +1,10 @@
 //! Seed-on-boot: importing generation 0 from a bundle the origin serves.
 //!
-//! Gated on `block-dev` for the same reason `dev_activation.rs` is: the block
-//! does not exist in a default-feature build, so these tests must not compile
-//! there.
+//! Gated on `block-dev` for the same reason `dev_activation.rs` is: these
+//! tests use the workspace half of the block (the `TestContext::with_dev*`
+//! fixtures, the status route, `blocks_api`), which no build without that
+//! feature compiles. The seed import itself is the runtime half's;
+//! `tests/site_runtime.rs` drives it on the `site-runtime` build.
 //!
 //! The fetch seam is what makes this host-testable at all — the real source is
 //! the service worker's own `fetch`, and `MapFetch` (from `dev::test_support`)

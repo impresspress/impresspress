@@ -1,8 +1,8 @@
 //! The dev sandbox's workspace store — `/b/dev/api/files*`.
 //!
-//! Gated on `block-dev` for the same reason `dev_status.rs` is: the block does
-//! not exist in a default-feature build, so these tests must not compile
-//! there.
+//! Gated on `block-dev` for the same reason `dev_status.rs` is: these tests
+//! drive the workspace half of the block, which no build without that
+//! feature compiles.
 #![cfg(feature = "block-dev")]
 
 use base64ct::{Base64, Encoding};

@@ -10,12 +10,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     activation::ProgressStep,
     control::{DynamicBlockSpec, DynamicRoute},
-    generation::{GenerationDiff, GenerationManifest},
+    generation::{GenerationDiff, GenerationManifest, GenerationSummary},
     paths::MAX_BATCH_FILES,
-    repo::{
-        generations::{GenerationCause, GenerationStatus},
-        runtime_state::ActivationPhase,
-    },
+    repo::runtime_state::ActivationPhase,
     scaffold::Template,
     validation::Diagnostic,
     workspace::FileEntry,
@@ -88,53 +85,6 @@ pub struct StorageUsage {
     pub retained_generations: u32,
 }
 
-/// One entry in the publication ledger, as the status and generation views
-/// publish it.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GenerationSummary {
-    /// Generation id.
-    pub id: String,
-    /// The generation this one was derived from, or null for the first.
-    pub parent_id: Option<String>,
-    /// What created this generation.
-    pub cause: GenerationCause,
-    /// Where the generation sits in its lifecycle.
-    pub status: GenerationStatus,
-    /// RFC 3339 creation time.
-    pub created_at: String,
-    /// RFC 3339 time the generation went live, or null if it never did.
-    pub activated_at: Option<String>,
-    // Written with the status by each writer of `failed` (listed on
-    // `GenerationStatus::Failed`) and by nothing else: `set_status` leaves the
-    // stored message alone when given none, and no transition leaves
-    // `failed`. For an activation that failed it is `ActivationError`'s
-    // `Display`, which is also the refusal `ActivationError::into_response`
-    // answers the publishing request with.
-    /// Why the generation failed: set when `status` is `failed`, null
-    /// otherwise.
-    ///
-    /// When its validation or activation failed, this is the message a
-    /// request that publishes it is refused with, and it names what failed:
-    /// site content or a block artifact that is not stored, the error that
-    /// stopped the blocks from loading, or a storage failure. When the
-    /// sandbox stopped before its activation finished, it says that instead,
-    /// which is not a verdict on the generation's content. When the sandbox
-    /// could not read the generation's stored manifest back on its next start,
-    /// it says that, and `site_files` and `blocks` are null.
-    pub failure_message: Option<String>,
-    // `None` only from the ledger views (`generations_api`), which summarize
-    // every row whether or not its manifest columns parse; a summary of a
-    // generation that was just activated always has its manifest.
-    /// Number of files in the generation's site manifest, or null when its
-    /// stored manifest cannot be read back (`failure_message` then says so
-    /// for a generation the sandbox abandoned over it).
-    pub site_files: Option<u32>,
-    /// Number of blocks in the generation's block manifest, or null when its
-    /// stored manifest cannot be read back.
-    pub blocks: Option<u32>,
-}
-
 /// A block serving in the active generation.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -158,20 +108,6 @@ pub struct ActivationView {
     pub phase: ActivationPhase,
     /// Human-readable detail for the progress panel.
     pub detail: String,
-}
-
-/// The `site` half of a generation manifest (design §11.3).
-///
-/// Its entries are [`FileEntry`] — the workspace manifest's own type, with
-/// the `site/` prefix stripped. A generation IS the workspace's `site/`
-/// entries frozen, so a separate identically-shaped type would be a mapping
-/// layer between two spellings of one thing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SiteManifest {
-    /// Every file the generation publishes, path relative to the site root.
-    #[serde(default)]
-    pub files: Vec<FileEntry>,
 }
 
 impl ActiveBlockView {

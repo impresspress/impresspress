@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_blob_round_trips_under_the_hash_of_its_content() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let (sha, stored) = put(&ctx, b"hello").await.expect("put");
         assert_eq!(sha, sha256_hex(b"hello"));
         assert_eq!(stored, Stored::New);
@@ -141,7 +141,7 @@ mod tests {
     /// from charging twice for one stored copy.
     #[tokio::test]
     async fn putting_the_same_bytes_twice_is_the_same_blob() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let (first, first_stored) = put(&ctx, b"hello").await.expect("put");
         let (second, second_stored) = put(&ctx, b"hello").await.expect("put again");
         assert_eq!(first, second);
@@ -160,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_hashed_is_put_without_the_second_hash() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let sha = sha256_hex(b"hello");
         assert_eq!(
             put_hashed(&ctx, &sha, b"hello").await.expect("store"),
@@ -175,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_absent_blob_is_not_reported_present_and_reads_as_not_found() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let sha = sha256_hex(b"never stored");
         assert!(!exists(&ctx, &sha).await.expect("exists"));
         assert_eq!(
@@ -186,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_is_idempotent() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let (sha, _) = put(&ctx, b"hello").await.expect("put");
         delete(&ctx, &sha).await.expect("delete");
         assert!(!exists(&ctx, &sha).await.expect("exists"));
@@ -204,7 +204,7 @@ mod tests {
     /// for it and get `PermissionDenied`.
     #[tokio::test]
     async fn a_foreign_namespace_is_refused_even_when_the_object_is_there() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
 
         // Act as `impresspress/files`: a shallow clone of the fixture running
         // as another block, sharing the same storage block and the same
@@ -254,7 +254,7 @@ mod tests {
     /// above would pass just as well if every cross-block reach were broken.
     #[tokio::test]
     async fn the_granted_site_namespace_is_reachable() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         storage::put(
             &ctx,
             "@wafer-run/web/site",

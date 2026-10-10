@@ -182,13 +182,13 @@ mod tests {
 
     #[tokio::test]
     async fn migration_seeds_the_journal_at_rest() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         assert_eq!(read(&ctx).await.expect("read"), RuntimeState::default());
     }
 
     #[tokio::test]
     async fn write_then_read_round_trips_every_field() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         let state = RuntimeState {
             active_generation_id: Some("gen-active".to_string()),
             desired_generation_id: Some("gen-desired".to_string()),
@@ -204,7 +204,7 @@ mod tests {
     /// recovery owed on the next boot (design §7.3).
     #[tokio::test]
     async fn write_clears_the_ids_it_is_given_as_none() {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         write(
             &ctx,
             &RuntimeState {

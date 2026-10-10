@@ -5,6 +5,10 @@
 //! Exposed under `test-support` (as well as `cfg(test)`) so the `tests/`
 //! integration crates and downstream consumers can drive the dev block without
 //! a real runtime behind it.
+//!
+//! The doubles serve both halves of the block; the request helpers reach the
+//! workspace's `/b/dev` routes, so they exist only where those do
+//! (`block-dev`).
 
 use std::{
     collections::BTreeMap,
@@ -14,7 +18,9 @@ use std::{
     },
 };
 
-use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
+#[cfg(feature = "block-dev")]
+use wafer_run::OutputStream;
+use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo};
 
 use super::{
     blobs,
@@ -26,6 +32,7 @@ use super::{
     seed,
     seed::{SeedFetch, SeedFile},
 };
+#[cfg(feature = "block-dev")]
 use crate::test_support::{admin_msg, output_json, Session, TestContext};
 
 // ---------------------------------------------------------------------------
@@ -36,6 +43,7 @@ use crate::test_support::{admin_msg, output_json, Session, TestContext};
 /// schema and [`TestContext::with_sign_in_added`] on top — for a test about
 /// who may reach `/b/dev`, which sends real credentials through
 /// [`TestContext::request`].
+#[cfg(feature = "block-dev")]
 pub async fn dev_with_accounts(control: Arc<dyn RuntimeControl>) -> TestContext {
     TestContext::with_admin()
         .await
@@ -47,6 +55,7 @@ pub async fn dev_with_accounts(control: Arc<dyn RuntimeControl>) -> TestContext 
 }
 
 /// The password every account [`signed_in_as`] seeds signs in with.
+#[cfg(feature = "block-dev")]
 const ACCOUNT_PASSWORD: &str = "correct-horse-battery-staple";
 
 /// Seed an account with `role` on a [`dev_with_accounts`] fixture and sign it
@@ -55,6 +64,7 @@ const ACCOUNT_PASSWORD: &str = "correct-horse-battery-staple";
 /// Not the bootstrap admin's address: the workspace guide prints that one as
 /// the local credentials, so a page assertion on it must not be satisfied by
 /// the signed-in operator's own email.
+#[cfg(feature = "block-dev")]
 pub async fn signed_in_as(ctx: &TestContext, role: &str) -> Session {
     let email = format!("{role}-account@example.com");
     ctx.seed_account(&email, ACCOUNT_PASSWORD, role).await;
@@ -68,6 +78,7 @@ pub async fn signed_in_as(ctx: &TestContext, role: &str) -> Session {
 /// this is how each of the six `dev_*.rs` integration files opened every
 /// request it makes. What these requests exercise is the block behind the
 /// gate; who may pass the gate is asked with [`dev_with_accounts`].
+#[cfg(feature = "block-dev")]
 pub async fn dev_post(ctx: &TestContext, path: &str, body: serde_json::Value) -> OutputStream {
     ctx.dispatch_resolved_json(admin_msg("create", path), &body)
         .await
@@ -75,12 +86,14 @@ pub async fn dev_post(ctx: &TestContext, path: &str, body: serde_json::Value) ->
 
 /// `GET` a `/b/dev` route as an admin, through the router — the admin taken
 /// as already resolved, as [`dev_post`].
+#[cfg(feature = "block-dev")]
 pub async fn dev_get(ctx: &TestContext, path: &str) -> OutputStream {
     ctx.dispatch_resolved(admin_msg("retrieve", path)).await
 }
 
 /// The `/b/dev/api/status` projection — the generation, the block set and the
 /// store sizes, as the page reads them.
+#[cfg(feature = "block-dev")]
 pub async fn dev_status(ctx: &TestContext) -> serde_json::Value {
     output_json(dev_get(ctx, "/b/dev/api/status").await).await
 }
