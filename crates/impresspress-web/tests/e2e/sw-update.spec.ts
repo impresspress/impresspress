@@ -202,10 +202,10 @@ async function versionsOf(page: Page) {
  * Whether `history` (`versionsOf`) shows Chromium's stall rather than a
  * worker of ours that never goes idle: after a newer version than `oldId`
  * reached `installed`, the old version — running then — was stopped, which
- * Chromium does to a worker only once no event of it is in flight, and was
- * then started again. The stop must be one that happened after the install
- * (`stopping`, then `stopped`), not a `stopped` state merely reported again
- * after it.
+ * Chromium does to a worker only once the worker reports itself idle (no
+ * event of it still running), and was then started again. The stop must be
+ * one that happened after the install (`stopping`, then `stopped`), not a
+ * `stopped` state merely reported again after it.
  */
 function stoppedIdleThenRestarted(history: VersionState[], oldId: string): boolean {
   const installed = history.findIndex((v) => v.id !== oldId && v.status === 'installed');
@@ -262,11 +262,11 @@ const updatedTo = async (page: Page, runtime: string) =>
  *
  * (b) is accepted only with that mechanism's signature in DevTools' history
  * (`stoppedIdleThenRestarted`): after the new version installed, the old
- * worker stopped — Chromium stops a worker only once no event of it is in
- * flight, so it was idle — and was started again. A worker of ours that
- * never goes idle (an event `sw.js` never lets end) never stops, shows no
- * such history, and fails here instead of being stopped by the test — the
- * held-worker case below checks that.
+ * worker stopped — Chromium stops a worker only once the worker reports
+ * itself idle, so no event of ours held it — and was started again. A
+ * worker of ours that never goes idle (an event `sw.js` never lets end)
+ * never stops, shows no such history, and fails here instead of being
+ * stopped by the test — the held-worker case below checks that.
  *
  * Without DevTools the browser stops the old worker once it has been idle for
  * its timeout, and the new version activates then. So in (b) the test does
@@ -274,6 +274,18 @@ const updatedTo = async (page: Page, runtime: string) =>
  * and visits again; that must end in (a). If the stall comes back on that
  * second visit too, the test fails, which is also what a regression that
  * stops activation altogether looks like.
+ *
+ * Stop first, then visit — never the other way round. A navigation while
+ * (b) holds is another Chromium race, and one only DevTools opens: the
+ * navigation asks the old worker to stop as soon as it is idle, and under
+ * DevTools (`ServiceWorkerVersion::OnRequestTermination`) a worker so asked
+ * is stopped when it reports itself idle even if the navigation's `fetch`
+ * event has just been sent to it. The navigation is then never answered and
+ * never sent again (a page's subresource requests are sent again once; a
+ * navigation is not), and `goto` times out. Without DevTools a worker with an
+ * event in flight is not stopped, so a visitor's navigation is answered —
+ * a minimal worker with no runtime hangs the same way under Playwright and
+ * never without it, so nothing in `sw.js` is involved.
  */
 async function nextDeploymentTakesOver(
   page: Page,
