@@ -1,17 +1,26 @@
-//! A minimal, reproducible ZIP writer — stored entries only.
+//! A minimal, reproducible ZIP writer — DEFLATE where it helps, stored
+//! otherwise.
 //!
-//! The sandbox export bundle (design's Plan 4) is a zip a static host serves
-//! verbatim: `seed/site/*`, `seed/blocks/*.wasm`, `seed/data.json`. Nothing in
-//! that set benefits from DEFLATE — wasm modules and already-minified assets
-//! barely shrink, and a browser unzipping on demand doesn't need to pay a
-//! decompression cost either — so this writer only ever emits method-0
-//! (stored) entries, which keeps the whole implementation to the three record
-//! types the ZIP format defines (local file header, central directory header,
-//! end-of-central-directory) with no compressor pulled in.
+//! The sandbox export bundle (design's Plan 4) is a zip someone downloads and
+//! unpacks onto a static host: the runtime shell, `seed/site/*`,
+//! `seed/blocks/*`, `seed/data.json`. Nine tenths of it by size is the
+//! runtime's wasm, and wasm compresses well — measured on a dev-sandbox
+//! build, DEFLATE at level 6 takes the 10.1 MB runtime to 3.6 MB, `sql-wasm`
+//! to half, the JavaScript to between a fifth and a third. So each entry is DEFLATEd
+//! ([`DEFLATE_LEVEL`]) and written that way when that makes it smaller, and
+//! stored (method 0) when it does not — a short file, or one already
+//! compressed (an image) — so no entry costs more than its own size. Nothing
+//! reads the archive but an unzip tool; every one reads both methods.
+//!
+//! The implementation stays at the three record types the ZIP format defines
+//! (local file header, central directory header, end-of-central-directory),
+//! with `miniz_oxide`'s raw DEFLATE as the only compressor.
 //!
 //! Every entry carries the same fixed DOS date/time (2026-01-01 00:00:00):
 //! two exports of the same tree must produce byte-identical archives, and the
-//! wall-clock the export ran at is not part of that identity.
+//! wall-clock the export ran at is not part of that identity. The compressor
+//! is deterministic too — one crate version at one level gives one output
+//! for one input — so compressing does not take that property away.
 //!
 //! No ZIP64 — entries and the archive as a whole are refused once they would
 //! carry the classic format's `u32` offset/size fields past 4 GiB. The
@@ -35,9 +44,20 @@ const VERSION: u16 = 20;
 /// so a reader trusts `path` verbatim instead of guessing an OEM code page.
 const FLAG_UTF8: u16 = 0x0800;
 
-/// Compression method 0 — stored, no compression. See the module docs for
-/// why this writer never emits anything else.
+/// Compression method 0 — stored, no compression: an entry DEFLATE does not
+/// shrink.
 const METHOD_STORED: u16 = 0;
+
+/// Compression method 8 — DEFLATE (raw, no zlib wrapper), which "version
+/// needed to extract" 2.0 ([`VERSION`]) already covers.
+const METHOD_DEFLATED: u16 = 8;
+
+/// The DEFLATE level: `miniz_oxide`'s (and zlib's) default. Measured on the
+/// 10.1 MB dev-sandbox runtime wasm, built for wasm32 with this workspace's
+/// size-first release profile and run in wasmtime: level 1 gives 4.6 MB in
+/// 0.15 s, level 6 gives 3.6 MB in 0.44 s. The export runs once, on an
+/// explicit request, and the half second buys a megabyte off every download.
+const DEFLATE_LEVEL: u8 = 6;
 
 const LOCAL_HEADER_SIG: u32 = 0x0403_4b50;
 const CENTRAL_HEADER_SIG: u32 = 0x0201_4b50;
@@ -94,7 +114,7 @@ pub enum ZipError {
     /// classic (non-ZIP64) format's `u32` offset/size fields impose — either
     /// the entry data itself, or the central directory record `finish` will
     /// eventually have to write for it.
-    #[error("archive would exceed the 4 GiB limit this stored-entry writer supports (no ZIP64)")]
+    #[error("archive would exceed the 4 GiB limit this writer supports (no ZIP64)")]
     TooLarge,
     /// This archive already holds [`MAX_ENTRIES`] entries — one more would
     /// overflow the central directory's 16-bit entry-count fields, wrapping
@@ -109,14 +129,26 @@ pub enum ZipError {
 /// — this is purely the second record [`finish`](ZipWriter::finish) owes.
 struct CentralEntry {
     name: String,
-    crc32: u32,
-    size: u32,
+    facts: EntryFacts,
     offset: u32,
 }
 
-/// Builds a ZIP archive of stored (uncompressed) entries, byte-for-byte
-/// reproducible across runs for the same inputs in the same order. See the
-/// module docs for the format and reproducibility rationale.
+/// What both of an entry's records say about its data.
+#[derive(Clone, Copy)]
+struct EntryFacts {
+    /// [`METHOD_STORED`] or [`METHOD_DEFLATED`].
+    method: u16,
+    /// CRC-32 of the UNCOMPRESSED bytes, whichever the method.
+    crc32: u32,
+    /// Bytes the entry takes in the archive.
+    compressed_size: u32,
+    /// Bytes it unpacks to.
+    size: u32,
+}
+
+/// Builds a ZIP archive, byte-for-byte reproducible across runs for the same
+/// inputs in the same order. See the module docs for the format and
+/// reproducibility rationale.
 pub struct ZipWriter {
     buf: Vec<u8>,
     entries: Vec<CentralEntry>,
@@ -157,7 +189,8 @@ impl ZipWriter {
         }
     }
 
-    /// Add one stored entry. `path` must be relative (no leading `/`, no `.`
+    /// Add one entry, DEFLATEd if that makes it smaller and stored
+    /// otherwise. `path` must be relative (no leading `/`, no `.`
     /// or `..` segment, no empty segment — i.e.
     /// [`wafer_block::wrap::is_traversal_safe_path`]), forward-slash-separated
     /// (no `\`), unique within this archive, and at most 65535 UTF-8 bytes
@@ -187,13 +220,23 @@ impl ZipWriter {
 
         let offset = u32::try_from(self.buf.len()).map_err(|_| ZipError::TooLarge)?;
         let size = u32::try_from(bytes.len()).map_err(|_| ZipError::TooLarge)?;
-        // `u64` throughout, not `usize`: `offset` and `size` above cap
-        // `buf.len()` and `bytes.len()` at `u32::MAX` each, so on wasm32 —
+        // After the size check, so an entry the format cannot describe is
+        // refused before anything spends time compressing it.
+        let deflated = miniz_oxide::deflate::compress_to_vec(bytes, DEFLATE_LEVEL);
+        let (method, data) = if deflated.len() < bytes.len() {
+            (METHOD_DEFLATED, deflated.as_slice())
+        } else {
+            (METHOD_STORED, bytes)
+        };
+        // Never larger than `size`, which fit.
+        let compressed_size = u32::try_from(data.len()).map_err(|_| ZipError::TooLarge)?;
+        // `u64` throughout, not `usize`: `offset` and `compressed_size` above
+        // cap `buf.len()` and `data.len()` at `u32::MAX` each, so on wasm32 —
         // where `usize` is 32 bits — their sum overflows the type this used to
         // be computed in, before the ceiling below could refuse it. `path_len`
         // is `u16::MAX`-bounded by the check above, so the cast is lossless.
         let path_len = path.len() as u64;
-        let grows_by = LOCAL_HEADER_FIXED_LEN + path_len + u64::from(size);
+        let grows_by = LOCAL_HEADER_FIXED_LEN + path_len + u64::from(compressed_size);
         let central_entry_len = CENTRAL_HEADER_FIXED_LEN + path_len;
         // The full projected size of `finish`'s eventual output: this
         // entry's local header + data, every central directory record
@@ -209,16 +252,20 @@ impl ZipWriter {
             return Err(ZipError::TooLarge);
         }
 
-        let crc32 = crc32fast::hash(bytes);
-        write_local_header(&mut self.buf, path, crc32, size);
-        self.buf.extend_from_slice(bytes);
+        let facts = EntryFacts {
+            method,
+            crc32: crc32fast::hash(bytes),
+            compressed_size,
+            size,
+        };
+        write_local_header(&mut self.buf, path, facts);
+        self.buf.extend_from_slice(data);
 
         self.names.insert(path.to_string());
         self.central_dir_bytes += central_entry_len;
         self.entries.push(CentralEntry {
             name: path.to_string(),
-            crc32,
-            size,
+            facts,
             offset,
         });
         Ok(())
@@ -239,19 +286,18 @@ impl ZipWriter {
     }
 }
 
-/// Local file header (`PK\x03\x04`) plus the entry's raw bytes — everything
-/// [`ZipWriter::add`] writes immediately, ahead of the central directory.
-fn write_local_header(buf: &mut Vec<u8>, path: &str, crc32: u32, size: u32) {
+/// Local file header (`PK\x03\x04`), which [`ZipWriter::add`] writes
+/// immediately ahead of the entry's data and of the central directory.
+fn write_local_header(buf: &mut Vec<u8>, path: &str, facts: EntryFacts) {
     buf.extend_from_slice(&LOCAL_HEADER_SIG.to_le_bytes());
     buf.extend_from_slice(&VERSION.to_le_bytes());
     buf.extend_from_slice(&FLAG_UTF8.to_le_bytes());
-    buf.extend_from_slice(&METHOD_STORED.to_le_bytes());
+    buf.extend_from_slice(&facts.method.to_le_bytes());
     buf.extend_from_slice(&DOS_TIME.to_le_bytes());
     buf.extend_from_slice(&DOS_DATE.to_le_bytes());
-    buf.extend_from_slice(&crc32.to_le_bytes());
-    // Stored entries have no compression, so compressed size == uncompressed.
-    buf.extend_from_slice(&size.to_le_bytes());
-    buf.extend_from_slice(&size.to_le_bytes());
+    buf.extend_from_slice(&facts.crc32.to_le_bytes());
+    buf.extend_from_slice(&facts.compressed_size.to_le_bytes());
+    buf.extend_from_slice(&facts.size.to_le_bytes());
     buf.extend_from_slice(&(path.len() as u16).to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
     buf.extend_from_slice(path.as_bytes());
@@ -264,12 +310,12 @@ fn write_central_header(buf: &mut Vec<u8>, entry: &CentralEntry) {
     buf.extend_from_slice(&VERSION.to_le_bytes()); // version made by
     buf.extend_from_slice(&VERSION.to_le_bytes()); // version needed to extract
     buf.extend_from_slice(&FLAG_UTF8.to_le_bytes());
-    buf.extend_from_slice(&METHOD_STORED.to_le_bytes());
+    buf.extend_from_slice(&entry.facts.method.to_le_bytes());
     buf.extend_from_slice(&DOS_TIME.to_le_bytes());
     buf.extend_from_slice(&DOS_DATE.to_le_bytes());
-    buf.extend_from_slice(&entry.crc32.to_le_bytes());
-    buf.extend_from_slice(&entry.size.to_le_bytes());
-    buf.extend_from_slice(&entry.size.to_le_bytes());
+    buf.extend_from_slice(&entry.facts.crc32.to_le_bytes());
+    buf.extend_from_slice(&entry.facts.compressed_size.to_le_bytes());
+    buf.extend_from_slice(&entry.facts.size.to_le_bytes());
     buf.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
     buf.extend_from_slice(&0u16.to_le_bytes()); // file comment length
@@ -313,6 +359,76 @@ mod tests {
         assert_eq!(s, "<h1>x</h1>");
         assert_eq!(f.compression(), zip::CompressionMethod::Stored);
         assert_eq!(f.crc32(), crc32fast::hash(b"<h1>x</h1>"));
+    }
+
+    /// An entry DEFLATE shrinks is written DEFLATEd, and an independent
+    /// reader inflates it back to exactly the bytes that went in. A runtime
+    /// wasm shrinks by about two thirds; text by more.
+    #[test]
+    fn an_entry_deflate_shrinks_is_deflated() {
+        let text = "fn main() { println!(\"hello\"); }\n".repeat(200);
+        let mut w = ZipWriter::new();
+        w.add("seed/blocks/hello/src/main.rs", text.as_bytes())
+            .unwrap();
+        let bytes = w.finish();
+        assert!(
+            bytes.len() < text.len() / 4,
+            "a {}-byte archive of {} bytes of repetitive text is not compressed",
+            bytes.len(),
+            text.len()
+        );
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut f = archive.by_name("seed/blocks/hello/src/main.rs").unwrap();
+        assert_eq!(f.compression(), zip::CompressionMethod::Deflated);
+        assert_eq!(f.size(), text.len() as u64);
+        assert!(f.compressed_size() < f.size());
+        assert_eq!(f.crc32(), crc32fast::hash(text.as_bytes()));
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut f, &mut s).unwrap();
+        assert_eq!(s, text);
+    }
+
+    /// An entry DEFLATE would not make smaller — a short one, or bytes that
+    /// are already compressed — is stored as it is, so no entry ever costs
+    /// more in the archive than its own size.
+    #[test]
+    fn an_entry_deflate_would_not_shrink_is_stored() {
+        // xorshift: deterministic bytes with no redundancy for DEFLATE to use.
+        let mut state: u32 = 0x9E37_79B9;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        let mut w = ZipWriter::new();
+        w.add("noise.bin", &noise).unwrap();
+        w.add("tiny.wasm", b"\0asm\x01\0\0\0").unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(w.finish())).unwrap();
+        for (name, content) in [("noise.bin", &noise[..]), ("tiny.wasm", b"\0asm\x01\0\0\0")] {
+            let mut f = archive.by_name(name).unwrap();
+            assert_eq!(f.compression(), zip::CompressionMethod::Stored, "{name}");
+            assert_eq!(f.compressed_size(), content.len() as u64, "{name}");
+            let mut read = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut read).unwrap();
+            assert_eq!(read, content, "{name}");
+        }
+    }
+
+    /// The compressor is part of what makes two exports of one generation
+    /// byte-identical: the same entries give the same archive.
+    #[test]
+    fn deflated_archives_are_reproducible() {
+        let text = "<p>the same page</p>\n".repeat(500);
+        let build = || {
+            let mut w = ZipWriter::new();
+            w.add("seed/site/index.html", text.as_bytes()).unwrap();
+            w.add("README.md", b"# site").unwrap();
+            w.finish()
+        };
+        assert_eq!(build(), build());
     }
 
     #[test]

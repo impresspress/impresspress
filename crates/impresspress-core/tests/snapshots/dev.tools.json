@@ -11590,7 +11590,7 @@
               "description": "One entry of the export bundle: where it lands in the zip, and how big it\nis.",
               "properties": {
                 "bytes": {
-                  "description": "The entry's uncompressed size in bytes. The archive stores entries\nuncompressed, so this is also what it costs in the zip.",
+                  "description": "The entry's uncompressed size in bytes: what it unpacks to. The\narchive DEFLATEs an entry when that makes it smaller and stores it\notherwise, so this is the most it costs in the zip.",
                   "format": "uint64",
                   "minimum": 0,
                   "type": "integer"
@@ -11634,7 +11634,7 @@
             "type": "object"
           },
           "total_bytes": {
-            "description": "Total size of every entry's content. The archive itself is slightly\nlarger: each entry carries a local header and a central directory\nrecord naming it.",
+            "description": "Total size of every entry's content, unpacked. The archive itself is\nusually much smaller, because entries are DEFLATEd where that helps\n(the runtime wasm to about a third). Only when nothing compresses is\nit slightly larger: each entry carries a local header and a central\ndirectory record naming it.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
