@@ -1,7 +1,8 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { once } from 'node:events';
 import { type ChildProcess } from 'node:child_process';
-import { readFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   bootServiceWorker,
@@ -160,26 +161,59 @@ function deathsIn(context: BrowserContext): string[] {
   return deaths;
 }
 
+/** One `ServiceWorker.workerVersionUpdated` report of one version. */
+type VersionState = { id: string; scriptURL: string; status: string; runningStatus: string };
+
 /**
  * Every service-worker version of the page's origin as DevTools reports it
- * (`ServiceWorker.workerVersionUpdated`), latest state first-hand rather
- * than inferred from a page: `status` is installing / installed /
- * activating / activated / redundant, `runningStatus` whether it runs.
+ * (`ServiceWorker.workerVersionUpdated`), first-hand rather than inferred
+ * from a page: `status` is installing / installed / activating / activated /
+ * redundant, `runningStatus` stopped / starting / running / stopping. `all`
+ * is each version's latest state; `history` every report, in the order they
+ * came.
  */
 async function versionsOf(page: Page) {
   const cdp = await page.context().newCDPSession(page);
-  const versions = new Map<string, { id: string; scriptURL: string; status: string; runningStatus: string }>();
+  const versions = new Map<string, VersionState>();
+  const history: VersionState[] = [];
   cdp.on('ServiceWorker.workerVersionUpdated', (event: any) => {
     for (const v of event.versions) {
-      versions.set(v.versionId, { id: v.versionId, scriptURL: v.scriptURL, status: v.status, runningStatus: v.runningStatus });
+      const state = { id: v.versionId, scriptURL: v.scriptURL, status: v.status, runningStatus: v.runningStatus };
+      versions.set(v.versionId, state);
+      history.push(state);
     }
   });
   await cdp.send('ServiceWorker.enable');
+  const all = () => [...versions.values()];
   return {
-    all: () => [...versions.values()],
-    /** Stop every worker, as a browser does with idle ones. */
+    all,
+    history: () => [...history],
+    /** The id of the version that is `activated`, once there is one. */
+    activeId: async () => {
+      await expect.poll(() => all().some((v) => v.status === 'activated')).toBe(true);
+      return all().find((v) => v.status === 'activated')!.id;
+    },
+    /** Stop every worker, busy or not (`ServiceWorker.stopAllWorkers`). */
     stopAll: () => cdp.send('ServiceWorker.stopAllWorkers'),
   };
+}
+
+/**
+ * Whether `history` (`versionsOf`) shows Chromium's stall rather than a
+ * worker of ours that never goes idle: after a newer version than `oldId`
+ * reached `installed`, the old version — running then — was stopped, which
+ * Chromium does to a worker only once no event of it is in flight, and was
+ * then started again. The stop must be one that happened after the install
+ * (`stopping`, then `stopped`), not a `stopped` state merely reported again
+ * after it.
+ */
+function stoppedIdleThenRestarted(history: VersionState[], oldId: string): boolean {
+  const installed = history.findIndex((v) => v.id !== oldId && v.status === 'installed');
+  if (installed < 0) return false;
+  const old = history.slice(installed + 1).filter((v) => v.id === oldId).map((v) => v.runningStatus);
+  const stopping = old.indexOf('stopping');
+  const stopped = stopping < 0 ? -1 : old.indexOf('stopped', stopping);
+  return stopped >= 0 && old.indexOf('starting', stopped) >= 0;
 }
 
 const SETTLED = { installing: null, waiting: null, active: 'activated', activeControlsThisPage: true };
@@ -190,6 +224,90 @@ const viaWorker = (page: Page, urlPath: string) =>
     const response = await fetch(target, { cache: 'no-store' });
     return { status: response.status, text: await response.text() };
   }, urlPath);
+
+/**
+ * Whether the version with `runtime` answers `page` (`plainWorkerWith`) and
+ * the registration has settled on it (`SETTLED`).
+ */
+const updatedTo = async (page: Page, runtime: string) =>
+  JSON.stringify(await answering(page)) === JSON.stringify(plainWorkerWith(runtime)) &&
+  JSON.stringify(await registrationOf(page)) === JSON.stringify(SETTLED);
+
+/**
+ * Wait until the next deployment's version answers `page`, with only its
+ * `runtime` kept, and say how it got there. Called after the visit that made
+ * the browser find the new script; `oldId` is the version that answered the
+ * page before the deploy (`versions.activeId()`, `versionsOf` created before
+ * the deploy). `inStall` runs in outcome (b), before the second visit.
+ *
+ * Two outcomes, told apart from DevTools' own report of the versions:
+ *
+ * (a) `normal` — the new version activates and controls the page.
+ * (b) `chromium-stall` — the new version stays `installed`, waiting, and the
+ *     old one stays the active worker, answering the page.
+ *
+ * (b) is Chromium's rule for a version that called `skipWaiting()`
+ * (`ServiceWorkerRegistration::ActivateWaitingVersionWhenReady` and
+ * `ServiceWorkerVersion::StartWorkerInternal` in content/browser/
+ * service_worker): it activates only once the active worker has no work.
+ * When it installs while that worker is busy — answering the visit — Chromium
+ * asks the worker to stop as soon as it is idle, and waits. A request from the
+ * open page that starts the old worker again (the visit's own subresources,
+ * racing that stop) clears the ask, and nothing asks again: the restarted
+ * worker stops only by its ordinary idle timeout. Under DevTools, which
+ * Playwright attaches to every worker, an idle worker is never stopped unless
+ * asked, so the new version waits for Chromium's five-minute limit on a
+ * waiting `skipWaiting()` version. Nothing in `sw.js` can end that sooner: a
+ * worker cannot stop itself, and a waiting version cannot activate itself.
+ *
+ * (b) is accepted only with that mechanism's signature in DevTools' history
+ * (`stoppedIdleThenRestarted`): after the new version installed, the old
+ * worker stopped — Chromium stops a worker only once no event of it is in
+ * flight, so it was idle — and was started again. A worker of ours that
+ * never goes idle (an event `sw.js` never lets end) never stops, shows no
+ * such history, and fails here instead of being stopped by the test — the
+ * held-worker case below checks that.
+ *
+ * Without DevTools the browser stops the old worker once it has been idle for
+ * its timeout, and the new version activates then. So in (b) the test does
+ * what the browser does — stops the old worker, idle by the signature above,
+ * and visits again; that must end in (a). If the stall comes back on that
+ * second visit too, the test fails, which is also what a regression that
+ * stops activation altogether looks like.
+ */
+async function nextDeploymentTakesOver(
+  page: Page,
+  versions: Awaited<ReturnType<typeof versionsOf>>,
+  oldId: string,
+  runtime: string,
+  inStall: () => Promise<void> = async () => {},
+): Promise<'normal' | 'chromium-stall'> {
+  const reached = await expect
+    .poll(() => updatedTo(page, runtime), { timeout: 60_000 })
+    .toBe(true)
+    .then(() => true, () => false);
+  if (reached) return 'normal';
+  // (b) — read from DevTools, not inferred: a new version waiting, the old
+  // one still the active one, serving the page, and the history of the
+  // mechanism that leaves them so.
+  const newer = versions.all().filter((v) => v.id !== oldId && v.scriptURL.endsWith('/sw.js'));
+  expect(newer.map((v) => v.status), JSON.stringify(versions.all())).toContain('installed');
+  expect(versions.all().find((v) => v.id === oldId)?.status).toBe('activated');
+  expect(await answering(page)).toMatchObject({ script: '/sw.js', controls: true });
+  expect(
+    stoppedIdleThenRestarted(versions.history(), oldId),
+    `the new version is waiting, but the old worker did not stop and start again after it ` +
+      `installed — it was never idle: ${JSON.stringify(versions.history())}`,
+  ).toBe(true);
+  await inStall();
+
+  // The next visit: idle workers stopped, a navigation.
+  await versions.stopAll();
+  await page.goto('/', { waitUntil: 'load' });
+  await served(page);
+  await expect.poll(() => updatedTo(page, runtime), { timeout: 60_000 }).toBe(true);
+  return 'chromium-stall';
+}
 
 test('a rebuild that changed nothing ships the same worker, and a new runtime ships a new one', () => {
   // Two runs of the build over one source tree: the browser compares `sw.js`
@@ -226,6 +344,8 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     await bootServiceWorker(page);
     expect(await answering(page)).toEqual(plainWorkerWith(first));
     expect(await registrationOf(page)).toEqual(SETTLED);
+    const versions = await versionsOf(page);
+    const oldId = await versions.activeId();
 
     // Something only this browser has: a page written into the workspace and
     // published, both of which live in OPFS.
@@ -271,10 +391,17 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // is answered by the worker the browser already had; the browser's own
     // check after the navigation is what finds the new script.
     await page.goto('/', { waitUntil: 'load' });
-    await expect.poll(() => answering(page), { timeout: 120_000 }).toEqual(plainWorkerWith(next));
     // The new worker did not wait for this tab to close (`skipWaiting`): it
-    // is the active one, nothing is left waiting, and the open page is its.
-    await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
+    // is the active one, nothing is left waiting, and the open page is its —
+    // by either outcome `nextDeploymentTakesOver` describes. Usually the
+    // browser's check finds the new script after this visit, with the old
+    // worker idle, and (a) follows at once. The check can also land BEFORE
+    // the visit (the previous navigation's delayed update check, firing after
+    // the host has switched — CI has met it), so the new version installs
+    // while the old worker answers this visit, and that is (b)'s ordering.
+    const branch = await nextDeploymentTakesOver(page, versions, oldId, next);
+    test.info().annotations.push({ type: 'activation', description: branch });
+    console.log(`sw-update returning-browser case: activation ${branch}`);
 
     // ---- the site, on the new runtime ---------------------------------------
     // The next request is the new worker's first, so this is where it loads
@@ -319,19 +446,9 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 // timeout of the case above, which met it only when Chrome happened to stop
 // the worker. Stopping it here takes that path on every run.
 //
-// What the update then does has two outcomes, and the test tells them apart
-// from DevTools' own report of the versions:
-//
-// (a) the new version activates and controls the page, with only its
-//     runtime kept — the normal outcome;
-// (b) Chromium's lost activation (the PR that added this, #127, traces it):
-//     the new version stays `installed`, waiting, with the old one idle and
-//     still in charge. The guarantee a person gets then is the NEXT visit:
-//     the browser stops idle workers, and the next navigation brings the new
-//     version in. So the test stops them and navigates again, and that must
-//     end in (a) — if the stall comes back on that second visit too, it
-//     fails, which is also what a regression that stops activation
-//     altogether looks like.
+// What the update then does has the two outcomes `nextDeploymentTakesOver`
+// describes; here the restarted old worker is answering the visit when the
+// new version installs, which is what makes (b) common in this case.
 //
 // The branch taken is recorded as the test's `activation` annotation.
 test('a returning browser whose worker was stopped moves to the new deployment, with no recovery', async ({
@@ -356,8 +473,7 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
     expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
 
     const versions = await versionsOf(page);
-    await expect.poll(() => versions.all().some((v) => v.status === 'activated')).toBe(true);
-    const oldId = versions.all().find((v) => v.status === 'activated')!.id;
+    const oldId = await versions.activeId();
 
     // The browser stops the idle worker; then the deploy.
     await versions.stopAll();
@@ -374,37 +490,12 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
       expect(versions.all().filter((v) => v.scriptURL.includes('?recovery='))).toEqual([]);
       expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
     };
-    /** (a): the new version controls the page, with only its runtime kept. */
-    const updated = async () =>
-      JSON.stringify(await answering(page)) === JSON.stringify(plainWorkerWith(next)) &&
-      JSON.stringify(await registrationOf(page)) === JSON.stringify(SETTLED);
-
     // The visit. The old worker starts again to answer it, from the runtime
     // it kept — the page is the app, not the boot shell.
     await page.goto('/', { waitUntil: 'load' });
     await served(page);
 
-    let branch = 'normal';
-    const reached = await expect
-      .poll(updated, { timeout: 60_000 })
-      .toBe(true)
-      .then(() => true, () => false);
-    if (!reached) {
-      // (b) — read from DevTools, not inferred: a new version waiting, and
-      // the old one still the active one, serving the page.
-      const newer = versions.all().filter((v) => v.id !== oldId && v.scriptURL.endsWith('/sw.js'));
-      expect(newer.map((v) => v.status), JSON.stringify(versions.all())).toContain('installed');
-      expect(versions.all().find((v) => v.id === oldId)?.status).toBe('activated');
-      expect(await answering(page)).toMatchObject({ script: '/sw.js', controls: true });
-      await assertNoDeathNoRecovery();
-      branch = 'chromium-stall';
-
-      // The next visit: idle workers stopped, a navigation.
-      await versions.stopAll();
-      await page.goto('/', { waitUntil: 'load' });
-      await served(page);
-      await expect.poll(updated, { timeout: 60_000 }).toBe(true);
-    }
+    const branch = await nextDeploymentTakesOver(page, versions, oldId, next, assertNoDeathNoRecovery);
     test.info().annotations.push({ type: 'activation', description: branch });
     console.log(`sw-update stopped-worker case: activation ${branch}`);
 
@@ -414,6 +505,78 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
   } finally {
     await context.close();
     await stop(server);
+  }
+});
+
+/** The path a held bundle's worker answers with an event that never ends. */
+const HOLD_PATH = '/__sw-update-hold';
+
+/**
+ * `dist` with a worker that can be held busy for good: every file is the
+ * bundle's own (linked), except `sw.js`, whose `fetch` listener first answers
+ * `HOLD_PATH` and keeps that event open with a `waitUntil` that never
+ * settles — what a product bug that never lets an event end looks like.
+ * Returns the directory; the caller removes it.
+ */
+function heldWorkerBundle(dist: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sw-update-held-'));
+  for (const entry of readdirSync(dist)) {
+    if (entry !== 'sw.js') symlinkSync(path.join(dist, entry), path.join(dir, entry));
+  }
+  const listener = "self.addEventListener('fetch', (event) => {";
+  const script = workerScript(dist);
+  expect(script, `${dist}/sw.js has no fetch listener to hold`).toContain(listener);
+  writeFileSync(
+    path.join(dir, 'sw.js'),
+    script.replace(
+      listener,
+      `${listener}\n    if (new URL(event.request.url).pathname === '${HOLD_PATH}') {\n` +
+        `        event.waitUntil(new Promise(() => {}));\n` +
+        `        event.respondWith(new Response('held'));\n` +
+        `        return;\n    }`,
+    ),
+  );
+  return dir;
+}
+
+// The stall branch of `nextDeploymentTakesOver` is not a way round a worker
+// of ours that never goes idle. Here the old worker is held busy for good —
+// an event its `waitUntil` never lets end — so the new version can never
+// activate (Chromium waits for the old worker to have no work), exactly the
+// picture of (b) in every state DevTools reports. What tells them apart is
+// the history: a busy worker is never stopped, so it shows no stop-and-
+// restart after the install, and the helper must fail rather than stop it.
+test('an old worker that never goes idle is not taken for Chromium’s stall', async ({ browser }) => {
+  test.setTimeout(300_000);
+  const next = runtimeOf(UPDATE_DIST);
+  const held = heldWorkerBundle(DEV_DIST);
+  let server = await serveDirectory(held, SW_UPDATE_PORT);
+  const context = await browser.newContext({ baseURL: ORIGIN });
+  try {
+    const page = await context.newPage();
+    await bootServiceWorker(page);
+    const versions = await versionsOf(page);
+    const oldId = await versions.activeId();
+    expect(await viaWorker(page, HOLD_PATH)).toEqual({ status: 200, text: 'held' });
+
+    await stop(server);
+    const deployedAt = new Date();
+    utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
+    server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
+    await page.goto('/', { waitUntil: 'load' });
+
+    const outcome = await nextDeploymentTakesOver(page, versions, oldId, next).then(
+      (branch) => branch,
+      (error: Error) => error,
+    );
+    expect(outcome, `the held worker was taken for: ${String(outcome)}`).toBeInstanceOf(Error);
+    expect(String(outcome)).toContain('it was never idle');
+    // And it really was the update that could not get in: installed, waiting.
+    expect(await registrationOf(page)).toMatchObject({ waiting: 'installed', active: 'activated' });
+  } finally {
+    await context.close();
+    await stop(server);
+    rmSync(held, { recursive: true, force: true });
   }
 });
 
