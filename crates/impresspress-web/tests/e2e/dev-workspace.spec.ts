@@ -711,6 +711,26 @@ test('an expired session removes the workspace tools from the registry', async (
   );
 });
 
+test('dev_compile_block refuses a call with no block name before anything compiles', async ({ page }) => {
+  test.setTimeout(300_000);
+  await bootServiceWorker(page);
+  await openWorkspace(page);
+  await waitForTool(page, 'dev_compile_block');
+
+  // Chromium's registry does not check a call against `inputSchema`, so the
+  // page does (`withArgumentCheck`, applied in `registerPageTool`). Unchecked,
+  // `{}` compiled a block named `undefined`.
+  expect(await execute(page, 'dev_compile_block', {})).toEqual({
+    isError: true,
+    content: [{ type: 'text', text: 'Missing required argument: name' }],
+  });
+  // Present but empty passes `required`; `compileBlock` refuses it.
+  expect(await execute(page, 'dev_compile_block', { name: '' })).toEqual({
+    isError: true,
+    content: [{ type: 'text', text: 'dev_compile_block: the block name must be a non-empty string' }],
+  });
+});
+
 test('the workspace is cross-origin isolated and its preview frames the live site', async ({
   page,
 }) => {
