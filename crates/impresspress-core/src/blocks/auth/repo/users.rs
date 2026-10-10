@@ -770,8 +770,9 @@ pub struct ActiveUserQuery {
     /// Items per page; values below 1 fall back to 20.
     pub page_size: u32,
     /// Literal substring of the email address OR the user id, ASCII case
-    /// ignored (`FilterOp::ContainsIgnoreCase`). Both admin surfaces asked a different one of those two questions
-    /// before this function existed; one door means one answer.
+    /// ignored (`FilterOp::ContainsIgnoreCase`). Both admin surfaces asked a
+    /// different one of those two questions before this function existed;
+    /// one door means one answer.
     pub search: Option<String>,
 }
 

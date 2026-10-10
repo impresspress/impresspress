@@ -204,7 +204,7 @@ pub async fn collect_interleaved(
     let mut live_artifacts = BTreeSet::new();
     for row in &retained {
         // Through the manifest rather than the stored column text: the row's
-        // two halves ARE the manifest (`generation::from_row` is exact), and
+        // two halves ARE the manifest (`generation::from_row` rebuilds it), and
         // reading the shas off a parsed manifest is what keeps this and the
         // activation's own content check reading the same fields.
         //
