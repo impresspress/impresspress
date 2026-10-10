@@ -195,7 +195,7 @@ pub async fn handle_rollback(
     // The workspace adoption is *not* here: it happens inside the queue, as
     // part of applying the `Rollback` intent, so that it and the publish land
     // under one lease. See `activation::activate`.
-    let _compiling = shared.compile.lock().await;
+    let _compiling = shared.workspace.compile.lock().await;
     let outcome = match activation::request(
         ctx,
         shared,

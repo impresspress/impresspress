@@ -2,9 +2,10 @@
 //!
 //! Validation has three steps, and this module is the middle one. The
 //! executable steps are the host's: [`super::control::RuntimeControl::inspect`]
-//! loads the artifact under no capabilities and parses `BlockInfo`, and
-//! [`super::control::RuntimeControl::probe`] runs `Init`/`Start` and one
-//! request under the spec the rules below accepted. This module is the pure
+//! loads the artifact under no capabilities and parses `BlockInfo`, and the
+//! workspace's `WorkspaceControl::probe` (`block-dev`; the staging path runs
+//! it, a seed import does not) runs `Init`/`Start` and one request under the
+//! spec the rules below accepted. This module is the pure
 //! data half: rules over the `BlockInfo` the guest reported, the name it was
 //! compiled under, and the block set it is joining.
 //!
@@ -40,8 +41,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use wafer_block::{capabilities::HeaderPolicy, wrap, Allowlist, BlockCapabilities, BlockInfo};
 
+#[cfg(any(test, feature = "block-dev"))]
+use super::control::ValidationFailure;
 use super::{
-    control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind, ValidationFailure},
+    control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
     paths,
 };
 
@@ -134,6 +137,10 @@ pub const CAP_HEADERS: &str = "cap-headers";
 pub const TOO_MANY_BLOCKS: &str = "too-many-blocks";
 /// A block already in the active set has no readable stored `BlockInfo`, so
 /// the duplicate-agent-tool rule cannot be applied against it.
+///
+/// Workspace only (`block-dev`): the staging path is what reads stored
+/// `BlockInfo`s back.
+#[cfg(feature = "block-dev")]
 pub const BUILD_ROW_MISSING: &str = "build-row-missing";
 /// The artifact is over [`MAX_ARTIFACT_BYTES`].
 pub const ARTIFACT_TOO_LARGE: &str = "artifact-too-large";
@@ -263,6 +270,10 @@ impl Diagnostic {
     /// Refused before the artifact is stored or executed: the version is
     /// knowable without running anything, and the fix does not depend on
     /// what the artifact would have reported.
+    ///
+    /// Workspace only (`block-dev`: the staging path), and compiled for this
+    /// crate's unit tests.
+    #[cfg(any(test, feature = "block-dev"))]
     pub fn stale_guest_module(reported: u32, current: u32) -> Self {
         Self::error(
             WAFER_GUEST_VERSION_CODE,
@@ -279,7 +290,7 @@ impl Diagnostic {
     /// The refusal a SEED BUNDLE's block built against a different guest
     /// crate version produces (`seed::import`).
     ///
-    /// Same code as [`Self::stale_guest_module`] — the fault is the same, a
+    /// Same code as `Self::stale_guest_module` (`block-dev`) — the fault is the same, a
     /// module speaking a contract this runtime does not guarantee — but not
     /// the same remedy. An import has no compiler session and no workspace
     /// page to reload: the artifact was built wherever the bundle was
@@ -298,11 +309,15 @@ impl Diagnostic {
     }
 
     /// The refusal a failed [`super::control::RuntimeControl::inspect`] or
-    /// [`super::control::RuntimeControl::probe`] produces.
+    /// [`super::control::WorkspaceControl::probe`] produces.
     ///
     /// The code is `guest-{stage}` — `guest-load`, `guest-info`,
     /// `guest-init`, `guest-start`, `guest-probe` — so the stage is machine
     /// readable and the enum stays the single owner of its spelling.
+    ///
+    /// Workspace only (`block-dev`: the staging path), and compiled for this
+    /// crate's unit tests.
+    #[cfg(any(test, feature = "block-dev"))]
     pub fn guest(failure: &ValidationFailure) -> Self {
         Self::error(
             &format!("guest-{}", failure.stage.as_str()),
@@ -345,9 +360,9 @@ pub fn name_format_diagnostic(name: &str) -> Diagnostic {
 /// which a workspace registers as a `crate::routing::ExtraRoute` and so is
 /// absent from the built-in table. Reserved in a `site-runtime` build too,
 /// where nothing routes it: a block a seed carries into an exported site must
-/// not claim the prefix the same seed's workspace serves on. A deployment that adds further extra routes
-/// passes them alongside these — the caller owns that list because
-/// `Context` does not publish one.
+/// not claim the prefix the same seed's workspace serves on. A deployment
+/// that adds further extra routes passes them alongside these — the caller
+/// owns that list because `Context` does not publish one.
 pub fn builtin_route_prefixes() -> Vec<&'static str> {
     crate::routing::ROUTES
         .iter()

@@ -354,7 +354,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     // asked for nothing unusual. The section is one small JSON read, which is
     // not what the "do not hold this across an export" argument is about.
     let ws = {
-        let _serialized = shared.workspace.lock().await;
+        let _serialized = shared.workspace_manifest.lock().await;
         workspace::load(ctx).await.map_err(Refusal::Internal)?
     };
 
@@ -386,13 +386,19 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let title = exported_title(ctx).await.map_err(Refusal::Internal)?;
 
     // --- the shell -------------------------------------------------------
-    let listed = shared.shell.list().await.map_err(Refusal::Shell)?;
+    let listed = shared
+        .workspace
+        .shell
+        .list()
+        .await
+        .map_err(Refusal::Shell)?;
     let mut shell: Vec<Entry> = Vec::new();
     for path in listed {
         if shell_excluded(&path) {
             continue;
         }
         let bytes = shared
+            .workspace
             .shell
             .fetch(&path)
             .await
@@ -1101,7 +1107,7 @@ fn data_too_large(bytes: usize) -> String {
 /// A content read that came back [`ErrorCode::NotFound`] is the export losing
 /// a race, not an internal fault.
 ///
-/// [`assemble`] reads the manifest under `DevShared::workspace` and then reads
+/// [`assemble`] reads the manifest under `DevShared::workspace_manifest` and then reads
 /// each blob **outside** it — deliberately, because a 10 MB read under that
 /// mutex would block editing for the length of an export. This is the one
 /// place in the block where a read of stored content is not covered by the

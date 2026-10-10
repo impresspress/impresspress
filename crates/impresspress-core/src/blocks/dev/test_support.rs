@@ -1,14 +1,16 @@
-//! Test doubles for the [`RuntimeControl`], [`ShellSource`] and
-//! [`seed::SeedFetch`] seams, plus the request helpers every `dev_*.rs`
-//! integration file needs to reach the block at all.
+//! Test doubles for the [`RuntimeControl`], `WorkspaceControl`,
+//! `ShellSource` and [`seed::SeedFetch`] seams, plus the request helpers
+//! every `dev_*.rs` integration file needs to reach the block at all.
 //!
 //! Exposed under `test-support` (as well as `cfg(test)`) so the `tests/`
 //! integration crates and downstream consumers can drive the dev block without
 //! a real runtime behind it.
 //!
-//! The doubles serve both halves of the block; the request helpers reach the
-//! workspace's `/b/dev` routes, so they exist only where those do
-//! (`block-dev`).
+//! Each double exists where its seam does. [`FakeControl`]'s
+//! `RuntimeControl` half, [`MapFetch`], [`seed_file`], [`fake_bypass_rules`]
+//! and [`hello_info`] serve the runtime half in every build; its
+//! `WorkspaceControl` half, `FakeShell` and the request helpers that reach
+//! the `/b/dev` routes exist only where those do (`block-dev`).
 
 use std::{
     collections::BTreeMap,
@@ -22,13 +24,12 @@ use std::{
 use wafer_run::OutputStream;
 use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo};
 
+#[cfg(feature = "block-dev")]
+use super::control::{GenerationAnnouncement, ShellSource, WorkspaceControl};
 use super::{
     blobs,
     bypass::BypassRules,
-    control::{
-        DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
-        ValidationStage,
-    },
+    control::{DynamicBlockSpec, RuntimeControl, ValidationFailure, ValidationStage},
     seed,
     seed::{SeedFetch, SeedFile},
 };
@@ -44,7 +45,7 @@ use crate::test_support::{admin_msg, output_json, Session, TestContext};
 /// who may reach `/b/dev`, which sends real credentials through
 /// [`TestContext::request`].
 #[cfg(feature = "block-dev")]
-pub async fn dev_with_accounts(control: Arc<dyn RuntimeControl>) -> TestContext {
+pub async fn dev_with_accounts(control: Arc<dyn WorkspaceControl>) -> TestContext {
     TestContext::with_admin()
         .await
         .with_auth_added()
@@ -112,15 +113,16 @@ pub fn hello_info(name: &str) -> BlockInfo {
     .summary("hello")])
 }
 
-/// A [`RuntimeControl`] that records what it was asked to do instead of
-/// building anything.
+/// A [`RuntimeControl`] (and, under `block-dev`, `WorkspaceControl`) that
+/// records what it was asked to do instead of building anything.
 ///
-/// `rebuild` appends the requested block set and bumps the generation counter,
-/// so a test can assert both *what* was activated and *how many times* — the
-/// two things the real control plane is responsible for and the page keys on.
-/// `inspect` reports whatever `BlockInfo` the test set, and `probe` records
-/// the spec it was handed, so a test can assert that the guest was executed
-/// under the ACCEPTED capabilities rather than its own declaration.
+/// `rebuild` appends the requested block set (and, under `block-dev`, bumps
+/// the generation counter `runtime_generation` reports), so a test can assert
+/// both *what* was activated and *how many times* — the two things the real
+/// control plane is responsible for and the page keys on. `inspect` reports
+/// whatever `BlockInfo` the test set, and `probe` records the spec it was
+/// handed, so a test can assert that the guest was executed under the
+/// ACCEPTED capabilities rather than its own declaration.
 ///
 /// It also models the *retained runtime* half of design §7.3: `rebuild` keeps
 /// the block set it swapped out and `restore_previous` puts it back without
@@ -146,12 +148,14 @@ pub struct FakeControl {
     fail_inspect: Mutex<Option<ValidationFailure>>,
     /// Set by [`Self::fail_next_probe`]: the refusal the next `probe` answers
     /// with, consumed by that call.
+    #[cfg(feature = "block-dev")]
     fail_probe: Mutex<Option<ValidationFailure>>,
     /// Every spec handed to `probe`, oldest first.
     ///
     /// Recorded rather than merely counted because the *capabilities* a probe
     /// runs under are the point of the inspect/probe split: a test asserts
     /// that they are the ACCEPTED set, not the guest's raw declaration.
+    #[cfg(feature = "block-dev")]
     probed: Mutex<Vec<DynamicBlockSpec>>,
     /// Bumped by every `inspect` call, refusals included. A test that asserts
     /// a request was refused *before* the module was loaded reads this.
@@ -191,11 +195,14 @@ pub struct FakeControl {
     /// Set by [`Self::fail_next_restore`]: the message the next
     /// `restore_previous` refuses with, consumed by that call.
     fail_restore: Mutex<Option<String>>,
-    /// Bumped by every successful `rebuild`.
+    /// Bumped by every successful `rebuild`; what `runtime_generation`
+    /// reports.
+    #[cfg(feature = "block-dev")]
     generation: AtomicU64,
     /// Every generation `announce_active` was told about, oldest first — the
     /// fixture's stand-in for the messages the browser control posts to the
     /// page.
+    #[cfg(feature = "block-dev")]
     announced: Mutex<Vec<GenerationAnnouncement>>,
 }
 
@@ -206,7 +213,9 @@ impl FakeControl {
             rebuilt: Mutex::new(Vec::new()),
             validated_info: Mutex::new(None),
             fail_inspect: Mutex::new(None),
+            #[cfg(feature = "block-dev")]
             fail_probe: Mutex::new(None),
+            #[cfg(feature = "block-dev")]
             probed: Mutex::new(Vec::new()),
             inspections: AtomicU64::new(0),
             fail_rebuild: Mutex::new(None),
@@ -215,12 +224,15 @@ impl FakeControl {
             retained: Mutex::new(None),
             restores: AtomicU64::new(0),
             fail_restore: Mutex::new(None),
+            #[cfg(feature = "block-dev")]
             generation: AtomicU64::new(0),
+            #[cfg(feature = "block-dev")]
             announced: Mutex::new(Vec::new()),
         })
     }
 
     /// A control whose next `probe` refuses at `stage`.
+    #[cfg(feature = "block-dev")]
     pub fn rejecting(stage: ValidationStage, message: &str) -> Arc<Self> {
         let control = Self::new();
         control.fail_next_probe(stage, message);
@@ -239,6 +251,7 @@ impl FakeControl {
     }
 
     /// Make the next `probe` refuse at `stage` with `message`.
+    #[cfg(feature = "block-dev")]
     pub fn fail_next_probe(&self, stage: ValidationStage, message: &str) {
         *self.fail_probe.lock().expect("fail_probe mutex") =
             Some(ValidationFailure::new(stage, message));
@@ -250,6 +263,7 @@ impl FakeControl {
     }
 
     /// The specs handed to `probe`, oldest first.
+    #[cfg(feature = "block-dev")]
     pub fn probes(&self) -> Vec<DynamicBlockSpec> {
         self.probed.lock().expect("probed mutex").clone()
     }
@@ -294,6 +308,7 @@ impl FakeControl {
     }
 
     /// Every activation announced to the page, oldest first.
+    #[cfg(feature = "block-dev")]
     pub fn announcements(&self) -> Vec<GenerationAnnouncement> {
         self.announced.lock().expect("announced mutex").clone()
     }
@@ -329,18 +344,6 @@ impl RuntimeControl for FakeControl {
             }))
     }
 
-    async fn probe(
-        &self,
-        spec: &DynamicBlockSpec,
-        _artifact: &[u8],
-    ) -> Result<(), ValidationFailure> {
-        if let Some(failure) = self.fail_probe.lock().expect("fail_probe mutex").take() {
-            return Err(failure);
-        }
-        self.probed.lock().expect("probed mutex").push(spec.clone());
-        Ok(())
-    }
-
     async fn rebuild(&self, blocks: &[DynamicBlockSpec]) -> Result<(), String> {
         // Taken out of the lock before the await: a `MutexGuard` is not held
         // across a suspension point anywhere in this fixture, for the same
@@ -366,6 +369,7 @@ impl RuntimeControl for FakeControl {
             .expect("live mutex")
             .replace(blocks.to_vec());
         *self.retained.lock().expect("retained mutex") = Some(previous);
+        #[cfg(feature = "block-dev")]
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -379,6 +383,22 @@ impl RuntimeControl for FakeControl {
         };
         *self.live.lock().expect("live mutex") = previous;
         self.restores.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "block-dev")]
+#[wafer_block::wafer_async_trait]
+impl WorkspaceControl for FakeControl {
+    async fn probe(
+        &self,
+        spec: &DynamicBlockSpec,
+        _artifact: &[u8],
+    ) -> Result<(), ValidationFailure> {
+        if let Some(failure) = self.fail_probe.lock().expect("fail_probe mutex").take() {
+            return Err(failure);
+        }
+        self.probed.lock().expect("probed mutex").push(spec.clone());
         Ok(())
     }
 
@@ -463,6 +483,7 @@ pub fn seed_file(path: &str, bytes: &[u8]) -> SeedFile {
 /// `initialize()` — [`fake_bypass_rules`], the rules a real dev-sandbox bundle
 /// renders — so a test can assert the export strips the compiler prefix from
 /// those too.
+#[cfg(feature = "block-dev")]
 pub struct FakeShell {
     files: BTreeMap<String, Vec<u8>>,
     /// Set by [`Self::failing_to_list`]: what `list` refuses with.
@@ -483,6 +504,7 @@ pub struct FakeShell {
 /// and the engines here to what the bundler actually renders
 /// (`the_fake_shell_states_what_the_bundler_renders`), so this copy cannot
 /// drift from it.
+#[cfg(feature = "block-dev")]
 pub const FAKE_SW_JS: &str = concat!(
     "const DEV_ENABLED = true;\n",
     "const BYPASS_RULES = ",
@@ -505,9 +527,10 @@ pub const FAKE_SW_JS: &str = concat!(
 /// The bypass rules a dev-sandbox worker hands `initialize()`: what
 /// `impresspress-bundle` renders for the dev-sandbox deployment
 /// (`examples/dev-sandbox/impresspress.toml` — a dev bundle with the compiler
-/// prefix), with [`FakeShell`]'s wasm-pack base name. [`FAKE_SW_JS`] declares
-/// exactly these, and the test fixtures build `DevShared` with them.
-/// `tests/dev_export.rs` checks them against the bundler's own.
+/// prefix), with `FakeShell`'s wasm-pack base name. `FAKE_SW_JS` (`block-dev`)
+/// declares exactly these, and the test fixtures build `DevShared` with them
+/// in both builds. `tests/dev_export.rs` checks them against the bundler's
+/// own.
 pub fn fake_bypass_rules() -> BypassRules {
     BypassRules {
         exact: [
@@ -535,12 +558,14 @@ pub fn fake_bypass_rules() -> BypassRules {
     }
 }
 
+#[cfg(feature = "block-dev")]
 impl Default for FakeShell {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "block-dev")]
 impl FakeShell {
     /// A shell with the seven files a real bundle's `files` listing carries.
     pub fn new() -> Self {
@@ -600,6 +625,7 @@ impl FakeShell {
     }
 }
 
+#[cfg(feature = "block-dev")]
 #[wafer_block::wafer_async_trait]
 impl ShellSource for FakeShell {
     async fn list(&self) -> Result<Vec<String>, String> {

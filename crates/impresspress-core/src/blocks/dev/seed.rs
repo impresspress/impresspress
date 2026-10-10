@@ -62,7 +62,7 @@
 //!
 //! # What is still *not* verified
 //!
-//! [`super::control::RuntimeControl::probe`] is not run: no `Init`, no
+//! The workspace's dry-run `probe` (`control::WorkspaceControl`) is not run: no `Init`, no
 //! `Start`, no request. Those execute guest code under the accepted
 //! capabilities, and a seed import happens during boot, before anything is
 //! serving — the activation the caller requests next rebuilds the runtime
@@ -70,10 +70,21 @@
 //! that traps in `Init` therefore fails the activation rather than the
 //! import, and the sandbox falls back exactly as it does for any failed
 //! activation.
+//!
+//! # The sandbox section
+//!
+//! A seed can describe the sandbox it seeds ([`SeedManifest::sandbox`]: its
+//! guide and its `llms.txt`), which only the workspace reads. Its handling —
+//! fetching and checking the guide, recording it, and the boot repair
+//! (`repair_llms`) — is compiled only with `block-dev`. A build without it
+//! still parses the section, so it can refuse such a seed by name
+//! (`SANDBOX_SEED_REFUSAL`) rather than with serde's "unknown field".
 
 use serde::{Deserialize, Serialize};
 use wafer_run::context::Context;
 
+#[cfg(feature = "block-dev")]
+use super::repo::seed_info;
 use super::{
     artifacts, blobs,
     bypass::BypassRules,
@@ -81,7 +92,7 @@ use super::{
     data_snapshot,
     generation::{GenerationManifest, SiteManifest},
     paths,
-    repo::{self, runtime_state, seed_info},
+    repo::{self, runtime_state},
     validation,
     workspace::{self, Workspace},
 };
@@ -140,9 +151,9 @@ pub struct SeedBlock {
 pub struct SandboxSeed {
     /// The template's name, e.g. `bootstrap`. Same rule as a block name.
     pub template: String,
-    /// One paragraph the page shows verbatim; at most [`MAX_PROMPT_BYTES`].
+    /// One paragraph the page shows verbatim; at most `MAX_PROMPT_BYTES`.
     pub suggested_prompt: String,
-    /// The guide, a Markdown file named [`GUIDE_PATH`] beside the manifest,
+    /// The guide, a Markdown file named `GUIDE_PATH` beside the manifest,
     /// verified like every other file: hash and size.
     pub guide: SeedFile,
     /// What the sandbox tells a reader about itself, a text file named
@@ -182,6 +193,9 @@ pub struct SeedManifest {
     /// The sandbox block, when this bundle seeds a workspace sandbox rather
     /// than an exported site. `#[serde(default)]` so a manifest written before
     /// the field existed still imports; `SCHEMA_VERSION` is unchanged.
+    ///
+    /// Parsed in every build, read only with `block-dev`: a build without it
+    /// refuses a seed that carries one, naming the section.
     #[serde(default)]
     pub sandbox: Option<SandboxSeed>,
 }
@@ -261,16 +275,20 @@ pub fn data_url(path: &str) -> String {
 pub const MAX_DATA_BYTES: usize = 2 * 1024 * 1024;
 
 /// The one name the guide may have, beside the manifest.
+#[cfg(feature = "block-dev")]
 pub const GUIDE_PATH: &str = "guide.md";
 
 /// Largest guide a bundle may carry. Sized for a document an agent reads
 /// once per session, not for a manual.
+#[cfg(feature = "block-dev")]
 pub const MAX_GUIDE_BYTES: usize = 256 * 1024;
 
 /// Largest suggested prompt: one paragraph, shown verbatim on the page.
+#[cfg(feature = "block-dev")]
 pub const MAX_PROMPT_BYTES: usize = 4 * 1024;
 
 /// URL of the guide.
+#[cfg(feature = "block-dev")]
 pub fn guide_url(path: &str) -> String {
     format!("{ROOT}{path}")
 }
@@ -281,12 +299,27 @@ pub const LLMS_PATH: &str = "llms.txt";
 
 /// Largest `llms.txt` a bundle may carry: [`paths::MAX_FILE_BYTES`], because
 /// it is published where a site file of that name would be.
+#[cfg(feature = "block-dev")]
 pub const MAX_LLMS_BYTES: usize = paths::MAX_FILE_BYTES;
 
 /// URL of the sandbox's `llms.txt`.
+#[cfg(feature = "block-dev")]
 pub fn llms_url(path: &str) -> String {
     format!("{ROOT}{path}")
 }
+
+/// What a build without `block-dev` refuses a seed carrying a `sandbox`
+/// section with (decision D2).
+///
+/// The section is the sandbox's own guide and `llms.txt`; a build with no
+/// workspace has nothing that reads them, and importing the rest of the
+/// bundle without them would boot a sandbox's welcome site as if it were the
+/// owner's. So the import refuses before anything is fetched and says which
+/// runtime serves such a seed. Recorded like every other refusal
+/// ([`record_failure`]).
+#[cfg(not(feature = "block-dev"))]
+pub const SANDBOX_SEED_REFUSAL: &str = "this seed carries a `sandbox` section (a sandbox's \
+     guide and llms.txt); serve it with the development sandbox runtime";
 
 /// The short workspace name of a registered block (`site/hello` → `hello`).
 ///
@@ -339,7 +372,9 @@ pub async fn is_fresh(ctx: &dyn Context) -> Result<bool, String> {
 /// (its prompt and guide), fetch and inspect every artifact, check every
 /// guest report, then write the blobs and artifacts, then save the workspace,
 /// then import the data snapshot, and last record the sandbox block — so a
-/// `seed_info` row is never left behind by an import that was refused.
+/// `seed_info` row is never left behind by an import that was refused. The
+/// sandbox steps are `block-dev`'s; a build without it refuses a seed that
+/// has a sandbox block before any of this (`SANDBOX_SEED_REFUSAL`).
 ///
 /// A workspace saved before its blobs would name content that is not stored,
 /// and every later read of those paths would be a 500; in this order a
@@ -387,6 +422,12 @@ async fn import_bundle(
             "the seed bundle declares schema_version {}; this build reads {SCHEMA_VERSION}",
             manifest.schema_version
         ));
+    }
+    // A sandbox's seed, on a build that has no sandbox: refused before a
+    // byte is fetched, by name (D2).
+    #[cfg(not(feature = "block-dev"))]
+    if manifest.sandbox.is_some() {
+        return Err(SANDBOX_SEED_REFUSAL.to_string());
     }
     if manifest.blocks.len() > paths::MAX_BLOCKS {
         return Err(format!(
@@ -464,6 +505,7 @@ async fn import_bundle(
     // before a single site byte is stored, so a bundle whose guide is wrong
     // stores nothing at all. Held until the end, when the row is written
     // beside the workspace it describes.
+    #[cfg(feature = "block-dev")]
     let sandbox = match &manifest.sandbox {
         Some(declared) => Some(fetch_sandbox(fetch, declared).await?),
         None => None,
@@ -626,6 +668,7 @@ async fn import_bundle(
             .map_err(|e| format!("{url}: {}", e.message))?;
     }
 
+    #[cfg(feature = "block-dev")]
     if let Some(info) = &sandbox {
         seed_info::write(ctx, info)
             .await
@@ -701,6 +744,7 @@ async fn fetch_verified(
 /// Check and fetch a bundle's sandbox block: the template name, the prompt
 /// length, then the guide and `llms.txt` through [`fetch_and_verify`] like
 /// any other file.
+#[cfg(feature = "block-dev")]
 async fn fetch_sandbox(
     fetch: &dyn SeedFetch,
     declared: &SandboxSeed,
@@ -738,8 +782,10 @@ async fn fetch_sandbox(
 }
 
 /// Fetch and check the sandbox's `llms.txt` as a manifest declares it: the
-/// one name it may have, then hash and size like any other file. Shared by the import and by [`repair_llms`], so a text recorded on
-/// a later boot passed exactly the checks one recorded at import did.
+/// one name it may have, then hash and size like any other file. Shared by
+/// the import and by [`repair_llms`], so a text recorded on a later boot
+/// passed exactly the checks one recorded at import did.
+#[cfg(feature = "block-dev")]
 async fn fetch_llms(fetch: &dyn SeedFetch, declared: &SeedFile) -> Result<String, String> {
     if declared.path != LLMS_PATH {
         return Err(format!(
@@ -753,6 +799,7 @@ async fn fetch_llms(fetch: &dyn SeedFetch, declared: &SeedFile) -> Result<String
 }
 
 /// What [`repair_llms`] found and did.
+#[cfg(feature = "block-dev")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmsRepair {
     /// This instance's seed carried no sandbox block: it has no sandbox
@@ -802,6 +849,10 @@ pub enum LlmsRepair {
 /// `llms.txt`, or nothing is live) also reads the active generation's
 /// manifest, to learn which of those it is; only a boot that then has
 /// something to write goes on to a publish, which reads the row again.
+///
+/// Workspace only (`block-dev`): a build without it never records a
+/// sandbox's text, so it has none to repair.
+#[cfg(feature = "block-dev")]
 pub async fn repair_llms(ctx: &dyn Context, fetch: &dyn SeedFetch) -> Result<LlmsRepair, String> {
     let mut row = seed_info::llms(ctx).await.map_err(|e| e.message)?;
     let Some(template) = row.template.clone() else {
@@ -1034,6 +1085,10 @@ async fn clear_failure(ctx: &dyn Context) {
 /// snapshot a runtime resolves is built at boot, *before* the import that
 /// writes this runs, so a config read would answer with the previous boot's
 /// answer to a question about this one.
+///
+/// Workspace only (`block-dev`): its one reader is the status endpoint. A
+/// site's owner reads the row on `/b/admin/settings/variables`.
+#[cfg(feature = "block-dev")]
 pub async fn last_failure(ctx: &dyn Context) -> Result<Option<String>, wafer_run::WaferError> {
     Ok(variables::get_by_key(ctx, SEED_ERROR_KEY)
         .await?

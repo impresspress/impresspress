@@ -288,8 +288,8 @@ async fn every_response_is_never_cached() {
 fn routes_and_endpoints_stay_in_lockstep() {
     let info = DevBlock::with_workspace(DevShared::new(
         FakeControl::new(),
-        std::sync::Arc::new(FakeShell::new()),
         fake_bypass_rules(),
+        std::sync::Arc::new(FakeShell::new()),
     ))
     .info();
 
@@ -361,10 +361,10 @@ fn routes_and_endpoints_stay_in_lockstep() {
 fn an_exported_bundle_declares_no_surface_it_does_not_route() {
     let shared = DevShared::new(
         FakeControl::new(),
-        std::sync::Arc::new(FakeShell::new()),
         fake_bypass_rules(),
+        std::sync::Arc::new(FakeShell::new()),
     );
-    let exported = DevBlock::runtime_only(std::sync::Arc::clone(&shared)).info();
+    let exported = DevBlock::runtime_only().info();
 
     assert!(
         exported.endpoints.is_empty(),

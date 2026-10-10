@@ -56,8 +56,12 @@ const DIVERGENT: &[(&str, &[&str], &str)] = &[
         "The browser development sandbox's workspace: the `/b/dev` page and \
          its API (compile, stage, activate, export). Its security model is \
          that this code is ABSENT from every build that is not the sandbox, \
-         not merely switched off in one, so impresspress-web reaches it only \
-         through its opt-in `browser-devtools` feature, while \
+         not merely switched off in one (one shipped build still breaks that \
+         today: a site exported from the sandbox ships the sandbox's own \
+         browser-devtools runtime with the workspace switched off at \
+         runtime, until the export ships a site-runtime-only build), so \
+         impresspress-web reaches it only through its opt-in \
+         `browser-devtools` feature, while \
          impresspress-cloudflare and the native `impresspress` binary do not \
          offer it at all — there is neither a Worker-side nor a server-side \
          sandbox.",

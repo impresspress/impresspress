@@ -26,6 +26,10 @@ const SINGLETON_ID: i64 = 1;
 
 /// What the seed's `sandbox` block carried.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Workspace only (`block-dev`: written by the seed import's sandbox steps
+/// and the boot repair, read by the workspace page and the reference and
+/// status handlers), and compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub struct SeedInfo {
     /// The template's name, e.g. `bootstrap`.
     pub template: String,
@@ -40,6 +44,11 @@ pub struct SeedInfo {
 }
 
 /// The row, or `None` until an import has written it.
+///
+/// Workspace only (`block-dev`: written by the seed import's sandbox steps
+/// and the boot repair, read by the workspace page and the reference and
+/// status handlers), and compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub async fn read(ctx: &dyn Context) -> Result<Option<SeedInfo>, WaferError> {
     let record = db::get_by_field(
         ctx,
@@ -64,6 +73,11 @@ pub async fn read(ctx: &dyn Context) -> Result<Option<SeedInfo>, WaferError> {
 /// Reads only the `template` column: the status poll calls this a few times
 /// a second, and the row's `guide_markdown` can run to hundreds of KiB.
 /// A missing row is `NotFound`, as from [`read`].
+///
+/// Workspace only (`block-dev`: written by the seed import's sandbox steps
+/// and the boot repair, read by the workspace page and the reference and
+/// status handlers), and compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub async fn template(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
     let rows = db::list(
         ctx,
@@ -100,9 +114,9 @@ pub struct LlmsRow {
 
 /// The three `llms.txt` columns.
 ///
-/// Reads only those, for [`template`]'s reason: every publish and every boot
+/// Reads only those, for `template`'s reason: every publish and every boot
 /// calls this, and the row's guide is beside them. A missing row is
-/// `NotFound`, as from [`read`].
+/// `NotFound`, as from `read`.
 pub async fn llms(ctx: &dyn Context) -> Result<LlmsRow, WaferError> {
     let rows = db::list(
         ctx,
@@ -133,6 +147,11 @@ pub async fn llms(ctx: &dyn Context) -> Result<LlmsRow, WaferError> {
 
 /// Record the sandbox's `llms.txt` on a row that has none — the boot repair's
 /// write. Nothing else on the row changes.
+///
+/// Workspace only (`block-dev`: written by the seed import's sandbox steps
+/// and the boot repair, read by the workspace page and the reference and
+/// status handlers), and compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub async fn record_llms_text(ctx: &dyn Context, text: &str) -> Result<(), WaferError> {
     let data = crate::util::json_map(serde_json::json!({ "llms_text": text }));
     db::update_by_filters(ctx, TABLE, vec![singleton_filter()], data).await
@@ -154,6 +173,11 @@ fn singleton_filter() -> Filter {
 }
 
 /// Overwrite the row with `info`, stamping `imported_at`.
+///
+/// Workspace only (`block-dev`: written by the seed import's sandbox steps
+/// and the boot repair, read by the workspace page and the reference and
+/// status handlers), and compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub async fn write(ctx: &dyn Context, info: &SeedInfo) -> Result<(), WaferError> {
     let data = crate::util::json_map(serde_json::json!({
         "template": info.template,

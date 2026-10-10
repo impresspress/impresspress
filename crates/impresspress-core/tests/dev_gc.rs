@@ -300,7 +300,7 @@ async fn a_collection_during_an_activation_keeps_the_blob_its_manifest_names() {
         // A second write of the same path, as `files::handle_write` makes it:
         // store the blob, then save the entry, under the workspace lock.
         {
-            let _serialized = shared.workspace.lock().await;
+            let _serialized = shared.workspace_manifest.lock().await;
             let z = b"<h1>Z</h1>";
             let (z_sha, stored) = blobs::put(&ctx, z).await.expect("store Z");
             let mut ws = workspace::load(&ctx).await.expect("load workspace");

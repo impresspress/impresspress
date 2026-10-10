@@ -48,7 +48,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use futures::{channel::oneshot, lock::MutexGuard};
+use futures::channel::oneshot;
+#[cfg(feature = "block-dev")]
+use futures::lock::MutexGuard;
 use serde::{Deserialize, Serialize};
 use wafer_run::{context::Context, WaferError};
 #[cfg(feature = "block-dev")]
@@ -56,7 +58,7 @@ use wafer_run::{ErrorCode, OutputStream};
 
 use super::{
     blobs,
-    control::{DynamicBlockSpec, GenerationAnnouncement},
+    control::DynamicBlockSpec,
     gc,
     generation::{self, GenerationManifest, GenerationSummary, SiteManifest},
     publisher::publish_site,
@@ -65,8 +67,10 @@ use super::{
         generations::{GenerationCause, GenerationRow, GenerationStatus, NewGeneration},
         runtime_state::{ActivationPhase, RuntimeState},
     },
-    retention, workspace,
+    retention,
 };
+#[cfg(feature = "block-dev")]
+use super::{control::GenerationAnnouncement, workspace};
 use crate::util::now_millis;
 
 // ---------------------------------------------------------------------------
@@ -100,13 +104,14 @@ pub struct ProgressStep {
     pub detail: String,
 }
 
-/// Why an activation did not happen — or, for [`Self::RollbackNotAdopted`],
-/// why one that did happen did not finish.
+/// Why an activation did not happen — or, for `Self::RollbackNotAdopted`
+/// (`block-dev`), why one that did happen did not finish.
 ///
 /// Four kinds, because they mean four different things to the caller: the
 /// request described a state that cannot be built (fix the request), the host
 /// could not build it (retry or roll back), persistence failed (retry), or a
-/// rollback went live and left the workspace behind (retry the rollback).
+/// rollback went live and left the workspace behind (retry the rollback). A
+/// build without `block-dev` has no rollback, so it has the first three.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationError {
     /// The manifest referenced content that is not stored. Reported as `422`:
@@ -122,6 +127,7 @@ pub enum ActivationError {
     /// with the target's then failed. `500`, because the request did not
     /// finish; but the message says the rollback is live, because telling
     /// the caller it failed would send them after a rollback that happened.
+    #[cfg(feature = "block-dev")]
     RollbackNotAdopted {
         /// The generation that went live.
         generation_id: String,
@@ -135,7 +141,9 @@ impl ActivationError {
     pub fn status(&self) -> u16 {
         match self {
             Self::Validation(_) => 422,
-            Self::Runtime(_) | Self::Storage(_) | Self::RollbackNotAdopted { .. } => 500,
+            Self::Runtime(_) | Self::Storage(_) => 500,
+            #[cfg(feature = "block-dev")]
+            Self::RollbackNotAdopted { .. } => 500,
         }
     }
 
@@ -183,6 +191,7 @@ impl std::fmt::Display for ActivationError {
             // against a live generation with the same manifests,
             // `activate_staged` rebuilds nothing and publishes nothing, and
             // `adopt_site` then runs again.
+            #[cfg(feature = "block-dev")]
             Self::RollbackNotAdopted {
                 generation_id,
                 message,
@@ -198,7 +207,8 @@ impl std::fmt::Display for ActivationError {
     }
 }
 
-/// A held `DevShared::workspace` lock.
+/// A held `DevShared::workspace_manifest` lock.
+#[cfg(feature = "block-dev")]
 type WorkspaceGuard<'a> = MutexGuard<'a, ()>;
 
 /// Persistence failures all arrive the same way.
@@ -269,11 +279,17 @@ pub(super) async fn schedule_maintenance(
 /// caller that read the workspace early but reached the queue late would
 /// displace content written after its own read). Both are read inside
 /// [`activate`], after the journal, so the newest persisted state always wins.
+///
+/// A build without `block-dev` has one intent, [`Self::Seed`]: the other
+/// three are what the workspace's handlers ask for, and they are compiled
+/// only with those handlers (`SiteOnly` from a file write, `BlockSet` from a
+/// compile or a block removal, `Rollback` from the generations API).
 pub enum ActivationIntent {
     /// Publish the workspace's `site/` half, keeping whatever block set is
     /// live. Never rebuilds the runtime (design §7.2) — the block half is
     /// copied from the generation that is active at dequeue, so
     /// `block_set_changed` is false by construction.
+    #[cfg(feature = "block-dev")]
     SiteOnly,
     /// Publish `blocks` as the complete desired block set.
     ///
@@ -286,6 +302,7 @@ pub enum ActivationIntent {
     /// win. Design §6.6 allows one compile at a time and the compile lock is
     /// what upholds that; a future that lifts the lock should carry the block
     /// *delta* here rather than the whole set.
+    #[cfg(feature = "block-dev")]
     BlockSet {
         /// The site to publish, or `None` for the workspace's own.
         site: Option<SiteManifest>,
@@ -297,6 +314,7 @@ pub enum ActivationIntent {
     /// The target is carried rather than re-read because a ledger row is
     /// immutable: the manifest cannot have changed between the handler's
     /// lookup (which is what answers `404`) and the dequeue.
+    #[cfg(feature = "block-dev")]
     Rollback {
         /// The generation whose contents are being republished.
         target: GenerationManifest,
@@ -321,16 +339,31 @@ impl ActivationIntent {
     /// dequeue that this request has already written to. A rollback or a seed
     /// *does* name one explicitly, and replaces the workspace wholesale, so a
     /// site write racing with it was going to be overwritten either way.
+    #[cfg(feature = "block-dev")]
     fn supersedes(&self, pending: &Self) -> bool {
         !matches!(self, Self::SiteOnly) || matches!(pending, Self::SiteOnly)
+    }
+
+    /// Whether this intent should replace `pending` in the queue's single
+    /// slot: always, in a build whose one intent is [`Self::Seed`], which
+    /// names its whole site and block set — the newest seed is the state
+    /// asked for.
+    #[cfg(not(feature = "block-dev"))]
+    fn supersedes(&self, _pending: &Self) -> bool {
+        true
     }
 }
 
 /// Resolve `intent` into the manifest to stage, against the state that is
 /// current now.
 ///
-/// `held` is the caller's `DevShared::workspace` guard, which it keeps until
-/// the manifest's staged row is inserted — see [`workspace_site`].
+/// `held` is the caller's `DevShared::workspace_manifest` guard, which it
+/// keeps until the manifest's staged row is inserted — see
+/// [`workspace_site`].
+///
+/// Workspace only: a build without `block-dev` has only
+/// [`ActivationIntent::Seed`], which carries its manifest whole.
+#[cfg(feature = "block-dev")]
 async fn compose(
     ctx: &dyn Context,
     held: &WorkspaceGuard<'_>,
@@ -363,7 +396,7 @@ async fn compose(
 ///
 /// This is the manifest read that backs **every ordinary edit**, not a rare
 /// one: `files::handle_write` and `files::handle_delete` release
-/// `DevShared::workspace` before they publish — deliberately, so editing never
+/// `DevShared::workspace_manifest` before they publish — deliberately, so editing never
 /// waits behind a runtime rebuild — and this function then reads the manifest
 /// back inside the activation that publish asked for. That released gap is
 /// exactly where a second concurrent write takes the lock and saves the
@@ -375,7 +408,7 @@ async fn compose(
 /// sanitized `500`.
 ///
 /// So it reads under the same mutex as the mutators: `held` is
-/// `DevShared::workspace`'s guard, taken by [`activate`].
+/// `DevShared::workspace_manifest`'s guard, taken by [`activate`].
 ///
 /// # Why the guard outlives this read
 ///
@@ -401,9 +434,9 @@ async fn compose(
 /// 1. **Nothing enters the queue holding this lock.** Every caller of
 ///    [`request`] — `files::publish_if_site`, `blocks_api`'s stage and remove,
 ///    `generations_api`'s rollback, and the browser host's seed import — holds
-///    no `DevShared::workspace` guard when it calls. `files.rs` closes its
+///    no `DevShared::workspace_manifest` guard when it calls. `files.rs` closes its
 ///    guard's scope before it publishes; the three block-set callers hold
-///    `DevShared::compile` instead; the seed importer holds neither. So no
+///    `Workspace::compile` instead; the seed importer holds neither. So no
 ///    task can be waiting on this queue while holding the mutex this takes.
 /// 2. **It does not nest with [`adopt_site`].** Both acquisitions live in
 ///    [`activate`], but they are sequential, not nested: this guard is
@@ -418,6 +451,7 @@ async fn compose(
 ///    taken inside it, and there is no activation request and no runtime
 ///    rebuild. The collector, the only other holder that reads the ledger,
 ///    takes this lock first and nothing else while holding it.
+#[cfg(feature = "block-dev")]
 async fn workspace_site(
     ctx: &dyn Context,
     _held: &WorkspaceGuard<'_>,
@@ -657,15 +691,21 @@ async fn activate(
     // then disagree with nothing left to reconcile them.
     //
     // Read here rather than after `compose`, which consumes the intent.
+    #[cfg(feature = "block-dev")]
     let adopts_site = matches!(intent, ActivationIntent::Rollback { .. });
     let state = repo::runtime_state::read(ctx)
         .await
         .map_err(storage_error)?;
     let previous = load_previous(ctx, &state).await?;
-    // Held from the workspace read through the staged row's insert, for every
-    // intent: see `workspace_site`.
-    let composing = shared.workspace.lock().await;
+    // Held from the compose through the staged row's insert, for every
+    // intent. The workspace's intents read the workspace under it and need
+    // it held until the row exists: see `workspace_site`. A seed carries its
+    // manifest whole and reads nothing under it.
+    let composing = shared.workspace_manifest.lock().await;
+    #[cfg(feature = "block-dev")]
     let mut manifest = compose(ctx, &composing, intent, previous.as_ref()).await?;
+    #[cfg(not(feature = "block-dev"))]
+    let ActivationIntent::Seed { mut manifest } = intent;
 
     // The id is minted here, not by the repo, because the manifest has to
     // carry it before it is hashed (design §11.3) — and the parent is
@@ -731,6 +771,7 @@ async fn activate(
     // Which means a failure here arrives after the commit, with the rollback
     // already serving — so it is reported as exactly that, never as a
     // rollback that did not happen.
+    #[cfg(feature = "block-dev")]
     if adopts_site {
         adopt_site(ctx, shared, &manifest.site).await.map_err(|e| {
             ActivationError::RollbackNotAdopted {
@@ -749,6 +790,7 @@ async fn activate(
 /// never written), so nothing has been stored and nothing has been reclaimed.
 /// Charging for it would make a rollback look like a fresh upload of the whole
 /// site and eat the workspace's quota for content it already paid for.
+#[cfg(feature = "block-dev")]
 async fn adopt_site(
     ctx: &dyn Context,
     shared: &super::DevShared,
@@ -766,7 +808,7 @@ async fn adopt_site(
     // `compose` and the staged row's insert — is sequential with this one
     // rather than nested: it is dropped after the insert, and this runs after
     // `activate_staged`. `workspace_site` carries the full argument.
-    let _serialized = shared.workspace.lock().await;
+    let _serialized = shared.workspace_manifest.lock().await;
     let mut ws = workspace::load(ctx).await?;
     let stale: Vec<String> = ws
         .files
@@ -869,6 +911,14 @@ async fn activate_staged(
     // --- Publish the site -------------------------------------------------
     journal(ctx, state, Some(id), ActivationPhase::Publishing).await?;
     let diff = generation::diff(previous_manifest, manifest);
+    // Read only by the workspace's announcement below.
+    #[cfg_attr(
+        not(feature = "block-dev"),
+        expect(
+            unused_variables,
+            reason = "only the block-dev announcement reads which paths the publish touched"
+        )
+    )]
     let published =
         match publish_site(ctx, previous_manifest.map(|m| &m.site), &manifest.site).await {
             Ok(published) => published,
@@ -927,14 +977,22 @@ async fn activate_staged(
     // nothing of it to wait for. The paths are spelled as the workspace
     // spells them (`site/…`), the one form every `/b/dev` surface uses for a
     // site file.
-    shared.control.announce_active(&GenerationAnnouncement {
-        id: row.id.clone(),
-        cause: row.cause,
-        changed_paths: published
-            .iter()
-            .map(|path| format!("{}{path}", workspace::SITE_PREFIX))
-            .collect(),
-    });
+    //
+    // Workspace only: the `/b/dev` page is the announcement's one listener,
+    // so a build without it has no announcement to make and no host call to
+    // make it with.
+    #[cfg(feature = "block-dev")]
+    shared
+        .workspace
+        .control
+        .announce_active(&GenerationAnnouncement {
+            id: row.id.clone(),
+            cause: row.cause,
+            changed_paths: published
+                .iter()
+                .map(|path| format!("{}{path}", workspace::SITE_PREFIX))
+                .collect(),
+        });
     schedule_maintenance(ctx, shared, maintenance).await;
     progress.record(ActivationPhase::Active, format!("generation {}", row.id));
 
@@ -1621,6 +1679,7 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "block-dev")]
     use crate::{
         blocks::dev::{
             test_support::FakeControl,
@@ -1629,10 +1688,19 @@ mod tests {
         test_support::TestContext,
     };
 
+    /// The intent every build has, for the tests about the queue itself.
+    fn seed() -> ActivationIntent {
+        ActivationIntent::Seed {
+            manifest: GenerationManifest::staged(SiteManifest::default(), Vec::new()),
+        }
+    }
+
+    #[cfg(feature = "block-dev")]
     fn site_only() -> ActivationIntent {
         ActivationIntent::SiteOnly
     }
 
+    #[cfg(feature = "block-dev")]
     fn entry(path: &str, sha: &str) -> FileEntry {
         FileEntry {
             path: path.to_string(),
@@ -1644,6 +1712,7 @@ mod tests {
     /// Adopting a site manifest replaces the whole `site/` half and leaves
     /// `blocks/` alone — a rollback is a site+block republish, not a workspace
     /// wipe.
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn adopting_a_site_replaces_only_the_site_half() {
         let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
@@ -1660,8 +1729,8 @@ mod tests {
             &ctx,
             &super::super::DevShared::new(
                 FakeControl::new(),
-                std::sync::Arc::new(super::super::test_support::FakeShell::new()),
                 super::super::test_support::fake_bypass_rules(),
+                std::sync::Arc::new(super::super::test_support::FakeShell::new()),
             ),
             &SiteManifest {
                 files: vec![entry("index.html", "old")],
@@ -1689,6 +1758,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "block-dev")]
     fn block_set(marker: &str) -> ActivationIntent {
         ActivationIntent::BlockSet {
             site: None,
@@ -1702,6 +1772,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "block-dev")]
     fn block_marker(intent: &ActivationIntent) -> Option<&str> {
         match intent {
             ActivationIntent::BlockSet { blocks, .. } => {
@@ -1715,19 +1786,20 @@ mod tests {
     #[test]
     fn the_first_request_drives_and_the_rest_wait() {
         let queue = ActivationQueue::new();
-        let admitted = queue.admit(GenerationCause::SiteWrite, site_only());
+        let admitted = queue.admit(GenerationCause::Seed, seed());
         assert!(matches!(
             admitted,
-            Admission::Drive(_, GenerationCause::SiteWrite, ActivationIntent::SiteOnly)
+            Admission::Drive(_, GenerationCause::Seed, ActivationIntent::Seed { .. })
         ));
         assert!(matches!(
-            queue.admit(GenerationCause::SiteWrite, site_only()),
+            queue.admit(GenerationCause::Seed, seed()),
             Admission::Wait(_)
         ));
     }
 
     /// Coalescing: the newest intent wins, and every waiter is carried over to
     /// it — including the one whose own intent was displaced.
+    #[cfg(feature = "block-dev")]
     #[test]
     fn queued_requests_coalesce_onto_the_newest_intent() {
         let queue = ActivationQueue::new();
@@ -1745,6 +1817,7 @@ mod tests {
     /// resolve the same persisted workspace at dequeue, so the site write is
     /// carried either way — but replacing the intent would drop the block set
     /// the compile staged.
+    #[cfg(feature = "block-dev")]
     #[test]
     fn a_site_write_does_not_displace_a_pending_block_change() {
         let queue = ActivationQueue::new();
@@ -1759,6 +1832,7 @@ mod tests {
     }
 
     /// The reverse still replaces: a block change is not subsumed by anything.
+    #[cfg(feature = "block-dev")]
     #[test]
     fn a_block_change_displaces_a_pending_site_write() {
         let queue = ActivationQueue::new();
@@ -1774,20 +1848,20 @@ mod tests {
     #[test]
     fn the_queue_is_released_only_when_nothing_is_pending() {
         let queue = ActivationQueue::new();
-        let mut driver = expect_drive(queue.admit(GenerationCause::SiteWrite, site_only()));
-        let _waiter = queue.admit(GenerationCause::SiteWrite, site_only());
+        let mut driver = expect_drive(queue.admit(GenerationCause::Seed, seed()));
+        let _waiter = queue.admit(GenerationCause::Seed, seed());
 
         assert!(driver.next().is_some());
         // Still running: the driver has not finished the batch it just took.
         assert!(matches!(
-            queue.admit(GenerationCause::SiteWrite, site_only()),
+            queue.admit(GenerationCause::Seed, seed()),
             Admission::Wait(_)
         ));
         assert!(driver.next().is_some());
         assert!(driver.next().is_none());
         drop(driver);
         assert!(matches!(
-            queue.admit(GenerationCause::SiteWrite, site_only()),
+            queue.admit(GenerationCause::Seed, seed()),
             Admission::Drive(..)
         ));
     }
@@ -1798,9 +1872,8 @@ mod tests {
     #[test]
     fn a_dropped_lease_releases_the_queue_and_fails_its_waiters() {
         let queue = ActivationQueue::new();
-        let driver = expect_drive(queue.admit(GenerationCause::SiteWrite, site_only()));
-        let Admission::Wait(mut waiter) = queue.admit(GenerationCause::SiteWrite, site_only())
-        else {
+        let driver = expect_drive(queue.admit(GenerationCause::Seed, seed()));
+        let Admission::Wait(mut waiter) = queue.admit(GenerationCause::Seed, seed()) else {
             panic!("the second request must wait");
         };
 
@@ -1814,7 +1887,7 @@ mod tests {
         }
         assert!(
             matches!(
-                queue.admit(GenerationCause::SiteWrite, site_only()),
+                queue.admit(GenerationCause::Seed, seed()),
                 Admission::Drive(..)
             ),
             "the queue must be free again"

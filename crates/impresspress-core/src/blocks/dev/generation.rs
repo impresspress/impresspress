@@ -376,6 +376,10 @@ pub async fn load(
 ///
 /// The journal — not the `status` column — is what says which generation is
 /// serving; the column records the row's own lifecycle.
+///
+/// Workspace only (`block-dev`: the staging and removal paths, the export,
+/// and the boot repair's `publisher::converge_sandbox_llms`).
+#[cfg(feature = "block-dev")]
 pub async fn active(
     ctx: &dyn Context,
 ) -> Result<Option<(GenerationRow, GenerationManifest)>, WaferError> {
@@ -383,7 +387,7 @@ pub async fn active(
     active_from(ctx, &state).await
 }
 
-/// [`active`] for a caller that has already read the journal.
+/// `active` (`block-dev`) for a caller that has already read the journal.
 ///
 /// The status endpoint is polled every ~300 ms while a tool call is in flight
 /// and needs the phase as well as the active generation; reading the

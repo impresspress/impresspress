@@ -25,6 +25,9 @@ pub const MAX_FILES: usize = 2_000;
 /// anything is stored, so one request holds at most 64 × [`MAX_FILE_BYTES`]
 /// = 32 MiB of decoded content, which is within the 64 MiB
 /// [`MAX_WORKSPACE_BYTES`] workspace quota.
+///
+/// Workspace only (`block-dev`).
+#[cfg(feature = "block-dev")]
 pub const MAX_BATCH_FILES: usize = 64;
 
 /// Largest total size of the workspace's files, in bytes.
@@ -245,6 +248,10 @@ pub fn block_name_is_valid(name: &str) -> bool {
 ///
 /// It must never over-estimate, or a legal payload would be refused: base64
 /// carries three bytes per four characters, of which at most two are padding.
+///
+/// Workspace only (`block-dev`: the files and staging handlers), and compiled
+/// for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub fn min_base64_decoded_len(encoded: &str) -> usize {
     (encoded.len() / 4).saturating_mul(3).saturating_sub(2)
 }
@@ -265,6 +272,10 @@ pub fn content_type_for(path: &str) -> &'static str {
 ///
 /// `image/svg+xml` and the `application/*` textual formats are the reason this
 /// is not `starts_with("text/")`: they are source a user edits.
+///
+/// Workspace only (`block-dev`: the files and staging handlers), and compiled
+/// for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub fn is_textual(content_type: &str) -> bool {
     content_type.starts_with("text/")
         || content_type.starts_with("application/json")
@@ -285,6 +296,10 @@ pub fn is_textual(content_type: &str) -> bool {
 /// offered as text. Nothing about the *stored* content type changes:
 /// [`content_type_for`] still answers `application/octet-stream`, which is
 /// what the site publisher serves.
+///
+/// Workspace only (`block-dev`: the files and staging handlers), and compiled
+/// for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub fn may_be_text(content_type: &str) -> bool {
     is_textual(content_type) || content_type == wafer_core::mime::UNKNOWN
 }

@@ -8,6 +8,17 @@
 //! boundary: the dev block hands over a validated spec set and the host
 //! answers with a rebuilt, swapped-in runtime.
 //!
+//! # Two traits, one per half
+//!
+//! [`RuntimeControl`] is what a site needs to boot, converge and run its
+//! blocks: read a guest's report ([`RuntimeControl::inspect`]), rebuild,
+//! and restore. `WorkspaceControl` (`block-dev` only) adds what only the
+//! workspace's staging path and its page use — the dry-run `probe`, the
+//! runtime counter the status endpoint reports, and the announcement the
+//! page listens for. A build without `block-dev` has neither those methods
+//! nor the `ShellSource` the export reads, so no host can implement them
+//! there and no runtime module can call them.
+//!
 //! # Validation is three steps, in this order
 //!
 //! 1. [`RuntimeControl::inspect`] — instantiate the module under
@@ -17,8 +28,10 @@
 //!    prefixes, capability namespaces, collisions. Pure data over that
 //!    `BlockInfo`; they are what turn the guest's *declaration* into an
 //!    accepted [`DynamicBlockSpec`].
-//! 3. [`RuntimeControl::probe`] — Init, Start and one request under the
-//!    capabilities of that **accepted** spec.
+//! 3. `WorkspaceControl::probe` — Init, Start and one request under the
+//!    capabilities of that **accepted** spec. The staging path runs it; a
+//!    seed import does not (`super::seed`, "What is still *not* verified"),
+//!    so it is workspace-only.
 //!
 //! The order is the whole point. A single `validate` that ran the lifecycle
 //! under the guest's own declaration would execute untrusted code under
@@ -29,6 +42,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "block-dev")]
 use super::repo::generations::GenerationCause;
 
 /// Access tier a dynamically-registered block asks the router to apply to one
@@ -176,7 +190,7 @@ impl PartialEq for DynamicBlockSpec {
 impl Eq for DynamicBlockSpec {}
 
 /// Where a guest failed [`RuntimeControl::inspect`] or
-/// [`RuntimeControl::probe`].
+/// `WorkspaceControl::probe`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStage {
@@ -244,7 +258,8 @@ impl std::fmt::Display for ValidationFailure {
     }
 }
 
-/// The host's half of activation.
+/// The host's half of activation: the calls a site's boot, its seed import
+/// and every activation make.
 ///
 /// `MaybeSend + MaybeSync` (rather than a hard `Send + Sync`) is what lets the
 /// browser implementation hold the live `Rc<Wafer>` it is required to hold:
@@ -269,24 +284,6 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// `requires` and `capabilities` out of it, and a host that normalized
     /// any of those would silently disable a rule.
     async fn inspect(&self, artifact: &[u8]) -> Result<wafer_block::BlockInfo, ValidationFailure>;
-
-    /// Step 3: run `Init`, `Start` and one probe request under
-    /// `spec.capabilities`.
-    ///
-    /// `spec` is the **accepted** spec — the one the caller's static rules
-    /// produced and approved, not the guest's raw declaration. It is also
-    /// exactly what [`Self::rebuild`] will be handed, so a guest that traps
-    /// here would have trapped live.
-    ///
-    /// A dry run: nothing is swapped in, and a trap must fail this call
-    /// without poisoning the outer runtime (design §6.6). Failures are
-    /// [`ValidationStage::Init`], [`ValidationStage::Start`] or
-    /// [`ValidationStage::Probe`].
-    async fn probe(
-        &self,
-        spec: &DynamicBlockSpec,
-        artifact: &[u8],
-    ) -> Result<(), ValidationFailure>;
 
     /// Rebuild the runtime with exactly this block set and swap it in.
     ///
@@ -313,6 +310,36 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// caller's failure report to say so; the runtime is then whatever the
     /// rebuild left live.
     async fn restore_previous(&self) -> Result<(), String>;
+}
+
+/// The workspace's half of the host: what only the staging path, the status
+/// endpoint and the `/b/dev` page use.
+///
+/// A supertrait of [`RuntimeControl`] because the workspace drives the same
+/// runtime a site does — one host object implements both, and
+/// [`super::DevShared`] holds it twice: as `dyn RuntimeControl` for the
+/// activation path every build has, and as `dyn WorkspaceControl` in
+/// [`super::Workspace`] for the calls only a workspace makes.
+#[cfg(feature = "block-dev")]
+#[wafer_block::wafer_async_trait]
+pub trait WorkspaceControl: RuntimeControl {
+    /// Step 3: run `Init`, `Start` and one probe request under
+    /// `spec.capabilities`.
+    ///
+    /// `spec` is the **accepted** spec — the one the caller's static rules
+    /// produced and approved, not the guest's raw declaration. It is also
+    /// exactly what [`RuntimeControl::rebuild`] will be handed, so a guest that traps
+    /// here would have trapped live.
+    ///
+    /// A dry run: nothing is swapped in, and a trap must fail this call
+    /// without poisoning the outer runtime (design §6.6). Failures are
+    /// [`ValidationStage::Init`], [`ValidationStage::Start`] or
+    /// [`ValidationStage::Probe`].
+    async fn probe(
+        &self,
+        spec: &DynamicBlockSpec,
+        artifact: &[u8],
+    ) -> Result<(), ValidationFailure>;
 
     /// Monotonic runtime generation counter (bumped by every successful
     /// rebuild). The `/b/dev` page re-registers its agent tools whenever this
@@ -337,7 +364,7 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
     fn announce_active(&self, generation: &GenerationAnnouncement);
 }
 
-/// What [`RuntimeControl::announce_active`] tells the page about a
+/// What [`WorkspaceControl::announce_active`] tells the page about a
 /// generation that has just gone live.
 ///
 /// # The `dev-generation` message
@@ -354,6 +381,7 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
 ///   spelling (`site_write`, `site_delete`, `block_compile`, `block_remove`,
 ///   `rollback`, `seed`), the same spelling the `/b/dev` API uses;
 /// - `changed_paths`: [`Self::changed_paths`], an array of strings.
+#[cfg(feature = "block-dev")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationAnnouncement {
     /// The generation that is now active.
@@ -393,6 +421,9 @@ pub struct GenerationAnnouncement {
 /// `MaybeSend + MaybeSync` for the same reason [`RuntimeControl`] is: the
 /// browser implementation resolves through a `JsFuture`, which is not `Send`,
 /// and the sandbox is single-threaded on every target it runs on.
+///
+/// Workspace only (`block-dev`): the export is its one reader.
+#[cfg(feature = "block-dev")]
 #[wafer_block::wafer_async_trait]
 pub trait ShellSource: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Every file of the running static shell, relative to the site root

@@ -27,9 +27,11 @@
 //!
 //! Every other impresspress feature block goes through
 //! [`crate::impresspress_feature_block!`], which generates a zero-argument
-//! `new()`. This block's constructor takes the shared state that carries the
-//! `RuntimeControl` handle, so the struct and `impl Block` are written out in
-//! the same shape the macro would produce (as `impresspress/llm` already is).
+//! `new()`. This block's workspace form ([`DevBlock`]'s `with_workspace`,
+//! `block-dev`) takes the shared state its handlers serve, and its `info()`
+//! and `handle()` differ by build, so the struct and `impl Block` are written
+//! out in the same shape the macro would produce (as `impresspress/llm`
+//! already is).
 //!
 //! # Why it is not in the block manifest
 //!
@@ -103,11 +105,13 @@ use wafer_run::{
     LifecycleEvent, Message, OutputStream, WaferError,
 };
 
+#[cfg(feature = "block-dev")]
+pub use self::control::{ShellSource, WorkspaceControl};
 pub use self::{
     bypass::{BypassRule, BypassRules},
     control::{
-        DynamicBlockSpec, DynamicRoute, RouteAccessKind, RuntimeControl, ShellSource,
-        ValidationFailure, ValidationStage,
+        DynamicBlockSpec, DynamicRoute, RouteAccessKind, RuntimeControl, ValidationFailure,
+        ValidationStage,
     },
 };
 #[cfg(feature = "block-dev")]
@@ -544,7 +548,7 @@ fn with_no_store(mut error: WaferError) -> WaferError {
 /// - the published site, which `wafer-run/web` owns;
 /// - every [`data_snapshot::TABLE_ALLOWLIST`] table, one exact grant each
 ///   (never a `{org}__{block}__*` prefix) so the grant set says exactly what
-///   [`data_snapshot::export`]/[`data_snapshot::import`] actually touch — the
+///   `data_snapshot::export`/[`data_snapshot::import`] actually touch — the
 ///   same closed-list discipline the allowlist itself exists for. This is
 ///   the dev block's own control-plane logic reading and writing another
 ///   block's rows directly, not a delegated call through that block's own
@@ -560,22 +564,17 @@ pub fn wrap_grants() -> Vec<wafer_run::ResourceGrant> {
     grants
 }
 
-/// State shared by every `/b/dev` handler.
+/// State shared by the block, the host's boot and every activation.
 ///
 /// Held behind an `Arc` because the activation queue is shared mutable state
 /// that outlives any one request — and outlives the runtime an activation
 /// rebuilds.
 pub struct DevShared {
     /// The host's half of activation: builds and swaps the live runtime.
-    pub control: Arc<dyn RuntimeControl>,
-    /// The host's other half: the static shell this deployment is running
-    /// inside of, which [`export`] copies into the bundle it hands the user.
     ///
-    /// Beside `control` rather than inside it because the two answer
-    /// different questions — one builds a runtime, the other reads files the
-    /// host was shipped as — and because a host may legitimately have one
-    /// without the other (an export is a read; a runtime rebuild is not).
-    pub shell: Arc<dyn ShellSource>,
+    /// In a `block-dev` build this is the same host object as
+    /// `Workspace::control`, held through its supertrait.
+    pub control: Arc<dyn RuntimeControl>,
     /// The paths the service worker in front of this runtime leaves to the
     /// static host — what it handed `initialize({ bypass })`, kept for the
     /// worker's life. A site file at one of them would never be shown, so
@@ -605,7 +604,52 @@ pub struct DevShared {
     /// a `std::sync::Mutex` cannot be held across an `await` at all. It guards
     /// the manifest only: it is released before the activation the mutation
     /// requests, so ordinary editing never waits behind a publish.
-    pub workspace: futures::lock::Mutex<()>,
+    ///
+    /// In every build, not only with the workspace: the store is the runtime
+    /// half's (an activation composes from it and the collector reads it),
+    /// and an activation holds this from its compose to its staged row's
+    /// insert so a collection cannot run in between
+    /// (`activation::workspace_site`, `gc`).
+    pub workspace_manifest: futures::lock::Mutex<()>,
+    /// Serializes `activation::maintain` — retention's prune and the
+    /// collector — against itself.
+    ///
+    /// Scheduled after a request's reply, maintenance runs outside the
+    /// activation queue, so two of them can overlap: the tasks one request
+    /// left behind run together, and the next request's can start before
+    /// they finish. Two prunes would delete the same rows and two
+    /// collections the same objects, and the slower one would fail on what
+    /// the faster one had already removed. One at a time, each pass reads
+    /// what the previous one left.
+    ///
+    /// Taken first and held for the whole pass; the collector takes
+    /// [`Self::workspace_manifest`] inside it, and nothing takes this while
+    /// holding that, or while waiting on the activation queue.
+    pub maintenance: futures::lock::Mutex<()>,
+    /// What only the workspace half uses: the host's workspace calls, the
+    /// static shell the export copies, and the compile lock.
+    ///
+    /// No `Option`: a `block-dev` build always has a workspace host (even
+    /// when it serves an exported bundle and routes no `/b/dev`), and a build
+    /// without `block-dev` has no field to fill.
+    #[cfg(feature = "block-dev")]
+    pub workspace: Workspace,
+}
+
+/// The workspace half of [`DevShared`] (`block-dev` only).
+#[cfg(feature = "block-dev")]
+pub struct Workspace {
+    /// The host's workspace calls: the staging path's dry-run `probe`, the
+    /// status endpoint's runtime counter, and the announcement the `/b/dev`
+    /// page listens for. The same host object as [`DevShared::control`].
+    pub control: Arc<dyn WorkspaceControl>,
+    /// The static shell this deployment is running inside of, which
+    /// [`export`] copies into the bundle it hands the user.
+    ///
+    /// Beside `control` rather than inside it because the two answer
+    /// different questions — one builds a runtime, the other reads files the
+    /// host was shipped as.
+    pub shell: Arc<dyn ShellSource>,
     /// Serializes every change to the *block* set.
     ///
     /// A block change is resolved as a whole desired set —
@@ -621,32 +665,18 @@ pub struct DevShared {
     /// the intent instead; the lock is the cheaper half of that trade while
     /// the sandbox has one agent and one page.
     ///
-    /// An **async** mutex for the same reason [`Self::workspace`] is: the
-    /// critical section spans storage, the ledger and the runtime rebuild. It
-    /// is a separate lock because it guards a different thing — a site write
-    /// must never wait behind a compile, and `ActivationIntent::SiteOnly`
-    /// composes its block half at dequeue precisely so it does not have to.
+    /// An **async** mutex for the same reason
+    /// [`DevShared::workspace_manifest`] is: the critical section spans
+    /// storage, the ledger and the runtime rebuild. It is a separate lock
+    /// because it guards a different thing — a site write must never wait
+    /// behind a compile, and `ActivationIntent::SiteOnly` composes its block
+    /// half at dequeue precisely so it does not have to.
     pub compile: futures::lock::Mutex<()>,
-    /// Serializes `activation::maintain` — retention's prune and the
-    /// collector — against itself.
-    ///
-    /// Scheduled after a request's reply, maintenance runs outside the
-    /// activation queue, so two of them can overlap: the tasks one request
-    /// left behind run together, and the next request's can start before
-    /// they finish. Two prunes would delete the same rows and two
-    /// collections the same objects, and the slower one would fail on what
-    /// the faster one had already removed. One at a time, each pass reads
-    /// what the previous one left.
-    ///
-    /// Taken first and held for the whole pass; the collector takes
-    /// [`Self::workspace`] inside it, and nothing takes this while holding
-    /// that, or while waiting on the activation queue.
-    pub maintenance: futures::lock::Mutex<()>,
 }
 
 impl DevShared {
-    /// Build the shared state around the two host seams and the service
-    /// worker's bypass rules.
+    /// Build the shared state around the host's runtime control and the
+    /// service worker's bypass rules — all a build without `block-dev` has.
     ///
     /// [`RuntimeControl`] is bounded on `MaybeSend + MaybeSync`, which is
     /// unbounded on wasm32 — that is what lets the browser control hold the
@@ -655,52 +685,64 @@ impl DevShared {
     /// not need to be; see the crate-level
     /// `expect(clippy::arc_with_non_send_sync)` in `lib.rs` for why the lint
     /// that says so is off for wasm32 only.
-    pub fn new(
-        control: Arc<dyn RuntimeControl>,
-        shell: Arc<dyn ShellSource>,
-        bypass: BypassRules,
-    ) -> Arc<Self> {
+    #[cfg(not(feature = "block-dev"))]
+    pub fn new(control: Arc<dyn RuntimeControl>, bypass: BypassRules) -> Arc<Self> {
         Arc::new(Self {
             control,
-            shell,
             bypass,
             activation: activation::ActivationQueue::new(),
-            workspace: futures::lock::Mutex::new(()),
-            compile: futures::lock::Mutex::new(()),
+            workspace_manifest: futures::lock::Mutex::new(()),
             maintenance: futures::lock::Mutex::new(()),
+        })
+    }
+
+    /// Build the shared state with its workspace half. `control` is held
+    /// twice: as itself for the workspace's calls and, upcast, as the
+    /// [`RuntimeControl`] every activation uses. `shell` is the static shell
+    /// the export reads.
+    ///
+    /// The `Arc` is not `Send`/`Sync` on wasm32, for the reason the site
+    /// build's constructor gives.
+    #[cfg(feature = "block-dev")]
+    pub fn new(
+        control: Arc<dyn WorkspaceControl>,
+        bypass: BypassRules,
+        shell: Arc<dyn ShellSource>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            control: control.clone(),
+            bypass,
+            activation: activation::ActivationQueue::new(),
+            workspace_manifest: futures::lock::Mutex::new(()),
+            maintenance: futures::lock::Mutex::new(()),
+            workspace: Workspace {
+                control,
+                shell,
+                compile: futures::lock::Mutex::new(()),
+            },
         })
     }
 }
 
 /// The browser development sandbox's block (`impresspress/dev`).
+///
+/// Its `info()` and `lifecycle()` read no shared state, so only the
+/// workspace's dispatch holds any: a build without `block-dev` has no field.
 pub struct DevBlock {
-    // Read only by the workspace dispatch in `handle`. A build without
-    // `block-dev` has no dispatch, and keeps the field so `runtime_only` is
-    // handed the same shared state in every build.
-    #[cfg_attr(
-        not(feature = "block-dev"),
-        expect(
-            dead_code,
-            reason = "only the block-dev dispatch in `handle` reads the shared state"
-        )
-    )]
-    shared: Arc<DevShared>,
-    /// Whether the runtime that registered this block also routed
-    /// [`ROUTE_PREFIX`] — the workspace half of the sandbox.
+    /// The shared state the workspace's handlers serve — `Some` exactly when
+    /// the runtime that registered this block also routed [`ROUTE_PREFIX`].
     ///
-    /// A `block-dev` build registers the block in BOTH of `SandboxMode`'s
+    /// A `block-dev` build registers the block in both of `SandboxMode`'s
     /// compiled-in modes, because its `lifecycle(Init)` is what creates the
     /// ledger tables the seed import and the generation history write to.
-    /// Only the workspace mode routes it. What this field carries is that
-    /// difference, into the one place that would otherwise describe a
-    /// surface that is not there: [`Block::info`] — whose `endpoints` become
+    /// Only the workspace mode routes it. This field carries that difference
+    /// into the two places that would otherwise describe or serve a surface
+    /// that is not there: [`Block::info`] — whose `endpoints` become
     /// `/openapi.json` and whose `admin_url` becomes an "Open" button on
-    /// `/b/admin/blocks`, for every registered block, routed or not.
-    ///
-    /// A build without `block-dev` has no workspace to carry, so no field:
-    /// its block is always [`Self::runtime_only`].
+    /// `/b/admin/blocks`, for every registered block, routed or not — and
+    /// [`Block::handle`], which has no state to dispatch to without it.
     #[cfg(feature = "block-dev")]
-    workspace: bool,
+    workspace: Option<Arc<DevShared>>,
 }
 
 impl DevBlock {
@@ -710,8 +752,7 @@ impl DevBlock {
     #[cfg(feature = "block-dev")]
     pub fn with_workspace(shared: Arc<DevShared>) -> Self {
         Self {
-            shared,
-            workspace: true,
+            workspace: Some(shared),
         }
     }
 
@@ -725,12 +766,14 @@ impl DevBlock {
     /// `routes_and_endpoints_stay_in_lockstep` exists to catch, one level up
     /// from where that test can see it.
     ///
-    /// The only form a build without `block-dev` has.
-    pub fn runtime_only(shared: Arc<DevShared>) -> Self {
+    /// Takes nothing: the shared state the host built is the host's to hold
+    /// (the activation queue and the boot run on it), and nothing this block
+    /// does without a route reads it. The only form a build without
+    /// `block-dev` has.
+    pub fn runtime_only() -> Self {
         Self {
-            shared,
             #[cfg(feature = "block-dev")]
-            workspace: false,
+            workspace: None,
         }
     }
 }
@@ -765,7 +808,7 @@ impl Block for DevBlock {
         // none of it — see `Self::runtime_only` — and a build without
         // `block-dev` has no route table to declare it from.
         #[cfg(feature = "block-dev")]
-        if self.workspace {
+        if self.workspace.is_some() {
             return base
                 .endpoints(endpoint_match::declare(ROUTES))
                 .admin_url(ROUTE_PREFIX);
@@ -785,9 +828,10 @@ impl Block for DevBlock {
         // the inside, because one row of `ROUTES` is `Public` and hands out a
         // session: that page must not be one stray route registration away
         // from existing on a site that was exported to be served for real.
-        if !self.workspace {
+        // A block built without the workspace has no state to serve it from.
+        let Some(shared) = &self.workspace else {
             return no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found");
-        }
+        };
         let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
             return no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found");
         };
@@ -799,25 +843,25 @@ impl Block for DevBlock {
             Route::PageScript => page::handle_script(&msg),
             Route::PageStylesheet => page::handle_stylesheet(&msg),
             Route::PageCompilerAdapter => page::handle_compiler_adapter(&msg),
-            Route::ApiStatus => status::handle(ctx, &self.shared).await,
-            Route::ApiFilesList => files::handle_list(ctx, &self.shared, &msg).await,
-            Route::ApiFilesRead => files::handle_read(ctx, &self.shared, input).await,
-            Route::ApiFilesWrite => files::handle_write(ctx, &self.shared, input).await,
-            Route::ApiFilesWriteBatch => files::handle_write_batch(ctx, &self.shared, input).await,
-            Route::ApiFilesDelete => files::handle_delete(ctx, &self.shared, input).await,
+            Route::ApiStatus => status::handle(ctx, shared).await,
+            Route::ApiFilesList => files::handle_list(ctx, shared, &msg).await,
+            Route::ApiFilesRead => files::handle_read(ctx, shared, input).await,
+            Route::ApiFilesWrite => files::handle_write(ctx, shared, input).await,
+            Route::ApiFilesWriteBatch => files::handle_write_batch(ctx, shared, input).await,
+            Route::ApiFilesDelete => files::handle_delete(ctx, shared, input).await,
             Route::ApiGenerations => generations_api::handle_list(ctx, &msg).await,
             Route::ApiGenerationDetail => generations_api::handle_detail(ctx, &msg).await,
             Route::ApiGenerationRollback => {
-                generations_api::handle_rollback(ctx, &self.shared, &msg).await
+                generations_api::handle_rollback(ctx, shared, &msg).await
             }
-            Route::ApiBuildStage => blocks_api::handle_stage(ctx, &self.shared, input).await,
-            Route::ApiBlockCreate => scaffold::handle_create(ctx, &self.shared, input).await,
-            Route::ApiBlockRemove => blocks_api::handle_remove(ctx, &self.shared, &msg).await,
+            Route::ApiBuildStage => blocks_api::handle_stage(ctx, shared, input).await,
+            Route::ApiBlockCreate => scaffold::handle_create(ctx, shared, input).await,
+            Route::ApiBlockRemove => blocks_api::handle_remove(ctx, shared, &msg).await,
             Route::ApiReference => scaffold::handle_reference(ctx).await,
             Route::ApiGuest => scaffold::handle_guest(ctx).await,
             Route::ApiToolsJson => tools::handle(ctx).await,
-            Route::ApiExportManifest => export::handle_manifest(ctx, &self.shared).await,
-            Route::ApiExport => export::handle_export(ctx, &self.shared).await,
+            Route::ApiExportManifest => export::handle_manifest(ctx, shared).await,
+            Route::ApiExport => export::handle_export(ctx, shared).await,
         }
     }
 
@@ -1039,8 +1083,8 @@ mod tests {
 
         let declared = DevBlock::with_workspace(DevShared::new(
             test_support::FakeControl::new(),
-            std::sync::Arc::new(test_support::FakeShell::new()),
             test_support::fake_bypass_rules(),
+            std::sync::Arc::new(test_support::FakeShell::new()),
         ))
         .info()
         .endpoints;

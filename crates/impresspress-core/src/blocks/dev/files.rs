@@ -17,7 +17,7 @@
 //! hash check: the hash check is about the path each writer named and says
 //! nothing about the rest of the file.
 //!
-//! The whole load-mutate-save therefore runs under `DevShared::workspace`, an
+//! The whole load-mutate-save therefore runs under `DevShared::workspace_manifest`, an
 //! async mutex held across those storage calls. It guards the *manifest*, not
 //! the publish: the guard is released before the activation the mutation
 //! requests, so editing never waits behind a runtime rebuild. Any handler
@@ -145,7 +145,7 @@ pub async fn handle_list(ctx: &dyn Context, shared: &DevShared, msg: &Message) -
     // reads it, and a save landing in between invalidates the snapshot (see
     // this module's header).
     let ws = {
-        let _serialized = shared.workspace.lock().await;
+        let _serialized = shared.workspace_manifest.lock().await;
         match workspace::load(ctx).await {
             Ok(ws) => ws,
             Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
@@ -179,7 +179,7 @@ pub async fn handle_read(
     // point: an entry and the content it names are one fact, and a read that
     // released between them would be holding a manifest a mutation has since
     // replaced — the blob it names is exactly what the collector reclaims.
-    let _serialized = shared.workspace.lock().await;
+    let _serialized = shared.workspace_manifest.lock().await;
     let ws = match workspace::load(ctx).await {
         Ok(ws) => ws,
         Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
@@ -255,7 +255,7 @@ pub async fn handle_write(
     // guard is dropped before the publish below: the mutation is what has to
     // be serialized, not the activation it asks for.
     let entry = {
-        let _serialized = shared.workspace.lock().await;
+        let _serialized = shared.workspace_manifest.lock().await;
         let mut ws = match workspace::load(ctx).await {
             Ok(ws) => ws,
             Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
@@ -439,7 +439,7 @@ pub async fn handle_write_batch(
     // Under `shared.workspace` for the reason `handle_write` gives, and
     // released before the publish below for the same one.
     let mut written = {
-        let _serialized = shared.workspace.lock().await;
+        let _serialized = shared.workspace_manifest.lock().await;
         let mut ws = match workspace::load(ctx).await {
             Ok(ws) => ws,
             Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
@@ -487,7 +487,7 @@ pub async fn handle_write_batch(
 /// save it: the half of a multi-file write that comes after the caller's own
 /// checks, shared by [`handle_write_batch`] and `scaffold::handle_create`.
 ///
-/// The caller holds `DevShared::workspace` and loaded `ws` under it; `files`
+/// The caller holds `DevShared::workspace_manifest` and loaded `ws` under it; `files`
 /// are workspace-relative paths in `area`, each with its bytes, with no path
 /// twice. Returns the written entries in `files` order, or the refusal to
 /// send.
@@ -649,7 +649,7 @@ pub async fn handle_delete(
     {
         // Same serialization as a write, for the same reason: a delete is a
         // read-modify-write of the whole manifest.
-        let _serialized = shared.workspace.lock().await;
+        let _serialized = shared.workspace_manifest.lock().await;
         let mut ws = match workspace::load(ctx).await {
             Ok(ws) => ws,
             Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
