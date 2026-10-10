@@ -1,5 +1,6 @@
-// `llm-chat.js` under `node --test`: the message cards it builds, and how a
-// thread link behaves on a phone.
+// `llm-chat.js` under `node --test`: the message cards it builds, how a
+// thread link behaves on a phone, and what a sent chat shows when the server
+// answers it or refuses it.
 //
 // No DOM library, for the reason `ui/assets/test/chrome_harness.mjs` gives:
 // CI runs these with a bare `node --test` and nothing installed. The stub
@@ -76,7 +77,7 @@ function matches(el, sel) {
 }
 
 /** A chat page: `.page--chat` > (aside.chat-threads > #thread-list) + (section.chat-main > #messages-area + form#chat-form). */
-function harness({ bootstrap = [], conversationDisplay = 'flex' } = {}) {
+function harness({ bootstrap = [], conversationDisplay = 'flex', reply = null } = {}) {
   const listeners = { click: [], submit: [], change: [], DOMContentLoaded: [] };
   const body = new El('body');
   const page = body.appendChild(new El('div'));
@@ -96,6 +97,9 @@ function harness({ bootstrap = [], conversationDisplay = 'flex' } = {}) {
   const hidden = form.appendChild(new El('input'));
   hidden.id = 'active-thread-id';
   hidden.value = '';
+  const input = form.appendChild(new El('textarea'));
+  input.id = 'chat-input';
+  input.value = '';
   const carrier = body.appendChild(new El('script'));
   carrier.id = 'llm-chat-bootstrap';
   carrier.textContent = JSON.stringify(bootstrap);
@@ -119,7 +123,15 @@ function harness({ bootstrap = [], conversationDisplay = 'flex' } = {}) {
     history: { replaced: null, replaceState(_s, _t, u) { this.replaced = u; } },
     marked: { parse: (t) => '<p>' + t + '</p>' },
     DOMPurify: { sanitize: (h) => h },
-    fetch: (url) => { fetches.push(url); return Promise.resolve({ json: () => Promise.resolve({ records: [] }) }); },
+    fetch: (url, init) => {
+      fetches.push(url);
+      const answer = reply?.(url, init) ?? { status: 200, body: { records: [] } };
+      return Promise.resolve({
+        ok: answer.status >= 200 && answer.status < 300,
+        status: answer.status,
+        json: () => Promise.resolve(answer.body),
+      });
+    },
     setTimeout: () => 0,
     console,
     Element: El,
@@ -134,7 +146,11 @@ function harness({ bootstrap = [], conversationDisplay = 'flex' } = {}) {
     for (const fn of listeners.click) fn(e);
     return e;
   };
-  return { page, list, area, form, hidden, window, history: context.history, click, fetches };
+  const submit = () => {
+    const e = { target: form, preventDefault() {} };
+    for (const fn of listeners.submit) fn(e);
+  };
+  return { page, list, area, form, hidden, input, window, history: context.history, click, submit, fetches };
 }
 
 function threadLink(list, id) {
@@ -204,4 +220,47 @@ test('on a phone showing the list, a thread link navigates instead', () => {
   assert.equal(e.defaultPrevented, false, 'the link must take the browser to the thread page');
   assert.equal(h.hidden.value, '');
   assert.equal(h.history.replaced, null);
+});
+
+/** Let every pending promise in the page settle. */
+const settled = () => new Promise((r) => setImmediate(r));
+
+test('a chat the server refuses shows the reason it gives, not "No response"', async () => {
+  const reason = "llm.chat: no open page has the LLM model 'm' loaded — load it first";
+  const h = harness({
+    reply: (url) => (url === '/b/llm/api/chat'
+      ? { status: 503, body: { error: 'Unavailable', message: reason } }
+      : null),
+  });
+  h.hidden.value = 't-1';
+  h.input.value = 'hi';
+  h.submit();
+  await settled();
+
+  assert.ok(h.fetches.includes('/b/llm/api/chat'), h.fetches.join(', '));
+  const cards = h.area.children;
+  const last = cards[cards.length - 1];
+  assert.equal(last.className, 'card message-card--warning', 'the refusal is a system card');
+  assert.equal(last.querySelector('.message-card__content').textContent, 'Error: ' + reason);
+  assert.ok(
+    !cards.some((c) => (c.querySelector('.message-card__content')?.textContent ?? '').includes('No response')),
+    'no assistant card claims an empty answer',
+  );
+});
+
+test('a chat the server answers is shown as the reply', async () => {
+  const h = harness({
+    reply: (url) => (url === '/b/llm/api/chat'
+      ? { status: 200, body: { content: 'hello', message_id: 'e-1', model: 'm', truncated: false } }
+      : null),
+  });
+  h.hidden.value = 't-1';
+  h.input.value = 'hi';
+  h.submit();
+  await settled();
+
+  const cards = h.area.children;
+  const last = cards[cards.length - 1];
+  assert.equal(last.className, 'card message-card--neutral');
+  assert.equal(last.querySelector('.message-card__content').innerHTML, '<p>hello</p>');
 });

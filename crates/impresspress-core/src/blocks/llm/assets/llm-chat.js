@@ -349,7 +349,17 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     })
-    .then(function (r) { return r.json(); })
+    .then(function (r) {
+      // A chat the server could not answer comes back as an error status
+      // with `{error, message}`, and the message is what the person needs:
+      // a 503's says why the model cannot take the chat now (no page holds
+      // it, the provider cannot be reached). Read as a reply it would show
+      // as "No response".
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (!r.ok) throw new Error(data.message || ('the chat failed (HTTP ' + r.status + ')'));
+        return data;
+      });
+    })
     .then(function (data) {
       var streamCard = document.getElementById('streaming-msg');
       if (streamCard) {
