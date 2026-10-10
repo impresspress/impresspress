@@ -29,8 +29,9 @@ overlap between Rubrc and WAFER: Rubrc targets wasm32-wasip1, while external
 dependencies and procedural macros are not yet a dependable part of its public
 workflow.
 
-The verifier loads the resulting bytes with WasmiBlock::load_from_bytes, checks
-the block metadata and lifecycle, invokes the handler, and receives:
+The spike's native verifier loaded the resulting bytes with
+WasmiBlock::load_from_bytes, checked the block metadata and lifecycle, invoked
+the handler, and received:
 
     Hello from a browser-compiled WAFER block!
 
@@ -42,6 +43,12 @@ The following gates passed:
 | Full wasm-bindgen package with the feature | wasm-pack build passed |
 | Dependency-free guest for wasm32-wasip1 | 28,469 bytes |
 | Native verifier executing the guest via wasmi | passed |
+
+The native verifier has since been removed. The dev sandbox's end-to-end test
+(`crates/impresspress-web/tests/e2e/dev-foundations.spec.ts`) stages this guest
+into the browser sandbox's runtime on every CI run, which loads it with wasmi
+and serves its route, and asserts the same greeting. That covers what the
+verifier did, in the host the guest is for.
 
 Host-size cost measured from release builds:
 
@@ -154,13 +161,15 @@ From the repository root:
       --target wasm32-wasip1 \
       --manifest-path experiments/browser-service-worker-blocks/guest/Cargo.toml
 
-    cargo run --locked --offline \
-      --manifest-path experiments/browser-service-worker-blocks/verify/Cargo.toml \
-      -- experiments/browser-service-worker-blocks/guest/target/wasm32-wasip1/release/browser_compiled_wafer_block.wasm
-
     cd crates/impresspress-web
     wasm-pack build --target web --release -- \
       --features dynamic-wasm-blocks
+
+To run the guest in the sandbox, point `PROOF_GUEST_WASM` at
+`experiments/browser-service-worker-blocks/guest/target/wasm32-wasip1/release/browser_compiled_wafer_block.wasm`
+and run `npm run e2e:dev` in `crates/impresspress-web` against a dev-sandbox
+build, as the `e2e-dev-sandbox` job in `.github/workflows/ci-shared.yml`
+does.
 
 ## References
 

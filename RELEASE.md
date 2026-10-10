@@ -44,10 +44,11 @@ an existing browser sandbox stored. `workspace.json` and every generation
 lose the `content_type` on each file, and the live site is published again
 so each file carries its new type. Until then a stored type is read and
 ignored. An older runtime cannot read the rewritten data, so rolling the
-runtime back breaks a sandbox this version has booted. The recovery is a fresh sandbox: clear the site's data in the
-browser, or open it in a new profile. If the republish fails, the browser
-console says so. The sandbox keeps working, with its active site and blocks,
-and the next boot tries again.
+runtime back breaks a sandbox this version has booted. The recovery is a
+fresh sandbox: clear the site's data in the browser, or open it in a new
+profile. If the republish fails, the browser console says so. The sandbox
+keeps working, with its active site and blocks, and the next boot tries
+again.
 
 ### Storage: the object listing's `prefix` is case-sensitive everywhere
 

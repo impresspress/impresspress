@@ -256,9 +256,18 @@ pub fn site_blob_shas(manifest: &GenerationManifest) -> BTreeSet<&str> {
 
 /// Rebuild the manifest a ledger row stores.
 ///
-/// The row holds the two halves plus the identity, so this reconstruction is
-/// exact — [`manifest_sha256`] of the result equals the row's stored hash for
-/// any row this module wrote.
+/// The row holds the two halves plus the identity, so for a row this version
+/// wrote the reconstruction is exact: [`manifest_sha256`] of the result
+/// equals the row's stored hash.
+///
+/// A row an earlier version wrote can still carry a `content_type` on each
+/// site entry, and its stored hash covers that key. The key is dropped on the
+/// way in (see [`super::stored_types`]), so for such a row the result denotes
+/// the same files and blocks but hashes differently from what the row
+/// stores. The boot upgrade rewrites every such row with a hash recomputed
+/// over the manifest without the key; until then, and for as long as the
+/// active row is held back because republishing its site failed, the two
+/// disagree.
 pub fn from_row(row: &GenerationRow) -> Result<GenerationManifest, WaferError> {
     Ok(GenerationManifest {
         schema_version: SCHEMA_VERSION,
@@ -501,6 +510,58 @@ mod tests {
         let next = manifest(Vec::new(), Vec::new());
         assert_eq!(diff(Some(&prev), &next).removed_blocks, vec!["site/x"]);
         assert!(block_set_changed(Some(&prev), &next));
+    }
+
+    /// A ledger row for `manifest`, its halves and hash written as activation
+    /// writes them.
+    fn row_for(manifest: &GenerationManifest) -> GenerationRow {
+        GenerationRow {
+            id: manifest.generation_id.clone(),
+            parent_id: manifest.parent_id.clone(),
+            status: repo::generations::GenerationStatus::Active,
+            cause: repo::generations::GenerationCause::SiteWrite,
+            site_manifest_json: canonical_text(&manifest.site).expect("site"),
+            block_manifest_json: canonical_text(&manifest.blocks).expect("blocks"),
+            manifest_sha256: manifest_sha256(manifest).expect("hash"),
+            created_at: "2026-10-10T00:00:00Z".to_string(),
+            activated_at: None,
+            failure_message: None,
+        }
+    }
+
+    #[test]
+    fn from_row_reproduces_the_stored_hash_of_a_row_this_version_wrote() {
+        let manifest = manifest(vec![file("index.html", "aa")], vec![spec("site/x", "bb")]);
+        let row = row_for(&manifest);
+        let rebuilt = from_row(&row).expect("parses");
+        assert_eq!(rebuilt, manifest);
+        assert_eq!(
+            manifest_sha256(&rebuilt).expect("hash"),
+            row.manifest_sha256
+        );
+    }
+
+    #[test]
+    fn from_row_drops_a_legacy_content_type_the_stored_hash_still_covers() {
+        let manifest = manifest(vec![file("index.html", "aa")], Vec::new());
+
+        // What an earlier version stored: the same canonical manifest with a
+        // `content_type` on each site entry, hashed with it.
+        let mut legacy = serde_json::to_value(&manifest).expect("value");
+        for entry in legacy["site"]["files"].as_array_mut().expect("files") {
+            entry["content_type"] = Value::from("text/html");
+        }
+        let mut row = row_for(&manifest);
+        row.site_manifest_json = canonicalize(legacy["site"].clone()).to_string();
+        row.manifest_sha256 = sha256_hex(canonicalize(legacy).to_string().as_bytes());
+
+        let rebuilt = from_row(&row).expect("a legacy row still parses");
+        assert_eq!(rebuilt, manifest, "the key is dropped on the way in");
+        assert_ne!(
+            manifest_sha256(&rebuilt).expect("hash"),
+            row.manifest_sha256,
+            "until the upgrade rewrites the row, its stored hash covers the key"
+        );
     }
 
     #[test]
