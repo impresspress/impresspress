@@ -128,10 +128,12 @@ export function forwardSandboxDiagnostics(page: Page) {
 
 /**
  * What Playwright rejects an `evaluate` with when a navigation replaced the
- * document it ran in before it answered. Two places in playwright-core
- * write it: `Frame._contextDestroyed` and `_contextCreated` in
- * `server/frames.js`, and `rewriteError` in
- * `server/chromium/crExecutionContext.js`, which adds a full stop.
+ * document it ran in before it answered. playwright-core writes it in
+ * `server/frames.js` (`Frame._contextCreated` and `Frame._contextDestroyed`)
+ * and in each browser's `rewriteError` (`server/chromium/crExecutionContext.js`,
+ * `server/webkit/wkExecutionContext.js`, `server/firefox/ffExecutionContext.js`),
+ * which add a full stop. The constant leaves the full stop off so that the
+ * match covers both spellings.
  */
 const NAVIGATED_AWAY = 'Execution context was destroyed, most likely because of a navigation';
 
