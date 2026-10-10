@@ -429,11 +429,11 @@ fn is_char_literal(b: &[u8], i: usize) -> bool {
 /// That is a narrower rule than "a cfg mentioning `test`", deliberately.
 /// `#[cfg(all(test, feature = "llm"))]` (`blocks/llm/providers/mod.rs`) is
 /// test-only and is stripped. `#[cfg(any(feature = "postgres", test))]` is
-/// **not**, and neither is `#[cfg(any(feature = "site-runtime", test))]`
+/// **not**, and neither is `#[cfg(any(feature = "block-dev", test))]`
 /// (`blocks/products/mod.rs`): the items under them compile into the real
-/// `--features postgres` / `--features site-runtime` builds — CI's "Tests
-/// (postgres feature)" job builds the first, its `site-runtime` clippy and
-/// test steps the second. Stripping them would hide live repo code from every
+/// `--features postgres` / `--features block-dev` builds — CI's "Tests
+/// (postgres feature)" job builds the first, its `block-dev` suite and
+/// clippy the second. Stripping them would hide live repo code from every
 /// gate here — the blindness this module exists to remove, reintroduced by a
 /// matcher that was merely more generous.
 fn test_only_attr_tail(line: &str) -> Option<&str> {

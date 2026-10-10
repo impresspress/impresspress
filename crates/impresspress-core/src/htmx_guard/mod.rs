@@ -195,8 +195,8 @@ fn registered() -> Vec<BlockInfo> {
     infos.push(wafer_run::Block::info(
         &crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
             crate::blocks::dev::test_support::FakeControl::new(),
-            std::sync::Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
             crate::blocks::dev::test_support::fake_bypass_rules(),
+            std::sync::Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
         )),
     ));
     infos

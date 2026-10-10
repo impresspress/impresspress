@@ -144,6 +144,10 @@ site-runtime = []
 # build that is not the sandbox (`examples/dev-sandbox`, through
 # `impresspress-web`'s `browser-devtools`) — the security model in the design
 # doc turns on the code not existing there, not on it being switched off.
+# One shipped build still breaks that today: a site exported from the
+# sandbox ships the sandbox's own `browser-devtools` runtime with the
+# workspace switched off at runtime (`SandboxMode::Exported`), until the
+# export ships a `site-runtime`-only build instead.
 # Consumers that want it opt in explicitly.
 #
 # Pulls in `crc32fast` and `miniz_oxide`, used solely by `blocks::dev::zip`

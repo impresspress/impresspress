@@ -32,7 +32,7 @@ const BLOB_CONTENT_TYPE: &str = "application/octet-stream";
 /// implementation is a second thing that can disagree with a stored key.
 pub use wafer_block::hash::sha256_hex;
 
-/// What a [`put`] did with the bytes it was given.
+/// What a [`put_hashed`] did with the bytes it was given.
 ///
 /// The caller needs to know: the workspace's blob-byte accounting
 /// ([`super::workspace::Workspace::blob_bytes`]) may only grow when the store
@@ -50,13 +50,18 @@ pub enum Stored {
 /// Idempotent by construction — the key *is* the content — and skips the
 /// write when the blob is already present, which is the common case: a page
 /// saved twice, or two paths holding the same asset.
+///
+/// A test observer: nothing in either build reads it. Compiled for this
+/// crate's unit tests and for the `test-support` integration tests, which
+/// look at what the runtime half stored through it.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn put(ctx: &dyn Context, bytes: &[u8]) -> Result<(String, Stored), WaferError> {
     let sha = sha256_hex(bytes);
     let stored = put_hashed(ctx, &sha, bytes).await?;
     Ok((sha, stored))
 }
 
-/// [`put`] for a caller that has already hashed `bytes`.
+/// `put` for a caller that has already hashed `bytes`.
 ///
 /// The write handler needs the hash *before* it stores, to decide how much
 /// quota headroom the write needs; hashing half a megabyte twice to get the

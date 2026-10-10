@@ -225,10 +225,10 @@ async fn without_a_configured_password_the_page_only_offers_the_login_page() {
 async fn an_exported_bundle_has_no_entry_page() {
     let shared = DevShared::new(
         FakeControl::new(),
-        Arc::new(FakeShell::new()),
         fake_bypass_rules(),
+        Arc::new(FakeShell::new()),
     );
-    let exported = Arc::new(DevBlock::runtime_only(Arc::clone(&shared)));
+    let exported = Arc::new(DevBlock::runtime_only());
 
     // 1. Not declared: nothing in `/openapi.json`, nothing for the router to
     //    refine a route with.

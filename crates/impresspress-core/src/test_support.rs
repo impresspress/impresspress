@@ -806,7 +806,7 @@ impl TestContext {
     /// because that grant is present. Migrations run before enforcement
     /// starts, exactly as they do at boot.
     #[cfg(feature = "block-dev")]
-    pub async fn with_dev(control: Arc<dyn crate::blocks::dev::RuntimeControl>) -> Self {
+    pub async fn with_dev(control: Arc<dyn crate::blocks::dev::WorkspaceControl>) -> Self {
         Self::with_admin().await.with_dev_added(control).await
     }
 
@@ -831,7 +831,7 @@ impl TestContext {
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added(
         self,
-        control: Arc<dyn crate::blocks::dev::RuntimeControl>,
+        control: Arc<dyn crate::blocks::dev::WorkspaceControl>,
     ) -> Self {
         // The default shell is a plausible one rather than an empty one: a
         // fixture that had no shell at all could not tell "this test does not
@@ -855,7 +855,7 @@ impl TestContext {
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added_and_shell(
         self,
-        control: Arc<dyn crate::blocks::dev::RuntimeControl>,
+        control: Arc<dyn crate::blocks::dev::WorkspaceControl>,
         shell: Arc<dyn crate::blocks::dev::ShellSource>,
     ) -> Self {
         self.with_dev_added_and_bypass(
@@ -874,31 +874,39 @@ impl TestContext {
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added_and_bypass(
         self,
-        control: Arc<dyn crate::blocks::dev::RuntimeControl>,
+        control: Arc<dyn crate::blocks::dev::WorkspaceControl>,
         shell: Arc<dyn crate::blocks::dev::ShellSource>,
         bypass: crate::blocks::dev::BypassRules,
     ) -> Self {
         use crate::blocks::dev;
 
-        let shared = dev::DevShared::new(control, shell, bypass);
+        let shared = dev::DevShared::new(control, bypass, shell);
         let block = dev::DevBlock::with_workspace(shared.clone());
         self.with_dev_block_added(shared, block, dev::WORKSPACE_ROUTES)
             .await
     }
 
     /// Build a `TestContext` with admin + dev-sandbox migrations applied and
-    /// the `impresspress/dev` block registered over `control` the way an
-    /// exported site registers it: the runtime half alone
-    /// ([`crate::blocks::dev::DevBlock::runtime_only`]), with no route.
+    /// the `impresspress/dev` block registered the way an exported site
+    /// registers it: the runtime half alone
+    /// ([`crate::blocks::dev::DevBlock::runtime_only`]), with no route, over
+    /// a `DevShared` built around `control`.
     ///
-    /// Everything else is what [`Self::with_dev`] applies — the storage
-    /// wiring, the [`crate::blocks::dev::wrap_grants`] and WRAP enforcement,
-    /// after-response deferral — because the runtime half reaches the same
+    /// Everything else is what `Self::with_dev` (`block-dev`) applies — the
+    /// storage wiring, the [`crate::blocks::dev::wrap_grants`] and WRAP
+    /// enforcement, after-response deferral — because the runtime half reaches the same
     /// stores under the same grants in both builds. Available without
     /// `block-dev`, which is what lets a `site-runtime`-only build test the
     /// seed import, activation and publishing on their own.
+    ///
+    /// `control` is the [`crate::blocks::dev::test_support::FakeControl`]
+    /// double rather than any `RuntimeControl`, because the fixture builds
+    /// the `DevShared` of the build it runs in: a `block-dev` build's carries
+    /// the workspace half too, whose control the same double implements.
     #[cfg(feature = "site-runtime")]
-    pub async fn with_site_runtime(control: Arc<dyn crate::blocks::dev::RuntimeControl>) -> Self {
+    pub async fn with_site_runtime(
+        control: Arc<crate::blocks::dev::test_support::FakeControl>,
+    ) -> Self {
         Self::with_admin()
             .await
             .with_site_runtime_added(control)
@@ -912,19 +920,22 @@ impl TestContext {
     #[cfg(feature = "site-runtime")]
     pub async fn with_site_runtime_added(
         self,
-        control: Arc<dyn crate::blocks::dev::RuntimeControl>,
+        control: Arc<crate::blocks::dev::test_support::FakeControl>,
     ) -> Self {
         use crate::blocks::dev;
 
-        // `DevShared` takes a shell in every build today; the runtime half
-        // never reads it (the export is its one reader), so the plausible
-        // default serves.
+        #[cfg(not(feature = "block-dev"))]
+        let shared = dev::DevShared::new(control, dev::test_support::fake_bypass_rules());
+        // The workspace half a `block-dev` build's `DevShared` always has.
+        // Nothing the runtime half does reads it; the default shell is the
+        // plausible one `with_dev_added` uses.
+        #[cfg(feature = "block-dev")]
         let shared = dev::DevShared::new(
             control,
-            Arc::new(dev::test_support::FakeShell::new()),
             dev::test_support::fake_bypass_rules(),
+            Arc::new(dev::test_support::FakeShell::new()),
         );
-        let block = dev::DevBlock::runtime_only(shared.clone());
+        let block = dev::DevBlock::runtime_only();
         self.with_dev_block_added(shared, block, &[]).await
     }
 
@@ -4282,21 +4293,18 @@ pub fn real_block_infos() -> Vec<BlockInfo> {
     // ships only under its own (non-default) features — in the form each
     // build registers: the workspace under `block-dev`, the runtime half
     // alone under `site-runtime` without it. Its `info()` is declarative —
-    // neither the `RuntimeControl` nor the `ShellSource` handle it is built
-    // with is ever called here, so the test doubles suffice.
+    // nothing the workspace form is built with is ever called here, so the
+    // test doubles suffice — and the runtime half is built with nothing.
+    #[cfg(feature = "block-dev")]
+    let block = crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
+        crate::blocks::dev::test_support::FakeControl::new(),
+        crate::blocks::dev::test_support::fake_bypass_rules(),
+        Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
+    ));
+    #[cfg(all(feature = "site-runtime", not(feature = "block-dev")))]
+    let block = crate::blocks::dev::DevBlock::runtime_only();
     #[cfg(feature = "site-runtime")]
-    {
-        let shared = crate::blocks::dev::DevShared::new(
-            crate::blocks::dev::test_support::FakeControl::new(),
-            Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
-            crate::blocks::dev::test_support::fake_bypass_rules(),
-        );
-        #[cfg(feature = "block-dev")]
-        let block = crate::blocks::dev::DevBlock::with_workspace(shared);
-        #[cfg(not(feature = "block-dev"))]
-        let block = crate::blocks::dev::DevBlock::runtime_only(shared);
-        infos.push(block.info());
-    }
+    infos.push(block.info());
 
     infos
 }

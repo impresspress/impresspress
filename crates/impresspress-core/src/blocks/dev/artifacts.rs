@@ -70,12 +70,16 @@ pub async fn put(ctx: &dyn Context, bytes: &[u8]) -> Result<String, WaferError> 
 }
 
 /// Fetch the artifact stored under `sha`.
+///
+/// Workspace only (`block-dev`: the export copies artifacts into the
+/// bundle), and compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub async fn get(ctx: &dyn Context, sha: &str) -> Result<Vec<u8>, WaferError> {
     let (bytes, _info) = storage::get(ctx, FOLDER, &key_for(sha)).await?;
     Ok(bytes)
 }
 
-/// [`get`] for a caller that holds the platform `StorageService` rather than
+/// `get` (`block-dev`) for a caller that holds the platform `StorageService` rather than
 /// a request [`Context`].
 ///
 /// The runtime rebuild is that caller and can be no other:
@@ -110,10 +114,14 @@ pub async fn get_direct(
 /// `O(folder)` on OPFS, and a buffered `get` would transfer up to
 /// [`super::validation::MAX_ARTIFACT_BYTES`] to answer a yes or no.
 ///
-/// Nothing in the block asks this — tests use it to observe the store.
 /// Activation answers the same question from the builds ledger
 /// ([`artifact_index`](super::repo::builds::artifact_index)), which costs no
 /// storage call at all — see `activation::missing_content`.
+///
+/// A test observer: nothing in either build reads it. Compiled for this
+/// crate's unit tests and for the `test-support` integration tests, which
+/// look at what the runtime half stored through it.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn exists(ctx: &dyn Context, sha: &str) -> Result<bool, WaferError> {
     match storage::get_stream(ctx, FOLDER, &key_for(sha)).await {
         Ok(_unread) => Ok(true),

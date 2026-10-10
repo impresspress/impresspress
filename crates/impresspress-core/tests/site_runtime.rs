@@ -9,8 +9,9 @@
 //! it on a cold boot (`impresspress-web`'s `seed_on_boot`: `seed::is_fresh`,
 //! `seed::import`, then `activation::request` with the `Seed` intent), and
 //! the absence of the workspace is checked where a caller would meet it: the
-//! block's declaration, the published `/openapi.json`, the router, and the
-//! block's own `handle`.
+//! block's declaration, the published `/openapi.json`, the router, the
+//! block's own `handle`, and the seed import, which refuses a sandbox's seed
+//! by name.
 //!
 //! The gate is the point of the file, not a convenience: `cargo test
 //! --workspace` turns `block-dev` on for this crate (the `impresspress`
@@ -31,7 +32,7 @@ use impresspress_core::{
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
         data_snapshot::{self, DataSnapshot},
         repo::generations::GenerationCause,
-        seed::{self, SeedBlock, SeedManifest},
+        seed::{self, SandboxSeed, SeedBlock, SeedManifest},
         test_support::{fake_bypass_rules, hello_info, seed_file, FakeControl, MapFetch},
         DevBlock,
     },
@@ -128,6 +129,23 @@ async fn fixture() -> (TestContext, Arc<FakeControl>) {
     (ctx, control)
 }
 
+/// A [`seed::SeedFetch`] that serves no file and counts every request.
+#[derive(Default)]
+struct CountingFetch(std::sync::atomic::AtomicUsize);
+
+impl CountingFetch {
+    fn asked(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl seed::SeedFetch for CountingFetch {
+    fn get<'a>(&'a self, url: &'a str) -> seed::FetchFuture<'a> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { Err(format!("{url}: this bundle serves nothing")) })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // What the runtime half does
 // ---------------------------------------------------------------------------
@@ -195,8 +213,7 @@ async fn a_seed_boots_into_a_live_site_with_its_block_and_data() {
 /// no admin page, and a summary of what it is in this build.
 #[tokio::test]
 async fn the_block_declares_no_workspace_surface() {
-    let (ctx, _control) = fixture().await;
-    let info = DevBlock::runtime_only(ctx.dev_shared()).info();
+    let info = DevBlock::runtime_only().info();
 
     assert_eq!(info.name, dev::BLOCK_NAME);
     assert!(
@@ -231,10 +248,17 @@ async fn openapi_publishes_no_workspace_path() {
 /// anonymous visitor, and not from the block itself if something hands it
 /// the request directly. The entry page — the one `Public` row of a
 /// workspace, which hands out a session — is among them.
+///
+/// The two router legs show only that this fixture registered no route
+/// (`TestContext::with_site_runtime_added` passes none); they do not test
+/// production's wiring, which is `impresspress-web`'s `runtime_factory` and
+/// is pinned by that crate's const assertions. The direct leg is the one
+/// that tests this build: its `handle` has no dispatch table to look a path
+/// up in.
 #[tokio::test]
 async fn no_workspace_path_answers() {
     let (ctx, _control) = fixture().await;
-    let block = DevBlock::runtime_only(ctx.dev_shared());
+    let block = DevBlock::runtime_only();
     for path in [
         "/b/dev",
         "/b/dev/enter",
@@ -257,4 +281,59 @@ async fn no_workspace_path_answers() {
             .await;
         assert_eq!(output_http_status(direct).await, 404, "direct {path}");
     }
+}
+
+/// A seed that carries a `sandbox` section (a sandbox's guide and
+/// `llms.txt`) is refused by name on a build without the workspace, before
+/// anything is fetched, inspected or stored — not imported with the section dropped,
+/// and not refused as serde's "unknown field" (decision D2). The refusal is
+/// recorded where the site's admin can read it, like any other, and the
+/// instance stays fresh.
+#[tokio::test]
+async fn a_seed_with_a_sandbox_section_is_refused_naming_it() {
+    let (ctx, control) = fixture().await;
+    let (mut manifest, _bundle) = seed_bundle();
+    manifest.sandbox = Some(SandboxSeed {
+        template: "blank".to_string(),
+        suggested_prompt: "Build me a shop.".to_string(),
+        guide: seed_file("guide.md", b"# Guide\n"),
+        llms: seed_file(seed::LLMS_PATH, b"# The sandbox\n"),
+    });
+    // A bundle that serves nothing and counts what it is asked for: any fetch
+    // before the refusal would be counted, and would fail the import with a
+    // different message than the refusal's.
+    let fetch = CountingFetch::default();
+
+    let refused = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect_err("a sandbox's seed is refused");
+    assert_eq!(refused, seed::SANDBOX_SEED_REFUSAL);
+    assert_eq!(fetch.asked(), 0, "nothing is fetched before the refusal");
+    assert!(
+        refused.contains("`sandbox` section") && refused.contains("development sandbox runtime"),
+        "{refused}"
+    );
+
+    // Nor was the artifact inspected or anything stored.
+    assert_eq!(control.inspections(), 0);
+    assert!(ctx
+        .storage_get("wafer-run/web", "site", "index.html")
+        .await
+        .is_err());
+    assert!(seed::is_fresh(&ctx).await.expect("read the ledger"));
+    // Recorded for the site's admin, as every refused import is.
+    let rows = db::list_all(&ctx.fixture(), "impresspress__admin__variables", Vec::new())
+        .await
+        .expect("list variables");
+    let recorded = rows
+        .iter()
+        .find(|row| row.data.get("key").and_then(|v| v.as_str()) == Some(seed::SEED_ERROR_KEY))
+        .and_then(|row| row.data.get("value").and_then(|v| v.as_str()));
+    assert_eq!(recorded, Some(seed::SANDBOX_SEED_REFUSAL));
 }

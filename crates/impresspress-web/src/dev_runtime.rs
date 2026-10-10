@@ -2,16 +2,20 @@
 //! rebuild, and what happens on a cold boot.
 //!
 //! `impresspress-core` decides *what* should be live; this decides *how*. The
-//! seam is [`RuntimeControl`], and [`BrowserRuntimeControl`] is its only real
-//! implementation: it compiles guest artifacts with wasmi, rebuilds a `Wafer`
-//! through the shared [`RuntimeFactory`], and swaps it in.
+//! seam is [`RuntimeControl`] — with [`WorkspaceControl`] on top for what only
+//! the workspace asks (the dry-run probe, the runtime counter, the
+//! announcement to the page) — and [`BrowserRuntimeControl`] is the only real
+//! implementation of both: it compiles guest artifacts with wasmi, rebuilds a
+//! `Wafer` through the shared [`RuntimeFactory`], and swaps it in.
 //!
 //! # The cycle, and where it is closed
 //!
-//! `DevShared` holds the control; the factory holds `DevShared`; the control
-//! rebuilds through the factory. Something has to be late-bound, and it is the
-//! control's factory handle ([`BrowserRuntimeControl::set_factory`]) — because
-//! the *other* order does not work at all. The cold-start runtime has to
+//! `DevShared` holds the control (twice: as the `RuntimeControl` every
+//! activation uses, and in its workspace half as the `WorkspaceControl`); the
+//! factory holds `DevShared`; the control rebuilds through the factory.
+//! Something has to be late-bound, and it is the control's factory handle
+//! ([`BrowserRuntimeControl::set_factory`]) — because the *other* order does
+//! not work at all. The cold-start runtime has to
 //! carry `/b/dev` (otherwise the page 404s until the first rebuild, and a
 //! sandbox with no blocks would never rebuild), so `DevShared` must exist
 //! before the first `factory.build`. A factory cannot be built before then;
@@ -30,9 +34,10 @@
 //!
 //! # Why no `unsafe impl Send`/`Sync`
 //!
-//! Every trait this module implements or hands values to (`RuntimeControl`,
-//! `Context`, `Block`) is bounded on `wafer_run::MaybeSend + MaybeSync`, which
-//! is unbounded on `wasm32`. `Rc`, `Cell` and `RefCell` therefore cross those
+//! Every trait this module implements or hands values to that has a thread
+//! bound (`RuntimeControl` and through it `WorkspaceControl`, `ShellSource`,
+//! `Context`, `Block`) is bounded on `wafer_run::MaybeSend + MaybeSync`,
+//! which is unbounded on `wasm32`. `Rc`, `Cell` and `RefCell` therefore cross those
 //! boundaries without an `unsafe` marker impl; the only cost is
 //! `clippy::arc_with_non_send_sync`, which the crate-level
 //! `expect(clippy::arc_with_non_send_sync)` in `lib.rs` turns off for wasm32
@@ -55,7 +60,7 @@ use impresspress_core::blocks::dev::{
     artifacts,
     control::{
         DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
-        ValidationStage,
+        ValidationStage, WorkspaceControl,
     },
     repo::generations::GenerationCause,
     seed::{self, SeedManifest},
@@ -376,6 +381,78 @@ impl RuntimeControl for BrowserRuntimeControl {
         Ok(info)
     }
 
+    /// Build a runtime with exactly `blocks` and swap it in.
+    ///
+    /// Artifacts are read through the platform `StorageService` directly:
+    /// there is no request in flight here (an activation can be driven by boot
+    /// convergence, where no `Context` exists at all), and
+    /// [`artifacts::get_direct`] is where the key layout is stated so the two
+    /// readers cannot drift.
+    ///
+    /// Nothing is swapped until every guest has loaded and the whole runtime
+    /// has booted, so a failure anywhere leaves the live runtime exactly as it
+    /// was. The generation counter is bumped last, after the swap, because it
+    /// is what the `/b/dev` page keys its tool re-registration on.
+    ///
+    /// The `Rc` [`impresspress_browser::replace_wafer`] hands back is kept in
+    /// [`Self::retained`], which is what makes the swap reversible — see
+    /// [`Self::restore_previous`].
+    async fn rebuild(&self, blocks: &[DynamicBlockSpec]) -> Result<(), String> {
+        let factory = self.factory()?;
+        let storage = impresspress_browser::make_storage_service();
+
+        let mut dynamic: Vec<DynamicBlock> = Vec::with_capacity(blocks.len());
+        for spec in blocks {
+            let artifact = artifacts::get_direct(&storage, &spec.artifact_sha256)
+                .await
+                .map_err(|e| format!("block {}: {}", spec.name, e.message))?;
+            let block =
+                load_guest(spec, &artifact).map_err(|e| format!("block {}: {e}", spec.name))?;
+            dynamic.push((spec.clone(), block));
+        }
+
+        let wafer = factory
+            .build(&dynamic)
+            .await
+            .map_err(|e| describe_js(&e, "building the runtime"))?;
+        let previous = impresspress_browser::replace_wafer(wafer).map_err(|e| e.to_string())?;
+        let was_built = self.last_built.borrow_mut().replace(blocks.to_vec());
+        *self.retained.borrow_mut() = Some(RetainedRuntime {
+            wafer: previous,
+            blocks: was_built,
+        });
+        self.generation.set(self.generation.get().saturating_add(1));
+        Ok(())
+    }
+
+    /// Put the retained runtime back, without building one.
+    ///
+    /// [`impresspress_browser::restore_wafer`] takes the very `Rc` the last
+    /// [`Self::rebuild`] swapped out, so this is a pointer swap: no artifact
+    /// is read, no guest is compiled, no block's `Init` runs a second time.
+    /// That is what design §7.3 asks for, and it is also the only version of
+    /// this that cannot fail on its own account once there is something to
+    /// restore.
+    ///
+    /// The generation counter still moves: the live runtime changed, and the
+    /// `/b/dev` page's tool registration is keyed on the counter rather than
+    /// on which direction the change went.
+    async fn restore_previous(&self) -> Result<(), String> {
+        // Taken out of the `RefCell` before anything else touches it — the
+        // same rule `factory()` follows, and the reason `retained` is never
+        // borrowed across a call.
+        let Some(retained) = self.retained.borrow_mut().take() else {
+            return Err("no previous runtime was retained to restore".to_string());
+        };
+        impresspress_browser::restore_wafer(retained.wafer);
+        *self.last_built.borrow_mut() = retained.blocks;
+        self.generation.set(self.generation.get().saturating_add(1));
+        Ok(())
+    }
+}
+
+#[wafer_block::wafer_async_trait]
+impl WorkspaceControl for BrowserRuntimeControl {
     /// Run `Init`, `Start` and one request under the **accepted** spec's
     /// capabilities, swapping nothing in.
     ///
@@ -485,75 +562,6 @@ impl RuntimeControl for BrowserRuntimeControl {
         }
     }
 
-    /// Build a runtime with exactly `blocks` and swap it in.
-    ///
-    /// Artifacts are read through the platform `StorageService` directly:
-    /// there is no request in flight here (an activation can be driven by boot
-    /// convergence, where no `Context` exists at all), and
-    /// [`artifacts::get_direct`] is where the key layout is stated so the two
-    /// readers cannot drift.
-    ///
-    /// Nothing is swapped until every guest has loaded and the whole runtime
-    /// has booted, so a failure anywhere leaves the live runtime exactly as it
-    /// was. The generation counter is bumped last, after the swap, because it
-    /// is what the `/b/dev` page keys its tool re-registration on.
-    ///
-    /// The `Rc` [`impresspress_browser::replace_wafer`] hands back is kept in
-    /// [`Self::retained`], which is what makes the swap reversible — see
-    /// [`Self::restore_previous`].
-    async fn rebuild(&self, blocks: &[DynamicBlockSpec]) -> Result<(), String> {
-        let factory = self.factory()?;
-        let storage = impresspress_browser::make_storage_service();
-
-        let mut dynamic: Vec<DynamicBlock> = Vec::with_capacity(blocks.len());
-        for spec in blocks {
-            let artifact = artifacts::get_direct(&storage, &spec.artifact_sha256)
-                .await
-                .map_err(|e| format!("block {}: {}", spec.name, e.message))?;
-            let block =
-                load_guest(spec, &artifact).map_err(|e| format!("block {}: {e}", spec.name))?;
-            dynamic.push((spec.clone(), block));
-        }
-
-        let wafer = factory
-            .build(&dynamic)
-            .await
-            .map_err(|e| describe_js(&e, "building the runtime"))?;
-        let previous = impresspress_browser::replace_wafer(wafer).map_err(|e| e.to_string())?;
-        let was_built = self.last_built.borrow_mut().replace(blocks.to_vec());
-        *self.retained.borrow_mut() = Some(RetainedRuntime {
-            wafer: previous,
-            blocks: was_built,
-        });
-        self.generation.set(self.generation.get().saturating_add(1));
-        Ok(())
-    }
-
-    /// Put the retained runtime back, without building one.
-    ///
-    /// [`impresspress_browser::restore_wafer`] takes the very `Rc` the last
-    /// [`Self::rebuild`] swapped out, so this is a pointer swap: no artifact
-    /// is read, no guest is compiled, no block's `Init` runs a second time.
-    /// That is what design §7.3 asks for, and it is also the only version of
-    /// this that cannot fail on its own account once there is something to
-    /// restore.
-    ///
-    /// The generation counter still moves: the live runtime changed, and the
-    /// `/b/dev` page's tool registration is keyed on the counter rather than
-    /// on which direction the change went.
-    async fn restore_previous(&self) -> Result<(), String> {
-        // Taken out of the `RefCell` before anything else touches it — the
-        // same rule `factory()` follows, and the reason `retained` is never
-        // borrowed across a call.
-        let Some(retained) = self.retained.borrow_mut().take() else {
-            return Err("no previous runtime was retained to restore".to_string());
-        };
-        impresspress_browser::restore_wafer(retained.wafer);
-        *self.last_built.borrow_mut() = retained.blocks;
-        self.generation.set(self.generation.get().saturating_add(1));
-        Ok(())
-    }
-
     fn runtime_generation(&self) -> u64 {
         self.generation.get()
     }
@@ -564,7 +572,7 @@ impl RuntimeControl for BrowserRuntimeControl {
     ///
     /// Spawned rather than awaited: `matchAll` is a promise, and the trait
     /// method is fire-and-forget because the activation has already
-    /// committed (see [`RuntimeControl::announce_active`]). A failure is
+    /// committed (see [`WorkspaceControl::announce_active`]). A failure is
     /// logged and the activation stands.
     fn announce_active(&self, generation: &GenerationAnnouncement) {
         let id = generation.id.clone();
@@ -895,8 +903,9 @@ impl ShellSource for BrowserShellSource {
 /// shared state the `impresspress/dev` block runs on.
 ///
 /// Both are needed by [`install`] and neither can be reached from the other:
-/// `DevShared` holds the control only as `Arc<dyn RuntimeControl>` (no
-/// downcast), and the control deliberately does not hold `DevShared` — that
+/// `DevShared` holds the control only as trait objects (`Arc<dyn
+/// RuntimeControl>`, and `Arc<dyn WorkspaceControl>` in its workspace half;
+/// no downcast), and the control deliberately does not hold `DevShared` — that
 /// would be the reference cycle the [`Weak`] factory handle exists to avoid.
 pub struct Sandbox {
     control: Arc<BrowserRuntimeControl>,
@@ -937,7 +946,7 @@ pub fn attach(
     // same reason `RuntimeControl` is — this implementation resolves through a
     // `JsFuture`.
     let shell: Arc<dyn ShellSource> = Arc::new(BrowserShellSource);
-    let shared = DevShared::new(control.clone(), shell, bypass());
+    let shared = DevShared::new(control.clone(), bypass(), shell);
     let factory = Rc::new(factory.with_dev(shared.clone()));
     control.set_factory(&factory);
     (factory, Some(Sandbox { control, shared }))

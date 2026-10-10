@@ -75,6 +75,42 @@ pub(crate) fn json_text(record: &wafer_core::clients::database::Record, key: &st
     }
 }
 
+/// Every spelling a closed status enum's derived JSON schema lists.
+///
+/// The schema is generated from the enum's own variants (serde's spelling,
+/// one entry per variant), so it is a list of every status that nobody had to
+/// remember to update. The `ALL` completeness tests compare the hand-written
+/// `ALL` arrays against it: a variant added to the enum and left out of `ALL`
+/// fails them.
+#[cfg(test)]
+pub(crate) fn schema_spellings<T: schemars::JsonSchema>() -> std::collections::BTreeSet<String> {
+    fn collect(value: &serde_json::Value, into: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    match (key.as_str(), value) {
+                        ("enum", serde_json::Value::Array(items)) => into.extend(
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string)),
+                        ),
+                        ("const", serde_json::Value::String(item)) => {
+                            into.insert(item.clone());
+                        }
+                        _ => collect(value, into),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| collect(item, into)),
+            _ => {}
+        }
+    }
+    let schema = serde_json::to_value(schemars::schema_for!(T)).expect("a schema encodes");
+    let mut spellings = std::collections::BTreeSet::new();
+    collect(&schema, &mut spellings);
+    spellings
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

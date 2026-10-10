@@ -33,6 +33,15 @@ pub enum BuildStatus {
 }
 
 impl BuildStatus {
+    /// Every status a row can rest in.
+    ///
+    /// The in-flight queries derive their filters from this list and
+    /// [`Self::is_in_flight`] rather than restating a status, so a status
+    /// added to the enum cannot be silently left out of either side:
+    /// `all_lists_every_status` holds this list to the enum's derived schema,
+    /// and `is_in_flight`'s match is exhaustive.
+    pub const ALL: [Self; 3] = [Self::Staged, Self::Valid, Self::Invalid];
+
     /// Whether a row in this status says its compile has not reached a
     /// generation yet — and so whether the artifact it names is protected by
     /// the row alone.
@@ -44,7 +53,9 @@ impl BuildStatus {
     /// `Invalid` are both terminal: by then either a generation names the
     /// artifact or the compile is over and it is garbage.
     ///
-    /// Exhaustive on purpose: a new status has to state which side it is on.
+    /// Exhaustive on purpose: a new status has to state which side it is on —
+    /// and the side it states is the one every in-flight query filters on
+    /// ([`list_in_flight`], [`is_in_flight_for_artifact`], [`list_settled`]).
     pub fn is_in_flight(self) -> bool {
         match self {
             Self::Staged => true,
@@ -161,6 +172,11 @@ pub async fn insert(ctx: &dyn Context, new: &NewBuild) -> Result<BuildRow, Wafer
 }
 
 /// Read one build by id.
+///
+/// A test observer: nothing in either build reads it. Compiled for this
+/// crate's unit tests and for the `test-support` integration tests, which
+/// look at what the runtime half stored through it.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn get(ctx: &dyn Context, id: &str) -> Result<BuildRow, WaferError> {
     decode(&db::get(ctx, TABLE, id).await?)
 }
@@ -202,6 +218,10 @@ pub async fn set_status(
 /// not the endpoints, and the duplicate-agent-tool rule needs the endpoints.
 /// Filtered in the query rather than by paging `list_recent` because the
 /// answer must not depend on how many builds have happened since.
+///
+/// Workspace only (`block-dev`: the staging path and the export), and
+/// compiled for this crate's unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub async fn latest_valid_for_artifact(
     ctx: &dyn Context,
     artifact_sha256: &str,
@@ -241,6 +261,11 @@ pub async fn latest_valid_for_artifact(
 /// [`super::generations::list_recent`] states: the timestamp is
 /// millisecond-resolution on wasm32, and two rows sharing one would otherwise
 /// come back in whatever order the backend chose.
+///
+/// A test observer: nothing in either build reads it. Compiled for this
+/// crate's unit tests and for the `test-support` integration tests, which
+/// look at what the runtime half stored through it.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn list_recent(ctx: &dyn Context, limit: u32) -> Result<Vec<BuildRow>, WaferError> {
     let list = db::list(
         ctx,
@@ -277,7 +302,7 @@ pub async fn list_in_flight(ctx: &dyn Context) -> Result<Vec<BuildRow>, WaferErr
         ctx,
         TABLE,
         &ListOptions {
-            filters: vec![status_is(BuildStatus::Staged)],
+            filters: vec![status_in(BuildStatus::is_in_flight)],
             sort: newest_first(),
             limit: Some(MAX_LIST_LIMIT),
             skip_count: true,
@@ -309,7 +334,7 @@ pub async fn is_in_flight_for_artifact(
                     operator: FilterOp::Equal,
                     value: serde_json::json!(artifact_sha256),
                 },
-                status_is(BuildStatus::Staged),
+                status_in(BuildStatus::is_in_flight),
             ],
             limit: Some(1),
             skip_count: true,
@@ -346,7 +371,7 @@ pub struct RetiredBuilds {
 /// accepted, which is one `set_status` apart — so it is promoted to
 /// [`BuildStatus::Valid`], keeping the `BlockInfo` the stage recorded before
 /// the activation. That is not cosmetic: the row is where
-/// [`latest_valid_for_artifact`] finds the endpoints of a block in the active
+/// `latest_valid_for_artifact` (`block-dev`) finds the endpoints of a block in the active
 /// set, and without it every later stage of *another* block is refused for a
 /// collision check it cannot run.
 ///
@@ -436,7 +461,8 @@ pub struct SettledRow {
     pub artifact_sha256: String,
 }
 
-/// Every row that is not [`BuildStatus::Staged`], as `(id, artifact)`.
+/// Every row that is not in flight ([`BuildStatus::is_in_flight`]), as
+/// `(id, artifact)`.
 ///
 /// For the collector's stale-row pass (`super::super::gc`), which needs to
 /// know which rows promise an artifact is already stored. Only the two columns
@@ -451,11 +477,7 @@ pub async fn list_settled(ctx: &dyn Context) -> Result<Vec<SettledRow>, WaferErr
             TABLE,
             &ListOptions {
                 columns: Some(vec!["id".into(), "artifact_sha256".into()]),
-                filters: vec![Filter {
-                    field: "status".into(),
-                    operator: FilterOp::NotEqual,
-                    value: serde_json::json!(BuildStatus::Staged.as_str()),
-                }],
+                filters: vec![status_in(|status| !status.is_in_flight())],
                 sort: vec![SortField {
                     field: "id".into(),
                     desc: false,
@@ -488,7 +510,9 @@ pub async fn delete(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
     db::delete(ctx, TABLE, id).await
 }
 
-/// A `status = …` filter.
+/// A `status = …` filter. Its one reader is [`latest_valid_for_artifact`],
+/// and it is compiled where that is.
+#[cfg(any(test, feature = "block-dev"))]
 fn status_is(status: BuildStatus) -> Filter {
     Filter {
         field: "status".into(),
@@ -497,11 +521,30 @@ fn status_is(status: BuildStatus) -> Filter {
     }
 }
 
+/// A `status IN (…)` filter over the statuses `keep` accepts.
+///
+/// Derived from [`BuildStatus::ALL`] rather than written out, so the in-flight
+/// side and the settled side cannot both forget a status that was added to
+/// the enum (`ALL` is held to the enum by `all_lists_every_status`) — the
+/// same construction `super::generations` uses.
+fn status_in(keep: impl Fn(BuildStatus) -> bool) -> Filter {
+    let statuses: Vec<&str> = BuildStatus::ALL
+        .iter()
+        .filter(|status| keep(**status))
+        .map(|status| status.as_str())
+        .collect();
+    Filter {
+        field: "status".into(),
+        operator: FilterOp::In,
+        value: serde_json::json!(statuses),
+    }
+}
+
 /// Delete every build row naming `artifact_sha256`.
 ///
 /// For the garbage collector, and only after the artifact itself is gone: a
 /// row that says an artifact was accepted, for bytes the store no longer
-/// holds, is a claim [`latest_valid_for_artifact`] would hand back to the
+/// holds, is a claim `latest_valid_for_artifact` would hand back to the
 /// duplicate-tool check as if the block were still loadable.
 pub async fn delete_for_artifact(
     ctx: &dyn Context,
@@ -559,6 +602,23 @@ mod tests {
 
     use super::*;
     use crate::{blocks::dev::test_support::FakeControl, test_support::TestContext};
+
+    /// `ALL` names every status the enum has: the in-flight and settled
+    /// filters are both built from it, so a status missing here would be in
+    /// neither.
+    #[test]
+    fn all_lists_every_status() {
+        let listed: std::collections::BTreeSet<String> = BuildStatus::ALL
+            .iter()
+            .map(|status| status.as_str().to_string())
+            .collect();
+        assert_eq!(listed, super::super::schema_spellings::<BuildStatus>());
+        assert_eq!(
+            listed.len(),
+            BuildStatus::ALL.len(),
+            "ALL lists a status twice"
+        );
+    }
 
     /// JSON-encoded `TEXT` columns in canonical form, read back through
     /// `repo::json_text` like the generation manifests.

@@ -61,7 +61,9 @@ impl GenerationStatus {
     ///
     /// Retention derives the statuses it may delete from this list and
     /// [`Self::survives_retention`] rather than restating them, so a status
-    /// added to the enum cannot be silently left out of either set.
+    /// added to the enum cannot be silently left out of either set:
+    /// `all_lists_every_status` holds this list to the enum's derived schema,
+    /// and `is_in_flight`'s match is exhaustive.
     pub const ALL: [Self; 6] = [
         Self::Staged,
         Self::Validating,
@@ -542,7 +544,8 @@ pub async fn delete_many(ctx: &dyn Context, ids: &[String]) -> Result<(), WaferE
 ///
 /// Derived from [`GenerationStatus::ALL`] rather than written out, so the two
 /// halves of the split — retained and prunable — cannot both forget a status
-/// that was added to the enum.
+/// that was added to the enum (`ALL` is held to the enum by
+/// `all_lists_every_status`).
 fn status_in(keep: impl Fn(GenerationStatus) -> bool) -> Filter {
     let statuses: Vec<&str> = GenerationStatus::ALL
         .iter()
@@ -612,6 +615,22 @@ mod tests {
 
     use super::*;
     use crate::{blocks::dev::test_support::FakeControl, test_support::TestContext};
+
+    /// `ALL` names every status the enum has: retention's two sets are both
+    /// built from it, so a status missing here would be in neither.
+    #[test]
+    fn all_lists_every_status() {
+        let listed: std::collections::BTreeSet<String> = GenerationStatus::ALL
+            .iter()
+            .map(|status| status.as_str().to_string())
+            .collect();
+        assert_eq!(listed, super::super::schema_spellings::<GenerationStatus>());
+        assert_eq!(
+            listed.len(),
+            GenerationStatus::ALL.len(),
+            "ALL lists a status twice"
+        );
+    }
 
     /// A manifest pair in the canonical form design §11.3 mandates (sorted
     /// keys, no whitespace) — the form `manifest_sha256` is a hash over.

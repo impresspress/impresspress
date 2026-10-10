@@ -142,7 +142,7 @@ pub trait GcInterleave: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Called once, after both folders have been listed and before any root
     /// has been read.
     ///
-    /// **Called with `DevShared::workspace` held** — the collector takes it
+    /// **Called with `DevShared::workspace_manifest` held** — the collector takes it
     /// before the blob listing (see "The counters are read off the listing").
     /// An implementation that writes a workspace file, or does anything else
     /// that takes that lock, deadlocks: it waits on the collector that is
@@ -193,7 +193,7 @@ pub async fn collect_interleaved(
     // `activation::adopt_site` documents holds — `files.rs` releases the lock
     // before it asks for an activation, so nothing holding it is ever
     // waiting on that queue. After a reply it runs under no queue lease.
-    let serialized = shared.workspace.lock().await;
+    let serialized = shared.workspace_manifest.lock().await;
     let blob_objects = list_all(ctx, blobs::FOLDER).await?;
 
     interleave.after_listing().await;
@@ -274,7 +274,7 @@ pub async fn collect_interleaved(
 /// staging writes the row before the bytes and [`collect`] deletes the row
 /// with them.
 ///
-/// The manifest read is under `DevShared::workspace`, like every other read of
+/// The manifest read is under `DevShared::workspace_manifest`, like every other read of
 /// it (`super::files`' header): this is the *poll* the page runs three times a
 /// second while a tool call is outstanding, so it is the read most likely to
 /// land inside [`collect_blobs`]'s delete-and-save — and a progress panel that
@@ -291,7 +291,7 @@ pub async fn storage_usage(
     shared: &DevShared,
 ) -> Result<StorageUsage, WaferError> {
     let ws = {
-        let _serialized = shared.workspace.lock().await;
+        let _serialized = shared.workspace_manifest.lock().await;
         workspace::load(ctx).await?
     };
     let artifacts = repo::builds::artifact_index(ctx).await?;
@@ -308,7 +308,7 @@ pub async fn storage_usage(
 /// Delete the unreachable blobs, then set the workspace's blob counters to
 /// what the store holds.
 ///
-/// The caller holds `DevShared::workspace`, and took it before it listed
+/// The caller holds `DevShared::workspace_manifest`, and took it before it listed
 /// `candidates`. That is what makes both halves of this sound. The workspace
 /// read here cannot miss an entry for a blob that is a candidate: a write
 /// stores its blob and saves the entry naming it inside one lock hold, so

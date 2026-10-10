@@ -220,11 +220,11 @@ pub async fn handle_create(
     }
     let files = request.template.files(&request.name);
 
-    // The whole read-modify-write runs under `DevShared::workspace`, for the
+    // The whole read-modify-write runs under `DevShared::workspace_manifest`, for the
     // reason `files::handle_write` documents: the manifest is loaded, changed
     // and saved as a whole, so two writers interleaving would each save a
     // snapshot that predates the other.
-    let _serialized = shared.workspace.lock().await;
+    let _serialized = shared.workspace_manifest.lock().await;
     let mut ws = match workspace::load(ctx).await {
         Ok(ws) => ws,
         Err(e) => return no_store_db_error_internal(e, "dev workspace load"),

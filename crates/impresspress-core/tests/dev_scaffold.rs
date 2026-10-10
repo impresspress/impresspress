@@ -13,7 +13,7 @@ use impresspress_core::{
         repo::seed_info::{self, SeedInfo},
         scaffold::Template,
         test_support::{dev_post, hello_info, FakeControl},
-        workspace, RuntimeControl, WAFER_GUEST_VERSION,
+        workspace, WorkspaceControl, WAFER_GUEST_VERSION,
     },
     test_support::{admin_msg, output_http_status, output_json, TestContext},
 };

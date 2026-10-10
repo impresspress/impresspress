@@ -463,7 +463,7 @@ impl RuntimeFactory {
             let dev_block: Arc<dyn wafer_run::Block> = Arc::new(if self.mode.workspace() {
                 dev::DevBlock::with_workspace(dev.clone())
             } else {
-                dev::DevBlock::runtime_only(dev.clone())
+                dev::DevBlock::runtime_only()
             });
             builder = builder
                 .extra_block(dev::BLOCK_NAME, dev_block)

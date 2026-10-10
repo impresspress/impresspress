@@ -567,7 +567,7 @@ async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
         .expect("no rules, nothing shadowed");
 
     // The same workspace behind a worker that does hand its rules over.
-    let current = DevShared::new(FakeControl::new(), shell.clone(), fake_bypass_rules());
+    let current = DevShared::new(FakeControl::new(), fake_bypass_rules(), shell.clone());
     let fetched = shell.fetches();
     for error in [
         export::build(&ctx, &current).await.expect_err("refused"),
@@ -636,8 +636,8 @@ async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it(
         BLOCK_NAME,
         std::sync::Arc::new(DevBlock::with_workspace(DevShared::new(
             FakeControl::new(),
-            shell.clone(),
             fake_bypass_rules(),
+            shell.clone(),
         ))),
     );
     let fetched = shell.fetches();
@@ -706,7 +706,7 @@ async fn the_compiler_prefix_is_not_an_exported_rule() {
         json!({"path": "site/__impresspress_dev/compiler/notes.txt", "content": "x", "expected_sha256": null}),
     )
     .await;
-    let current = DevShared::new(FakeControl::new(), shell, fake_bypass_rules());
+    let current = DevShared::new(FakeControl::new(), fake_bypass_rules(), shell);
     export::build(&ctx, &current).await.expect("exports");
 }
 

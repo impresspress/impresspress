@@ -41,7 +41,7 @@
 //! have to be one indivisible section: two block changes that interleaved
 //! between their read and their request would each compose a set from a
 //! snapshot that predates the other, and the later one would silently drop
-//! the earlier block. [`super::DevShared::compile`] is that section, and it
+//! the earlier block. [`super::Workspace::compile`] is that section, and it
 //! is held from the read through `activation::request`.
 //!
 //! Site writes are unaffected: [`ActivationIntent::SiteOnly`] composes its
@@ -214,7 +214,7 @@ async fn stage(
 
     // From here to the activation, the active block set must not change
     // under us — see the module docs.
-    let _compiling = shared.compile.lock().await;
+    let _compiling = shared.workspace.compile.lock().await;
 
     let active = generation::active(ctx).await?;
     let live: Vec<DynamicBlockSpec> = active.map_or_else(Vec::new, |(_row, m)| m.blocks);
@@ -271,7 +271,7 @@ async fn stage(
     // Step 3: run the guest, under the accepted spec. This is the same value
     // `rebuild` is handed below, so a guest that traps here would have
     // trapped live.
-    if let Err(failure) = shared.control.probe(&spec, artifact).await {
+    if let Err(failure) = shared.workspace.control.probe(&spec, artifact).await {
         let diagnostics = together(&request.diagnostics, vec![Diagnostic::guest(&failure)]);
         invalidate(ctx, &build.id, &diagnostics).await?;
         return Ok(refusal_response(Some(build.id), diagnostics));
@@ -484,7 +484,7 @@ async fn remove(
 
     // Same section as staging, for the same reason: the next block set is
     // resolved from the current one.
-    let _compiling = shared.compile.lock().await;
+    let _compiling = shared.workspace.compile.lock().await;
 
     let live: Vec<DynamicBlockSpec> = generation::active(ctx)
         .await?

@@ -6,17 +6,18 @@
 //! typed database client. The two halves sit in different builds: `export`,
 //! with `OWNED_TABLES` and `variable_is_exportable`, is the workspace's
 //! (`block-dev`); [`import`] — what a seed's `data.json` goes through on a
-//! cold boot — is the runtime's (`site-runtime`). **No SQL text is generated or executed anywhere in
-//! this module** — the import is one `db::batch` of typed writes, exactly as
+//! cold boot — is the runtime's (`site-runtime`). **No SQL text is generated
+//! or executed anywhere in this module** — the import is one `db::batch` of
+//! typed writes, exactly as
 //! amendment 9 requires and as
 //! `CLAUDE.md`'s "no raw SQL in block code" rule already demands of every
 //! other block.
 //!
 //! # The allowlist is closed, not additive
 //!
-//! [`TABLE_ALLOWLIST`] and [`TABLE_EXCLUDED`] between them must name every
-//! collection the products, admin and auth blocks declare — a new table that
-//! lands in neither is a decision nobody made, and
+//! [`TABLE_ALLOWLIST`] and `TABLE_EXCLUDED` (`block-dev`) between them must
+//! name every collection the products, admin and auth blocks declare — a new
+//! table that lands in neither is a decision nobody made, and
 //! `every_declared_table_of_the_three_blocks_has_an_export_decision`
 //! (`tests/dev_data_snapshot.rs`) fails the build the moment that happens.
 //! [`import`] enforces the same closure from the other direction: a snapshot
@@ -28,7 +29,7 @@
 //! # What never leaves
 //!
 //! `impresspress__admin__variables` is filtered row-by-row through
-//! [`variable_is_exportable`] as it is read, so a sensitive value or an
+//! `variable_is_exportable` as it is read, so a sensitive value or an
 //! `IMPRESSPRESS_`-prefixed infrastructure key never enters the snapshot in
 //! the first place — there is no later redaction step for a bug to skip.
 //! Every session, token, audit-log and payment/provider-state table is kept
@@ -61,25 +62,37 @@ use crate::blocks::products::list_live_products;
 // grouped import below; this file is listed in that test's
 // `TABLE_IDENT_ALLOWED` with the same justification given there.
 use crate::blocks::products::TABLE as PRODUCTS_COLLECTION;
+// The tables only `TABLE_EXCLUDED` names: the export's bookkeeping.
+#[cfg(feature = "block-dev")]
 use crate::{
     blocks::{
-        admin::{AUDIT_LOGS_TABLE, PERMISSIONS_TABLE, ROLES_TABLE, STORAGE_ACCESS_LOGS_TABLE},
+        admin::{AUDIT_LOGS_TABLE, STORAGE_ACCESS_LOGS_TABLE},
         auth::repo::{
-            api_keys, bootstrap_tokens, jwt_blocklist, local_credentials, maintenance, oauth_pkce,
-            orgs, pats, provider_links, rate_limits, sessions, tokens, users,
+            api_keys, bootstrap_tokens, jwt_blocklist, maintenance, oauth_pkce, orgs, pats,
+            provider_links, rate_limits, sessions, tokens,
         },
         products::{
-            archive_offers_write, money, product_snapshot_upsert, unarchived_offer_ids,
-            validate_imported_variables, CHECKOUT_PRESETS_TABLE, DISPUTES_TABLE,
-            ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE, LINE_ITEMS_TABLE,
-            OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE, PRODUCT_TEMPLATES_TABLE,
-            PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE,
-            SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE,
-            SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE, VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
+            DISPUTES_TABLE, ENTITLEMENTS_TABLE, LINE_ITEMS_TABLE, PAYMENT_LINKS_TABLE,
+            PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE, SELLER_ACCOUNTS_TABLE,
+            STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE, SUBSCRIPTION_ITEMS_TABLE,
         },
     },
-    // audit-allow: names the platform tables for the export allowlist/exclusion bookkeeping below — the two it reads (`variables`, `user_roles`) are granted by `dev::wrap_grants()`, which maps every `TABLE_ALLOWLIST` entry to `read_write(BLOCK_NAME, table)` and which the runtime honours from its flat grant list, and the audit attributes grants to the declaring file's block and cannot see it
-    platform_state::{block_settings, request_logs, user_roles, variables, wrap_grants},
+    // audit-allow: names the platform tables for the export's exclusion bookkeeping below — none is read or written, only listed as deliberately left out of every export
+    platform_state::{block_settings, request_logs, wrap_grants},
+};
+use crate::{
+    blocks::{
+        admin::{PERMISSIONS_TABLE, ROLES_TABLE},
+        auth::repo::{local_credentials, users},
+        products::{
+            archive_offers_write, money, product_snapshot_upsert, unarchived_offer_ids,
+            validate_imported_variables, CHECKOUT_PRESETS_TABLE, GROUPS_TABLE,
+            GROUP_TEMPLATES_TABLE, OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PRODUCT_TEMPLATES_TABLE,
+            PRODUCT_VERSIONS_TABLE, TYPES_TABLE, VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
+        },
+    },
+    // audit-allow: names the platform tables for the export allowlist bookkeeping below — the two it reads (`variables`, `user_roles`) are granted by `dev::wrap_grants()`, which maps every `TABLE_ALLOWLIST` entry to `read_write(BLOCK_NAME, table)` and which the runtime honours from its flat grant list, and the audit attributes grants to the declaring file's block and cannot see it
+    platform_state::{user_roles, variables},
 };
 
 /// Schema version this build's [`DataSnapshot`] reads and writes.
@@ -99,7 +112,7 @@ pub struct DataSnapshot {
     /// `BTreeMap`, not `HashMap`: table order is incidental to what an
     /// export means, so sorting it is free reproducibility — two exports of
     /// the same data serialize to the same bytes, the same reason
-    /// [`super::zip::ZipWriter`]'s archives are byte-identical across runs.
+    /// `super::zip::ZipWriter`'s (`block-dev`) archives are byte-identical across runs.
     pub tables: BTreeMap<String, Vec<serde_json::Map<String, Value>>>,
 }
 
@@ -174,7 +187,7 @@ pub enum Mode {
 
 /// Every table this build exports, and how [`import`] applies its rows.
 ///
-/// See the module docs for why this list — together with [`TABLE_EXCLUDED`]
+/// See the module docs for why this list — together with `TABLE_EXCLUDED`
 /// — is a closed set, and for the one exception ([`local_credentials`])
 /// among the tables usually thought of as "secrets".
 pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
@@ -255,6 +268,12 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
 
 /// Every table the products, admin and auth blocks declare that
 /// [`TABLE_ALLOWLIST`] deliberately leaves out of every export.
+///
+/// The export's bookkeeping (`block-dev`): nothing reads it at run time —
+/// `every_declared_table_of_the_three_blocks_has_an_export_decision` checks
+/// it against the declared tables — and the import, the half a build without
+/// `block-dev` has, enforces the allowlist alone.
+#[cfg(feature = "block-dev")]
 pub const TABLE_EXCLUDED: &[&str] = &[
     // --- products: money moved, a specific order, or per-instance Stripe
     // state — none of it portable to a different deployment. ---

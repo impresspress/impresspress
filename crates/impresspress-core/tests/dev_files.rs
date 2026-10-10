@@ -635,8 +635,8 @@ async fn every_files_response_is_never_cached() {
 fn the_write_schema_and_the_handler_agree_on_what_is_required() {
     let info = DevBlock::with_workspace(DevShared::new(
         FakeControl::new(),
-        std::sync::Arc::new(FakeShell::new()),
         fake_bypass_rules(),
+        std::sync::Arc::new(FakeShell::new()),
     ))
     .info();
     let write = info
@@ -1036,7 +1036,7 @@ async fn once_parked(hold: &HeldGet) {
 /// into a `500`.
 ///
 /// The defect this pins is real and user-facing, not a fixture artifact.
-/// `DevShared::workspace` orders the manifest's writers against each other and
+/// `DevShared::workspace_manifest` orders the manifest's writers against each other and
 /// orders nothing against a read, so before the fix `handle_read` loaded the
 /// manifest unlocked and fetched the blob afterwards. Every storage call is a
 /// suspension point and the sandbox's fetch events dispatch concurrently, so
@@ -1141,7 +1141,7 @@ async fn a_read_holds_off_the_write_and_the_collection_that_would_pull_its_blob(
 ///
 /// This is the reader that backs every ordinary site write and delete, and it
 /// was the last one to take the lock. `files::handle_write` and
-/// `handle_delete` release `DevShared::workspace` *before* they publish —
+/// `handle_delete` release `DevShared::workspace_manifest` *before* they publish —
 /// deliberately, so editing never waits behind a runtime rebuild — and
 /// `activation::workspace_site` then reads the manifest back inside the
 /// activation that publish asked for. That released gap is where a second

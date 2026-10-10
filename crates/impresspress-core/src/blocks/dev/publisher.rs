@@ -60,6 +60,12 @@
 //! `llms.txt` of its own is published with the sandbox's
 //! ([`SandboxLlms`]), and a site that has one is published with its own.
 //!
+//! Only a `block-dev` build records a sandbox's text (the seed import's
+//! sandbox steps and the boot repair are the workspace's). A build without
+//! it still reads the record on every publish — a row with no text, so the
+//! site is published alone — because the read is one narrow query and the
+//! publish stays one code path in both builds.
+//!
 //! It is done here, on the published view, and not by seeding the file into
 //! `site/`, because the file is the sandbox's and not the site's: it must not
 //! be listed in the workspace, counted against it, or — the case that
@@ -201,6 +207,9 @@ pub async fn publish_site(
 /// site left the name free. Otherwise the active generation decides — its
 /// site may hold the name itself — and republishing it over itself is a
 /// diff of that one file.
+///
+/// Workspace only (`block-dev`), with the repair that calls it.
+#[cfg(feature = "block-dev")]
 pub async fn converge_sandbox_llms(
     ctx: &dyn Context,
     recorded: seed_info::LlmsRow,
@@ -614,9 +623,13 @@ mod tests {
 
     // -- the sandbox's own llms.txt ------------------------------------------
 
+    #[cfg(feature = "block-dev")]
     const SANDBOX_LLMS: &str = "# The sandbox\n\nBuild a site here.\n";
 
-    /// A dev context whose seed import recorded [`SANDBOX_LLMS`].
+    /// A dev context whose seed import recorded [`SANDBOX_LLMS`]. Only a
+    /// `block-dev` build's import records one (`seed::import`'s sandbox
+    /// steps), so the tests that need it are `block-dev`'s.
+    #[cfg(feature = "block-dev")]
     async fn seeded_sandbox() -> TestContext {
         let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
         seed_info::write(
@@ -636,6 +649,7 @@ mod tests {
     /// The case the whole mechanism is for: the worker controls the page, the
     /// site has no `llms.txt`, and `/llms.txt` must still be the sandbox's
     /// text rather than the SPA fallback's `index.html`.
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn a_site_without_llms_txt_is_published_with_the_sandboxes() {
         let ctx = seeded_sandbox().await;
@@ -678,6 +692,7 @@ mod tests {
 
     /// The site's own file wins the moment it exists, and the sandbox's comes
     /// back the moment it is gone.
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn a_sites_own_llms_txt_replaces_the_sandboxes_and_deleting_it_restores_it() {
         let ctx = seeded_sandbox().await;
@@ -714,6 +729,7 @@ mod tests {
     /// A site that uses the NAME as a directory keeps it: the sandbox's file
     /// is withdrawn before the children land, like any file-to-directory
     /// change, and is not written over them.
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn a_site_directory_named_llms_txt_displaces_the_sandboxes_file() {
         let ctx = seeded_sandbox().await;
@@ -745,6 +761,7 @@ mod tests {
     /// (`tests/dev_seed.rs` drives the repair itself) — is written by the next
     /// publish, although no site file changed: what is
     /// in the folder is read from the record, not assumed from the row.
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn a_text_recorded_after_the_last_publish_is_written_by_the_next_one() {
         let ctx = TestContext::with_site_runtime(FakeControl::new()).await;
@@ -784,6 +801,7 @@ mod tests {
 
     /// The record follows the folder: set when the sandbox's text is
     /// written, cleared when the site's own file takes the name.
+    #[cfg(feature = "block-dev")]
     #[tokio::test]
     async fn the_record_says_whether_the_sandboxes_text_is_in_the_folder() {
         let ctx = seeded_sandbox().await;

@@ -42,7 +42,7 @@ async fn build(ctx: &dyn Context, shared: &DevShared) -> Result<StatusResponse, 
         active_generation: active
             .as_ref()
             .map(|(row, manifest)| generation::summarize(row, Some(manifest))),
-        runtime_generation: shared.control.runtime_generation(),
+        runtime_generation: shared.workspace.control.runtime_generation(),
         blocks: active
             .as_ref()
             .map(|(_row, manifest)| {

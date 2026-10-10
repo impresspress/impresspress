@@ -152,6 +152,10 @@ impl Workspace {
     }
 
     /// The entry at `path`, if any.
+    ///
+    /// Workspace only (`block-dev`: the files API), and compiled for this
+    /// crate's unit tests.
+    #[cfg(any(test, feature = "block-dev"))]
     pub fn get(&self, path: &str) -> Option<&FileEntry> {
         self.files.get(path)
     }
@@ -160,6 +164,11 @@ impl Workspace {
     ///
     /// The blob it named is deliberately left alone — an older generation may
     /// still reference it (see [`super::blobs`]).
+    ///
+    /// Workspace only (`block-dev`: the files API, and a rollback's
+    /// `activation::adopt_site`), and compiled for this
+    /// crate's unit tests.
+    #[cfg(any(test, feature = "block-dev"))]
     pub fn remove(&mut self, path: &str) -> Option<FileEntry> {
         self.files.remove(path)
     }
@@ -169,6 +178,10 @@ impl Workspace {
     /// NOT the quota: superseded and deleted content is still stored and still
     /// costs, and only [`Self::blob_bytes`] counts it. This is the "how big is
     /// my site" number, not the "how much have I used" one.
+    ///
+    /// Workspace only (`block-dev`: the files API), and compiled for this
+    /// crate's unit tests.
+    #[cfg(any(test, feature = "block-dev"))]
     pub fn total_bytes(&self) -> u64 {
         self.files.values().map(|entry| entry.size).sum()
     }
@@ -263,6 +276,10 @@ impl Workspace {
     }
 
     /// Every distinct block name the workspace defines sources for, sorted.
+    ///
+    /// Workspace only (`block-dev`: the files API), and compiled for this
+    /// crate's unit tests.
+    #[cfg(any(test, feature = "block-dev"))]
     pub fn block_names(&self) -> Vec<String> {
         self.files
             .keys()
@@ -289,6 +306,10 @@ pub fn site_manifest(ws: &Workspace) -> Vec<FileEntry> {
 /// compiler that wants a crate rooted at `Cargo.toml` / `src/lib.rs`, not a
 /// tree nested two directories deep. The workspace path is recoverable as
 /// `blocks/{name}/{entry.path}`.
+///
+/// Workspace only (`block-dev`: the export), and compiled for this crate's
+/// unit tests.
+#[cfg(any(test, feature = "block-dev"))]
 pub fn block_sources(ws: &Workspace, name: &str) -> Vec<FileEntry> {
     entries_under(ws, &format!("{BLOCKS_PREFIX}{name}/"))
 }
@@ -307,7 +328,9 @@ fn entries_under(ws: &Workspace, prefix: &str) -> Vec<FileEntry> {
         .collect()
 }
 
-/// The block name a `blocks/<name>/…` path belongs to.
+/// The block name a `blocks/<name>/…` path belongs to. Compiled where its
+/// one reader, [`Workspace::block_names`], is.
+#[cfg(any(test, feature = "block-dev"))]
 fn block_name_of(path: &str) -> Option<&str> {
     let rest = path.strip_prefix(BLOCKS_PREFIX)?;
     let (name, remainder) = rest.split_once('/')?;
