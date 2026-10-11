@@ -28,14 +28,15 @@ use crate::SandboxMode;
 /// `variables::seed_and_load()` — there are no process env vars in the browser,
 /// only the local defaults below plus auto-generated secrets.
 /// `mode` is the *resolved* verdict from [`SandboxMode::resolve`], never the
-/// raw `initialize({ dev })` request: on a build without `browser-devtools`
-/// the sandbox does not exist, so a feature-off boot must leave a database
-/// indistinguishable from one that never asked for a sandbox — which is why
-/// `WAFER_RUN_SHARED__HAS_LANDING_PAGE` below is written on EVERY verdict
-/// rather than only on the affirmative one. It follows
-/// [`SandboxMode::runtime_present`]: an exported bundle always has a site (its
-/// `seed/` guarantees one), so `/` must serve it there exactly as it does in
-/// the workspace.
+/// raw `initialize({ dev })` request: on a build without the sandbox (neither
+/// `browser-site-runtime` nor `browser-devtools`) it does not exist, so such a
+/// boot must leave a database indistinguishable from one that never asked
+/// for a sandbox — which is why `WAFER_RUN_SHARED__HAS_LANDING_PAGE` below is
+/// written on EVERY verdict rather than only on the affirmative one. It
+/// follows [`SandboxMode::runtime_present`]: an exported bundle — a site
+/// build, or a devtools build booted with `dev: false` — always has a site
+/// (its `seed/` guarantees one), so `/` must serve it there exactly as it
+/// does in the workspace.
 pub async fn seed_and_load_variables(
     db: &Arc<dyn DatabaseService>,
     mode: SandboxMode,
@@ -92,14 +93,14 @@ pub async fn seed_and_load_variables(
     //
     // Both directions, because the browser database is keyed by ORIGIN and
     // outlives the bundle that wrote it. Serving a bundle without the
-    // sandbox's runtime (one compiled without `browser-devtools`) to an
-    // origin a sandbox bundle previously ran on would otherwise leave a stale
-    // `"true"` in OPFS, and `/` would keep serving a site nothing can publish
-    // to any more instead of redirecting anonymous visitors to the login
-    // page. That directly contradicts what `SandboxMode::resolve` promises —
-    // "a build without the feature must produce a runtime indistinguishable
-    // from one that was never asked for a sandbox" — and a value only ever
-    // written in one direction cannot deliver it.
+    // sandbox's runtime (one compiled without `browser-site-runtime`, which
+    // `browser-devtools` implies) to an origin a sandbox or site bundle
+    // previously ran on would otherwise leave a stale `"true"` in OPFS, and
+    // `/` would keep serving a site nothing can publish to any more instead
+    // of redirecting anonymous visitors to the login page. That directly
+    // contradicts what `SandboxMode::Absent` promises — a runtime
+    // indistinguishable from one that was never asked for a sandbox — and a
+    // value only ever written in one direction cannot deliver it.
     //
     // Writing `"false"` here overrides nothing an operator would have set: in
     // the browser target the sandbox is the ONLY producer of a landing page

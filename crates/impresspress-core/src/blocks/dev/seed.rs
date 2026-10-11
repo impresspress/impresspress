@@ -358,7 +358,7 @@ pub async fn is_fresh(ctx: &dyn Context) -> Result<bool, String> {
 /// first, not an error.
 ///
 /// `control` is the runtime seam ([`RuntimeControl::inspect`]) — the boot
-/// caller has one (`impresspress-web`'s `install` builds the control before
+/// caller has one (`impresspress-web`'s `attach` builds the control before
 /// the first runtime), and the module docs above say why an importer that
 /// did not use it left four validation rules unapplied and every later
 /// staging attempt refused.

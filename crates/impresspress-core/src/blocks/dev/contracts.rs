@@ -36,7 +36,7 @@ pub struct StatusResponse {
     /// `WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves
     /// (`GET /b/dev/api/guest`) and compiles blocks against.
     pub wafer_guest_version: u32,
-    // `dev_runtime::install` logs a refused seed and carries on, because a
+    // `site_runtime::install` logs a refused seed and carries on, because a
     // sandbox that refuses to boot is one whose `/b/dev` page — the only thing
     // that could fix it — never comes up; this field is what makes the cause
     // readable without the service worker's console. Read from the same

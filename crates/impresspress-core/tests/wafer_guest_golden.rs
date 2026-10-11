@@ -22,7 +22,7 @@
 //!
 //! Everything between the template's source and the response body is the
 //! production path: the same three-step load `impresspress-web`'s
-//! `dev_runtime::load_guest` performs, the ABI exports, the JSON host codec,
+//! `site_runtime::load_guest` performs, the ABI exports, the JSON host codec,
 //! WRAP's own-namespace rule, the `schema` capability, and the real database
 //! handler.
 //!
@@ -296,7 +296,7 @@ fn golden_wafer() -> Wafer {
 /// spec it was admitted under.
 ///
 /// Three steps, in production's order (`blocks/dev/blocks_api.rs::stage` and
-/// `impresspress-web/src/dev_runtime.rs::load_guest`):
+/// `impresspress-web/src/site_runtime.rs::load_guest`):
 ///
 /// 1. **inspect** — instantiate under [`BlockCapabilities::none`] and read the
 ///    guest's own `BlockInfo`. No lifecycle event runs, because nothing has
@@ -307,7 +307,7 @@ fn golden_wafer() -> Wafer {
 /// 3. **load** — [`WasmiBlock::load_with_capabilities_and_limits`] with
 ///    `spec.capabilities` (the accepted set, never the raw declaration) and
 ///    [`ResourceLimits::default`], which is the fuel/memory pair
-///    `dev_runtime::guest_limits` also builds.
+///    `site_runtime::guest_limits` also builds.
 ///
 /// A `load_from_bytes` here would carry no bound at all, leaving the guest's
 /// capabilities to whatever an operator's `capabilities` block config states

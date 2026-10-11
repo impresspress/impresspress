@@ -15,19 +15,34 @@
 // dev `Context` impls) across those trait boundaries with no
 // `unsafe impl Send`/`Sync`.
 //
-// The SMART POINTER is forced at the four sites the lint reaches — that is the
+// The SMART POINTER is forced at every site the lint reaches — that is the
 // claim this allow rests on, and it is narrower than "the code is all
-// API-shaped". `ImpresspressBuilder::extra_block`, `DevShared::new` and
-// `Context::clone_arc` take or return `Arc<dyn _>` by value, and `Rc` does not
-// coerce into an `Arc<dyn Trait>` (E0605). On this single-threaded target none
-// of the four is making a cross-thread claim to be wrong about.
+// API-shaped". There are two in a site build and four in a
+// `browser-devtools` one:
+//
+// * `BrowserRuntimeControl::new` (`site_runtime`), whose `Arc` is what
+//   `DevShared::new` takes as `Arc<dyn RuntimeControl>` (and, in a devtools
+//   build, `Arc<dyn WorkspaceControl>`);
+// * `Context::clone_arc` for `BootContext` (`site_runtime`) and, in a
+//   devtools build, for `DenyAllContext` (`dev_runtime`), which returns
+//   `Arc<dyn Context>`;
+// * in a devtools build, the `DevBlock` `runtime_factory` hands
+//   `ImpresspressBuilder::extra_block` as `Arc<dyn Block>` — the workspace
+//   block holds the `DevShared`, and through it the control. (A site
+//   build's `DevBlock` holds nothing and is genuinely `Send + Sync`.)
+//
+// Each API takes or returns `Arc<dyn _>` by value, and `Rc` does not coerce
+// into an `Arc<dyn Trait>` (E0605). On this single-threaded target none of
+// them is making a cross-thread claim to be wrong about.
 //
 // Scoped to wasm32 even though this crate only ships to a browser, because
 // that is the actual precondition: on a native target the same bounds resolve
 // to real `Send + Sync`, the lint is accurate again, and this allow must not
-// silence it.
+// silence it. Scoped to `browser-site-runtime` because every site is in the
+// sandbox's code: a build without it has none, and an `expect` with nothing
+// to catch is itself an error.
 #![cfg_attr(
-    target_arch = "wasm32",
+    all(target_arch = "wasm32", feature = "browser-site-runtime"),
     expect(
         clippy::arc_with_non_send_sync,
         reason = "on this single-threaded target the `Arc` is forced by the \
@@ -42,15 +57,18 @@ use wafer_core::interfaces::config::service::ConfigService;
 use wasm_bindgen::prelude::*;
 
 pub mod config;
-// The module documents itself (`//!` in `dev_runtime.rs`). Deliberately no
-// `///` here: rustdoc merges an outer doc comment on the `mod` item with the
-// module's own inner docs and then resolves the whole block in *this* scope,
-// so every intra-doc link the module makes to its own items goes unresolved.
+// Both sandbox modules document themselves (`//!` in each file). Deliberately
+// no `///` here: rustdoc merges an outer doc comment on the `mod` item with
+// the module's own inner docs and then resolves the whole block in *this*
+// scope, so every intra-doc link the module makes to its own items goes
+// unresolved.
 #[cfg(feature = "browser-devtools")]
 pub mod dev_runtime;
 pub mod runtime_factory;
+#[cfg(feature = "browser-site-runtime")]
+pub mod site_runtime;
 
-pub use runtime_factory::{RuntimeFactory, RuntimeOptions, SandboxMode};
+pub use runtime_factory::{CompiledSandbox, RuntimeFactory, RuntimeOptions, SandboxMode};
 
 /// The operator-level `csp` the browser runtime hands `wafer-run/security-headers`,
 /// which merges it directive by directive over its own baseline and refuses
@@ -78,14 +96,17 @@ const IMPRESSPRESS_CSP: &str = concat!(
 /// this worker leaves to the static host (see `bypass_rules_option`).
 ///
 /// The flag is a *request*, and it selects the WORKSPACE half of the sandbox
-/// only (see [`SandboxMode`]). A build with `browser-devtools` compiled in
-/// always runs the sandbox's RUNTIME half — the seed import, the generation
-/// ledger, journal convergence, the dynamic-block rebuild — because that is
-/// what makes an ImpressPress folder serve the site it ships, and an EXPORTED
-/// bundle boots with `{ dev: false }` precisely so it has no `/b/dev`. On a
-/// build without the feature the flag resolves to [`SandboxMode::Absent`] and
-/// `{ dev: true }` is a no-op apart from the single console warning below:
-/// same seeded variables, same CSP, same routes as `{ dev: false }`.
+/// only, and only on a build that compiled one (see [`SandboxMode`]). A build
+/// with `browser-site-runtime` compiled in — a site build, or a
+/// `browser-devtools` build, which implies it — always runs the sandbox's
+/// RUNTIME half: the seed import, the generation ledger, journal
+/// convergence, the dynamic-block rebuild. That is what makes an
+/// ImpressPress folder serve the site it ships, and an EXPORTED bundle boots
+/// with `{ dev: false }` precisely so it has no `/b/dev`. Where the build has
+/// no workspace — a site build ([`SandboxMode::Exported`]) or no sandbox at
+/// all ([`SandboxMode::Absent`]) — `{ dev: true }` is a no-op apart from the
+/// single console warning below: same seeded variables, same CSP, same
+/// routes as `{ dev: false }`.
 #[wasm_bindgen]
 pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // Before anything that can log. `tracing`'s default dispatcher discards
@@ -113,19 +134,32 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // A bundle can ask for the sandbox on a build that never compiled it. That
-    // is accepted rather than fatal — the block cannot exist, so there is
-    // nothing to disable — but it is the difference between "the sandbox is
-    // off" and "the sandbox is missing", so say so once rather than leaving an
-    // operator to wonder why `/b/dev` 404s.
-    #[cfg(not(feature = "browser-devtools"))]
+    // A bundle can ask for the workspace on a build that never compiled it.
+    // That is accepted rather than fatal — the workspace cannot exist, so
+    // there is nothing to disable — but it is the difference between "the
+    // workspace is off" and "the workspace is missing", so say so once rather
+    // than leaving an operator to wonder why `/b/dev` 404s.
     if dev_requested {
-        web_sys::console::warn_1(
-            &"impresspress: initialize({ dev: true }) on a build without the \
-              `browser-devtools` feature — the sandbox is not compiled in and \
-              /b/dev will not exist"
+        let missing = match CompiledSandbox::COMPILED {
+            CompiledSandbox::None => Some(
+                "a build without the sandbox (neither `browser-site-runtime` nor \
+                 `browser-devtools`) — the sandbox is not compiled in",
+            ),
+            CompiledSandbox::Site => Some(
+                "a site build (`browser-site-runtime` without `browser-devtools`) — \
+                 the site runtime runs, but the workspace is not compiled in",
+            ),
+            CompiledSandbox::Devtools => None,
+        };
+        if let Some(missing) = missing {
+            web_sys::console::warn_1(
+                &format!(
+                    "impresspress: initialize({{ dev: true }}) on {missing}, and /b/dev \
+                     will not exist"
+                )
                 .into(),
-        );
+            );
+        }
     }
 
     impresspress_browser::db_init().await?;
@@ -137,15 +171,14 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     .map_err(|e| JsValue::from_str(&e))?;
 
     // The sandbox control plane is attached BEFORE the first build, so the
-    // cold-start runtime already carries the dev block (and, in a workspace
-    // build, `/b/dev`). Doing it afterwards would mean the page did not exist
-    // until a rebuild — and an instance with no guest blocks has no reason to
-    // rebuild, so on the common path it would never exist at all. `attach`
-    // answers `None` only when the feature is not compiled in, and the factory
-    // is then untouched. Without the feature there is no `attach` at all and
-    // `factory` is used as constructed.
-    #[cfg(feature = "browser-devtools")]
-    let (factory, sandbox) = dev_runtime::attach(factory, || bypass_rules_option(&options));
+    // cold-start runtime already carries the dev block — whose `Init` creates
+    // the ledger the seed import writes to — and, in a workspace, `/b/dev`.
+    // Doing it afterwards would mean neither existed until a rebuild — and an
+    // instance with no guest blocks has no reason to rebuild, so on the common
+    // path they would never exist at all. Without `browser-site-runtime`
+    // there is no `attach` at all and `factory` is used as constructed.
+    #[cfg(feature = "browser-site-runtime")]
+    let (factory, sandbox) = site_runtime::attach(factory, bypass_rules_option(&options));
 
     let wafer = factory.build(&[]).await?;
 
@@ -157,30 +190,30 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // was in the middle of, and rebuild with the active block set — all before
     // returning, because requests only start once `initialize()` resolves.
     //
-    // This runs for an EXPORTED bundle too (`{ dev: false }` with the feature
-    // compiled in). It is the whole reason the export works: the archive ships
-    // a `seed/` beside the shell, and this is what reads it. See
-    // `SandboxMode`.
-    #[cfg(feature = "browser-devtools")]
-    if let Some(sandbox) = &sandbox {
-        dev_runtime::install(sandbox).await;
-    }
+    // This runs for an EXPORTED bundle too — `{ dev: false }` on a
+    // `browser-devtools` build, or any request on a site build. It is the
+    // whole reason the export works: the archive ships a `seed/` beside the
+    // shell, and this is what reads it. See `SandboxMode`.
+    #[cfg(feature = "browser-site-runtime")]
+    site_runtime::install(&sandbox).await;
 
     Ok(())
 }
 
 /// The `bypass` option of `initialize()`: the rules the running worker's fetch
 /// handler applies, rendered by `impresspress-bundle` from the same value as
-/// its condition (`BYPASS_RULES` in `sw.js.tmpl`). The development sandbox
-/// keeps them and refuses a site file at a path they list — exactly this
-/// worker's rules, with no fetch and nothing that can fail later.
+/// its condition (`BYPASS_RULES` in `sw.js.tmpl`). The sandbox's runtime
+/// keeps them and refuses a site file at a path they list — the seed import
+/// on every sandbox build, and the workspace's site-file writes and export on a
+/// `browser-devtools` one — exactly this worker's rules, with no fetch and
+/// nothing that can fail later.
 ///
 /// Missing or unparseable — a `sw.js` rendered before the option existed —
 /// is NO rules, with a console warning: that worker still bypasses what it
 /// always did, the sandbox just cannot see which paths those are, so it
 /// refuses none, as before. Refusing to boot instead would turn a missing
 /// check into a dead deployment.
-#[cfg(feature = "browser-devtools")]
+#[cfg(feature = "browser-site-runtime")]
 fn bypass_rules_option(options: &JsValue) -> impresspress_core::blocks::dev::BypassRules {
     let value =
         js_sys::Reflect::get(options, &JsValue::from_str("bypass")).unwrap_or(JsValue::UNDEFINED);
@@ -196,7 +229,7 @@ fn bypass_rules_option(options: &JsValue) -> impresspress_core::blocks::dev::Byp
     parsed.unwrap_or_else(|reason| {
         web_sys::console::warn_1(
             &format!(
-                "impresspress: no service-worker bypass rules ({reason}); the dev sandbox \
+                "impresspress: no service-worker bypass rules ({reason}); the sandbox \
                  will not refuse site files this worker serves from the static host — \
                  rebuild the bundle with a current impresspress-bundle"
             )

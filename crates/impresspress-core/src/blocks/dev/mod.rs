@@ -36,12 +36,14 @@
 //! # Why it is not in the block manifest
 //!
 //! Registration happens from the consumer, via `ImpresspressBuilder::extra_block`
-//! and `add_route`, gated on `impresspress-web`'s `browser-devtools` feature —
-//! the block is registered wherever the feature is compiled in, and only its
-//! `/b/dev` ROUTE is keyed on the deployment being a workspace rather than an
-//! exported bundle (`SandboxMode`, spec amendment 19) — never on a stored
-//! variable. `feature_block_manifest!` only enumerates blocks whose
-//! constructors take no arguments, and — more to the point — the sandbox's
+//! and `add_route`, gated on `impresspress-web`'s `browser-site-runtime`
+//! feature (which its `browser-devtools` implies) — the block is registered
+//! wherever that is compiled in, and only its `/b/dev` ROUTE is keyed on the
+//! deployment being a workspace (a `browser-devtools` build booted with
+//! `[dev] enabled`) rather than an exported bundle (`SandboxMode`, spec
+//! amendment 19) — never on a stored variable. `feature_block_manifest!` only
+//! enumerates blocks whose constructors take no arguments, and — more to the
+//! point — the sandbox's
 //! security model (design §13) depends on this block being absent from every
 //! normal deployment, not merely disabled in one.
 

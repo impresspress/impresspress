@@ -945,14 +945,19 @@ jobs:
           retention-days: 7
 
   # The only job that compiles, boots and exercises the browser development
-  # sandbox. `impresspress-web/src/dev_runtime.rs` — wasmi `inspect`/`probe`,
-  # the runtime rebuild, `replace_wafer`, boot convergence, seed-on-boot —
-  # exists only inside a service worker, so no host test can run a line of it;
-  # this job is where it runs. It is also the only place the `browser-devtools`
-  # feature set is compiled at all — `block-dev` itself is covered by the
-  # `Clippy (block-dev)` and `Run the block-dev suite` steps above, which lint
-  # and run `impresspress-core`'s half on the host, and its runtime half alone
-  # by `Clippy (site-runtime)` and `Run the site-runtime tests`.
+  # sandbox. `impresspress-web/src/site_runtime.rs` — wasmi `inspect`, the
+  # runtime rebuild, `replace_wafer`, boot convergence, seed-on-boot — and
+  # `impresspress-web/src/dev_runtime.rs` — the `probe`, the announcement to
+  # the page, the export's shell source — exist only inside a service worker,
+  # so no host test can run a line of either; this job is where they run, in
+  # the `browser-devtools` build (an export still boots that build with the
+  # workspace switched off). It is also the only place `impresspress-web`'s
+  # sandbox features are compiled at all: the three wasm32 clippy steps below
+  # lint no features, `browser-site-runtime` and `browser-devtools`. On the
+  # core side, `block-dev` itself is covered by the `Clippy (block-dev)` and
+  # `Run the block-dev suite` steps above, which lint and run
+  # `impresspress-core`'s half on the host, and its runtime half alone by
+  # `Clippy (site-runtime)` and `Run the site-runtime tests`.
   e2e-dev-sandbox:
     name: E2E dev sandbox (browser WASM + wasmi guest)
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
@@ -1007,6 +1012,21 @@ jobs:
       # `browser-devtools` code under wasm32 — which nothing else compiles.
       - name: Clippy (browser-devtools, wasm32)
         run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
+
+      # The other two configurations `impresspress-web` has. Each compiles its
+      # own block of `runtime_factory.rs`'s const assertions — the compiled
+      # sandbox, the mode every `initialize({ dev })` request resolves to, and
+      # for a site build that the factory routes no `/b/dev` path — so these
+      # steps are what check that wiring, and they are where a site build's
+      # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
+      # are linted at all. Nothing else compiles a site build; `build-wasm`
+      # compiles the no-sandbox `pkg/` with wasm-pack (so that block of
+      # assertions runs there too) but does not lint it.
+      - name: Clippy (browser-site-runtime, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-site-runtime -- -D warnings
+
+      - name: Clippy (no sandbox, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown -- -D warnings
 
       # Debug build, as `e2e-build` does: the CLI only assembles static files
       # here, so its runtime speed is irrelevant and a debug compile is cheaper.

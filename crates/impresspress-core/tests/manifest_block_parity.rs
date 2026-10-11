@@ -68,14 +68,14 @@ const DIVERGENT: &[(&str, &[&str], &str)] = &[
     ),
     (
         "site-runtime",
-        &["impresspress-core"],
+        &["impresspress-core", "impresspress-web"],
         "The runtime half of the sandbox's block (ledger, seed import, \
          activation, the published site) — what a site exported from the \
          browser sandbox runs. Browser-only for the same reason `block-dev` \
          is: impresspress-cloudflare and the native `impresspress` binary \
-         host no sandbox and serve no exported one. impresspress-web does not \
-         name it: its one route to it is `browser-devtools`, whose \
-         `impresspress-core/block-dev` implies it.",
+         host no sandbox and serve no exported one. impresspress-web reaches \
+         it through its opt-in `browser-site-runtime` feature (the site \
+         build), which its `browser-devtools` feature implies.",
     ),
     (
         "block-fastembed",
@@ -180,7 +180,8 @@ fn passthrough_blocks(crate_dir: &str) -> BTreeSet<String> {
 
 /// Every block feature `impresspress-web` makes reachable: the ones it
 /// enables directly on the `impresspress-core` dependency, plus any a feature
-/// of its own turns on (`browser-devtools` → `impresspress-core/block-dev`).
+/// of its own turns on (`browser-site-runtime` → `impresspress-core/site-runtime`,
+/// `browser-devtools` → `impresspress-core/block-dev`).
 fn web_blocks() -> BTreeSet<String> {
     let manifest = manifest("impresspress-web");
     let mut blocks: BTreeSet<String> = core_dependency_features(&manifest)

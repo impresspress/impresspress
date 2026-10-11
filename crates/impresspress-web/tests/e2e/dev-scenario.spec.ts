@@ -194,7 +194,7 @@ async function devStatusCode(page: Page): Promise<number> {
  * page. A seed import that refuses — a schema version it does not read, a
  * table outside the allowlist, a block whose artifact will not load — is
  * logged by the runtime with `console::error_1` and then swallowed:
- * `dev_runtime::install` deliberately keeps booting, because a sandbox that
+ * `site_runtime::install` deliberately keeps booting, because a sandbox that
  * refuses to start is a sandbox whose diagnostics nobody can reach. Inside a
  * service worker those lines go nowhere Playwright looks by default, so a
  * broken export would surface here as "expected 3, got 0" and nothing else.
@@ -550,7 +550,7 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
       // block is serving on the exported runtime.
       //
       // A seed import that refused was logged and swallowed by
-      // `dev_runtime::install`, so a bare assertion failure here would be
+      // `site_runtime::install`, so a bare assertion failure here would be
       // "expected 3, got 0" with no cause. Re-raising with the service
       // worker's own console is what turns a broken export into a diagnosis.
       try {
