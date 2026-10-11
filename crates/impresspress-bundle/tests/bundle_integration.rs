@@ -669,7 +669,7 @@ fn a_site_page_named_sql_something_is_not_bypassed() {
 /// pair. Without this the compiler cannot start on any host, and the only
 /// symptom the page gets is an empty `Worker` error event. What the rendered
 /// worker DOES with each mode is driven in Node
-/// (`the_rendered_worker_isolates_bypassed_responses_in_a_workspace_only`);
+/// (`the_rendered_worker_behaves_per_sandbox_mode`);
 /// this pins the text.
 #[test]
 fn a_workspace_bundle_adds_the_isolation_headers_to_bypassed_responses() {
@@ -940,7 +940,7 @@ fn the_rendered_worker_keeps_its_own_runtime() {
 /// and a plain bundle leave it to the network, so an exported site is not
 /// cross-origin isolated. `tests/sw/sw_sandbox_mode.test.mjs`.
 #[test]
-fn the_rendered_worker_isolates_bypassed_responses_in_a_workspace_only() {
+fn the_rendered_worker_behaves_per_sandbox_mode() {
     let renderings: Vec<(&str, tempfile::TempDir)> = [
         ("SW_JS", SandboxShell::None),
         ("SW_JS_SITE", SandboxShell::Site),

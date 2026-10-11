@@ -11,7 +11,7 @@
 // built. The text of the branch is pinned in `tests/bundle_integration.rs`;
 // this drives it.
 //
-// Run by `the_rendered_worker_isolates_bypassed_responses_in_a_workspace_only`
+// Run by `the_rendered_worker_behaves_per_sandbox_mode`
 // in `tests/bundle_integration.rs`, which renders one worker per mode and
 // passes them in `SW_JS` ('none'), `SW_JS_SITE` and `SW_JS_WORKSPACE`.
 import test from 'node:test';

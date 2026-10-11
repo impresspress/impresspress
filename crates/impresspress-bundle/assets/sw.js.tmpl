@@ -14,7 +14,9 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // (`blocks/dev/export.rs`), which ships the workspace's runtime shell as a
 // site, finds and rewrites exactly one rendering and asserts it. One line,
 // one rewrite, one assertion: changing the declaration below from workspace
-// to site is the whole of turning the sandbox's shell into a site's.
+// to site is the whole of changing the mode, and the one edit the export
+// makes for it. (It is not the whole export: that also takes the compiler's
+// bypass out of this file and edits `index.html` — see `export.rs`.)
 // (Deliberately NOT spelled out here as a literal: the export finds the
 // declaration by exact text and requires it to occur exactly once, so a
 // comment quoting it would be a second, ambiguous match.)
@@ -614,9 +616,9 @@ self.addEventListener('fetch', (event) => {
         // rather than decided by the runtime — and a 'site' or 'none' bundle
         // keeps the plain early return it always had: only the workspace runs
         // the compiler that needs isolation, and a site wants its pages free
-        // to embed a third-party iframe. That one line is also exactly what
-        // the sandbox's export rewrites, from workspace to site, to ship the
-        // shell as a site (`blocks/dev/export.rs`).
+        // to embed a third-party iframe. That one line is also the line the
+        // sandbox's export rewrites, from workspace to site, to change the
+        // mode (`blocks/dev/export.rs`).
         // ------------------------------------------------------------------
         if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {
             event.respondWith(passthrough(event.request));
