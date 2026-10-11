@@ -648,7 +648,10 @@ pub fn attach(factory: RuntimeFactory, bypass: BypassRules) -> (Rc<RuntimeFactor
 /// `initialize()`. A sandbox that refuses to boot is a sandbox whose `/b/dev`
 /// page — the only thing that could fix it — never comes up; a sandbox that
 /// boots with nothing dynamic still serves the page, the ledger and the
-/// diagnostics that say why.
+/// diagnostics that say why. An exported site that refuses to boot would
+/// show its visitors nothing and its admin nothing either; one that boots
+/// still serves its admin, where a refused seed is recorded as
+/// `IMPRESSPRESS__DEV__SEED_ERROR` on `/b/admin/settings/variables`.
 pub async fn install(sandbox: &Sandbox) {
     let Some(wafer) = impresspress_browser::current_wafer() else {
         web_sys::console::error_1(

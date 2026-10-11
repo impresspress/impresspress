@@ -268,7 +268,8 @@ const _: () = {
     // And so the factory routes nothing of the workspace for any request:
     // no `/b/dev`, no `/b/dev/enter`. The router legs of
     // `impresspress-core`'s `tests/site_runtime.rs::no_workspace_path_answers`
-    // test only that test's fixture; this is the production registration.
+    // test only that test's fixture; this is the function production's
+    // registration loop (`RuntimeFactory::build`) iterates.
     assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, false)).is_empty());
     assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, true)).is_empty());
 };
@@ -773,17 +774,23 @@ impl RuntimeFactory {
     /// requests. A runtime not in [`SandboxMode::Workspace`] — an exported
     /// site, a site build whatever it was asked for, or any build without the
     /// sandbox — therefore carries the unrelaxed policy, which is what the
-    /// feature-off smoke asserts. Both relaxations exist for the workspace alone: the compiler
-    /// worker and the `/b/dev` preview iframe.
+    /// feature-off smoke asserts. Both relaxations exist for the workspace
+    /// alone: the compiler worker and the `/b/dev` preview iframe. So the
+    /// relaxation is compiled only where the workspace is, `browser-devtools`,
+    /// like the `security_headers` widening in [`Self::build`]: a site build's
+    /// policy is the base one with no branch that could widen it.
     fn csp(&self) -> String {
-        let mut csp = crate::IMPRESSPRESS_CSP.to_string();
+        #[cfg(feature = "browser-devtools")]
         if self.mode.workspace() {
             // The compiler worker (a same-origin module worker; its blob-URL
             // subordinate workers come from `allow_blob_workers`) and the
             // live-site preview iframe on `/b/dev`.
-            csp.push_str("; worker-src 'self'; frame-src 'self'");
+            return format!(
+                "{}; worker-src 'self'; frame-src 'self'",
+                crate::IMPRESSPRESS_CSP
+            );
         }
-        csp
+        crate::IMPRESSPRESS_CSP.to_string()
     }
 }
 

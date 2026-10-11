@@ -6,10 +6,13 @@ import { bootServiceWorker, loginAdmin, WELCOME_PHRASE } from './fixtures/dev-sa
 /**
  * Plan 1 checkpoint for the browser development sandbox.
  *
- * Everything under `crates/impresspress-web/src/dev_runtime.rs` — wasmi
- * `inspect`/`probe`, the runtime rebuild, `replace_wafer`, the boot context,
- * seed-on-boot — only exists inside a service worker. Nothing in it can be
- * covered by a host test, so this file is the first and only place it runs.
+ * The browser half of the sandbox only exists inside a service worker:
+ * `crates/impresspress-web/src/site_runtime.rs` — wasmi `inspect`, the
+ * runtime rebuild, `replace_wafer`, the boot context, seed-on-boot — and
+ * `crates/impresspress-web/src/dev_runtime.rs` — the `probe`, the
+ * announcement to the page, the export's shell source, the rest of the
+ * workspace half. Nothing in either can be covered by a host test, so this
+ * file is the first and only place they run.
  * The bundle it serves is built by `examples/dev-sandbox/build.sh` (a
  * `browser-devtools` wasm through the sealed web flow with `[dev] enabled =
  * true`, the welcome starter site at `examples/dev-sandbox/seeds/blank/`
