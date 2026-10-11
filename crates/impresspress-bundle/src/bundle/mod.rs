@@ -8,6 +8,7 @@ pub mod template;
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
 
@@ -41,6 +42,58 @@ pub const APP_TITLE_CLOSE: &str = "</span>";
 /// opened) from one standing at a page of the app. One value, so the two
 /// scripts cannot disagree about where the shell is.
 pub const SHELL_URL: &str = "/";
+
+/// Which half of the browser sandbox a bundle's service worker boots: `sw.js.tmpl`'s
+/// `__SANDBOX__` placeholder renders [`Self::as_str`] into ONE constant,
+/// `const SANDBOX = '…';`, which `initialize({ sandbox: SANDBOX, … })` and the
+/// isolation-header passthrough both read.
+///
+/// The spelling is the same everywhere it appears: `[sandbox] mode = "site"`
+/// in `impresspress.toml` (no `[sandbox]` table is [`Self::None`]), this
+/// enum, and `const SANDBOX = 'site';` in the shipped `sw.js`.
+///
+/// The service worker states what it was BUILT for; the runtime wasm still
+/// has to have been COMPILED with the matching `impresspress-web` feature
+/// for the mode to exist (`browser-site-runtime` for [`Self::Site`],
+/// `browser-devtools` for [`Self::Workspace`]). A mode the binary did not
+/// compile is the mode the binary has, with one console warning from
+/// `initialize()` — `impresspress-web`'s `SandboxMode` states the rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxShell {
+    /// No sandbox: a plain bundle. The service worker neither bypasses
+    /// [`SEED_BYPASS_PREFIX`] nor adds the isolation headers.
+    #[default]
+    None,
+    /// The sandbox's runtime half alone — a site that ships a `seed/` and
+    /// imports it on a cold boot (an exported sandbox). The service worker
+    /// bypasses [`SEED_BYPASS_PREFIX`] and adds no isolation headers: a site
+    /// wants its pages free to embed a third-party iframe.
+    Site,
+    /// The development sandbox itself: the runtime half plus `/b/dev`. The
+    /// service worker bypasses [`SEED_BYPASS_PREFIX`] and answers every
+    /// bypassed same-origin request itself, adding the cross-origin-isolation
+    /// headers the in-browser compiler's worker needs.
+    Workspace,
+}
+
+impl SandboxShell {
+    /// The mode as `sw.js` spells it: `'none'`, `'site'` or `'workspace'` —
+    /// the same words `[sandbox] mode` takes.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Site => "site",
+            Self::Workspace => "workspace",
+        }
+    }
+
+    /// Whether this bundle ships the sandbox's runtime half, which imports
+    /// the seed served under [`SEED_BYPASS_PREFIX`] on a cold boot.
+    pub const fn runs_the_site_runtime(self) -> bool {
+        matches!(self, Self::Site | Self::Workspace)
+    }
+}
 
 /// Consumer-supplied configuration that controls how templates are rendered.
 /// All fields are optional; sensible defaults are derived from the discovered
@@ -81,15 +134,10 @@ pub struct AppConfig {
     /// that merely runs out of time all keep the data (`erasesFor` in
     /// `loader.js.tmpl`).
     pub opfs_wipe_on_recovery: bool,
-    /// Whether the Service Worker boots the runtime with the browser
-    /// development sandbox on: `sw.js.tmpl`'s `__DEV_ENABLED__` placeholder
-    /// renders one constant, `const DEV_ENABLED = true;`, which both
-    /// `initialize({ dev: DEV_ENABLED, … })` and the isolation-header
-    /// passthrough read. **Default: false.**
-    /// Driven by `[dev] enabled` in `impresspress.toml`; the runtime still
-    /// needs to have been compiled with `impresspress-web/browser-devtools`
-    /// for the flag to register anything.
-    pub dev_enabled: bool,
+    /// Which half of the browser sandbox this bundle's service worker boots
+    /// — [`SandboxShell`]. **Default: [`SandboxShell::None`].** Driven by
+    /// `[sandbox] mode` in `impresspress.toml`.
+    pub sandbox: SandboxShell,
     /// An HTML fragment the boot shell (`index.html`) shows under its title,
     /// between [`BOOT_NOTICE_START`] and [`BOOT_NOTICE_END`]. **Default:
     /// none.**
@@ -309,9 +357,10 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     render_if_exists(pkg_dir, "index.html.tmpl", "index.html", &vars)?;
 
     // 6. The manifest, last: `assets` (the two logical names templates
-    //    reference) plus `files` (the whole shell, for a runtime that needs
+    //    reference), `files` (the whole shell, for a runtime that needs
     //    to enumerate the static files it was shipped inside of — see
-    //    `AssetManifest::files`).
+    //    `AssetManifest::files`) and `bypass` (the same rules value
+    //    `sw.js` was rendered from in step 5 — see `AssetManifest::bypass`).
     //
     //    `asset-manifest.json` names itself in `files`. That is deliberate
     //    and costs nothing: the listing is of NAMES, taken before the file
@@ -336,6 +385,7 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
         build_id,
         assets: manifest_assets,
         files,
+        bypass,
     };
     manifest.write(&pkg_dir.join("asset-manifest.json"))?;
 
@@ -452,16 +502,9 @@ fn build_template_vars(
             "false".to_string()
         },
     );
-    // Rendered into `initialize({ dev: __DEV_ENABLED__ })` — a JS boolean
-    // literal, not a string, so the runtime reads it back as `Some(bool)`.
-    vars.insert(
-        "DEV_ENABLED".to_string(),
-        if app.dev_enabled {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        },
-    );
+    // Rendered between the quotes of `const SANDBOX = '__SANDBOX__';` — one
+    // of three fixed words, none of which needs escaping.
+    vars.insert("SANDBOX".to_string(), app.sandbox.as_str().to_string());
     vars
 }
 

@@ -66,6 +66,12 @@ async fn the_dev_sandbox_configuration_emits_a_static_llms_txt_and_a_readable_bo
     // The title has one source. `title_file` is the only way this
     // configuration gets one, and no seed's title is spelled in it.
     let parsed = impresspress::cli::config::parse(&config).unwrap();
+    // The development sandbox itself: the workspace half on top of the
+    // runtime one.
+    assert_eq!(
+        parsed.sandbox.mode,
+        impresspress_bundle::bundle::SandboxShell::Workspace
+    );
     let impresspress::cli::config::AppTitle::File(title_file) = parsed.app.title else {
         panic!("[app] title is written inline: {:?}", parsed.app.title);
     };
@@ -146,6 +152,21 @@ async fn the_dev_sandbox_configuration_emits_a_static_llms_txt_and_a_readable_bo
         let manifest: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dist.join("asset-manifest.json")).unwrap())
                 .unwrap();
+        // `[sandbox] mode = "workspace"` reaches the shipped worker as its
+        // one constant, and the seed and compiler trees it serves from the
+        // static host are rules the worker and the manifest both state.
+        assert_eq!(
+            sw.matches("const SANDBOX = 'workspace';").count(),
+            1,
+            "{sw}"
+        );
+        let bypass = &manifest["bypass"]["prefixes"];
+        for prefix in ["/seed/", "/__impresspress_dev/compiler/"] {
+            assert!(
+                bypass.as_array().unwrap().iter().any(|p| p == prefix),
+                "{prefix} is not in the manifest's bypass: {manifest}"
+            );
+        }
         assert!(
             !manifest["files"]
                 .as_array()

@@ -11,7 +11,7 @@
 // served by `python3 -m http.server` in CI and by whatever a contributor runs
 // locally, and "every host must be configured" is a rule with no enforcement
 // point. So the rule lives in the one thing that ships inside the bundle and
-// sits in front of every same-origin request: a dev-enabled `sw.js` answers
+// sits in front of every same-origin request: a workspace `sw.js` answers
 // each bypassed request itself and adds `Cross-Origin-Embedder-Policy:
 // credentialless` + `Cross-Origin-Opener-Policy: same-origin`
 // (`crates/impresspress-bundle/assets/sw.js.tmpl`). Nothing is lost by the

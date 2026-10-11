@@ -11,9 +11,10 @@
 #
 # Two halves have to agree for the sandbox to exist at all (design §13):
 #   * the wasm must be COMPILED with `--features browser-devtools`, and
-#   * the bundle must be BUILT with `[dev] enabled = true` (see
-#     `impresspress.toml`), which is what renders `const DEV_ENABLED = true;`
-#     into `sw.js` and puts `/seed/` on the service worker's bypass list.
+#   * the bundle must be BUILT with `[sandbox] mode = "workspace"` (see
+#     `impresspress.toml`), which is what renders
+#     `const SANDBOX = 'workspace';` into `sw.js` and puts `/seed/` on the
+#     service worker's bypass list.
 # Building either half without the other is a bundle with no `/b/dev`, so both
 # are done here rather than left to the caller.
 #
@@ -337,12 +338,12 @@ IMPRESSPRESS_WEB_PKG_DIR="$PKG_DIR" \
 
 DIST="$HERE/dist"
 [ -f "$DIST/sw.js" ] || { echo "build.sh: $DIST/sw.js was not produced" >&2; exit 1; }
-# The one build-time constant `sw.js` renders `[dev] enabled` into
-# (`impresspress-bundle`'s `sw.js.tmpl`): `initialize({ dev: DEV_ENABLED })`
+# The one build-time constant `sw.js` renders `[sandbox] mode` into
+# (`impresspress-bundle`'s `sw.js.tmpl`): `initialize({ sandbox: SANDBOX })`
 # and the isolation-header passthrough both read it, so this single line is
-# the whole of "the sandbox is on in this bundle".
-grep -q 'const DEV_ENABLED = true;' "$DIST/sw.js" || {
-  echo "build.sh: $DIST/sw.js does not declare 'const DEV_ENABLED = true;' — is [dev] enabled set?" >&2
+# the whole of "this bundle is the workspace".
+grep -q "const SANDBOX = 'workspace';" "$DIST/sw.js" || {
+  echo "build.sh: $DIST/sw.js does not declare \"const SANDBOX = 'workspace';\" — is [sandbox] mode = \"workspace\" set?" >&2
   exit 1
 }
 [ -d "$DIST/snippets" ] || {

@@ -564,15 +564,15 @@ pub struct Sandbox {
 /// built, and return the shared factory handle and the [`Sandbox`]
 /// [`install`] needs.
 ///
-/// Unconditional, and **not** keyed on the `dev` flag. Every build that
+/// Unconditional, and **not** keyed on the bundle's `sandbox` request. Every build that
 /// compiles this module has the sandbox's RUNTIME half (`runtime_factory`'s
 /// const assertions pin that every request resolves to a mode with
 /// [`SandboxMode::runtime_present`](crate::SandboxMode::runtime_present) in
-/// both such configurations), and an exported bundle — `{ dev: false }`, or
+/// both such configurations), and an exported bundle — `{ sandbox: 'site' }`, or
 /// any request on a site build — needs every one of these: the control that
 /// loads its seeded blocks, the `DevShared` that owns the activation queue,
 /// and the [`install`] below that imports the `seed/` the archive ships
-/// beside the shell. Keying this on the flag is what made an exported site
+/// beside the shell. Keying this on the request is what made an exported site
 /// come up empty. A build with no sandbox at all does not compile this
 /// module, so `RuntimeFactory::with_dev` is never called there and the
 /// runtime is the one that never asked for a sandbox (design §13). Which of

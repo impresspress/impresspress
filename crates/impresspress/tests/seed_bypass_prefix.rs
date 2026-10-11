@@ -43,7 +43,7 @@ fn the_sandbox_reads_back_exactly_the_bypass_rules_the_worker_hands_it() {
     )
     .unwrap();
     let app = impresspress_bundle::bundle::AppConfig {
-        dev_enabled: true,
+        sandbox: impresspress_bundle::bundle::SandboxShell::Workspace,
         extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
         ..Default::default()
     };

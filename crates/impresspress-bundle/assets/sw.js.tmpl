@@ -1,22 +1,24 @@
 // @generated build: __BUILD_ID__ — Service Worker that runs Impresspress via WASM
 import init, { initialize, handle_request } from '__WASM_JS__';
 
-// Whether this bundle carries the browser development sandbox, rendered from
-// `[dev] enabled` at BUILD time (`impresspress-bundle`'s `DEV_ENABLED` var).
+// Which half of the browser sandbox this bundle boots — 'none', 'site' (the
+// sandbox's runtime half: an exported site that imports the `seed/` it ships)
+// or 'workspace' (the development sandbox itself) — rendered from
+// `[sandbox] mode` at BUILD time (`impresspress-bundle`'s `SandboxShell`,
+// `SANDBOX` var).
 //
-// ONE constant, read by BOTH places the flag decides something: the
-// `initialize({ dev: DEV_ENABLED, … })` below, and the isolation-header
-// passthrough in the fetch handler. It used to be the placeholder itself
-// substituted at both sites, which meant a shipped `sw.js` stated the same
-// fact twice — and the dev sandbox's export (`blocks/dev/export.rs`), which
-// ships the runtime shell with the sandbox turned OFF, then had to find and
-// rewrite two different renderings and assert both. One line, one rewrite,
-// one assertion: flipping the declaration below from true to false is the
-// whole of turning a dev bundle into a plain one. (Deliberately NOT spelled
-// out here as a literal: the export finds the declaration by exact text and
-// requires it to occur exactly once, so a comment quoting it would be a
-// second, ambiguous match.)
-const DEV_ENABLED = __DEV_ENABLED__;
+// ONE constant, read by BOTH places the mode decides something: the
+// `initialize({ sandbox: SANDBOX, … })` below, and the isolation-header
+// passthrough in the fetch handler, which only a workspace takes. A shipped
+// `sw.js` states the fact once — and the dev sandbox's export
+// (`blocks/dev/export.rs`), which ships the workspace's runtime shell as a
+// site, finds and rewrites exactly one rendering and asserts it. One line,
+// one rewrite, one assertion: changing the declaration below from workspace
+// to site is the whole of turning the sandbox's shell into a site's.
+// (Deliberately NOT spelled out here as a literal: the export finds the
+// declaration by exact text and requires it to occur exactly once, so a
+// comment quoting it would be a second, ambiguous match.)
+const SANDBOX = '__SANDBOX__';
 
 // The requests the fetch handler below leaves to the network, as data:
 // `impresspress-bundle` renders this object and that handler's `if (…)`
@@ -310,7 +312,7 @@ async function ensureInitialized() {
         console.log('[__APP_NAME__] Initializing runtime...');
         await eraseSettled();
         try {
-            await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
+            await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
             throw e;
@@ -541,9 +543,9 @@ self.addEventListener('fetch', (event) => {
     // own script, the boot loader, the PWA and asset manifests, the wasm-pack
     // / bundler output, the shell's vendored files, Cloudflare's `/cdn-cgi/`
     // namespace, and whatever the app adds (`--extra-bypass-prefix`,
-    // `--extra-bypass-exact`; `/seed/` in a dev bundle). `/` and `/index.html`
-    // are intentionally INTERCEPTED unless the app lists them, so the
-    // consumer's router can render a UI block at root.
+    // `--extra-bypass-exact`; `/seed/` in a 'site' or 'workspace' bundle).
+    // `/` and `/index.html` are intentionally INTERCEPTED unless the app
+    // lists them, so the consumer's router can render a UI block at root.
     //
     // The condition is rendered whole from `impresspress-bundle`'s
     // `BypassRules` (`bundle/bypass.rs`, which says why each rule is there),
@@ -553,15 +555,15 @@ self.addEventListener('fetch', (event) => {
         // ------------------------------------------------------------------
         // Bypassed — the network answers this, not the wasm runtime.
         //
-        // In a NON-dev bundle that is the whole story: return, and the
-        // browser performs the fetch it would have performed with no service
-        // worker at all.
+        // In a 'none' or 'site' bundle that is the whole story: return, and
+        // the browser performs the fetch it would have performed with no
+        // service worker at all.
         //
-        // In a DEV bundle it is not, and the reason is a rule that is easy to
-        // miss. A document with a `Cross-Origin-Embedder-Policy` inherits
-        // that policy to every dedicated worker it starts, and the browser
-        // REFUSES to start one whose own script response does not carry a
-        // compatible COEP. The sandbox's `/b/dev` is COEP `credentialless`
+        // In a 'workspace' bundle it is not, and the reason is a rule that
+        // is easy to miss. A document with a `Cross-Origin-Embedder-Policy`
+        // inherits that policy to every dedicated worker it starts, and the
+        // browser REFUSES to start one whose own script response does not
+        // carry a compatible COEP. The sandbox's `/b/dev` is COEP `credentialless`
         // (it needs `SharedArrayBuffer` for the in-browser Rust toolchain),
         // and the toolchain's worker script is one of the files bypassed
         // above — a quarter of a gigabyte of static assets that must not go
@@ -580,10 +582,10 @@ self.addEventListener('fetch', (event) => {
         // the coi-serviceworker pattern, applied to the requests this worker
         // otherwise waves through.
         //
-        // Hence: a dev bundle answers the bypassed request itself, with the
-        // network's own response plus the cross-origin-isolation pair. The
+        // Hence: a workspace bundle answers the bypassed request itself, with
+        // the network's own response plus the cross-origin-isolation pair. The
         // pair matches what the runtime already sends on everything it serves
-        // in a dev deployment (the security-headers block's
+        // in a workspace (the security-headers block's
         // `cross_origin_isolation`), so this makes the static files CONSISTENT
         // with the rest of the origin rather than special.
         //
@@ -605,16 +607,18 @@ self.addEventListener('fetch', (event) => {
         // from inside the worker being replaced is how an update check gets a
         // stale script.
         //
-        // The condition below reads `DEV_ENABLED`, the single build-time
+        // The condition below reads `SANDBOX`, the single build-time
         // constant declared at the top of this file (the same one
-        // `initialize()` is passed), so the difference between a dev bundle
-        // and a plain one is visible in ONE line of the shipped file rather
-        // than decided at runtime — and a non-dev bundle keeps the plain
-        // early return it always had. Flipping that one line is also exactly
-        // what the sandbox's export rewrites to ship the shell with the
-        // sandbox off (`blocks/dev/export.rs`).
+        // `initialize()` is passed), so the difference between the workspace
+        // and every other bundle is visible in ONE line of the shipped file
+        // rather than decided by the runtime — and a 'site' or 'none' bundle
+        // keeps the plain early return it always had: only the workspace runs
+        // the compiler that needs isolation, and a site wants its pages free
+        // to embed a third-party iframe. That one line is also exactly what
+        // the sandbox's export rewrites, from workspace to site, to ship the
+        // shell as a site (`blocks/dev/export.rs`).
         // ------------------------------------------------------------------
-        if (DEV_ENABLED && url.pathname !== '/sw.js') {
+        if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {
             event.respondWith(passthrough(event.request));
         }
         return;
@@ -818,7 +822,7 @@ async function runtimeStopped(request) {
  * as in `passthrough`. Whatever the host said is passed on — if it has no
  * shell at SHELL_URL, its answer is the truth about this deployment.
  *
- * With the host's headers and no others, in a dev bundle too: unlike
+ * With the host's headers and no others, in a workspace bundle too: unlike
  * `passthrough`, this adds no cross-origin-isolation pair. The shell is the
  * same document a first visit gets straight from the host, which has no such
  * headers either; it starts no worker and needs no `SharedArrayBuffer`, and

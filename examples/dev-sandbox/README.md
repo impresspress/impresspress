@@ -2,9 +2,10 @@
 
 The bundle behind the build sandboxes — `dev.impresspress.org` and
 `build-bootstrap.impresspress.org`: a browser-local WebMCP development
-sandbox, one per seed. `impresspress.toml` sets `[dev] enabled = true`, which
-turns on the `impresspress/dev` block (`/b/dev`) and the service worker's
-seed-on-boot import (`impresspress-core::blocks::dev::seed`). What a fresh
+sandbox, one per seed. `impresspress.toml` sets `[sandbox] mode =
+"workspace"`, which turns on the `impresspress/dev` block's workspace
+(`/b/dev`) and the service worker's seed-on-boot import
+(`impresspress-core::blocks::dev::seed`). What a fresh
 origin boots with is a **seed** (see [Seeds](#seeds) below):
 `build.sh --seed NAME` stages `seeds/NAME/` into the gitignored `seed/`,
 which `[[assets.overlay]]` copies onto `dist/seed/` wholesale.
@@ -107,8 +108,8 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
    the bundle cannot seed itself.
 2. Builds `impresspress-web` to wasm with `--features browser-devtools` into
    `crates/impresspress-web/pkg-dev` (this is what puts the `/b/dev`
-   control-plane code in the binary at all — `[dev] enabled` alone only wires
-   the service-worker plumbing around it).
+   control-plane code in the binary at all — `[sandbox] mode = "workspace"`
+   alone only wires the service-worker plumbing around it).
 3. Runs `impresspress build --target web --release` from this directory
    (`IMPRESSPRESS_WEB_PKG_DIR` pointed at `pkg-dev`) to assemble `dist/`.
 

@@ -471,13 +471,13 @@ pub fn seed_file(path: &str, bytes: &[u8]) -> SeedFile {
 ///
 /// [`Self::new`] carries a plausible shell: the three rendered templates, the
 /// hashed wasm-pack pair, `vendor/sql-wasm.wasm` and the asset manifest
-/// itself. Its `sw.js` is a dev bundle's — it declares
-/// `const DEV_ENABLED = true;` and reads that constant in the isolation-header
-/// passthrough, exactly as `impresspress-bundle`'s template renders it — and
-/// its bypass list carries the compiler prefix the way a deployment that
-/// ships the in-browser toolchain does. So a test can assert BOTH edits the
-/// export makes to a shell file: the dev flag turned off, and the bypass for
-/// a compiler tree the export does not copy removed.
+/// itself. Its `sw.js` is a workspace bundle's — it declares
+/// `const SANDBOX = 'workspace';` and reads that constant in the
+/// isolation-header passthrough, exactly as `impresspress-bundle`'s template
+/// renders it — and its bypass list carries the compiler prefix the way a
+/// deployment that ships the in-browser toolchain does. So a test can assert
+/// BOTH edits the export makes to a shell file: the mode set to `'site'`, and
+/// the bypass for a compiler tree the export does not copy removed.
 ///
 /// Its `sw.js` also declares the `BYPASS_RULES` the worker hands
 /// `initialize()` — [`fake_bypass_rules`], the rules a real dev-sandbox bundle
@@ -492,21 +492,22 @@ pub struct FakeShell {
     fetched: std::sync::atomic::AtomicUsize,
 }
 
-/// The `sw.js` [`FakeShell::new`] serves — a dev bundle's, trimmed to the
-/// lines the export acts on (the `DEV_ENABLED` declaration and the compiler's
+/// The `sw.js` [`FakeShell::new`] serves — a workspace bundle's, trimmed to the
+/// lines the export acts on (the `SANDBOX` declaration and the compiler's
 /// bypass clause) plus the ones it must leave exactly alone (the constant's
 /// two readers and the `/seed/` bypass, without which an exported folder
 /// could never import the seed shipped beside it). The bypass condition is
 /// laid out the way `impresspress-bundle`'s `BypassRules::render_condition`
 /// renders one: a clause per line, each after the first leading with its `||`.
 /// `PAGE_ENGINES` is declared as the bundler renders it, so the `initialize()`
-/// call reads a constant that exists. `tests/dev_export.rs` holds the rules
-/// and the engines here to what the bundler actually renders
+/// call reads a constant that exists. `tests/dev_export.rs` holds the rules,
+/// the engines, the `SANDBOX` declaration, the `initialize()` call and the
+/// passthrough guard here to what the bundler actually renders
 /// (`the_fake_shell_states_what_the_bundler_renders`), so this copy cannot
 /// drift from it.
 #[cfg(feature = "block-dev")]
 pub const FAKE_SW_JS: &str = concat!(
-    "const DEV_ENABLED = true;\n",
+    "const SANDBOX = 'workspace';\n",
     "const BYPASS_RULES = ",
     r#"{"exact":["/sw.js","/loader.js","/manifest.json","/asset-manifest.json","#,
     r#""/webllm-engine.js","/embed-engine.js","/t2i-engine.js","#,
@@ -516,8 +517,8 @@ pub const FAKE_SW_JS: &str = concat!(
     "\n",
     r#"const PAGE_ENGINES = ["/webllm-engine.js","/embed-engine.js","/t2i-engine.js"];"#,
     "\n",
-    "await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
-    "if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n",
+    "await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
+    "if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') { passthrough(); }\n",
     "if (url.pathname.startsWith('/snippets/') ||\n        ",
     "url.pathname.startsWith('/cdn-cgi/') ||\n        ",
     "url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        ",
@@ -526,8 +527,8 @@ pub const FAKE_SW_JS: &str = concat!(
 
 /// The bypass rules a dev-sandbox worker hands `initialize()`: what
 /// `impresspress-bundle` renders for the dev-sandbox deployment
-/// (`examples/dev-sandbox/impresspress.toml` — a dev bundle with the compiler
-/// prefix), with `FakeShell`'s wasm-pack base name. `FAKE_SW_JS` (`block-dev`)
+/// (`examples/dev-sandbox/impresspress.toml` — a workspace bundle with the
+/// compiler prefix), with `FakeShell`'s wasm-pack base name. `FAKE_SW_JS` (`block-dev`)
 /// declares exactly these, and the test fixtures build `DevShared` with them
 /// in both builds. `tests/dev_export.rs` checks them against the bundler's
 /// own.

@@ -266,7 +266,7 @@ async fn shop_instance_with_shell(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
+async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     let control = FakeControl::new();
     let ctx = shop_instance(&control).await;
 
@@ -375,20 +375,21 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
         "the guest crate is not a seed entry: {listed:?}"
     );
 
-    // Development mode is OFF, and the ONE line that says so is the one the
-    // bundler renders (`impresspress-bundle`'s `sw.js.tmpl`): the isolation
-    // passthrough reads the same constant, so it is off too.
+    // The shell boots as a SITE, and the ONE line that says so is the one
+    // the bundler renders (`impresspress-bundle`'s `sw.js.tmpl`): the
+    // isolation passthrough reads the same constant and only takes a
+    // workspace, so it is off too.
     let sw = text(&entries, "sw.js");
-    assert!(sw.contains("const DEV_ENABLED = false;"), "{sw}");
-    assert!(!sw.contains("const DEV_ENABLED = true;"), "{sw}");
+    assert!(sw.contains("const SANDBOX = 'site';"), "{sw}");
+    assert!(!sw.contains("const SANDBOX = 'workspace';"), "{sw}");
     assert!(
         sw.contains(
-            "initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+            "initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
         ),
         "{sw}"
     );
     assert!(
-        sw.contains("if (DEV_ENABLED && url.pathname !== '/sw.js')"),
+        sw.contains("if (SANDBOX === 'workspace' && url.pathname !== '/sw.js')"),
         "{sw}"
     );
     // …and `/seed/` is still bypassed, or the exported folder could never
@@ -491,9 +492,9 @@ async fn the_compiler_tree_and_the_deployments_own_seed_are_never_copied() {
 /// shell whose `sw.js` does not carry the marker is a 500 — never a silent
 /// pass-through of a service worker that would come up as a second sandbox.
 #[tokio::test]
-async fn a_shell_whose_sw_js_has_no_dev_marker_is_refused() {
+async fn a_shell_whose_sw_js_has_no_workspace_marker_is_refused() {
     let control = FakeControl::new();
-    let shell = FakeShell::new().with("sw.js", b"await initialize({ dev: true });");
+    let shell = FakeShell::new().with("sw.js", b"await initialize({ sandbox: 'workspace' });");
     let ctx = TestContext::with_admin()
         .await
         .with_dev_added_and_shell(control, std::sync::Arc::new(shell))
@@ -718,10 +719,10 @@ async fn the_compiler_prefix_is_not_an_exported_rule() {
 /// another — so it is an export error.
 #[tokio::test]
 async fn an_sw_whose_condition_and_rules_disagree_about_the_compiler_is_refused() {
-    let listed_only = "const DEV_ENABLED = true;\n\
+    let listed_only = "const SANDBOX = 'workspace';\n\
         const BYPASS_RULES = {\"exact\":[\"/sw.js\"],\"prefixes\":[\"/__impresspress_dev/compiler/\",\"/seed/\"]};\n\
         if (url.pathname === '/sw.js' || url.pathname.startsWith('/__impresspress_dev/compiler/') || url.pathname.startsWith('/seed/')) { return; }\n";
-    let clause_only = "const DEV_ENABLED = true;\n\
+    let clause_only = "const SANDBOX = 'workspace';\n\
         const BYPASS_RULES = {\"exact\":[\"/sw.js\"],\"prefixes\":[\"/seed/\"]};\n\
         if (url.pathname === '/sw.js' ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        url.pathname.startsWith('/seed/')) { return; }\n";
     for sw in [listed_only, clause_only] {
@@ -862,7 +863,7 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     );
     assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
     assert!(
-        sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
+        sw.contains("await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
         "{sw}"
     );
 }
@@ -874,7 +875,7 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
 async fn a_shell_with_no_compiler_bypass_is_exported_unchanged() {
     let control = FakeControl::new();
     control.set_validated_info(hello_info("site/hello"));
-    let plain_sw = "const DEV_ENABLED = true;\n\
+    let plain_sw = "const SANDBOX = 'workspace';\n\
                     if (url.pathname.startsWith('/seed/')) { return; }\n";
     let shell = FakeShell::new().with("sw.js", plain_sw.as_bytes());
     let ctx = TestContext::with_admin()
@@ -897,8 +898,8 @@ async fn a_shell_with_no_compiler_bypass_is_exported_unchanged() {
     );
     assert_eq!(
         text(&archive, "sw.js"),
-        plain_sw.replace("= true;", "= false;"),
-        "only the dev flag may change on a shell with no compiler bypass"
+        plain_sw.replace("const SANDBOX = 'workspace';", "const SANDBOX = 'site';"),
+        "only the sandbox mode may change on a shell with no compiler bypass"
     );
 }
 
@@ -1595,8 +1596,8 @@ const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here
 
 /// The sandbox deployment's own boot shell, as built from `seed`: the shipped
 /// templates, rendered by the bundler with `examples/dev-sandbox`'s `[app]`
-/// name, that seed's title and the real boot notice, development mode on and
-/// the compiler's bypass — what `build.sh --seed <seed>` produces, minus the
+/// name, that seed's title and the real boot notice, `[sandbox] mode =
+/// "workspace"` and the compiler's bypass — what `build.sh --seed <seed>` produces, minus the
 /// wasm. Returned as a [`FakeShell`] over the three files the export edits or
 /// a visitor reads text from, with the title it was rendered under.
 fn sandbox_shell(seed: &str) -> (FakeShell, String) {
@@ -1634,7 +1635,7 @@ fn sandbox_shell(seed: &str) -> (FakeShell, String) {
             app_name: Some(name),
             app_title: Some(title.clone()),
             boot_notice_html: Some(notice),
-            dev_enabled: true,
+            sandbox: impresspress_bundle::bundle::SandboxShell::Workspace,
             extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
             ..Default::default()
         },
@@ -2411,11 +2412,12 @@ async fn a_boot_page_whose_notice_region_is_malformed_is_refused() {
 
 /// [`FAKE_SW_JS`] and [`fake_bypass_rules`] are a copy of what the bundler
 /// renders for the dev sandbox (`examples/dev-sandbox/impresspress.toml`:
-/// `[dev] enabled`, the compiler prefix), kept in `test_support` because the
-/// fixture is feature code that cannot depend on the bundler. This is where
-/// the copy is held to the original: the bypass rules, and the page engines
-/// (`impresspress_bundle::assets::PAGE_ENGINES`), exactly as the bundler
-/// renders them into the worker it builds.
+/// `[sandbox] mode = "workspace"`, the compiler prefix), kept in
+/// `test_support` because the fixture is feature code that cannot depend on
+/// the bundler. This is where the copy is held to the original: the bypass
+/// rules, the page engines (`impresspress_bundle::assets::PAGE_ENGINES`), the
+/// `SANDBOX` declaration the export rewrites, and the two lines that read it,
+/// exactly as the bundler renders them into the worker it builds.
 #[test]
 fn the_fake_shell_states_what_the_bundler_renders() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2424,13 +2426,23 @@ fn the_fake_shell_states_what_the_bundler_renders() {
         dir.path(),
         dir.path(),
         impresspress_bundle::bundle::AppConfig {
-            dev_enabled: true,
+            sandbox: impresspress_bundle::bundle::SandboxShell::Workspace,
             extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
             ..Default::default()
         },
     )
     .expect("render the shell");
     let sw = std::fs::read_to_string(dir.path().join("sw.js")).expect("sw.js");
+    // The lines the export rewrites, or must leave reading what it rewrote,
+    // are the bundler's to the byte.
+    for line in [
+        "const SANDBOX = 'workspace';",
+        "await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });",
+        "if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {",
+    ] {
+        assert_eq!(sw.matches(line).count(), 1, "{line} in the rendered {sw}");
+        assert_eq!(FAKE_SW_JS.matches(line).count(), 1, "{line} in FAKE_SW_JS");
+    }
     let declared = |name: &str, text: &str| -> String {
         let declaration = format!("const {name} = ");
         assert_eq!(text.matches(&declaration).count(), 1, "{name} in {text}");

@@ -30,10 +30,10 @@ nothing else; put it behind https to share it.
 
     index.html loader.js sw.js *.js *.wasm snippets/ vendor/
         The runtime shell — {{SHELL_FILES}} files, copied from the sandbox
-        that exported this. Development mode is OFF in this copy
-        (`const DEV_ENABLED = false;` in `sw.js`), so there is no `/b/dev`
-        workspace, no in-browser compiler and no agent tooling here. This is
-        the site, not the sandbox that built it.
+        that exported this. It boots as a site, not as the development
+        sandbox (`const SANDBOX = 'site';` in `sw.js`), so there is no
+        `/b/dev` workspace, no in-browser compiler and no agent tooling here.
+        This is the site, not the sandbox that built it.
 
     llms.txt
         Only if your site has one (`seed/site/llms.txt`): the same text,

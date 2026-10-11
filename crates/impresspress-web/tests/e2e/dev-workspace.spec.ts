@@ -466,11 +466,11 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     // site does not have. Nothing under it may be in here.
     expect(inspected.names.filter((n) => n.startsWith('__impresspress_dev/'))).toEqual([]);
 
-    // Development mode is OFF, in the one line that decides it — which is
+    // The shell boots as a SITE, in the one line that decides it — which is
     // also what turns off the isolation-header passthrough, since both read
-    // the same constant.
-    expect(inspected.sw).toContain('const DEV_ENABLED = false;');
-    expect(inspected.sw).not.toContain('const DEV_ENABLED = true;');
+    // the same constant and only a workspace takes the passthrough.
+    expect(inspected.sw).toContain("const SANDBOX = 'site';");
+    expect(inspected.sw).not.toContain("const SANDBOX = 'workspace';");
     // …and `/seed/` is still bypassed, or the exported folder could never
     // import the seed shipped beside it.
     expect(inspected.sw).toContain("url.pathname.startsWith('/seed/')");
@@ -499,9 +499,9 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     // OPFS, its own service-worker registration and an empty database, so
     // this boots the exported bundle exactly as someone who received the zip
     // would — and the seed import is the only thing that can put a site
-    // there. The bundle boots with `const DEV_ENABLED = false;`, so this also
+    // there. The bundle boots with `const SANDBOX = 'site';`, so this also
     // proves the fix that split `SandboxMode`: with the runtime half keyed on
-    // the flag, this page would be blank.
+    // the workspace request, this page would be blank.
     const runStart = Date.now();
     const unpacked = path.join(scratch, 'site');
     execFileSync('python3', [
@@ -550,6 +550,21 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       // it gets back the third-party iframes isolation would have cost it
       // (spec amendment 14's stated tradeoff, amendment 19's other half).
       expect(await site.evaluate(() => window.crossOriginIsolated)).toBe(false);
+      // …and none from the worker either. The page above is the runtime's,
+      // so it alone cannot show what the worker does with the files it leaves
+      // to the static host: in the workspace it answers each one itself and
+      // adds the isolation pair (`sw.js.tmpl`'s passthrough, taken only when
+      // `SANDBOX === 'workspace'`); here a bypassed file must come back with
+      // the host's headers and nothing else.
+      const bypassed = await site.evaluate(async () => {
+        const response = await fetch('/loader.js');
+        return {
+          status: response.status,
+          coep: response.headers.get('Cross-Origin-Embedder-Policy'),
+          coop: response.headers.get('Cross-Origin-Opener-Policy'),
+        };
+      });
+      expect(bypassed).toEqual({ status: 200, coep: null, coop: null });
       console.log(`exported bundle: served, booted, shop renders: ${Date.now() - runStart} ms`);
 
       // And when its runtime dies, it says why. An exported folder is served

@@ -1,10 +1,11 @@
 // Harness for the behaviour tests of the RENDERED service worker
-// (`sw_runtime_stopped.test.mjs`).
+// (`sw_runtime_stopped.test.mjs`, `sw_runtime_kept.test.mjs`,
+// `sw_sandbox_mode.test.mjs`).
 //
-// Run through `cargo test -p impresspress-bundle` — the
-// `the_rendered_worker_answers_for_a_stopped_runtime` test in
-// `tests/bundle_integration.rs` renders the shipped `sw.js.tmpl` with the real
-// bundler and passes the result's path in `SW_JS`. Loading the rendered file
+// Run through `cargo test -p impresspress-bundle` — the test in
+// `tests/bundle_integration.rs` that runs each file renders the shipped
+// `sw.js.tmpl` with the real bundler and passes each rendering's path in an
+// environment variable (`SW_JS` is always the default one). Loading the rendered file
 // rather than the template is the point: what is under test is what a browser
 // is served, placeholders substituted.
 //
@@ -35,14 +36,22 @@ function source(variable) {
   );
 }
 
-// `SW_JS` is the default rendering; `SW_JS_WIPE` the one with
-// `opfs_wipe_on_recovery`, whose answers say what a reload erases.
-const SOURCES = { plain: source('SW_JS'), wipe: source('SW_JS_WIPE') };
+// Each rendering, read the first time a worker asks for it, so a test file
+// needs only the variables it uses. `SW_JS` is the default rendering;
+// `SW_JS_WIPE` the one with `opfs_wipe_on_recovery`, whose answers say what a
+// reload erases; `sw_sandbox_mode.test.mjs` adds one per sandbox mode.
+const SOURCES = new Map();
+function rendering(variable) {
+  if (!SOURCES.has(variable)) SOURCES.set(variable, source(variable));
+  return SOURCES.get(variable);
+}
 
 /// The runtime binary the rendered worker keeps (`RUNTIME_URL` there): the
-/// bundler's hashed `.wasm` name, read out of what was rendered.
+/// bundler's hashed `.wasm` name, read out of what was rendered. Every
+/// rendering a test passes in is of the same fixture binary, so this is
+/// every rendering's.
 export const RUNTIME_URL = (() => {
-  const declared = SOURCES.plain.match(/^const RUNTIME_URL = '([^']+)';$/m);
+  const declared = rendering('SW_JS').match(/^const RUNTIME_URL = '([^']+)';$/m);
   if (!declared) throw new Error('the rendered sw.js no longer declares RUNTIME_URL');
   return declared[1];
 })();
@@ -67,7 +76,8 @@ let instances = 0;
 /// answer to a request the worker makes; by default it has the boot shell at
 /// `/` and nothing else — a plain file server, with no fallback for the paths
 /// only the runtime serves, and the runtime binary at RUNTIME_URL. `wipe`
-/// picks the `opfs_wipe_on_recovery` rendering.
+/// picks the `opfs_wipe_on_recovery` rendering; `variable` names any other
+/// rendering by the environment variable it was passed in.
 ///
 /// The worker starts as an INSTALLED one: its runtime binary is already kept
 /// in Cache Storage, as `install` left it — unless `runtime.kept` is
@@ -75,8 +85,8 @@ let instances = 0;
 /// promise: an erase another tab holds ERASE_LOCK for until it settles.
 /// `runtime.superseded` gives the registration a newer version waiting. `runtime.quotaFull` makes
 /// every put into the runtime cache fail as a full quota does.
-export async function loadWorker(runtime = {}, { wipe = false } = {}) {
-  const source = SOURCES[wipe ? 'wipe' : 'plain'];
+export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) {
+  const source = rendering(variable ?? (wipe ? 'SW_JS_WIPE' : 'SW_JS'));
   const listeners = {};
   const network = [];
   // The options each of those requests was made with, in the same order.

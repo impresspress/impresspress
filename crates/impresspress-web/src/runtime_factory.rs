@@ -48,14 +48,14 @@ pub enum DynamicBlock {}
 
 /// Build-time policy that is fixed for the life of the service worker.
 pub struct RuntimeOptions {
-    /// `initialize({ dev: … })` — what the *bundle asked for*. This is a
-    /// request, not a verdict: [`RuntimeFactory::new`] runs it through
-    /// [`SandboxMode::resolve`] with [`CompiledSandbox::COMPILED`] and keeps
-    /// only the result, because a bundle can ask for a workspace that was
-    /// never compiled in — and because `dev: false` on a build that HAS the
-    /// workspace is an exported site, which still needs the sandbox's runtime
-    /// half.
-    pub dev_enabled: bool,
+    /// Whether `initialize({ sandbox })` was `'workspace'` — what the
+    /// *bundle asked for*. This is a request, not a verdict:
+    /// [`RuntimeFactory::new`] runs it through [`SandboxMode::resolve`] with
+    /// [`CompiledSandbox::COMPILED`] and keeps only the result, because a
+    /// bundle can ask for a workspace that was never compiled in — and
+    /// because any other request on a build that HAS the workspace is an
+    /// exported site, which still needs the sandbox's runtime half.
+    pub workspace_requested: bool,
     /// `initialize({ pageEngines: … })` — the page-side model engines the
     /// bundle ships (`impresspress-bundle`'s `assets::PAGE_ENGINES`, as URL
     /// paths). Every page the runtime renders loads them: they are what
@@ -113,20 +113,20 @@ impl CompiledSandbox {
 /// * a **workspace** — `/b/dev`, its route, the in-browser compiler, the
 ///   widened CSP and the cross-origin isolation that compiler needs.
 ///
-/// Keying both on one flag is what made an exported bundle unbootable: the
-/// export renders `const DEV_ENABLED = false;` into `sw.js` (it must — the
-/// exported folder is a plain site with no workspace), and the runtime half
-/// went with it, so the `seed/` the archive ships beside itself was never
-/// imported and the exported site came up empty. Design §10.2 says the seed
+/// Keying both on one boolean is what made an exported bundle unbootable: the
+/// export turned that boolean off in `sw.js` (it must — the exported folder
+/// is a plain site with no workspace), and the runtime half went with it, so
+/// the `seed/` the archive ships beside itself was never imported and the
+/// exported site came up empty. Design §10.2 says the seed
 /// is read "on a cold boot with no active generation" — a property of the
 /// deployment, not of whether anyone can edit it.
 ///
-/// So: **the build decides which halves exist; the flag can only choose
+/// So: **the build decides which halves exist; the request can only choose
 /// between the halves the build has.** [`CompiledSandbox`] is the build's
-/// side, `initialize({ dev })` the bundle's request, and
+/// side, `initialize({ sandbox })` the bundle's request, and
 /// [`Self::resolve`] the one rule that combines them:
 ///
-/// | compiled | `dev: false` | `dev: true` |
+/// | compiled | `sandbox` other than `'workspace'` | `sandbox: 'workspace'` |
 /// |---|---|---|
 /// | [`CompiledSandbox::None`] | [`Self::Absent`] | [`Self::Absent`] |
 /// | [`CompiledSandbox::Site`] | [`Self::Exported`] | [`Self::Exported`] |
@@ -148,7 +148,8 @@ pub enum SandboxMode {
     /// The runtime half is live and the workspace is not — **an exported
     /// site**. Either a site build ([`CompiledSandbox::Site`], whatever the
     /// bundle asked for: the workspace is not in the binary) or a
-    /// `browser-devtools` build booted with `dev: false`. The runtime half is
+    /// `browser-devtools` build booted with any request other than
+    /// `sandbox: 'workspace'` (the export's `'site'`). The runtime half is
     /// fully live (it imports its `seed/`, converges its journal, rebuilds
     /// with its dynamic blocks and serves `/`), and the workspace half is
     /// not reachable: no `/b/dev` route, no widened CSP, and no cross-origin
@@ -158,8 +159,8 @@ pub enum SandboxMode {
     /// code is absent too; on a `browser-devtools` build it is compiled in
     /// and unrouted.
     Exported,
-    /// A `browser-devtools` build booted with `dev: true` — the development
-    /// sandbox itself. Everything [`Self::Exported`] has, plus `/b/dev` and
+    /// A `browser-devtools` build booted with `sandbox: 'workspace'` — the
+    /// development sandbox itself. Everything [`Self::Exported`] has, plus `/b/dev` and
     /// the tooling around it.
     Workspace,
 }
@@ -168,11 +169,11 @@ impl SandboxMode {
     /// Resolve the mode from the build and the bundle's request — the table
     /// in this type's doc.
     ///
-    /// `compiled` is [`CompiledSandbox::COMPILED`]; `requested` is the `dev`
-    /// flag from `initialize({ dev: … })`. The flag is a *request*: a bundle
-    /// can ask for a workspace that was never compiled in, and the answer is
-    /// the mode the build has — [`Self::Absent`] or [`Self::Exported`] — not
-    /// a workspace.
+    /// `compiled` is [`CompiledSandbox::COMPILED`]; `requested` is whether
+    /// `initialize({ sandbox })` asked for `'workspace'`. That is a
+    /// *request*: a bundle can ask for a workspace that was never compiled
+    /// in, and the answer is the mode the build has — [`Self::Absent`] or
+    /// [`Self::Exported`] — not a workspace.
     ///
     /// Taken as parameters rather than read from `cfg!` inside, so the rule is
     /// one pure expression stated once — every consumer reads
@@ -253,8 +254,9 @@ const _: () = {
 #[cfg(all(feature = "browser-site-runtime", not(feature = "browser-devtools")))]
 const _: () = {
     assert!(matches!(CompiledSandbox::COMPILED, CompiledSandbox::Site));
-    // `dev: false` and `dev: true` alike: an exported site. The runtime half
-    // is live (`site_runtime::attach` relies on this), the workspace is not.
+    // Whatever the request, `'workspace'` included: an exported site. The
+    // runtime half is live (`site_runtime::attach` relies on this), the
+    // workspace is not.
     assert!(matches!(
         SandboxMode::resolve(CompiledSandbox::COMPILED, false),
         SandboxMode::Exported
@@ -274,15 +276,15 @@ const _: () = {
     assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, true)).is_empty());
 };
 
-// --- devtools build: the flag chooses which half --------------------------
+// --- devtools build: the request chooses which half -----------------------
 #[cfg(feature = "browser-devtools")]
 const _: () = {
     assert!(matches!(
         CompiledSandbox::COMPILED,
         CompiledSandbox::Devtools
     ));
-    // `dev: false` — an exported site. The runtime half IS live; this is the
-    // assertion whose absence made an exported bundle boot empty.
+    // Not `'workspace'` — an exported site. The runtime half IS live; this
+    // is the assertion whose absence made an exported bundle boot empty.
     assert!(matches!(
         SandboxMode::resolve(CompiledSandbox::COMPILED, false),
         SandboxMode::Exported
@@ -290,7 +292,7 @@ const _: () = {
     assert!(SandboxMode::resolve(CompiledSandbox::COMPILED, false).runtime_present());
     assert!(workspace_routes(SandboxMode::resolve(CompiledSandbox::COMPILED, false)).is_empty());
 
-    // `dev: true` — the sandbox itself: both halves, and every workspace
+    // `'workspace'` — the sandbox itself: both halves, and every workspace
     // route.
     assert!(matches!(
         SandboxMode::resolve(CompiledSandbox::COMPILED, true),
@@ -341,7 +343,7 @@ const _: () = {
 /// The browser platform services plus the policy every runtime is built under.
 pub struct RuntimeFactory {
     /// The resolved verdict from [`SandboxMode::resolve`], computed once in
-    /// [`RuntimeFactory::new`]. The raw `initialize({ dev })` request is
+    /// [`RuntimeFactory::new`]. The raw `initialize({ sandbox })` request is
     /// intentionally *not* retained: keeping only the resolved value is what
     /// makes it impossible for a later consumer to key on "the bundle asked
     /// for it" on a build where the sandbox does not exist.
@@ -375,7 +377,7 @@ impl RuntimeFactory {
     /// Construct the browser services once.
     /// `BrowserEmbeddingService::new` is the only fallible one.
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
-        let mode = SandboxMode::resolve(CompiledSandbox::COMPILED, options.dev_enabled);
+        let mode = SandboxMode::resolve(CompiledSandbox::COMPILED, options.workspace_requested);
 
         let config_svc: Arc<dyn ConfigService> =
             Arc::new(wafer_core::service_blocks::config::EnvConfigService::new());
@@ -585,7 +587,7 @@ impl RuntimeFactory {
             // site it ships, and an exported bundle needs all of it — a site
             // build (`browser-site-runtime`) compiles this and nothing of the
             // workspace. See `SandboxMode` for why this is not keyed on the
-            // `dev` flag.
+            // bundle's `sandbox` request.
             //
             // The block itself is REGISTERED in both modes, and that is what
             // runs its `lifecycle(Init)` — which is what creates the
@@ -665,7 +667,7 @@ impl RuntimeFactory {
                 }
             }
 
-            // ── The WORKSPACE half — `dev: true` on a devtools build only ──
+            // ── The WORKSPACE half — `'workspace'` on a devtools build only ──
             //
             // `/b/dev` is registered at `RouteAccess::Admin` here, at the
             // router — not by a check inside any handler. That is the single

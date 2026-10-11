@@ -15,6 +15,10 @@
 //!   404, because the request for it never reaches the code that serves the
 //!   site.
 //!
+//! The same value is the third rendering, outside `sw.js`: `asset-manifest.json`'s
+//! `bypass` ([`super::manifest::AssetManifest::bypass`]), for a reader that
+//! holds the bundle's files rather than its running worker.
+//!
 //! A rule the condition applied but the data did not state would be exactly
 //! that silent shadowing again, which is why there is no second list.
 
@@ -22,8 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use super::AppConfig;
 
-/// URL prefix the development sandbox's seed bundle is served under, added to
-/// the service worker's bypass list whenever [`AppConfig::dev_enabled`].
+/// URL prefix the sandbox's seed bundle is served under, added to the service
+/// worker's bypass list whenever [`AppConfig::sandbox`] runs the sandbox's
+/// runtime half ([`super::SandboxShell::runs_the_site_runtime`]: `site` and
+/// `workspace`).
 ///
 /// The same value as `impresspress_core::blocks::dev::seed::ROOT`. It is
 /// restated rather than imported because this crate deliberately depends on no
@@ -86,14 +92,14 @@ impl BypassRules {
     /// site's own files (a seed's CSS framework, an agent's library), and a
     /// prefix would hand every one of them to the static host.
     ///
-    /// A dev bundle also bypasses [`SEED_BYPASS_PREFIX`]: the sandbox's seed
-    /// bundle is served by the static host, not by the runtime — on a cold
-    /// boot the service worker fetches `/seed/manifest.json` and imports
-    /// generation 0 from it, and a page asking for the same files must reach
-    /// the host too. A runtime that intercepted the prefix would answer from
-    /// the published site, which on the boot that needs the seed is empty.
-    /// Added here rather than by every consumer, so "the sandbox is on" is the
-    /// only thing an app has to say.
+    /// A `site` or `workspace` bundle also bypasses [`SEED_BYPASS_PREFIX`]:
+    /// the sandbox's seed bundle is served by the static host, not by the
+    /// runtime — on a cold boot the service worker fetches
+    /// `/seed/manifest.json` and imports generation 0 from it, and a page
+    /// asking for the same files must reach the host too. A runtime that
+    /// intercepted the prefix would answer from the published site, which on
+    /// the boot that needs the seed is empty. Added here rather than by every
+    /// consumer, so `[sandbox] mode` is the only thing an app has to say.
     ///
     /// A path an app lists that is already a rule is not listed twice.
     pub fn for_bundle(wasm_js_prefix: &str, app: &AppConfig) -> Self {
@@ -110,7 +116,11 @@ impl BypassRules {
         let prefixes = std::iter::once(wasm_js_prefix.to_string())
             .chain(BASE_PREFIXES.iter().map(|prefix| (*prefix).to_string()))
             .chain(app.extra_bypass_prefix.iter().cloned())
-            .chain(app.dev_enabled.then(|| SEED_BYPASS_PREFIX.to_string()));
+            .chain(
+                app.sandbox
+                    .runs_the_site_runtime()
+                    .then(|| SEED_BYPASS_PREFIX.to_string()),
+            );
         for prefix in prefixes {
             push_unique(&mut rules.prefixes, prefix);
         }
@@ -166,6 +176,7 @@ fn js_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bundle::SandboxShell;
 
     #[test]
     fn a_plain_bundle_has_the_base_rules_and_the_shell_vendor_files() {
@@ -181,31 +192,34 @@ mod tests {
     }
 
     #[test]
-    fn a_dev_bundle_adds_the_seed_prefix_after_the_apps_own() {
-        let app = AppConfig {
-            dev_enabled: true,
-            extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
-            extra_bypass_exact: vec!["/".to_string()],
-            ..AppConfig::default()
-        };
-        let rules = BypassRules::for_bundle("/app", &app);
-        assert_eq!(rules.exact.last().map(String::as_str), Some("/"));
-        assert_eq!(
-            rules.prefixes,
-            [
-                "/app",
-                "/snippets/",
-                "/cdn-cgi/",
-                "/__impresspress_dev/compiler/",
-                "/seed/",
-            ]
-        );
+    fn a_sandbox_bundle_adds_the_seed_prefix_after_the_apps_own() {
+        for sandbox in [SandboxShell::Site, SandboxShell::Workspace] {
+            let app = AppConfig {
+                sandbox,
+                extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
+                extra_bypass_exact: vec!["/".to_string()],
+                ..AppConfig::default()
+            };
+            let rules = BypassRules::for_bundle("/app", &app);
+            assert_eq!(rules.exact.last().map(String::as_str), Some("/"));
+            assert_eq!(
+                rules.prefixes,
+                [
+                    "/app",
+                    "/snippets/",
+                    "/cdn-cgi/",
+                    "/__impresspress_dev/compiler/",
+                    "/seed/",
+                ],
+                "{sandbox:?}"
+            );
+        }
     }
 
     #[test]
     fn a_rule_an_app_repeats_is_listed_once() {
         let app = AppConfig {
-            dev_enabled: true,
+            sandbox: SandboxShell::Workspace,
             extra_bypass_prefix: vec!["/seed/".to_string(), "/snippets/".to_string()],
             extra_bypass_exact: vec!["/sw.js".to_string()],
             ..AppConfig::default()

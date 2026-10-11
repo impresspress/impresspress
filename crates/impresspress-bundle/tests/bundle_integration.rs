@@ -1,9 +1,16 @@
 use std::{fs, path::PathBuf};
 
 use impresspress_bundle::bundle::{
-    run, AppConfig, BypassRules, APP_TITLE_CLOSE, APP_TITLE_OPEN, BOOT_NOTICE_END,
+    run, AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, BOOT_NOTICE_END,
     BOOT_NOTICE_START,
 };
+
+/// Every mode a bundle can be built in, in `[sandbox] mode`'s order.
+const SANDBOX_MODES: [SandboxShell; 3] = [
+    SandboxShell::None,
+    SandboxShell::Site,
+    SandboxShell::Workspace,
+];
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/bundle_fixtures/pkg-in")
@@ -330,83 +337,84 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
     );
 }
 
-#[test]
-fn sw_passes_the_dev_flag_to_initialize() {
+/// `sw.js` rendered from the shipped template for a bundle in `sandbox` mode,
+/// with `app`'s other settings.
+fn rendered_sw(sandbox: SandboxShell, app: AppConfig) -> String {
     let tmp = production_pkg_copy();
-
-    let app = AppConfig {
-        dev_enabled: true,
-        ..AppConfig::default()
-    };
-    run(tmp.path(), tmp.path(), app).expect("bundler ok");
-
-    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    // ONE rendered constant, read by `initialize()` and by the passthrough
-    // branch alike — see `sw.js.tmpl`'s header for why the flag is stated
-    // once rather than substituted at each use.
-    assert!(
-        sw.contains("const DEV_ENABLED = true;"),
-        "sw.js did not receive the dev flag; sw.js = {sw}"
-    );
-    assert!(
-        sw.contains(
-            "initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
-        ),
-        "initialize() must read the one constant; sw.js = {sw}"
-    );
+    run(tmp.path(), tmp.path(), AppConfig { sandbox, ..app }).expect("bundler ok");
+    fs::read_to_string(tmp.path().join("sw.js")).unwrap()
 }
 
 #[test]
-fn sw_defaults_the_dev_flag_to_false() {
+fn sw_passes_the_sandbox_mode_to_initialize() {
+    for (sandbox, declaration) in [
+        (SandboxShell::Site, "const SANDBOX = 'site';"),
+        (SandboxShell::Workspace, "const SANDBOX = 'workspace';"),
+    ] {
+        let sw = rendered_sw(sandbox, AppConfig::default());
+        // ONE rendered constant, read by `initialize()` and by the
+        // passthrough branch alike — see `sw.js.tmpl`'s header for why the
+        // mode is stated once rather than substituted at each use. Exactly
+        // once: the export finds it by this text.
+        assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
+        assert_eq!(sw.matches("const SANDBOX = ").count(), 1, "sw.js = {sw}");
+        assert!(
+            sw.contains(
+                "initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+            ),
+            "initialize() must read the one constant; sw.js = {sw}"
+        );
+    }
+}
+
+#[test]
+fn sw_defaults_the_sandbox_mode_to_none() {
     let tmp = production_pkg_copy();
 
     run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    // The sandbox is off unless a bundle asks for it: an app that never sets
-    // `[dev] enabled` must ship a service worker that boots the runtime with
-    // the flag explicitly false, not merely absent.
-    assert!(sw.contains("const DEV_ENABLED = false;"), "sw.js = {sw}");
+    // The sandbox is off unless a bundle asks for it: an app with no
+    // `[sandbox]` table must ship a service worker that boots the runtime
+    // with the mode explicitly 'none', not merely absent.
+    assert!(sw.contains("const SANDBOX = 'none';"), "sw.js = {sw}");
     assert!(
         sw.contains(
-            "initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+            "initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
         ),
         "initialize() must read the one constant; sw.js = {sw}"
     );
     assert!(
-        !sw.contains("__DEV_ENABLED__"),
+        !sw.contains("__SANDBOX__"),
         "placeholder not substituted in sw.js"
     );
 }
 
 /// The sandbox's seed bundle is fetched from the static host on a cold boot,
-/// so the service worker has to let `/seed/` through. It is the runtime's own
-/// flag that decides, not a second thing an app has to remember to configure.
+/// so the service worker of every bundle that runs the sandbox's runtime half
+/// — a site as much as the workspace — has to let `/seed/` through. It is the
+/// bundle's own mode that decides, not a second thing an app has to remember
+/// to configure.
 #[test]
-fn a_dev_bundle_bypasses_the_seed_prefix() {
-    let tmp = production_pkg_copy();
-
-    let app = AppConfig {
-        dev_enabled: true,
-        ..AppConfig::default()
-    };
-    run(tmp.path(), tmp.path(), app).expect("bundler ok");
-
-    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    assert!(
-        sw.contains("url.pathname.startsWith('/seed/')"),
-        "sw.js does not bypass the seed bundle; sw.js = {sw}"
-    );
-    assert!(
-        !sw.contains("__BYPASS_CONDITION__"),
-        "placeholder not substituted"
-    );
+fn a_site_or_workspace_bundle_bypasses_the_seed_prefix() {
+    for sandbox in [SandboxShell::Site, SandboxShell::Workspace] {
+        let sw = rendered_sw(sandbox, AppConfig::default());
+        assert!(
+            sw.contains("url.pathname.startsWith('/seed/')"),
+            "{sandbox:?} does not bypass the seed bundle; sw.js = {sw}"
+        );
+        assert!(bypasses(&sw, "/seed/manifest.json"), "{sandbox:?}");
+        assert!(
+            !sw.contains("__BYPASS_CONDITION__"),
+            "placeholder not substituted"
+        );
+    }
 }
 
 /// And only then: a bundle with no sandbox serves no seed, so intercepting
 /// `/seed/` is the correct (and unchanged) behaviour.
 #[test]
-fn a_non_dev_bundle_does_not_bypass_the_seed_prefix() {
+fn a_bundle_with_no_sandbox_does_not_bypass_the_seed_prefix() {
     let tmp = production_pkg_copy();
 
     run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
@@ -483,16 +491,23 @@ fn sw_initialize_rules(sw: &str) -> BypassRules {
 /// The rules `sw.js` hands the runtime in `initialize()` are what the running
 /// runtime believes this worker leaves to the network — the development
 /// sandbox refuses a site file at any path they list. They must be exactly
-/// the rules the fetch handler's condition applies, for a plain bundle and
-/// for a dev bundle with an app's own extras: a rule only the condition had
-/// would be a site file that publishes and 404s, and a rule only the data had
-/// would refuse a file the runtime could serve.
+/// the rules the fetch handler's condition applies, for a plain bundle, a
+/// site and a workspace with an app's own extras: a rule only the condition
+/// had would be a site file that publishes and 404s, and a rule only the data
+/// had would refuse a file the runtime could serve.
+///
+/// And `asset-manifest.json`'s `bypass` — the same value, for a reader that
+/// has the bundle's files rather than its worker — states them too.
 #[test]
 fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
     let configs = [
         AppConfig::default(),
         AppConfig {
-            dev_enabled: true,
+            sandbox: SandboxShell::Site,
+            ..AppConfig::default()
+        },
+        AppConfig {
+            sandbox: SandboxShell::Workspace,
             // A quote and a backslash in configured paths: the condition
             // escapes them for a JavaScript string and the data for JSON, and
             // both must come back as the same path.
@@ -509,34 +524,42 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
         },
     ];
     for app in configs {
-        let dev = app.dev_enabled;
+        let sandbox = app.sandbox;
         let tmp = production_pkg_copy();
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
         let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
         let handed = sw_initialize_rules(&sw);
 
         assert!(
-            sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
+            sw.contains("await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
             "sw.js = {sw}"
         );
         // Rule for rule, in order.
-        assert_eq!(handed, sw_bypass_rules(&sw), "dev = {dev}");
+        assert_eq!(handed, sw_bypass_rules(&sw), "{sandbox:?}");
         // And each handed rule, put to the rendered condition, is bypassed —
         // so the comparison above is not two readings of the same mistake.
         for path in &handed.exact {
-            assert!(bypasses(&sw, path), "{path} (dev = {dev}); sw.js = {sw}");
+            assert!(bypasses(&sw, path), "{path} ({sandbox:?}); sw.js = {sw}");
         }
         for prefix in &handed.prefixes {
             let under = format!("{prefix}x");
-            assert!(bypasses(&sw, &under), "{under} (dev = {dev}); sw.js = {sw}");
+            assert!(bypasses(&sw, &under), "{under} ({sandbox:?}); sw.js = {sw}");
         }
+        // The manifest's `bypass` is the same rules, rule for rule.
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let declared: BypassRules =
+            serde_json::from_value(manifest["bypass"].clone()).expect("the manifest's bypass");
+        assert_eq!(declared, handed, "{sandbox:?}");
         assert!(handed.exact.contains(&"/manifest.json".to_string()));
         assert_eq!(
             handed.prefixes.contains(&"/seed/".to_string()),
-            dev,
-            "the seed prefix is a dev bundle's alone"
+            sandbox != SandboxShell::None,
+            "the seed prefix is a site's and a workspace's alone"
         );
-        if dev {
+        if sandbox == SandboxShell::Workspace {
             assert!(handed
                 .prefixes
                 .contains(&"/__impresspress_dev/compiler/".to_string()));
@@ -569,13 +592,13 @@ fn sw_bypasses_exactly_the_shells_vendor_files() {
     }
 }
 
-/// A site file under `/vendor/` reaches the runtime — in a dev bundle too,
+/// A site file under `/vendor/` reaches the runtime — in a workspace too,
 /// whose bypass list is the longest.
 #[test]
 fn a_site_file_under_vendor_is_not_bypassed() {
     let tmp = production_pkg_copy();
     let app = AppConfig {
-        dev_enabled: true,
+        sandbox: SandboxShell::Workspace,
         ..AppConfig::default()
     };
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
@@ -595,30 +618,24 @@ fn a_site_file_under_vendor_is_not_bypassed() {
 
 /// Cloudflare reserves `/cdn-cgi/` on every proxied hostname — the RUM
 /// beacon it injects into each page POSTs to `/cdn-cgi/rum` — so the service
-/// worker leaves the whole prefix to the network, in dev and non-dev bundles
+/// worker leaves the whole prefix to the network, in every sandbox mode
 /// alike, and never routes it to the runtime (which would answer 501).
 #[test]
 fn cloudflare_cdn_cgi_paths_are_bypassed() {
-    for dev_enabled in [false, true] {
-        let tmp = production_pkg_copy();
-        let app = AppConfig {
-            dev_enabled,
-            ..AppConfig::default()
-        };
-        run(tmp.path(), tmp.path(), app).expect("bundler ok");
-        let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+    for sandbox in SANDBOX_MODES {
+        let sw = rendered_sw(sandbox, AppConfig::default());
 
         for path in ["/cdn-cgi/rum", "/cdn-cgi/trace"] {
             assert!(
                 bypasses(&sw, path),
-                "{path} reaches the runtime (dev = {dev_enabled}); sw.js = {sw}"
+                "{path} reaches the runtime ({sandbox:?}); sw.js = {sw}"
             );
         }
         // The prefix, not a look-alike: a site page that merely starts with
         // the same letters is still the runtime's.
         assert!(
             !bypasses(&sw, "/cdn-cgi-notes.html"),
-            "dev = {dev_enabled}; sw.js = {sw}"
+            "{sandbox:?}; sw.js = {sw}"
         );
     }
 }
@@ -629,7 +646,7 @@ fn cloudflare_cdn_cgi_paths_are_bypassed() {
 fn a_site_page_named_sql_something_is_not_bypassed() {
     let tmp = production_pkg_copy();
     let app = AppConfig {
-        dev_enabled: true,
+        sandbox: SandboxShell::Workspace,
         ..AppConfig::default()
     };
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
@@ -641,34 +658,29 @@ fn a_site_page_named_sql_something_is_not_bypassed() {
     }
 }
 
-/// A dev bundle's service worker is the deployment's header layer.
+/// A workspace's service worker is the deployment's header layer.
 ///
 /// The in-browser Rust toolchain runs in a dedicated worker started from a
 /// document that is COEP `credentialless`, and a browser refuses such a worker
 /// unless the worker SCRIPT's own response carries a compatible COEP. That
 /// script is a bypassed static file, so no runtime response can carry it and
 /// no static host is guaranteed to send it — which is why `sw.js` answers
-/// every bypassed same-origin request itself in a dev bundle and adds the
+/// every bypassed same-origin request itself in a workspace and adds the
 /// pair. Without this the compiler cannot start on any host, and the only
-/// symptom the page gets is an empty `Worker` error event.
+/// symptom the page gets is an empty `Worker` error event. What the rendered
+/// worker DOES with each mode is driven in Node
+/// (`the_rendered_worker_isolates_bypassed_responses_in_a_workspace_only`);
+/// this pins the text.
 #[test]
-fn a_dev_bundle_adds_the_isolation_headers_to_bypassed_responses() {
-    let tmp = production_pkg_copy();
-
-    let app = AppConfig {
-        dev_enabled: true,
-        ..AppConfig::default()
-    };
-    run(tmp.path(), tmp.path(), app).expect("bundler ok");
-
-    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    // Gated on the one build-time constant, not decided at runtime — the
-    // same constant `initialize()` is passed, so a bundle cannot be dev in
-    // one half of this file and not in the other.
+fn a_workspace_bundle_adds_the_isolation_headers_to_bypassed_responses() {
+    let sw = rendered_sw(SandboxShell::Workspace, AppConfig::default());
+    // Gated on the one build-time constant, not decided by the runtime — the
+    // same constant `initialize()` is passed, so a bundle cannot be a
+    // workspace in one half of this file and not in the other.
     assert!(
-        sw.contains("const DEV_ENABLED = true;")
-            && sw.contains("if (DEV_ENABLED && url.pathname !== '/sw.js') {"),
-        "the dev rendering must take the passthrough branch; sw.js = {sw}"
+        sw.contains("const SANDBOX = 'workspace';")
+            && sw.contains("if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {"),
+        "the workspace rendering must take the passthrough branch; sw.js = {sw}"
     );
     assert!(
         sw.contains("event.respondWith(passthrough(event.request));"),
@@ -697,30 +709,32 @@ fn a_dev_bundle_adds_the_isolation_headers_to_bypassed_responses() {
     );
 }
 
-/// And the other rendering, explicitly: a bundle with no sandbox has no
-/// compiler worker to start and no site-wide isolation to be consistent with,
-/// so its bypassed requests go to the network untouched — the behaviour every
-/// bundle had before the sandbox existed, and one less service-worker round
-/// trip per static asset.
+/// And the other renderings, explicitly: a bundle with no sandbox, and a
+/// site — what the sandbox exports — have no compiler worker to start and no
+/// site-wide isolation to be consistent with, so their bypassed requests go
+/// to the network untouched: the behaviour every bundle had before the
+/// sandbox existed, one less service-worker round trip per static asset, and
+/// for a site, pages that stay free to embed a third-party iframe.
 #[test]
-fn a_non_dev_bundle_leaves_bypassed_responses_to_the_network() {
-    let tmp = production_pkg_copy();
-
-    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
-
-    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    assert!(
-        sw.contains("const DEV_ENABLED = false;")
-            && sw.contains("if (DEV_ENABLED && url.pathname !== '/sw.js') {"),
-        "the non-dev rendering must not take the passthrough branch; sw.js = {sw}"
-    );
-    // The early return is still the last statement of the bypass branch.
-    assert!(
-        sw.contains(
-            "        }\n        return;\n    }\n    event.respondWith(handleFetch(event));"
-        ),
-        "the bypass branch must still end in the plain early return; sw.js = {sw}"
-    );
+fn a_site_or_plain_bundle_leaves_bypassed_responses_to_the_network() {
+    for (sandbox, declaration) in [
+        (SandboxShell::None, "const SANDBOX = 'none';"),
+        (SandboxShell::Site, "const SANDBOX = 'site';"),
+    ] {
+        let sw = rendered_sw(sandbox, AppConfig::default());
+        assert!(
+            sw.contains(declaration)
+                && sw.contains("if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {"),
+            "the {sandbox:?} rendering must not take the passthrough branch; sw.js = {sw}"
+        );
+        // The early return is still the last statement of the bypass branch.
+        assert!(
+            sw.contains(
+                "        }\n        return;\n    }\n    event.respondWith(handleFetch(event));"
+            ),
+            "the bypass branch must still end in the plain early return; sw.js = {sw}"
+        );
+    }
 }
 
 /// `handle_request` resolves to `{ response, after }`, and `after` — the
@@ -759,7 +773,7 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
     let tmp = production_pkg_copy();
 
     let app = AppConfig {
-        dev_enabled: true,
+        sandbox: SandboxShell::Workspace,
         extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
         ..AppConfig::default()
     };
@@ -825,10 +839,10 @@ fn node_test(test_file: &str, rendered: &str, plain_var: &str, wipe_var: &str) {
 /// contains the right substrings can still be a file no browser will run.
 #[test]
 fn the_rendered_worker_parses() {
-    for dev_enabled in [false, true] {
+    for sandbox in SANDBOX_MODES {
         let tmp = production_pkg_copy();
         let app = AppConfig {
-            dev_enabled,
+            sandbox,
             ..AppConfig::default()
         };
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
@@ -917,6 +931,42 @@ fn the_rendered_worker_answers_for_a_stopped_runtime() {
 #[test]
 fn the_rendered_worker_keeps_its_own_runtime() {
     node_test("sw_runtime_kept.test.mjs", "sw.js", "SW_JS", "SW_JS_WIPE");
+}
+
+/// What each sandbox mode's rendered worker does, driven in Node rather than
+/// read as text: it hands `initialize()` its mode, leaves `/seed/` to the
+/// static host in a site and a workspace only, and answers a bypassed request
+/// itself with the cross-origin-isolation pair in a workspace only — a site
+/// and a plain bundle leave it to the network, so an exported site is not
+/// cross-origin isolated. `tests/sw/sw_sandbox_mode.test.mjs`.
+#[test]
+fn the_rendered_worker_isolates_bypassed_responses_in_a_workspace_only() {
+    let renderings: Vec<(&str, tempfile::TempDir)> = [
+        ("SW_JS", SandboxShell::None),
+        ("SW_JS_SITE", SandboxShell::Site),
+        ("SW_JS_WORKSPACE", SandboxShell::Workspace),
+    ]
+    .into_iter()
+    .map(|(variable, sandbox)| {
+        let tmp = production_pkg_copy();
+        let app = AppConfig {
+            sandbox,
+            ..AppConfig::default()
+        };
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        (variable, tmp)
+    })
+    .collect();
+    let workers: Vec<(&str, PathBuf)> = renderings
+        .iter()
+        .map(|(variable, tmp)| (*variable, tmp.path().join("sw.js")))
+        .collect();
+    let env: Vec<(&str, &std::path::Path)> = workers
+        .iter()
+        .map(|(variable, path)| (*variable, path.as_path()))
+        .collect();
+    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sw/sw_sandbox_mode.test.mjs");
+    node(&["--test".as_ref(), tests.as_os_str()], &env);
 }
 
 /// The binary the worker keeps is the one its glue was built for: `sw.js`
@@ -1181,24 +1231,24 @@ fn a_boot_notice_containing_a_marker_is_refused() {
     }
 }
 
-/// `/llms.txt` is not the bundler's: no bundle — plain or dev, with a boot
-/// notice or without — carries the file, lists it in the shell, or keeps the
-/// path from the runtime. A deployment that wants a static one overlays it
+/// `/llms.txt` is not the bundler's: no bundle — in any sandbox mode, with a
+/// boot notice or without — carries the file, lists it in the shell, or keeps
+/// the path from the runtime. A deployment that wants a static one overlays it
 /// (the dev sandbox does); the runtime must still be the one asked once the
 /// worker controls the page, or a site's own `llms.txt` would be shadowed.
 #[test]
 fn no_bundle_emits_lists_or_bypasses_llms_txt() {
-    for dev_enabled in [false, true] {
+    for sandbox in SANDBOX_MODES {
         let tmp = production_pkg_copy_with_index();
         let app = AppConfig {
-            dev_enabled,
-            boot_notice_html: dev_enabled.then(|| NOTICE.to_string()),
+            sandbox,
+            boot_notice_html: (sandbox == SandboxShell::Workspace).then(|| NOTICE.to_string()),
             ..AppConfig::default()
         };
         let rules = BypassRules::for_bundle("/app", &app);
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
 
-        assert!(!tmp.path().join("llms.txt").exists(), "dev={dev_enabled}");
+        assert!(!tmp.path().join("llms.txt").exists(), "{sandbox:?}");
         let manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap(),
         )
@@ -1206,10 +1256,10 @@ fn no_bundle_emits_lists_or_bypasses_llms_txt() {
         let files = manifest["files"].as_array().expect("files");
         assert!(
             !files.iter().any(|f| f.as_str() == Some("llms.txt")),
-            "dev={dev_enabled}: {files:?}"
+            "{sandbox:?}: {files:?}"
         );
         let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-        assert!(!bypasses(&sw, "/llms.txt"), "dev={dev_enabled}");
+        assert!(!bypasses(&sw, "/llms.txt"), "{sandbox:?}");
         assert!(!rules.exact.iter().any(|p| p == "/llms.txt"), "{rules:?}");
         assert!(
             !rules
