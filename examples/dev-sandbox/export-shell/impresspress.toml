@@ -1,0 +1,30 @@
+# The EXPORT SHELL: the static files a site exported from the development
+# sandbox boots from — built here as a site in its own right, so the export
+# ships a shell made for a site rather than the sandbox's own.
+#
+# `../build.sh` builds it (step 2b) before the sandbox, around the
+# `browser-site-runtime` wasm (`pkg-site/`: the site runtime alone, with no
+# workspace compiled in), into `dist/` beside this file; the sandbox's
+# `impresspress.toml` names that directory as `[sandbox] export_shell`, and
+# the CLI lays it down in the sandbox's bundle at
+# `/__impresspress_dev/export-shell/` (`impresspress-bundle`'s
+# `EXPORT_SHELL_ROOT`).
+#
+# Nothing here is the sandbox's: no boot notice (it describes the sandbox),
+# no compiler bypass (an exported site has no `/b/dev` to compile for), no
+# overlays (the export adds the site's own `seed/`).
+[app]
+name = "impresspress-site"
+# A placeholder, for an export to replace with the site's own title (its
+# `APP_NAME`) between the bundler's `APP_TITLE_*` markers.
+title = "ImpressPress site"
+boot_redirect = "/"
+
+[assets]
+# The exported site's visitors keep their data on a failed boot, like every
+# other bundle's default.
+opfs_wipe_on_recovery = false
+
+[sandbox]
+# The sandbox's runtime half: the seed bypass, no isolation headers.
+mode = "site"

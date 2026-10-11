@@ -499,15 +499,19 @@ pub struct FakeShell {
 /// could never import the seed shipped beside it). The bypass condition is
 /// laid out the way `impresspress-bundle`'s `BypassRules::render_condition`
 /// renders one: a clause per line, each after the first leading with its `||`.
-/// `PAGE_ENGINES` is declared as the bundler renders it, so the `initialize()`
-/// call reads a constant that exists. `tests/dev_export.rs` holds the rules,
-/// the engines, the `SANDBOX` declaration, the `initialize()` call and the
-/// passthrough guard here to what the bundler actually renders
+/// `PAGE_ENGINES` and `EXPORT_SHELL` are declared as the bundler renders them
+/// for the dev sandbox (which is built with an export shell), so the
+/// `initialize()` call reads constants that exist. `tests/dev_export.rs`
+/// holds the rules, the engines, the `SANDBOX` and `EXPORT_SHELL`
+/// declarations, the `initialize()` call and the passthrough guard here to
+/// what the bundler actually renders
 /// (`the_fake_shell_states_what_the_bundler_renders`), so this copy cannot
 /// drift from it.
 #[cfg(feature = "block-dev")]
 pub const FAKE_SW_JS: &str = concat!(
     "const SANDBOX = 'workspace';\n",
+    r#"const EXPORT_SHELL = "/__impresspress_dev/export-shell/";"#,
+    "\n",
     "const BYPASS_RULES = ",
     r#"{"exact":["/sw.js","/loader.js","/manifest.json","/asset-manifest.json","#,
     r#""/webllm-engine.js","/embed-engine.js","/t2i-engine.js","#,
@@ -517,7 +521,7 @@ pub const FAKE_SW_JS: &str = concat!(
     "\n",
     r#"const PAGE_ENGINES = ["/webllm-engine.js","/embed-engine.js","/t2i-engine.js"];"#,
     "\n",
-    "await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
+    "await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
     "if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') { passthrough(); }\n",
     "if (url.pathname.startsWith('/snippets/') ||\n        ",
     "url.pathname.startsWith('/cdn-cgi/') ||\n        ",

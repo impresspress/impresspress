@@ -70,3 +70,7 @@ build/
 # The `browser-devtools` wasm-pack output examples/dev-sandbox/build.sh
 # builds into place — same as pkg/, just the feature-on twin.
 /crates/impresspress-web/pkg-dev/
+# …and its `browser-site-runtime` twin, the export shell's runtime, which the
+# same script builds beside it. (`examples/dev-sandbox/export-shell/dist/`,
+# the shell itself, is covered by `dist/` above.)
+/crates/impresspress-web/pkg-site/

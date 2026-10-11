@@ -78,3 +78,11 @@ to = "__impresspress_dev/compiler"
 
 [sandbox]
 mode = "workspace"
+# The shell for the site the workspace exports — a bundle built as a site
+# around the `browser-site-runtime` wasm, by build.sh from
+# `export-shell/impresspress.toml` — for the export to ship instead of a copy
+# of this sandbox's own. A build output, like `seed/`: the CLI lays it down at
+# `/__impresspress_dev/export-shell/`, after the bundler has listed this
+# bundle's own files, so it is not one of them. Not a bypass rule: the
+# shell's files are for the worker's own `fetch`, which it never intercepts.
+export_shell = "export-shell/dist"

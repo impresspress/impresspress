@@ -1115,19 +1115,25 @@ jobs:
       # `pkg-dev/` the step above compiled, restamped
       # (`fixtures/next-runtime-pkg.mjs` says why that is a faithful "later
       # build" and what compiling a second one would cost). After the bootstrap
-      # build, which is what leaves `pkg-dev/` behind, and before the blank
-      # one, which takes `dist/` and keeps it.
+      # build, which is what leaves `pkg-dev/` and `pkg-site/` behind, and
+      # before the blank one, which takes `dist/` and keeps it. The export
+      # shell's runtime is not what the spec updates, so `--site-pkg-dir`
+      # reuses the `pkg-site/` the step above compiled rather than compiling
+      # a third wasm.
       - name: Build the next deployment's bundle
         run: |
           set -o pipefail
           node crates/impresspress-web/tests/e2e/fixtures/next-runtime-pkg.mjs \
             crates/impresspress-web/pkg-dev "$RUNNER_TEMP/pkg-next"
-          UPDATE_DIST="$(examples/dev-sandbox/build.sh --pkg-dir "$RUNNER_TEMP/pkg-next" --out "$RUNNER_TEMP/dist-update" | tail -1)"
+          UPDATE_DIST="$(examples/dev-sandbox/build.sh --pkg-dir "$RUNNER_TEMP/pkg-next" --site-pkg-dir crates/impresspress-web/pkg-site --out "$RUNNER_TEMP/dist-update" | tail -1)"
           echo "UPDATE_DIST=$UPDATE_DIST" >> "$GITHUB_ENV"
 
-      # One script, shared with local runs: wasm-pack with `browser-devtools`,
-      # then the sealed web flow with `[sandbox] mode = "workspace"` and the welcome
-      # seed overlaid onto `dist/seed/`. Its last stdout line is the dist path.
+      # One script, shared with local runs: wasm-pack with `browser-devtools`
+      # and with `browser-site-runtime`, the marker check between the two, the
+      # export shell, then the sealed web flow with `[sandbox] mode =
+      # "workspace"`, the welcome seed overlaid onto `dist/seed/` and the
+      # export shell compared byte for byte with the site wasm. Its last
+      # stdout line is the dist path.
       - name: Build the dev-sandbox bundle
         run: |
           set -o pipefail

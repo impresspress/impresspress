@@ -384,7 +384,7 @@ async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     assert!(!sw.contains("const SANDBOX = 'workspace';"), "{sw}");
     assert!(
         sw.contains(
-            "initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+            "initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
         ),
         "{sw}"
     );
@@ -832,7 +832,7 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     let sw = text(&archive, "sw.js");
 
     assert!(
-        !sw.contains("__impresspress_dev"),
+        !sw.contains("/__impresspress_dev/compiler/"),
         "the compiler bypass must be gone; {sw}"
     );
     assert!(sw.contains("url.pathname.startsWith('/seed/')"), "{sw}");
@@ -863,7 +863,7 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     );
     assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
     assert!(
-        sw.contains("await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
+        sw.contains("await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
         "{sw}"
     );
 }
@@ -2412,12 +2412,13 @@ async fn a_boot_page_whose_notice_region_is_malformed_is_refused() {
 
 /// [`FAKE_SW_JS`] and [`fake_bypass_rules`] are a copy of what the bundler
 /// renders for the dev sandbox (`examples/dev-sandbox/impresspress.toml`:
-/// `[sandbox] mode = "workspace"`, the compiler prefix), kept in
-/// `test_support` because the fixture is feature code that cannot depend on
-/// the bundler. This is where the copy is held to the original: the bypass
-/// rules, the page engines (`impresspress_bundle::assets::PAGE_ENGINES`), the
-/// `SANDBOX` declaration the export rewrites, and the two lines that read it,
-/// exactly as the bundler renders them into the worker it builds.
+/// `[sandbox] mode = "workspace"`, an `export_shell`, the compiler prefix),
+/// kept in `test_support` because the fixture is feature code that cannot
+/// depend on the bundler. This is where the copy is held to the original: the
+/// bypass rules, the page engines (`impresspress_bundle::assets::PAGE_ENGINES`),
+/// the `SANDBOX` declaration the export rewrites, the `EXPORT_SHELL` one, and
+/// the two lines that read the mode, exactly as the bundler renders them into
+/// the worker it builds.
 #[test]
 fn the_fake_shell_states_what_the_bundler_renders() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2427,6 +2428,7 @@ fn the_fake_shell_states_what_the_bundler_renders() {
         dir.path(),
         impresspress_bundle::bundle::AppConfig {
             sandbox: impresspress_bundle::bundle::SandboxShell::Workspace,
+            export_shell: true,
             extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
             ..Default::default()
         },
@@ -2437,7 +2439,8 @@ fn the_fake_shell_states_what_the_bundler_renders() {
     // are the bundler's to the byte.
     for line in [
         "const SANDBOX = 'workspace';",
-        "await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });",
+        r#"const EXPORT_SHELL = "/__impresspress_dev/export-shell/";"#,
+        "await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });",
         "if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {",
     ] {
         assert_eq!(sw.matches(line).count(), 1, "{line} in the rendered {sw}");

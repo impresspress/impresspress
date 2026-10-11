@@ -39,8 +39,10 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     // dev iterations don't get pinned to stale browser-cached modules.
     let _ = release;
 
-    // 4. Apply overlays.
+    // 4. Apply overlays, then the export shell a workspace names
+    //    (`[sandbox] export_shell`).
     overlays::apply_overlays(&cfg, repo_root, &dist_dir)?;
+    overlays::apply_export_shell(&cfg, repo_root, &dist_dir)?;
 
     let profile = if release { "release" } else { "dev" };
     println!("built {} ({profile}) → {}", cfg.app.name, cfg.wasm.out_dir);

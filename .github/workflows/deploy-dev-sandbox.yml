@@ -102,9 +102,14 @@ jobs:
         run: examples/dev-sandbox/compiler/fetch-dist.sh
 
       # `compiler_is_current` matches `compiler/PIN.json` against the tree the
-      # step above put in place, so this builds the wasm and assembles the
+      # step above put in place, so this builds the wasms and assembles the
       # bundle for THIS seed without touching the compiler. Each matrix job
       # fetches the same published release asset — no cache, nothing to race.
+      # Each job compiles TWO wasms — the sandbox's (`browser-devtools`) and
+      # the export shell's (`browser-site-runtime`), checked against each
+      # other by `check-runtime-markers.mjs` — so this step takes 2–4 minutes
+      # longer than one would, and the deployment carries the export shell
+      # (~11 MB) at `/__impresspress_dev/export-shell/`.
       - name: Build examples/dev-sandbox (${{ matrix.seed }} seed)
         run: examples/dev-sandbox/build.sh --seed ${{ matrix.seed }}
 

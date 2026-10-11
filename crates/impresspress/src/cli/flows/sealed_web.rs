@@ -56,9 +56,12 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     impresspress_bundle::assets::write_to(&dist)?;
     impresspress_bundle::bundle::run(&dist, repo_root, app)?;
 
-    // 5. Apply overlays from impresspress.toml if present.
+    // 5. Apply overlays from impresspress.toml if present, then the export
+    //    shell a workspace names (`[sandbox] export_shell`) — after the
+    //    bundler has listed the bundle's own files, so neither is listed.
     if let Some((cfg, root)) = cfg {
         overlays::apply_overlays(&cfg, &root, &dist)?;
+        overlays::apply_export_shell(&cfg, &root, &dist)?;
     }
 
     let profile = if release { "release" } else { "dev" };

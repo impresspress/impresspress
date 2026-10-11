@@ -44,10 +44,51 @@ pub struct Config {
 /// (`browser-site-runtime`, or `browser-devtools` for a workspace) — a mode
 /// the binary never compiled is the mode the binary has, with one console
 /// warning.
+///
+/// `export_shell = "<dir>"` (a workspace only) names a finished bundle built
+/// as a site — `[sandbox] mode = "site"`, around a `browser-site-runtime`
+/// wasm — for the sandbox's export to ship instead of the sandbox's own shell.
+/// The directory is read relative to the one holding `impresspress.toml`,
+/// like an overlay's `from`, and the web flows copy it to
+/// `impresspress_bundle::bundle::EXPORT_SHELL_ROOT` after the bundler has
+/// listed the sandbox's own files (`helpers::overlays::apply_export_shell`),
+/// so none of its files is listed as the sandbox's. A mode other than
+/// `"workspace"` with an export shell does not parse: the shell is what a
+/// workspace's export ships, and nothing else would read it.
 #[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawSandboxConfig")]
 pub struct SandboxConfig {
     pub mode: impresspress_bundle::bundle::SandboxShell,
+    pub export_shell: Option<String>,
+}
+
+/// `[sandbox]` as it is written, before the mode and the export shell are
+/// checked against each other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandboxConfig {
+    mode: impresspress_bundle::bundle::SandboxShell,
+    #[serde(default)]
+    export_shell: Option<String>,
+}
+
+impl TryFrom<RawSandboxConfig> for SandboxConfig {
+    type Error = String;
+
+    fn try_from(raw: RawSandboxConfig) -> Result<Self, Self::Error> {
+        use impresspress_bundle::bundle::SandboxShell;
+        if raw.export_shell.is_some() && raw.mode != SandboxShell::Workspace {
+            return Err(format!(
+                "[sandbox] export_shell is for a workspace's export to ship, but mode is \
+                 \"{}\"; set mode = \"workspace\" or remove export_shell",
+                raw.mode.as_str()
+            ));
+        }
+        Ok(Self {
+            mode: raw.mode,
+            export_shell: raw.export_shell,
+        })
+    }
 }
 
 /// Points at the impresspress workspace when the consumer repo isn't part of it.
@@ -218,6 +259,7 @@ impl Config {
             extra_bypass_exact: self.assets.extra_bypass_exact.clone(),
             opfs_wipe_on_recovery: self.assets.opfs_wipe_on_recovery,
             sandbox: self.sandbox.mode,
+            export_shell: self.sandbox.export_shell.is_some(),
             boot_notice_html,
         })
     }
@@ -539,6 +581,38 @@ boot_redirect = "/"
             err.contains("dev") && err.contains("workspace"),
             "expected the unknown mode and the known ones, got: {err}"
         );
+    }
+
+    /// `export_shell` is a workspace's: with it the bundler is asked to name
+    /// the shell to the runtime; without it, not. Any other mode with one is
+    /// refused, naming the mode.
+    #[test]
+    fn an_export_shell_belongs_to_a_workspace() {
+        let cfg = parse(&format!(
+            "{APP}\n[sandbox]\nmode = \"workspace\"\nexport_shell = \"export-shell/dist\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.sandbox.export_shell.as_deref(),
+            Some("export-shell/dist")
+        );
+        assert!(cfg.bundle_app(Path::new(".")).unwrap().export_shell);
+
+        let cfg = parse(&format!("{APP}\n[sandbox]\nmode = \"workspace\"\n")).unwrap();
+        assert_eq!(cfg.sandbox.export_shell, None);
+        assert!(!cfg.bundle_app(Path::new(".")).unwrap().export_shell);
+
+        for mode in ["none", "site"] {
+            let err = parse(&format!(
+                "{APP}\n[sandbox]\nmode = \"{mode}\"\nexport_shell = \"export-shell/dist\"\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("export_shell") && err.contains(&format!("\"{mode}\"")),
+                "{mode}: {err}"
+            );
+        }
     }
 
     #[test]

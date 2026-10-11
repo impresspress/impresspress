@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use impresspress_bundle::bundle::{
     run, AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, BOOT_NOTICE_END,
-    BOOT_NOTICE_START,
+    BOOT_NOTICE_START, EXPORT_SHELL_ROOT,
 };
 
 /// Every mode a bundle can be built in, in `[sandbox] mode`'s order.
@@ -360,10 +360,79 @@ fn sw_passes_the_sandbox_mode_to_initialize() {
         assert_eq!(sw.matches("const SANDBOX = ").count(), 1, "sw.js = {sw}");
         assert!(
             sw.contains(
-                "initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+                "initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
             ),
             "initialize() must read the one constant; sw.js = {sw}"
         );
+    }
+}
+
+/// A workspace built with `[sandbox] export_shell` tells its runtime where the
+/// shell is, as the bundler's one root; every other bundle — a site, a plain
+/// one, a workspace with no shell — hands `initialize()` `null`. The
+/// constant is declared once and read by the `initialize()` call.
+#[test]
+fn only_a_workspace_with_an_export_shell_names_it() {
+    let shipped = format!(
+        "const EXPORT_SHELL = {};",
+        serde_json::to_string(EXPORT_SHELL_ROOT).unwrap()
+    );
+    assert_eq!(
+        shipped,
+        r#"const EXPORT_SHELL = "/__impresspress_dev/export-shell/";"#
+    );
+    let sw = rendered_sw(
+        SandboxShell::Workspace,
+        AppConfig {
+            export_shell: true,
+            ..AppConfig::default()
+        },
+    );
+    assert_eq!(sw.matches(&shipped).count(), 1, "sw.js = {sw}");
+    assert_eq!(
+        sw.matches("const EXPORT_SHELL = ").count(),
+        1,
+        "sw.js = {sw}"
+    );
+    assert!(
+        sw.contains("initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, "),
+        "initialize() must read the one constant; sw.js = {sw}"
+    );
+
+    for sandbox in SANDBOX_MODES {
+        let sw = rendered_sw(sandbox, AppConfig::default());
+        assert_eq!(
+            sw.matches("const EXPORT_SHELL = null;").count(),
+            1,
+            "{sandbox:?}: sw.js = {sw}"
+        );
+        assert!(!sw.contains(EXPORT_SHELL_ROOT), "{sandbox:?}: sw.js = {sw}");
+    }
+}
+
+/// The export shell is what a WORKSPACE's export ships. A site or a plain
+/// bundle that claimed one would hand its runtime a shell nothing reads, so
+/// the bundler refuses to build it — naming the mode — rather than render it.
+#[test]
+fn only_a_workspace_bundle_may_carry_an_export_shell() {
+    for sandbox in [SandboxShell::None, SandboxShell::Site] {
+        let tmp = production_pkg_copy();
+        let err = run(
+            tmp.path(),
+            tmp.path(),
+            AppConfig {
+                sandbox,
+                export_shell: true,
+                ..AppConfig::default()
+            },
+        )
+        .expect_err("an export shell outside a workspace must be refused")
+        .to_string();
+        assert!(
+            err.contains("export shell") && err.contains(&format!("'{}'", sandbox.as_str())),
+            "{sandbox:?}: {err}"
+        );
+        assert!(!tmp.path().join("sw.js").exists(), "{sandbox:?}");
     }
 }
 
@@ -380,7 +449,7 @@ fn sw_defaults_the_sandbox_mode_to_none() {
     assert!(sw.contains("const SANDBOX = 'none';"), "sw.js = {sw}");
     assert!(
         sw.contains(
-            "initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+            "initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
         ),
         "initialize() must read the one constant; sw.js = {sw}"
     );
@@ -531,7 +600,7 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
         let handed = sw_initialize_rules(&sw);
 
         assert!(
-            sw.contains("await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
+            sw.contains("await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
             "sw.js = {sw}"
         );
         // Rule for rule, in order.
@@ -934,7 +1003,8 @@ fn the_rendered_worker_keeps_its_own_runtime() {
 }
 
 /// What each sandbox mode's rendered worker does, driven in Node rather than
-/// read as text: it hands `initialize()` its mode, leaves `/seed/` to the
+/// read as text: it hands `initialize()` its mode and its export shell (the
+/// root for a workspace built with one, `null` otherwise), leaves `/seed/` to the
 /// static host in a site and a workspace only, and answers a bypassed request
 /// itself with the cross-origin-isolation pair in a workspace only — a site
 /// and a plain bundle leave it to the network, so an exported site is not
@@ -942,15 +1012,17 @@ fn the_rendered_worker_keeps_its_own_runtime() {
 #[test]
 fn the_rendered_worker_behaves_per_sandbox_mode() {
     let renderings: Vec<(&str, tempfile::TempDir)> = [
-        ("SW_JS", SandboxShell::None),
-        ("SW_JS_SITE", SandboxShell::Site),
-        ("SW_JS_WORKSPACE", SandboxShell::Workspace),
+        ("SW_JS", SandboxShell::None, false),
+        ("SW_JS_SITE", SandboxShell::Site, false),
+        ("SW_JS_WORKSPACE", SandboxShell::Workspace, false),
+        ("SW_JS_EXPORT_SHELL", SandboxShell::Workspace, true),
     ]
     .into_iter()
-    .map(|(variable, sandbox)| {
+    .map(|(variable, sandbox, export_shell)| {
         let tmp = production_pkg_copy();
         let app = AppConfig {
             sandbox,
+            export_shell,
             ..AppConfig::default()
         };
         run(tmp.path(), tmp.path(), app).expect("bundler ok");

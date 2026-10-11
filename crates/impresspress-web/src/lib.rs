@@ -90,10 +90,12 @@ const IMPRESSPRESS_CSP: &str = concat!(
 /// Boot the runtime inside the Service Worker.
 ///
 /// `options` is the object `sw.js` passes:
-/// `{ sandbox: 'none' | 'site' | 'workspace', bypass: <rules>, pageEngines: <paths> }`,
-/// rendered from the bundle's `__SANDBOX__`, `__BYPASS_RULES__` and
-/// `__PAGE_ENGINES__` placeholders (`impresspress-bundle`'s `SandboxShell`
-/// spells the mode). Only `'workspace'` asks for the workspace; any other
+/// `{ sandbox: 'none' | 'site' | 'workspace', exportShell: <root> | null, bypass: <rules>, pageEngines: <paths> }`,
+/// rendered from the bundle's `__SANDBOX__`, `__EXPORT_SHELL__`,
+/// `__BYPASS_RULES__` and `__PAGE_ENGINES__` placeholders
+/// (`impresspress-bundle`'s `SandboxShell` spells the mode). `exportShell` is
+/// read by a workspace only (see `export_shell_option`). Only `'workspace'`
+/// asks for the workspace; any other
 /// value — including a missing one, or one that is none of the three, which
 /// gets a console warning — does not: the workspace is never enabled by an
 /// unparseable value. `bypass` is the paths this worker leaves to the static
@@ -191,6 +193,24 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
         );
     }
 
+    // A workspace whose deployment carries no export shell still boots — the
+    // shell is what its export is for, not what the workspace runs on — but
+    // says so once, the way the other missing options do.
+    #[cfg(feature = "browser-devtools")]
+    if workspace_requested {
+        if let Err(reason) = export_shell_option(&options) {
+            web_sys::console::warn_1(
+                &format!(
+                    "impresspress: this workspace's deployment carries no export shell \
+                     ({reason}); its export has no shell built as a site to ship — rebuild \
+                     the deployment with examples/dev-sandbox/build.sh, which builds one \
+                     ([sandbox] export_shell)"
+                )
+                .into(),
+            );
+        }
+    }
+
     impresspress_browser::db_init().await?;
 
     let factory = RuntimeFactory::new(RuntimeOptions {
@@ -266,6 +286,43 @@ fn bypass_rules_option(options: &JsValue) -> impresspress_core::blocks::dev::Byp
         );
         impresspress_core::blocks::dev::BypassRules::default()
     })
+}
+
+/// The `exportShell` option of `initialize()`: the root path at which this
+/// deployment carries its export shell — the bundle built as a site for the
+/// workspace's export to ship — rendered by `impresspress-bundle` from its one
+/// `EXPORT_SHELL_ROOT` (`EXPORT_SHELL` in `sw.js.tmpl`), or `null` for a
+/// bundle built without one (`[sandbox] export_shell`).
+///
+/// A root is a path that starts and ends with `/`. Anything else —
+/// missing, `null`, or a value that is not such a path — is the reason there
+/// is none, for the caller's warning.
+#[cfg(feature = "browser-devtools")]
+fn export_shell_option(options: &JsValue) -> Result<String, String> {
+    let value = js_sys::Reflect::get(options, &JsValue::from_str("exportShell"))
+        .unwrap_or(JsValue::UNDEFINED);
+    if value.is_undefined() {
+        return Err("initialize() was not handed the option".to_string());
+    }
+    if value.is_null() {
+        return Err("the bundle was built without [sandbox] export_shell".to_string());
+    }
+    match value.as_string() {
+        Some(root) if root.starts_with('/') && root.ends_with('/') => Ok(root),
+        _ => Err(format!(
+            "the option is {}, not a root path",
+            describe_option(&value)
+        )),
+    }
+}
+
+/// `value` as a console message can show it.
+#[cfg(feature = "browser-devtools")]
+fn describe_option(value: &JsValue) -> String {
+    js_sys::JSON::stringify(value)
+        .ok()
+        .and_then(|json| json.as_string())
+        .unwrap_or_else(|| format!("{value:?}"))
 }
 
 /// The `pageEngines` option of `initialize()`: the page-side model engines the

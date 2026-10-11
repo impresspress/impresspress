@@ -110,8 +110,28 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
    `crates/impresspress-web/pkg-dev` (this is what puts the `/b/dev`
    control-plane code in the binary at all — `[sandbox] mode = "workspace"`
    alone only wires the service-worker plumbing around it).
-3. Runs `impresspress build --target web --release` from this directory
+3. Builds it again with `--features browser-site-runtime` into
+   `crates/impresspress-web/pkg-site`: the sandbox's runtime half alone —
+   seed import, generation ledger, dynamic blocks — with no workspace
+   compiled in. This is the runtime of the **export shell**, the static
+   files for the site an export hands the user.
+4. Checks the two wasms against each other with
+   `check-runtime-markers.mjs`: no workspace endpoint, tool or compiler path
+   (from `crates/impresspress-core/tests/snapshots/dev.endpoints.json` and
+   `dev.tools.json`) in `pkg-site`, every one of them in `pkg-dev`.
+5. Runs `impresspress build --target web --release` in `export-shell/`
+   (`IMPRESSPRESS_WEB_PKG_DIR` pointed at `pkg-site`) to assemble the export
+   shell into `export-shell/dist/` — a site bundle, `[sandbox] mode = "site"`,
+   with no boot notice and no compiler bypass.
+6. Runs `impresspress build --target web --release` from this directory
    (`IMPRESSPRESS_WEB_PKG_DIR` pointed at `pkg-dev`) to assemble `dist/`.
+   `[sandbox] export_shell = "export-shell/dist"` lays the shell down at
+   `dist/__impresspress_dev/export-shell/`, and the script checks that the
+   wasm shipped there is byte for byte the one step 3 built (or
+   `--site-pkg-dir` named).
+
+`--pkg-dir DIR` and `--site-pkg-dir DIR` skip steps 2 and 3, assembling from
+an existing wasm-pack output of each feature set instead.
 
 Last line of stdout is the absolute path of the finished bundle (`dist/`, or
 the `--out` directory).
