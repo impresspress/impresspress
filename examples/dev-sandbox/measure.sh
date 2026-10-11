@@ -12,7 +12,15 @@
 # that it stays bounded, because `pkg-dev/` never ships in the ordinary
 # (non-dev) bundle but a silent size creep there is still a signal the crate
 # is dragging avoidable weight into a feature that everyone building the
-# `browser-devtools` target pays for. It also measures
+# `browser-devtools` target pays for.
+#
+# build.sh compiles a third, `pkg-site/` (`--features browser-site-runtime`:
+# the site runtime alone, the wasm of the export shell the sandbox deployment
+# carries at `/__impresspress_dev/export-shell/`). This script does not
+# measure it; what gates that build is `check-runtime-markers.mjs`, which
+# build.sh runs over it and `pkg-dev/` — no workspace code in it — not its size.
+#
+# It also measures
 # `examples/dev-sandbox/compiler/dist/` — the in-browser Rust compiler, by
 # far the biggest thing dev.impresspress.org ships — whenever that tree has
 # been composed. `dist/` is gitignored and composed by

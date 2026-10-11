@@ -39,7 +39,8 @@ function source(variable) {
 // Each rendering, read the first time a worker asks for it, so a test file
 // needs only the variables it uses. `SW_JS` is the default rendering;
 // `SW_JS_WIPE` the one with `opfs_wipe_on_recovery`, whose answers say what a
-// reload erases; `sw_sandbox_mode.test.mjs` adds one per sandbox mode.
+// reload erases; `sw_sandbox_mode.test.mjs` adds one per sandbox mode and one
+// for a workspace built with an export shell.
 const SOURCES = new Map();
 function rendering(variable) {
   if (!SOURCES.has(variable)) SOURCES.set(variable, source(variable));

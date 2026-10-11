@@ -25,6 +25,13 @@ pub struct AssetManifest {
     /// this list omitted would be a file missing from every exported site,
     /// with no error anywhere.
     ///
+    /// A sandbox that carries an export shell (`[sandbox] export_shell`, laid
+    /// down at [`EXPORT_SHELL_ROOT`](super::EXPORT_SHELL_ROOT)) has two such
+    /// lists: its own, which never names the shell's files — the shell is
+    /// laid down after this listing is taken — and the shell's, in the
+    /// shell's own `asset-manifest.json`, naming exactly the files the shell
+    /// was built with.
+    ///
     /// `#[serde(default)]` so a manifest written by an older bundler still
     /// deserializes — the field is then empty, which the export reports as
     /// "this deployment's shell cannot be listed" rather than silently

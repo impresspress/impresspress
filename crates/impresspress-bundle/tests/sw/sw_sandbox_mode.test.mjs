@@ -13,7 +13,8 @@
 //
 // Run by `the_rendered_worker_behaves_per_sandbox_mode`
 // in `tests/bundle_integration.rs`, which renders one worker per mode and
-// passes them in `SW_JS` ('none'), `SW_JS_SITE` and `SW_JS_WORKSPACE`.
+// passes them in `SW_JS` ('none'), `SW_JS_SITE` and `SW_JS_WORKSPACE`, plus
+// a workspace built with an export shell in `SW_JS_EXPORT_SHELL`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { captureConsole, loadWorker } from './harness.mjs';
@@ -55,6 +56,9 @@ for (const { sandbox, variable } of MODES) {
     assert.equal(sw.initialized[0].sandbox, sandbox);
     // The option this replaced is gone, not merely joined.
     assert.equal('dev' in sw.initialized[0], false);
+    // None of these was built with an export shell, and says so: the option
+    // is handed, as null.
+    assert.equal(sw.initialized[0].exportShell, null);
   });
 
   test(`a '${sandbox}' worker leaves /seed/ to the static host only if it runs the site runtime`, async (t) => {
@@ -89,3 +93,15 @@ for (const { sandbox, variable } of MODES) {
     }
   });
 }
+
+// A workspace built with `[sandbox] export_shell` hands its runtime where the
+// shell is: the bundler's `EXPORT_SHELL_ROOT`, as a string.
+test('a workspace with an export shell hands initialize() its root', async (t) => {
+  captureConsole(t);
+  const sw = await worker('SW_JS_EXPORT_SHELL');
+
+  await sw.request('/b/auth/login');
+  assert.equal(sw.initialized.length, 1);
+  assert.equal(sw.initialized[0].sandbox, 'workspace');
+  assert.equal(sw.initialized[0].exportShell, '/__impresspress_dev/export-shell/');
+});

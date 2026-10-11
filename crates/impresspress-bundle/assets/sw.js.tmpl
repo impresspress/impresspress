@@ -22,6 +22,16 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // comment quoting it would be a second, ambiguous match.)
 const SANDBOX = '__SANDBOX__';
 
+// Where this deployment carries its export shell — a complete bundle built
+// as a site, for the workspace's export to ship — or null when it carries
+// none: `impresspress-bundle`'s `EXPORT_SHELL_ROOT` when the bundle was built
+// with `[sandbox] export_shell` (a workspace only), rendered from that one
+// constant. Handed to the runtime in `initialize()`, where only a workspace
+// looks at it. Not on the bypass list: the shell's files are for the
+// workspace's export to read with this worker's own `fetch` — which the fetch
+// handler below never sees — not for a page to load.
+const EXPORT_SHELL = __EXPORT_SHELL__;
+
 // The requests the fetch handler below leaves to the network, as data:
 // `impresspress-bundle` renders this object and that handler's `if (…)`
 // condition from ONE value (`BypassRules`, `bundle/bypass.rs`). It is handed
@@ -314,7 +324,7 @@ async function ensureInitialized() {
         console.log('[__APP_NAME__] Initializing runtime...');
         await eraseSettled();
         try {
-            await initialize({ sandbox: SANDBOX, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
+            await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
             throw e;

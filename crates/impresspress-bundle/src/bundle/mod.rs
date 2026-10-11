@@ -43,6 +43,23 @@ pub const APP_TITLE_CLOSE: &str = "</span>";
 /// scripts cannot disagree about where the shell is.
 pub const SHELL_URL: &str = "/";
 
+/// Where a development sandbox's deployment carries its EXPORT SHELL: a
+/// complete bundle built with [`SandboxShell::Site`] — around the site
+/// runtime's own wasm, with no workspace compiled in — for the sandbox's
+/// export to ship as the shell of the site it hands the user, instead of the
+/// sandbox's own. The `impresspress` CLI lays the shell
+/// down here (`[sandbox] export_shell`), and `sw.js.tmpl`'s `__EXPORT_SHELL__`
+/// renders this value into the one constant the worker hands
+/// `initialize({ exportShell })` — one value, so the directory the files are
+/// in and the address the runtime is told cannot disagree.
+///
+/// Deliberately NOT a bypass rule: the shell's files are for the worker's own
+/// `fetch` to read, and a service worker never intercepts its own requests.
+/// A page this worker controls that navigates here is answered by the
+/// runtime; an uncontrolled load (first visit, hard reload) gets the static
+/// file — the shell's own `index.html`.
+pub const EXPORT_SHELL_ROOT: &str = "/__impresspress_dev/export-shell/";
+
 /// Which half of the browser sandbox a bundle's service worker boots: `sw.js.tmpl`'s
 /// `__SANDBOX__` placeholder renders [`Self::as_str`] into ONE constant,
 /// `const SANDBOX = '…';`, which `initialize({ sandbox: SANDBOX, … })` and the
@@ -138,6 +155,15 @@ pub struct AppConfig {
     /// — [`SandboxShell`]. **Default: [`SandboxShell::None`].** Driven by
     /// `[sandbox] mode` in `impresspress.toml`.
     pub sandbox: SandboxShell,
+    /// Whether this bundle's deployment carries an export shell at
+    /// [`EXPORT_SHELL_ROOT`]. **Default: false.** Only a
+    /// [`SandboxShell::Workspace`] bundle may: [`run`] refuses it for any other
+    /// mode, because the export shell is what the WORKSPACE's export copies.
+    /// When set, `sw.js` hands `initialize({ exportShell })` that root; when
+    /// not, `null`. Driven by `[sandbox] export_shell` in `impresspress.toml`,
+    /// whose directory the `impresspress` CLI copies there after `run`
+    /// returns — `run` itself writes no file for it.
+    pub export_shell: bool,
     /// An HTML fragment the boot shell (`index.html`) shows under its title,
     /// between [`BOOT_NOTICE_START`] and [`BOOT_NOTICE_END`]. **Default:
     /// none.**
@@ -202,6 +228,15 @@ fn base_to_title(base: &str) -> String {
 }
 
 pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
+    // Before anything in `pkg_dir` is touched: a configuration the bundle
+    // cannot be built with leaves the directory as it was.
+    if app.export_shell && app.sandbox != SandboxShell::Workspace {
+        anyhow::bail!(
+            "an export shell is for a development sandbox's export to ship, but this \
+             bundle's sandbox mode is '{}', not 'workspace'",
+            app.sandbox.as_str()
+        );
+    }
     // --- Cleanup -------------------------------------------------------------
     // Dev rebuilds re-run wasm-pack, which writes the un-hashed pair (e.g.
     // `gizza_ai.js`, `gizza_ai_bg.wasm`) and then hits the same hashing path
@@ -366,10 +401,11 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    and costs nothing: the listing is of NAMES, taken before the file
     //    is written, and the name is fixed — so a consumer copying every
     //    listed file gets the manifest too, which is what a faithful copy of
-    //    the shell means. Nothing an overlay adds afterwards
-    //    (`impresspress`'s `apply_overlays`, which lays the sandbox's `seed/`
-    //    and compiler tree down after this returns) is listed either — it is
-    //    not there yet when the listing is taken.
+    //    the shell means. Nothing the CLI adds afterwards is listed either —
+    //    `impresspress`'s `apply_overlays`, which lays the sandbox's `seed/`
+    //    and compiler tree down after this returns, and `apply_export_shell`,
+    //    which lays the export shell down at `EXPORT_SHELL_ROOT`: neither is
+    //    there yet when the listing is taken.
     //
     //    `run` is NOT the only writer into this directory, though: `embed ×
     //    web` bundles in place in wasm-pack's own `--out-dir`, so the npm
@@ -505,6 +541,16 @@ fn build_template_vars(
     // Rendered between the quotes of `const SANDBOX = '__SANDBOX__';` — one
     // of three fixed words, none of which needs escaping.
     vars.insert("SANDBOX".to_string(), app.sandbox.as_str().to_string());
+    // Rendered as a JavaScript value, `const EXPORT_SHELL = __EXPORT_SHELL__;`:
+    // the root as a JSON string, or `null` for a bundle that carries none.
+    vars.insert(
+        "EXPORT_SHELL".to_string(),
+        if app.export_shell {
+            serde_json::to_string(EXPORT_SHELL_ROOT).expect("a string serializes")
+        } else {
+            "null".to_string()
+        },
+    );
     vars
 }
 

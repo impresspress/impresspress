@@ -47,7 +47,8 @@ async fn build_refuses_malformed_impresspress_toml() {
 
 /// The dev sandbox's own configuration, built the way `examples/dev-sandbox/
 /// build.sh` builds it: its `impresspress.toml` and boot notice, over a staged
-/// `seed/`, the staged title of the seed being built, and a compiler tree.
+/// `seed/`, the staged title of the seed being built, a compiler tree, and
+/// the export shell built from its own configuration first.
 ///
 /// What a reader with no service worker gets from that deployment is two
 /// static files, and both are this configuration's doing rather than the
@@ -71,6 +72,11 @@ async fn the_dev_sandbox_configuration_emits_a_static_llms_txt_and_a_readable_bo
     assert_eq!(
         parsed.sandbox.mode,
         impresspress_bundle::bundle::SandboxShell::Workspace
+    );
+    // …which ships the shell its export is for, built beside it.
+    assert_eq!(
+        parsed.sandbox.export_shell.as_deref(),
+        Some("export-shell/dist")
     );
     let impresspress::cli::config::AppTitle::File(title_file) = parsed.app.title else {
         panic!("[app] title is written inline: {:?}", parsed.app.title);
@@ -103,6 +109,17 @@ async fn the_dev_sandbox_configuration_emits_a_static_llms_txt_and_a_readable_bo
         fs::write(tmp.path().join(&title_file), format!("{title}\n")).unwrap();
         fs::create_dir_all(tmp.path().join("compiler/dist")).unwrap();
         fs::write(tmp.path().join("compiler/dist/manifest.json"), "{}").unwrap();
+        // The export shell, built first as build.sh builds it: its own
+        // configuration, through the same flow, into `export-shell/dist/`.
+        let shell = tmp.path().join("export-shell");
+        fs::create_dir_all(&shell).unwrap();
+        fs::copy(
+            sandbox.join("export-shell/impresspress.toml"),
+            shell.join("impresspress.toml"),
+        )
+        .unwrap();
+        sealed_web::build(&shell, false).await.unwrap();
+        let shell_dist = shell.join("dist");
 
         sealed_web::build(tmp.path(), false).await.unwrap();
         let dist = tmp.path().join("dist");
@@ -173,6 +190,66 @@ async fn the_dev_sandbox_configuration_emits_a_static_llms_txt_and_a_readable_bo
                 .unwrap()
                 .iter()
                 .any(|f| f.as_str() == Some("llms.txt")),
+            "{manifest}"
+        );
+
+        // The export shell is a site's: its worker boots the site runtime,
+        // and nothing in it names the sandbox's own trees.
+        let shell_sw = fs::read_to_string(shell_dist.join("sw.js")).unwrap();
+        assert_eq!(
+            shell_sw.matches("const SANDBOX = 'site';").count(),
+            1,
+            "{shell_sw}"
+        );
+        assert!(!shell_sw.contains("/__impresspress_dev/"), "{shell_sw}");
+        assert!(
+            shell_sw.contains("const EXPORT_SHELL = null;"),
+            "{shell_sw}"
+        );
+        // It is laid down whole at the bundler's root, byte for byte…
+        let root = impresspress_bundle::bundle::EXPORT_SHELL_ROOT;
+        let laid = dist.join(root.trim_matches('/'));
+        let shell_files =
+            impresspress_bundle::bundle::manifest::list_dist_files(&shell_dist).unwrap();
+        assert!(shell_files.iter().any(|f| f == "sw.js"), "{shell_files:?}");
+        assert_eq!(
+            impresspress_bundle::bundle::manifest::list_dist_files(&laid).unwrap(),
+            shell_files
+        );
+        for file in &shell_files {
+            assert_eq!(
+                fs::read(laid.join(file)).unwrap(),
+                fs::read(shell_dist.join(file)).unwrap(),
+                "{file}"
+            );
+        }
+        // …the sandbox's worker hands its runtime that root…
+        assert_eq!(
+            sw.matches(&format!(
+                "const EXPORT_SHELL = {};",
+                serde_json::to_string(root).unwrap()
+            ))
+            .count(),
+            1,
+            "{sw}"
+        );
+        // …and none of its files is listed as the sandbox's own, nor is the
+        // root a path the sandbox's worker leaves to the static host.
+        let root_relative = root.trim_start_matches('/');
+        assert!(
+            !manifest["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f.as_str().unwrap().starts_with(root_relative)),
+            "{manifest}"
+        );
+        assert!(
+            !bypass
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| root.starts_with(p.as_str().unwrap())),
             "{manifest}"
         );
         titles.push(title);

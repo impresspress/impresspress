@@ -18,11 +18,24 @@
 # Building either half without the other is a bundle with no `/b/dev`, so both
 # are done here rather than left to the caller.
 #
+# The same holds for the EXPORT SHELL the sandbox carries — the static files
+# for the site its export hands the user, built as a site rather than copied
+# from the sandbox: the wasm is compiled with `--features
+# browser-site-runtime` alone (`pkg-site/`, no workspace compiled in), and the
+# shell is bundled from `export-shell/impresspress.toml` (`[sandbox] mode =
+# "site"`) into `export-shell/dist/`, which the sandbox's own configuration
+# names as `[sandbox] export_shell`. Before either bundle is assembled,
+# `check-runtime-markers.mjs` checks the two compiled wasms against each other:
+# no workspace endpoint, tool or compiler path in the site runtime, all of them
+# in the sandbox's. After, the shell the sandbox shipped is compared byte for
+# byte with the site wasm this run compiled.
+#
 # Usage:
 #   examples/dev-sandbox/build.sh                  # build dist/ from seeds/blank
 #   examples/dev-sandbox/build.sh --seed NAME       # build dist/ from seeds/NAME
 #   examples/dev-sandbox/build.sh --seed NAME --out ../dist-NAME  # move the bundle there
 #   examples/dev-sandbox/build.sh --pkg-dir DIR     # assemble from DIR instead of compiling the wasm
+#   examples/dev-sandbox/build.sh --site-pkg-dir DIR  # the export shell's wasm from DIR, likewise
 #   examples/dev-sandbox/build.sh --check           # verify every seed and the compiler tree
 #
 # A relative `--out` is relative to the directory the script is run from; it
@@ -37,6 +50,12 @@
 # over another, and the second is assembled from a restamped copy of
 # `pkg-dev/` (`crates/impresspress-web/tests/e2e/fixtures/next-runtime-pkg.mjs`).
 # Everything after step 1 is the same recipe either way.
+#
+# `--site-pkg-dir DIR` does the same for step 1b: DIR is a wasm-pack output of
+# `impresspress-web` built with `--features browser-site-runtime` — `pkg-site/`
+# as an earlier run left it — and the export shell is assembled from that.
+# The two are independent: the next deployment `sw-update.spec.ts` deploys
+# needs another sandbox runtime, not another site runtime, so CI passes both.
 #
 # `IMPRESSPRESS=/path/to/impresspress` overrides which CLI binary assembles
 # the bundle. Default is whatever is on `PATH`, which is the trap this
@@ -198,6 +217,7 @@ check_compiler() {
 SEED="blank"
 OUT=""
 PKG_DIR=""
+SITE_PKG_DIR=""
 CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -205,7 +225,8 @@ while [ $# -gt 0 ]; do
     --seed) SEED="${2:-}"; [ -n "$SEED" ] || { echo "build.sh: --seed needs a name" >&2; exit 1; }; shift ;;
     --out) OUT="${2:-}"; [ -n "$OUT" ] || { echo "build.sh: --out needs a directory" >&2; exit 1; }; shift ;;
     --pkg-dir) PKG_DIR="${2:-}"; [ -n "$PKG_DIR" ] || { echo "build.sh: --pkg-dir needs a directory" >&2; exit 1; }; shift ;;
-    *) echo "build.sh: unknown argument '$1' (usage: build.sh [--check] [--seed NAME] [--out DIR] [--pkg-dir DIR])" >&2; exit 1 ;;
+    --site-pkg-dir) SITE_PKG_DIR="${2:-}"; [ -n "$SITE_PKG_DIR" ] || { echo "build.sh: --site-pkg-dir needs a directory" >&2; exit 1; }; shift ;;
+    *) echo "build.sh: unknown argument '$1' (usage: build.sh [--check] [--seed NAME] [--out DIR] [--pkg-dir DIR] [--site-pkg-dir DIR])" >&2; exit 1 ;;
   esac
   shift
 done
@@ -263,21 +284,26 @@ if [ -n "$OUT" ]; then
   fi
 fi
 
-# `--pkg-dir`, like `--out`, is the caller's path: resolved here, before the
-# `cd` further down, and checked before anything is built.
-if [ -n "$PKG_DIR" ]; then
-  PKG_DIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PKG_DIR")"
+# `--pkg-dir` and `--site-pkg-dir`, like `--out`, are the caller's paths:
+# resolved here, before the `cd` further down, and checked before anything is
+# built. `resolve_pkg_dir FLAG DIR` prints the resolved path.
+resolve_pkg_dir() {
+  local flag="$1" dir
+  dir="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$2")"
   for file in impresspress_web.js impresspress_web_bg.wasm; do
-    [ -f "$PKG_DIR/$file" ] || {
-      echo "build.sh: --pkg-dir '$PKG_DIR' has no $file — it must be a wasm-pack output of impresspress-web" >&2
+    [ -f "$dir/$file" ] || {
+      echo "build.sh: $flag '$dir' has no $file — it must be a wasm-pack output of impresspress-web" >&2
       exit 1
     }
   done
-  [ -d "$PKG_DIR/snippets" ] || {
-    echo "build.sh: --pkg-dir '$PKG_DIR' has no snippets/ — the JS glue cannot resolve its imports" >&2
+  [ -d "$dir/snippets" ] || {
+    echo "build.sh: $flag '$dir' has no snippets/ — the JS glue cannot resolve its imports" >&2
     exit 1
   }
-fi
+  printf '%s\n' "$dir"
+}
+if [ -n "$PKG_DIR" ]; then PKG_DIR="$(resolve_pkg_dir --pkg-dir "$PKG_DIR")"; fi
+if [ -n "$SITE_PKG_DIR" ]; then SITE_PKG_DIR="$(resolve_pkg_dir --site-pkg-dir "$SITE_PKG_DIR")"; fi
 
 if [ "$CHECK_ONLY" = 1 ]; then
   check_seed
@@ -321,17 +347,66 @@ else
   (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-dev -- --features browser-devtools)
 fi
 
-# 2. The sealed × web flow. `examples/dev-sandbox` has an `impresspress.toml`
-#    but no `Cargo.toml`, so the CLI's mode detection (`mode.rs`) takes the
-#    sealed path — which honours `IMPRESSPRESS_WEB_PKG_DIR` rather than
-#    rebuilding impresspress-web itself.
-cd "$HERE"
+# 1b. The site runtime — the sandbox's runtime half alone, with no workspace
+#     compiled in — for the export shell, into its own `pkg-site/`.
+#     `--site-pkg-dir` names one that already exists, and nothing is compiled.
+if [ -n "$SITE_PKG_DIR" ]; then
+  log "using the site-runtime wasm-pack output at $SITE_PKG_DIR"
+else
+  SITE_PKG_DIR="$REPO/crates/impresspress-web/pkg-site"
+  log "wasm-pack build --features browser-site-runtime -> $SITE_PKG_DIR"
+  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-site -- --features browser-site-runtime)
+fi
+
+# 1c. The guarantee the feature split is for, checked on the two artifacts:
+#     no workspace marker in the site runtime, every one in the sandbox's.
+log "checking the site runtime for workspace code (check-runtime-markers.mjs)"
+#     Its report goes to stderr with the rest of the log: stdout is the
+#     bundle path alone (callers keep its last line).
+node "$HERE/check-runtime-markers.mjs" "$SITE_PKG_DIR/impresspress_web_bg.wasm" "$PKG_DIR/impresspress_web_bg.wasm" >&2
+
+# 2b, 2. The sealed × web flow, twice: the export shell, then the sandbox
+#    that carries it. Neither `examples/dev-sandbox` nor `export-shell/` has a
+#    `Cargo.toml`, so the CLI's mode detection (`mode.rs`) takes the sealed
+#    path — which honours `IMPRESSPRESS_WEB_PKG_DIR` rather than rebuilding
+#    impresspress-web itself, and copies the wasm from it unchanged.
 [ -n "$IMPRESSPRESS_BIN" ] || {
   echo "build.sh: no impresspress CLI on PATH (or at \$IMPRESSPRESS='${IMPRESSPRESS:-}')." >&2
   echo "  cargo install --path '$REPO/crates/impresspress' --locked --root '$REPO/out'" >&2
   echo "  IMPRESSPRESS='$REPO/out/bin/impresspress' examples/dev-sandbox/build.sh" >&2
   exit 1
 }
+
+# 2b. The export shell, into `export-shell/dist/` — the directory the
+#     sandbox's `[sandbox] export_shell` names.
+cd "$HERE/export-shell"
+log "assembling the export shell with $IMPRESSPRESS_BIN"
+IMPRESSPRESS_WEB_PKG_DIR="$SITE_PKG_DIR" \
+  "$IMPRESSPRESS_BIN" build --target web --release
+SHELL_DIST="$HERE/export-shell/dist"
+# A site's worker: the mode the site runtime is compiled for, and nothing of
+# the sandbox's own trees (no compiler bypass, no export shell of its own).
+grep -q "const SANDBOX = 'site';" "$SHELL_DIST/sw.js" || {
+  echo "build.sh: $SHELL_DIST/sw.js does not declare \"const SANDBOX = 'site';\" — is [sandbox] mode = \"site\" set in export-shell/impresspress.toml?" >&2
+  exit 1
+}
+if grep -q "/__impresspress_dev/" "$SHELL_DIST/sw.js"; then
+  echo "build.sh: $SHELL_DIST/sw.js names /__impresspress_dev/ — the export shell must not carry the sandbox's trees" >&2
+  exit 1
+fi
+# Its manifest lists its files and states the rules its worker bypasses —
+# the two things a reader of the shell takes from it.
+python3 - "$SHELL_DIST/asset-manifest.json" <<'SHELLMANIFEST' || exit 1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+if not manifest.get("files"):
+    raise SystemExit(f"build.sh: {sys.argv[1]} lists no files")
+if not isinstance(manifest.get("bypass"), dict):
+    raise SystemExit(f"build.sh: {sys.argv[1]} states no bypass rules")
+SHELLMANIFEST
+
+# 2. The sandbox, with the shell laid down at /__impresspress_dev/export-shell/.
+cd "$HERE"
 log "assembling the bundle with $IMPRESSPRESS_BIN"
 IMPRESSPRESS_WEB_PKG_DIR="$PKG_DIR" \
   "$IMPRESSPRESS_BIN" build --target web --release
@@ -385,6 +460,27 @@ if not shown or any(t != title for t in shown):
 BOOTTITLE
 [ -f "$DIST/__impresspress_dev/compiler/manifest.json" ] || {
   echo "build.sh: $DIST/__impresspress_dev/compiler/manifest.json was not overlaid — check impresspress.toml's [[assets.overlay]]" >&2
+  exit 1
+}
+# The export shell: the sandbox's worker hands its runtime the shell's root,
+# and the shell laid down there runs the site wasm THIS run compiled (or was
+# handed with --site-pkg-dir) — byte for byte, not merely a shell of the same
+# name from an earlier build. The sealed flow copies the wasm-pack output
+# unchanged and only renames it, so the shell's own manifest says which file
+# it is.
+grep -q 'const EXPORT_SHELL = "/__impresspress_dev/export-shell/";' "$DIST/sw.js" || {
+  echo "build.sh: $DIST/sw.js does not hand its runtime the export shell — is [sandbox] export_shell set in impresspress.toml?" >&2
+  exit 1
+}
+SHIPPED_SHELL="$DIST/__impresspress_dev/export-shell"
+SHELL_WASM="$(python3 - "$SHIPPED_SHELL/asset-manifest.json" <<'SHELLWASM'
+import json, sys
+assets = json.load(open(sys.argv[1], encoding="utf-8"))["assets"]
+print(assets["impresspress_web_bg.wasm"].lstrip("/"))
+SHELLWASM
+)" || { echo "build.sh: $SHIPPED_SHELL/asset-manifest.json does not name the shell's wasm" >&2; exit 1; }
+cmp "$SHIPPED_SHELL/$SHELL_WASM" "$SITE_PKG_DIR/impresspress_web_bg.wasm" || {
+  echo "build.sh: the export shell's $SHELL_WASM is not $SITE_PKG_DIR/impresspress_web_bg.wasm — the sandbox shipped a shell built from another wasm" >&2
   exit 1
 }
 
