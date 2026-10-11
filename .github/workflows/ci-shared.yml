@@ -1015,7 +1015,7 @@ jobs:
 
       # The other two configurations `impresspress-web` has. Each compiles its
       # own block of `runtime_factory.rs`'s const assertions — the compiled
-      # sandbox, the mode every `initialize({ dev })` request resolves to, and
+      # sandbox, the mode every `initialize({ sandbox })` request resolves to, and
       # for a site build that the factory routes no `/b/dev` path — so these
       # steps are what check that wiring, and they are where a site build's
       # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
@@ -1126,7 +1126,7 @@ jobs:
           echo "UPDATE_DIST=$UPDATE_DIST" >> "$GITHUB_ENV"
 
       # One script, shared with local runs: wasm-pack with `browser-devtools`,
-      # then the sealed web flow with `[dev] enabled = true` and the welcome
+      # then the sealed web flow with `[sandbox] mode = "workspace"` and the welcome
       # seed overlaid onto `dist/seed/`. Its last stdout line is the dist path.
       - name: Build the dev-sandbox bundle
         run: |

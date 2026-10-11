@@ -14,8 +14,8 @@ import { bootServiceWorker, loginAdmin, WELCOME_PHRASE } from './fixtures/dev-sa
  * workspace half. Nothing in either can be covered by a host test, so this
  * file is the first and only place they run.
  * The bundle it serves is built by `examples/dev-sandbox/build.sh` (a
- * `browser-devtools` wasm through the sealed web flow with `[dev] enabled =
- * true`, the welcome starter site at `examples/dev-sandbox/seeds/blank/`
+ * `browser-devtools` wasm through the sealed web flow with `[sandbox] mode =
+ * "workspace"`, the welcome starter site at `examples/dev-sandbox/seeds/blank/`
  * overlaid onto `dist/seed/`).
  *
  * The first test is the anonymous half: **seed-on-boot** (a fresh origin

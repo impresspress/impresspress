@@ -89,24 +89,30 @@ const IMPRESSPRESS_CSP: &str = concat!(
 
 /// Boot the runtime inside the Service Worker.
 ///
-/// `options` is the object `sw.js` passes: `{ dev: <bool>, bypass: <rules> }`,
-/// rendered from the bundle's `__DEV_ENABLED__` and `__BYPASS_RULES__`
-/// placeholders. A missing or non-boolean `dev` reads as `false` — the
-/// sandbox is never enabled by an unparseable value. `bypass` is the paths
-/// this worker leaves to the static host (see `bypass_rules_option`).
+/// `options` is the object `sw.js` passes:
+/// `{ sandbox: 'none' | 'site' | 'workspace', bypass: <rules>, pageEngines: <paths> }`,
+/// rendered from the bundle's `__SANDBOX__`, `__BYPASS_RULES__` and
+/// `__PAGE_ENGINES__` placeholders (`impresspress-bundle`'s `SandboxShell`
+/// spells the mode). Only `'workspace'` asks for the workspace; any other
+/// value — including a missing one, or one that is none of the three, which
+/// gets a console warning — does not: the workspace is never enabled by an
+/// unparseable value. `bypass` is the paths this worker leaves to the static
+/// host (see `bypass_rules_option`).
 ///
-/// The flag is a *request*, and it selects the WORKSPACE half of the sandbox
-/// only, and only on a build that compiled one (see [`SandboxMode`]). A build
-/// with `browser-site-runtime` compiled in — a site build, or a
-/// `browser-devtools` build, which implies it — always runs the sandbox's
-/// RUNTIME half: the seed import, the generation ledger, journal
-/// convergence, the dynamic-block rebuild. That is what makes an
+/// The mode is a *request*, and what it can select is the WORKSPACE half of
+/// the sandbox only, and only on a build that compiled one (see
+/// [`SandboxMode`]). A build with `browser-site-runtime` compiled in — a
+/// site build, or a `browser-devtools` build, which implies it — always runs
+/// the sandbox's RUNTIME half: the seed import, the generation ledger,
+/// journal convergence, the dynamic-block rebuild. That is what makes an
 /// ImpressPress folder serve the site it ships, and an EXPORTED bundle boots
-/// with `{ dev: false }` precisely so it has no `/b/dev`. Where the build has
-/// no workspace — a site build ([`SandboxMode::Exported`]) or no sandbox at
-/// all ([`SandboxMode::Absent`]) — `{ dev: true }` is a no-op apart from the
-/// single console warning below: same seeded variables, same CSP, same
-/// routes as `{ dev: false }`.
+/// with `{ sandbox: 'site' }` precisely so it has no `/b/dev`. Where the
+/// build has no workspace — a site build ([`SandboxMode::Exported`]) or no
+/// sandbox at all ([`SandboxMode::Absent`]) — `{ sandbox: 'workspace' }` is
+/// a no-op apart from the single console warning below: same seeded
+/// variables, same CSP, same routes as any other request. So is
+/// `{ sandbox: 'site' }` on a build with no sandbox at all, with a warning of
+/// its own.
 #[wasm_bindgen]
 pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // Before anything that can log. `tracing`'s default dispatcher discards
@@ -129,17 +135,30 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // `impresspress_core::deferred`.
     impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Queued);
 
-    let dev_requested = js_sys::Reflect::get(&options, &JsValue::from_str("dev"))
+    let sandbox = js_sys::Reflect::get(&options, &JsValue::from_str("sandbox"))
         .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .and_then(|v| v.as_string());
+    let workspace_requested = sandbox.as_deref() == Some("workspace");
+
+    // A value that is none of the three words is a `sw.js` this runtime does
+    // not understand. It boots without the workspace — the rule above — but
+    // says so, rather than leaving an operator to wonder why `/b/dev` 404s.
+    if !matches!(sandbox.as_deref(), Some("none" | "site" | "workspace")) {
+        web_sys::console::warn_1(
+            &format!(
+                "impresspress: initialize() was handed sandbox {sandbox:?}, which is none of \
+                 'none', 'site' and 'workspace'; booting without the workspace"
+            )
+            .into(),
+        );
+    }
 
     // A bundle can ask for the workspace on a build that never compiled it.
     // That is accepted rather than fatal — the workspace cannot exist, so
     // there is nothing to disable — but it is the difference between "the
     // workspace is off" and "the workspace is missing", so say so once rather
     // than leaving an operator to wonder why `/b/dev` 404s.
-    if dev_requested {
+    if workspace_requested {
         let missing = match CompiledSandbox::COMPILED {
             CompiledSandbox::None => Some(
                 "a build without the sandbox (neither `browser-site-runtime` nor \
@@ -154,18 +173,28 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
         if let Some(missing) = missing {
             web_sys::console::warn_1(
                 &format!(
-                    "impresspress: initialize({{ dev: true }}) on {missing}, and /b/dev \
-                     will not exist"
+                    "impresspress: initialize({{ sandbox: 'workspace' }}) on {missing}, and \
+                     /b/dev will not exist"
                 )
                 .into(),
             );
         }
     }
+    // The same for the runtime half: a site asked for on a build with no
+    // sandbox at all has nothing to import its `seed/` with.
+    if sandbox.as_deref() == Some("site") && CompiledSandbox::COMPILED == CompiledSandbox::None {
+        web_sys::console::warn_1(
+            &"impresspress: initialize({ sandbox: 'site' }) on a build without the sandbox \
+              (neither `browser-site-runtime` nor `browser-devtools`) — the site runtime is \
+              not compiled in, and the bundle's seed/ will not be imported"
+                .into(),
+        );
+    }
 
     impresspress_browser::db_init().await?;
 
     let factory = RuntimeFactory::new(RuntimeOptions {
-        dev_enabled: dev_requested,
+        workspace_requested,
         page_engine_scripts: page_engines_option(&options),
     })
     .map_err(|e| JsValue::from_str(&e))?;
@@ -190,7 +219,7 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // was in the middle of, and rebuild with the active block set — all before
     // returning, because requests only start once `initialize()` resolves.
     //
-    // This runs for an EXPORTED bundle too — `{ dev: false }` on a
+    // This runs for an EXPORTED bundle too — `{ sandbox: 'site' }` on a
     // `browser-devtools` build, or any request on a site build. It is the
     // whole reason the export works: the archive ships a `seed/` beside the
     // shell, and this is what reads it. See `SandboxMode`.

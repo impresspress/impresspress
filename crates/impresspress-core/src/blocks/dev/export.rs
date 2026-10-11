@@ -40,11 +40,13 @@
 //! The exported site is a plain ImpressPress deployment: no `/b/dev`, no
 //! in-browser compiler, no cross-origin-isolation headers on static files.
 //! All three follow from one build-time constant in `sw.js`
-//! (`const DEV_ENABLED = true;`, `impresspress-bundle`'s `sw.js.tmpl`), which
-//! `initialize({ dev: DEV_ENABLED, … })` and the isolation-header passthrough
-//! both read — so turning the sandbox off is one line rewritten, and its
-//! absence is an [`ErrorCode::Internal`], never a silent pass-through of a
-//! shell that would come up as a second sandbox.
+//! (`const SANDBOX = 'workspace';`, `impresspress-bundle`'s `sw.js.tmpl`),
+//! which `initialize({ sandbox: SANDBOX, … })` and the isolation-header
+//! passthrough both read — so turning the shell into a site's is one line
+//! rewritten, to `'site'`, and its absence is an [`ErrorCode::Internal`],
+//! never a silent pass-through of a shell that would come up as a second
+//! sandbox. (`'site'`, not `'none'`: the exported site imports the `seed/`
+//! beside it, which is the sandbox's runtime half.)
 //!
 //! The boot page is the second edit: a deployment's boot notice (the sandbox
 //! says what it is and where its `llms.txt` is) describes the deployment, not
@@ -110,16 +112,17 @@ use super::{
 };
 use crate::{config_vars::APP_NAME_KEY, http::err_internal};
 
-/// The line `sw.js` carries when it was built for a dev deployment, and the
-/// one it must carry after an export.
+/// The line `sw.js` carries when it was built for the development sandbox
+/// (`[sandbox] mode = "workspace"`), and the one it must carry after an
+/// export (a site's).
 ///
 /// Stated as a pair rather than as a `replace` call inline so the assertion
 /// and the rewrite cannot disagree about the text. `impresspress-bundle`'s
-/// `sw_passes_the_dev_flag_to_initialize` pins the producing half.
-const SW_DEV_ON: &str = "const DEV_ENABLED = true;";
-const SW_DEV_OFF: &str = "const DEV_ENABLED = false;";
+/// `sw_passes_the_sandbox_mode_to_initialize` pins the producing half.
+const SW_DEV_ON: &str = "const SANDBOX = 'workspace';";
+const SW_DEV_OFF: &str = "const SANDBOX = 'site';";
 
-/// The shell's service worker: development mode off, the compiler's bypass
+/// The shell's service worker: booted as a site, the compiler's bypass
 /// gone.
 const SW_PATH: &str = "sw.js";
 
@@ -627,7 +630,7 @@ fn preview(assembled: &Assembled) -> ExportManifest {
     }
 }
 
-/// `sw.js` with the sandbox turned off.
+/// `sw.js` with the workspace turned off: booted as a site.
 ///
 /// A missing marker is [`ErrorCode::Internal`], never a pass-through: this
 /// runs on a shell the deployment built for itself, so its absence means the
@@ -639,7 +642,7 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
     let text = std::str::from_utf8(bytes).map_err(|_| {
         Refusal::Internal(WaferError::new(
             ErrorCode::Internal,
-            "the deployment's sw.js is not valid UTF-8, so its dev flag cannot be turned off",
+            "the deployment's sw.js is not valid UTF-8, so its sandbox mode cannot be set to site",
         ))
     })?;
     // EXACTLY one occurrence, not "at least one". Two would mean the marker
@@ -654,7 +657,7 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
             ErrorCode::Internal,
             format!(
                 "the deployment's sw.js contains {occurrences} occurrences of {SW_DEV_ON:?} \
-                 and the export needs exactly one, so it cannot turn development mode off; \
+                 and the export needs exactly one, so it cannot boot the shell as a site; \
                  the bundle was built by a different impresspress-bundle than this runtime \
                  expects"
             ),
@@ -936,7 +939,7 @@ async fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> Result<Str
     let rows: usize = facts.tables.values().sum();
     // A plain textual substitution, not a template engine: every value is a
     // number or a short string this function produced, and
-    // `export_zip_contains_shell_seed_sources_and_data_with_dev_off` asserts
+    // `export_zip_contains_shell_seed_sources_and_data_booted_as_a_site` asserts
     // no `{{` survives.
     Ok(README_TEMPLATE
         .replace("{{TITLE}}", facts.title)
@@ -1218,25 +1221,28 @@ mod tests {
     }
 
     #[test]
-    fn turning_the_dev_flag_off_rewrites_exactly_one_line() {
-        let sw = b"const DEV_ENABLED = true;\nif (DEV_ENABLED && x) {}\n";
+    fn setting_the_sandbox_to_site_rewrites_exactly_one_line() {
+        let sw = b"const SANDBOX = 'workspace';\nif (SANDBOX === 'workspace' && x) {}\n";
         let Ok(out) = sw_with_dev_off(sw) else {
-            panic!("a dev shell must rewrite");
+            panic!("a workspace shell must rewrite");
         };
         let text = String::from_utf8(out).expect("utf8");
-        assert!(text.contains("const DEV_ENABLED = false;"), "{text}");
+        assert!(text.contains("const SANDBOX = 'site';"), "{text}");
         // The passthrough branch is untouched: it reads the constant, so
-        // flipping the declaration flips it too. That is the whole reason
-        // the bundler renders one constant instead of two literals.
-        assert!(text.contains("if (DEV_ENABLED && x) {}"), "{text}");
-        assert!(!text.contains("= true;"), "{text}");
+        // changing the declaration turns it off too. That is the whole
+        // reason the bundler renders one constant instead of two literals.
+        assert!(
+            text.contains("if (SANDBOX === 'workspace' && x) {}"),
+            "{text}"
+        );
+        assert!(!text.contains("const SANDBOX = 'workspace';"), "{text}");
     }
 
     /// A second occurrence — a comment quoting the declaration, most likely
     /// — makes the marker ambiguous, and a blanket replace would edit both.
     #[test]
     fn a_shell_with_two_markers_is_refused() {
-        let sw = b"// flip const DEV_ENABLED = true; to false\nconst DEV_ENABLED = true;\n";
+        let sw = b"// set const SANDBOX = 'workspace'; to site\nconst SANDBOX = 'workspace';\n";
         let Err(refusal) = sw_with_dev_off(sw) else {
             panic!("an ambiguous marker must be refused");
         };
@@ -1307,11 +1313,15 @@ mod tests {
     /// The one thing this must never do is pass a shell through unchanged.
     #[test]
     fn a_shell_without_the_marker_is_refused() {
-        let Err(refusal) = sw_with_dev_off(b"await initialize({ dev: true });") else {
+        let Err(refusal) = sw_with_dev_off(b"await initialize({ sandbox: 'workspace' });") else {
             panic!("a shell with no marker must be refused");
         };
         let error = refusal.into_error();
         assert_eq!(error.code, ErrorCode::Internal);
-        assert!(error.message.contains("DEV_ENABLED"), "{}", error.message);
+        assert!(
+            error.message.contains("const SANDBOX = 'workspace';"),
+            "{}",
+            error.message
+        );
     }
 }

@@ -110,7 +110,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// URL prefix the seed bundle is served under.
 ///
 /// Also the service worker's bypass prefix (`impresspress-bundle`'s
-/// `build_template_vars` adds it when `[dev] enabled`), because these files
+/// `BypassRules::for_bundle` adds it for a `[sandbox] mode` of `"site"` or
+/// `"workspace"`), because these files
 /// are served by the static host and must not be answered from the published
 /// site the runtime owns.
 pub const ROOT: &str = "/seed/";

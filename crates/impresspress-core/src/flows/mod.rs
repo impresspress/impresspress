@@ -260,7 +260,7 @@ mod tests {
     use super::*;
 
     /// What `impresspress-web`'s `RuntimeFactory` declares on a
-    /// `browser-devtools` build with `[dev] enabled` (`runtime_factory.rs`):
+    /// `browser-devtools` build with `[sandbox] mode = "workspace"` (`runtime_factory.rs`):
     /// the app CSP plus the sandbox's two additions, and the frame-ancestors
     /// relaxation its live-site preview iframe needs.
     fn sandbox_security_headers() -> Vec<(String, serde_json::Value)> {

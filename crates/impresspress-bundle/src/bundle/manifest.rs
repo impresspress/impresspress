@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::BypassRules;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetManifest {
     #[serde(rename = "buildId")]
@@ -29,6 +31,19 @@ pub struct AssetManifest {
     /// exporting a site with no runtime in it.
     #[serde(default)]
     pub files: Vec<String>,
+    /// The bypass rules this bundle's `sw.js` was rendered with — the one
+    /// [`BypassRules`] value `run` computes, which also renders the fetch
+    /// handler's condition and the `BYPASS_RULES` the worker hands
+    /// `initialize()` (`bundle::bypass`'s module docs: there is no second
+    /// list). Written here so a reader that holds only the bundle's files,
+    /// not its running worker, can learn which paths that worker leaves to
+    /// the static host without parsing JavaScript.
+    ///
+    /// No `#[serde(default)]`: empty rules would read as "this worker
+    /// bypasses nothing", which is a claim about the worker, not the absence
+    /// of one. A manifest from a bundler that predates the field does not
+    /// parse as this type.
+    pub bypass: BypassRules,
 }
 
 /// Every file under `dir`, relative to it, `/`-separated and sorted, skipping
@@ -115,6 +130,10 @@ mod tests {
             build_id: "a1b2c3d4".into(),
             assets,
             files: vec!["index.html".into(), "vendor/sql-wasm.wasm".into()],
+            bypass: BypassRules {
+                exact: vec!["/sw.js".into()],
+                prefixes: vec!["/seed/".into()],
+            },
         };
         m.write(&path).unwrap();
 
@@ -125,16 +144,37 @@ mod tests {
         // the export reads it back verbatim and fetches each one.
         let parsed: AssetManifest = serde_json::from_str(&contents).unwrap();
         assert_eq!(parsed.files, vec!["index.html", "vendor/sql-wasm.wasm"]);
+        // The rules round-trip as the same `{exact, prefixes}` object
+        // `BypassRules::render_data` writes into `sw.js`.
+        assert_eq!(parsed.bypass, m.bypass);
+        let raw: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(
+            raw["bypass"],
+            serde_json::from_str::<serde_json::Value>(&m.bypass.render_data()).unwrap()
+        );
     }
 
-    /// A manifest written by a bundler that predates `files` still parses;
-    /// the field is simply empty. The export turns that into an explicit
-    /// refusal rather than an empty shell.
+    /// A manifest without `files` still parses; the field is simply empty.
+    /// The export turns that into an explicit refusal rather than an empty
+    /// shell.
     #[test]
     fn a_manifest_without_files_still_parses() {
-        let parsed: AssetManifest =
-            serde_json::from_str(r#"{"buildId": "x", "assets": {}}"#).unwrap();
+        let parsed: AssetManifest = serde_json::from_str(
+            r#"{"buildId": "x", "assets": {}, "bypass": {"exact": [], "prefixes": []}}"#,
+        )
+        .unwrap();
         assert!(parsed.files.is_empty());
+    }
+
+    /// One without `bypass` does not: empty rules would be a claim that the
+    /// worker bypasses nothing, not the absence of a claim.
+    #[test]
+    fn a_manifest_without_bypass_does_not_parse() {
+        let error = serde_json::from_str::<AssetManifest>(
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"]}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("bypass"), "{error}");
     }
 
     /// Every file under the directory, relative and sorted, with unrendered
@@ -202,6 +242,7 @@ mod tests {
             build_id: "x".into(),
             assets,
             files: Vec::new(),
+            bypass: BypassRules::default(),
         };
         m.write(&path).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();

@@ -1,6 +1,14 @@
 use serde::Deserialize;
 
+/// `impresspress.toml`, as the web and native flows read it.
+///
+/// `deny_unknown_fields`, like every table inside it: a table this does not
+/// know is refused by name rather than ignored. An ignored table is a setting
+/// that silently does nothing — a misspelt `[sandbx]`, or the `[dev]` that
+/// `[sandbox]` replaced, would build a bundle with no sandbox at all and say
+/// nothing.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub app: AppConfig,
     #[serde(default)]
@@ -10,19 +18,36 @@ pub struct Config {
     #[serde(default)]
     pub impresspress: ImpresspressConfig,
     #[serde(default)]
-    pub dev: DevConfig,
+    pub sandbox: SandboxConfig,
+    /// `[cloudflare]` — the one other table this file carries, and not this
+    /// parser's: `helpers::cloudflare::env::parse` reads it, with its own
+    /// struct, for the `embed × cloudflare` flow (`flows::embed_cloudflare`,
+    /// through `env::load`). Declared here only so that
+    /// `deny_unknown_fields` above accepts it; its contents are skipped
+    /// unread (`IgnoredAny`), and validated by that parser instead.
+    #[serde(default, rename = "cloudflare")]
+    _cloudflare: Option<serde::de::IgnoredAny>,
 }
 
-/// `[dev]` — the browser development sandbox (`impresspress/dev` block,
-/// `/b/dev`, dynamic guest blocks). Off by default; also requires the
-/// consumer crate to be built with `impresspress-web/browser-devtools`. A
-/// bundle built without the feature accepts `enabled = true` and ignores it —
-/// the block cannot exist in a binary that never compiled it.
+/// `[sandbox]` — which half of the browser sandbox the bundle's service
+/// worker boots (`impresspress_bundle::bundle::SandboxShell`, whose words
+/// `mode` takes):
+///
+/// * `mode = "site"` — the sandbox's runtime half: the bundle ships a
+///   `seed/` and imports it on a cold boot (an exported sandbox);
+/// * `mode = "workspace"` — the development sandbox itself (`/b/dev`, the
+///   in-browser compiler, dynamic guest blocks).
+///
+/// No `[sandbox]` table is a plain bundle (`"none"`, the default). The mode
+/// is what the service worker asks for; the wasm it boots must also have been
+/// COMPILED with the matching `impresspress-web` feature
+/// (`browser-site-runtime`, or `browser-devtools` for a workspace) — a mode
+/// the binary never compiled is the mode the binary has, with one console
+/// warning.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct DevConfig {
-    #[serde(default)]
-    pub enabled: bool,
+pub struct SandboxConfig {
+    pub mode: impresspress_bundle::bundle::SandboxShell,
 }
 
 /// Points at the impresspress workspace when the consumer repo isn't part of it.
@@ -192,7 +217,7 @@ impl Config {
             extra_bypass_prefix: self.assets.extra_bypass_prefix.clone(),
             extra_bypass_exact: self.assets.extra_bypass_exact.clone(),
             opfs_wipe_on_recovery: self.assets.opfs_wipe_on_recovery,
-            dev_enabled: self.dev.enabled,
+            sandbox: self.sandbox.mode,
             boot_notice_html,
         })
     }
@@ -469,53 +494,94 @@ boot_redirect = "/"
         assert!(err.contains("parse"), "{err}");
     }
 
+    const APP: &str = r#"
+[app]
+name = "x"
+title = "X"
+boot_redirect = "/"
+"#;
+
     #[test]
-    fn dev_table_parses_and_defaults_off() {
-        let cfg = parse(
-            r#"
-[app]
-name = "x"
-title = "X"
-boot_redirect = "/"
+    fn sandbox_table_parses_each_mode_and_defaults_to_none() {
+        use impresspress_bundle::bundle::SandboxShell;
+        for (mode, expected) in [
+            ("none", SandboxShell::None),
+            ("site", SandboxShell::Site),
+            ("workspace", SandboxShell::Workspace),
+        ] {
+            let cfg = parse(&format!("{APP}\n[sandbox]\nmode = \"{mode}\"\n")).unwrap();
+            assert_eq!(cfg.sandbox.mode, expected);
+            // The word the toml takes is the word `sw.js` is rendered with.
+            assert_eq!(expected.as_str(), mode);
+            // What the bundler is handed is the same value, not a reading of it.
+            let app = cfg.bundle_app(std::path::Path::new(".")).unwrap();
+            assert_eq!(app.sandbox, expected);
+        }
 
-[dev]
-enabled = true
-"#,
-        )
-        .unwrap();
-        assert!(cfg.dev.enabled);
-
-        // The sandbox is opt-in: a config that never mentions `[dev]` must
-        // leave it off rather than inheriting whatever the last build used.
-        let cfg = parse(
-            r#"
-[app]
-name = "x"
-title = "X"
-boot_redirect = "/"
-"#,
-        )
-        .unwrap();
-        assert!(!cfg.dev.enabled);
+        // The sandbox is opt-in: a config that never mentions `[sandbox]`
+        // must leave it off rather than inheriting whatever the last build
+        // used.
+        let cfg = parse(APP).unwrap();
+        assert_eq!(cfg.sandbox.mode, SandboxShell::None);
     }
 
     #[test]
-    fn reject_unknown_field_in_dev() {
-        let err = parse(
-            r#"
-[app]
-name = "x"
-title = "X"
-boot_redirect = "/"
+    fn a_sandbox_table_needs_a_known_mode() {
+        let err = parse(&format!("{APP}\n[sandbox]\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mode"), "expected 'mode', got: {err}");
 
-[dev]
-enabled = true
-sandbox = "yes"
-"#,
-        )
+        let err = parse(&format!("{APP}\n[sandbox]\nmode = \"dev\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("dev") && err.contains("workspace"),
+            "expected the unknown mode and the known ones, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_unknown_field_in_sandbox() {
+        let err = parse(&format!(
+            "{APP}\n[sandbox]\nmode = \"workspace\"\nenabled = true\n"
+        ))
         .unwrap_err()
         .to_string();
-        assert!(err.contains("sandbox"), "expected 'sandbox', got: {err}");
+        assert!(err.contains("enabled"), "expected 'enabled', got: {err}");
+    }
+
+    /// A table this parser does not know is refused, naming it and listing
+    /// the tables it does know — `[dev]`, which `[sandbox]` replaced, and a
+    /// misspelling alike. Ignored, either would build a bundle with no
+    /// sandbox and say nothing.
+    #[test]
+    fn an_unknown_table_is_refused() {
+        for (table, body) in [
+            ("dev", "[dev]\nenabled = true\n"),
+            ("sandbx", "[sandbx]\nmode = \"workspace\"\n"),
+        ] {
+            let err = parse(&format!("{APP}\n{body}")).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("unknown field `{table}`")) && err.contains("`sandbox`"),
+                "{body:?}: {err}"
+            );
+        }
+    }
+
+    /// …except `[cloudflare]`, which the same file carries for another
+    /// parser (`helpers::cloudflare::env::parse`). It is accepted here, and
+    /// whatever it holds is that parser's to validate.
+    #[test]
+    fn the_cloudflare_table_is_accepted() {
+        let cfg = parse(&format!(
+            "{APP}\n[cloudflare]\naccount_id = \"x\"\n\n[cloudflare.d1]\nbinding = \"DB\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.sandbox.mode,
+            impresspress_bundle::bundle::SandboxShell::None
+        );
     }
 
     #[test]

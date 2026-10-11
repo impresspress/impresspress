@@ -81,7 +81,7 @@ test('the default bundle has no dev block', async ({ page }) => {
   // The sandbox's security model (design §13) is that `impresspress/dev` is
   // ABSENT from a normal deployment, not merely disabled in one. `pkg/` is
   // built with neither of the sandbox's features (`browser-site-runtime`, or
-  // `browser-devtools`, which implies it) and without `[dev] enabled`, so
+  // `browser-devtools`, which implies it) and without a `[sandbox]` table, so
   // both halves of that must hold: no route, and no relaxed header for the
   // compiler worker / preview iframe the sandbox would need.
   //
@@ -116,7 +116,7 @@ test('the default bundle has no dev block', async ({ page }) => {
   // run against a real built `pkg/` (Plan 1 Task 10's fix round).
   //
   // Both lines above really do discriminate: `dev-foundations.spec.ts`
-  // asserts the opposite of each on a `browser-devtools` + `[dev] enabled`
+  // asserts the opposite of each on a `browser-devtools` + `[sandbox] mode = "workspace"`
   // bundle. They did not until `flows::register_site_main` stopped replacing
   // the factory's whole `wafer-run/security-headers` config with the shared
   // CSP directives — until then both bundles served the same policy and this
