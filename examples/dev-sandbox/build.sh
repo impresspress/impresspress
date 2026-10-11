@@ -361,7 +361,9 @@ fi
 # 1c. The guarantee the feature split is for, checked on the two artifacts:
 #     no workspace marker in the site runtime, every one in the sandbox's.
 log "checking the site runtime for workspace code (check-runtime-markers.mjs)"
-node "$HERE/check-runtime-markers.mjs" "$SITE_PKG_DIR/impresspress_web_bg.wasm" "$PKG_DIR/impresspress_web_bg.wasm"
+#     Its report goes to stderr with the rest of the log: stdout is the
+#     bundle path alone (callers keep its last line).
+node "$HERE/check-runtime-markers.mjs" "$SITE_PKG_DIR/impresspress_web_bg.wasm" "$PKG_DIR/impresspress_web_bg.wasm" >&2
 
 # 2b, 2. The sealed × web flow, twice: the export shell, then the sandbox
 #    that carries it. Neither `examples/dev-sandbox` nor `export-shell/` has a
