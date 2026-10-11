@@ -55,8 +55,9 @@ pub const SHELL_URL: &str = "/";
 ///
 /// Deliberately NOT a bypass rule: the shell's files are for the worker's own
 /// `fetch` to read, and a service worker never intercepts its own requests.
-/// A page navigating here is answered by the runtime, not by the shell's
-/// files.
+/// A page this worker controls that navigates here is answered by the
+/// runtime; an uncontrolled load (first visit, hard reload) gets the static
+/// file — the shell's own `index.html`.
 pub const EXPORT_SHELL_ROOT: &str = "/__impresspress_dev/export-shell/";
 
 /// Which half of the browser sandbox a bundle's service worker boots: `sw.js.tmpl`'s
