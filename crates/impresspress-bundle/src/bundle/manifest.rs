@@ -17,25 +17,26 @@ pub struct AssetManifest {
     /// `assets` names only the two files a template has to *reference* by a
     /// logical name (the wasm-pack pair). This is the whole shell — the
     /// rendered `index.html`/`loader.js`/`sw.js`, the wasm-bindgen
-    /// `snippets/` tree, `vendor/`, everything — and it exists because the
-    /// running runtime has no other way to enumerate the static files it was
-    /// shipped inside of. The development sandbox's export
-    /// (`impresspress-core`'s `blocks::dev::export`) copies exactly this list
-    /// into the bundle it hands the user, so a file the bundler produced but
-    /// this list omitted would be a file missing from every exported site,
-    /// with no error anywhere.
+    /// `snippets/` tree, `vendor/`, everything — and it exists because a
+    /// running runtime has no other way to enumerate the static files of a
+    /// bundle. The development sandbox's export (`impresspress-core`'s
+    /// `blocks::dev::export`) copies exactly the list of its EXPORT SHELL —
+    /// the site bundle a sandbox deployment carries at
+    /// [`EXPORT_SHELL_ROOT`](super::EXPORT_SHELL_ROOT) (`[sandbox]
+    /// export_shell`) — into the bundle it hands the user, so a file the
+    /// bundler produced but this list omitted would be a file missing from
+    /// every exported site, with no error anywhere.
     ///
-    /// A sandbox that carries an export shell (`[sandbox] export_shell`, laid
-    /// down at [`EXPORT_SHELL_ROOT`](super::EXPORT_SHELL_ROOT)) has two such
-    /// lists: its own, which never names the shell's files — the shell is
-    /// laid down after this listing is taken — and the shell's, in the
-    /// shell's own `asset-manifest.json`, naming exactly the files the shell
-    /// was built with.
+    /// A sandbox that carries an export shell has two such lists: its own,
+    /// which never names the shell's files — the shell is laid down after
+    /// this listing is taken — and the shell's, in the shell's own
+    /// `asset-manifest.json`, naming exactly the files the shell was built
+    /// with. Only the shell's is copied anywhere.
     ///
-    /// `#[serde(default)]` so a manifest written by an older bundler still
-    /// deserializes — the field is then empty, which the export reports as
-    /// "this deployment's shell cannot be listed" rather than silently
-    /// exporting a site with no runtime in it.
+    /// `#[serde(default)]` so a manifest without the field still
+    /// deserializes as an empty list, which every reader refuses by name
+    /// ("lists no files") rather than treating as a bundle with nothing in
+    /// it.
     #[serde(default)]
     pub files: Vec<String>,
     /// The bypass rules this bundle's `sw.js` was rendered with — the one
@@ -51,6 +52,47 @@ pub struct AssetManifest {
     /// of one. A manifest from a bundler that predates the field does not
     /// parse as this type.
     pub bypass: BypassRules,
+    /// The SHA-256 (lowercase hex) of every file in [`Self::files`] as
+    /// [`run`](super::run) wrote it, by the same relative path — except
+    /// `asset-manifest.json` itself, which cannot carry its own digest.
+    ///
+    /// For a reader that fetches the listed files from a static host and has
+    /// to know it got the bundle's bytes: the development sandbox's export,
+    /// reading its export shell. A static host can answer a file it does not
+    /// have with something else and a `200` — Cloudflare's
+    /// `not_found_handling = "single-page-application"` serves the root
+    /// `index.html` for any missing path — so a shell missing one listed file
+    /// would otherwise be exported with HTML under the wasm's name. A digest
+    /// catches that and every other wrong body (a stale cache, a partial
+    /// upload), where checking the response's type would catch only the
+    /// first.
+    ///
+    /// The bytes `run` wrote: a file the `impresspress` CLI lays over a
+    /// listed one afterwards (`[[assets.overlay]]`) replaces the file and not
+    /// its digest. The export shell is laid down whole, and the CLI refuses
+    /// an overlay under its root, so what it lists is what it ships.
+    ///
+    /// No `#[serde(default)]`, like [`Self::bypass`]: a manifest from a
+    /// bundler that predates the field cannot be verified, and does not
+    /// parse as this type.
+    pub sha256: BTreeMap<String, String>,
+}
+
+/// The name [`run`](super::run) writes the manifest under — the one listed
+/// file [`AssetManifest::sha256`] has no digest for.
+pub const ASSET_MANIFEST: &str = "asset-manifest.json";
+
+/// [`AssetManifest::sha256`] for `files` under `dir`: every listed file but
+/// [`ASSET_MANIFEST`], hashed as it is on disk.
+pub fn digest_files(dir: &Path, files: &[String]) -> Result<BTreeMap<String, String>> {
+    use sha2::{Digest, Sha256};
+    let mut digests = BTreeMap::new();
+    for file in files.iter().filter(|file| *file != ASSET_MANIFEST) {
+        let path = dir.join(file);
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        digests.insert(file.clone(), hex::encode(Sha256::digest(&bytes)));
+    }
+    Ok(digests)
 }
 
 /// Every file under `dir`, relative to it, `/`-separated and sorted, skipping
@@ -113,9 +155,31 @@ fn is_package_metadata(name: &str) -> bool {
 }
 
 impl AssetManifest {
+    /// Check that `dir` holds exactly what this manifest states: every listed
+    /// file there, each but [`ASSET_MANIFEST`] with the digest
+    /// [`Self::sha256`] gives it, and no digest for a file that is not
+    /// listed. The error names the first file that is not.
+    pub fn verify(&self, dir: &Path) -> Result<()> {
+        if let Some(unlisted) = self.sha256.keys().find(|file| !self.files.contains(file)) {
+            anyhow::bail!("{ASSET_MANIFEST} has a digest for {unlisted:?}, which it does not list");
+        }
+        let found = digest_files(dir, &self.files)?;
+        for (file, digest) in &found {
+            match self.sha256.get(file) {
+                None => anyhow::bail!("{ASSET_MANIFEST} lists {file:?} with no digest"),
+                Some(listed) if listed != digest => anyhow::bail!(
+                    "{file:?} is not the file {ASSET_MANIFEST} lists: its SHA-256 is {digest}, \
+                     not {listed}"
+                ),
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn write(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_string_pretty(self).context("serialising asset manifest")?;
-        std::fs::write(path, body).context("writing asset-manifest.json")?;
+        std::fs::write(path, body).with_context(|| format!("writing {ASSET_MANIFEST}"))?;
         Ok(())
     }
 }
@@ -141,6 +205,10 @@ mod tests {
                 exact: vec!["/sw.js".into()],
                 prefixes: vec!["/seed/".into()],
             },
+            sha256: BTreeMap::from([
+                ("index.html".into(), "aa".repeat(32)),
+                ("vendor/sql-wasm.wasm".into(), "bb".repeat(32)),
+            ]),
         };
         m.write(&path).unwrap();
 
@@ -154,6 +222,8 @@ mod tests {
         // The rules round-trip as the same `{exact, prefixes}` object
         // `BypassRules::render_data` writes into `sw.js`.
         assert_eq!(parsed.bypass, m.bypass);
+        // The digests round-trip as a plain `{path: hex}` object.
+        assert_eq!(parsed.sha256, m.sha256);
         let raw: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(
             raw["bypass"],
@@ -167,7 +237,7 @@ mod tests {
     #[test]
     fn a_manifest_without_files_still_parses() {
         let parsed: AssetManifest = serde_json::from_str(
-            r#"{"buildId": "x", "assets": {}, "bypass": {"exact": [], "prefixes": []}}"#,
+            r#"{"buildId": "x", "assets": {}, "bypass": {"exact": [], "prefixes": []}, "sha256": {}}"#,
         )
         .unwrap();
         assert!(parsed.files.is_empty());
@@ -178,10 +248,54 @@ mod tests {
     #[test]
     fn a_manifest_without_bypass_does_not_parse() {
         let error = serde_json::from_str::<AssetManifest>(
-            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"]}"#,
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "sha256": {}}"#,
         )
         .unwrap_err();
         assert!(error.to_string().contains("bypass"), "{error}");
+    }
+
+    /// Nor one without `sha256`: a reader that verifies what it fetched
+    /// cannot verify against nothing.
+    #[test]
+    fn a_manifest_without_digests_does_not_parse() {
+        let error = serde_json::from_str::<AssetManifest>(
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "bypass": {"exact": [], "prefixes": []}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("sha256"), "{error}");
+    }
+
+    /// Every listed file is hashed as it is on disk, except the manifest,
+    /// which cannot hold its own digest.
+    #[test]
+    fn digest_files_hashes_every_listed_file_but_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
+        std::fs::write(tmp.path().join("index.html"), "hello").unwrap();
+        std::fs::write(tmp.path().join("vendor/a.wasm"), "").unwrap();
+        let files = vec![
+            ASSET_MANIFEST.to_string(),
+            "index.html".to_string(),
+            "vendor/a.wasm".to_string(),
+        ];
+        let digests = digest_files(tmp.path(), &files).unwrap();
+        assert_eq!(
+            digests,
+            BTreeMap::from([
+                (
+                    "index.html".to_string(),
+                    // SHA-256("hello")
+                    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string()
+                ),
+                (
+                    "vendor/a.wasm".to_string(),
+                    // SHA-256("")
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
+                ),
+            ])
+        );
+        // A listed file that is not there is an error, not a skipped entry.
+        assert!(digest_files(tmp.path(), &["gone.js".to_string()]).is_err());
     }
 
     /// Every file under the directory, relative and sorted, with unrendered
@@ -250,6 +364,7 @@ mod tests {
             assets,
             files: Vec::new(),
             bypass: BypassRules::default(),
+            sha256: BTreeMap::new(),
         };
         m.write(&path).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();

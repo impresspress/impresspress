@@ -93,8 +93,9 @@ const IMPRESSPRESS_CSP: &str = concat!(
 /// `{ sandbox: 'none' | 'site' | 'workspace', exportShell: <root> | null, bypass: <rules>, pageEngines: <paths> }`,
 /// rendered from the bundle's `__SANDBOX__`, `__EXPORT_SHELL__`,
 /// `__BYPASS_RULES__` and `__PAGE_ENGINES__` placeholders
-/// (`impresspress-bundle`'s `SandboxShell` spells the mode). `exportShell` is
-/// read by a workspace only (see `export_shell_option`). Only `'workspace'`
+/// (`impresspress-bundle`'s `SandboxShell` spells the mode). `exportShell`
+/// roots the export shell a workspace's export reads (see
+/// `export_shell_option`). Only `'workspace'`
 /// asks for the workspace; any other
 /// value — including a missing one, or one that is none of the three, which
 /// gets a console warning — does not: the workspace is never enabled by an
@@ -107,8 +108,9 @@ const IMPRESSPRESS_CSP: &str = concat!(
 /// site build, or a `browser-devtools` build, which implies it — always runs
 /// the sandbox's RUNTIME half: the seed import, the generation ledger,
 /// journal convergence, the dynamic-block rebuild. That is what makes an
-/// ImpressPress folder serve the site it ships, and an EXPORTED bundle boots
-/// with `{ sandbox: 'site' }` precisely so it has no `/b/dev`. Where the
+/// ImpressPress folder serve the site it ships. An EXPORTED bundle is the
+/// deployment's export shell: a site build, booted with `{ sandbox: 'site' }`,
+/// with no `/b/dev` compiled in at all. Where the
 /// build has no workspace — a site build ([`SandboxMode::Exported`]) or no
 /// sandbox at all ([`SandboxMode::Absent`]) — `{ sandbox: 'workspace' }` is
 /// a no-op apart from the single console warning below: same seeded
@@ -194,17 +196,19 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     }
 
     // A workspace whose deployment carries no export shell still boots — the
-    // shell is what its export is for, not what the workspace runs on — but
-    // says so once, the way the other missing options do.
+    // shell is what its export ships, not what the workspace runs on — but
+    // says so once, the way the other missing options do. Its export then
+    // refuses, naming the missing shell; it never ships the sandbox's own.
+    #[cfg(feature = "browser-devtools")]
+    let export_shell = export_shell_option(&options);
     #[cfg(feature = "browser-devtools")]
     if workspace_requested {
-        if let Err(reason) = export_shell_option(&options) {
+        if let Err(reason) = &export_shell {
             web_sys::console::warn_1(
                 &format!(
                     "impresspress: this workspace's deployment carries no export shell \
-                     ({reason}); its export has no shell built as a site to ship — rebuild \
-                     the deployment with examples/dev-sandbox/build.sh, which builds one \
-                     ([sandbox] export_shell)"
+                     ({reason}), so its export will refuse — rebuild the deployment with \
+                     examples/dev-sandbox/build.sh, which builds one ([sandbox] export_shell)"
                 )
                 .into(),
             );
@@ -227,7 +231,14 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // path they would never exist at all. Without `browser-site-runtime`
     // there is no `attach` at all and `factory` is used as constructed.
     #[cfg(feature = "browser-site-runtime")]
-    let (factory, sandbox) = site_runtime::attach(factory, bypass_rules_option(&options));
+    let (factory, sandbox) = site_runtime::attach(
+        factory,
+        site_runtime::SandboxOptions {
+            bypass: bypass_rules_option(&options),
+            #[cfg(feature = "browser-devtools")]
+            export_shell: export_shell.ok(),
+        },
+    );
 
     let wafer = factory.build(&[]).await?;
 
@@ -239,10 +250,10 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // was in the middle of, and rebuild with the active block set — all before
     // returning, because requests only start once `initialize()` resolves.
     //
-    // This runs for an EXPORTED bundle too — `{ sandbox: 'site' }` on a
-    // `browser-devtools` build, or any request on a site build. It is the
-    // whole reason the export works: the archive ships a `seed/` beside the
-    // shell, and this is what reads it. See `SandboxMode`.
+    // This runs for an EXPORTED bundle too — the export shell, a site build
+    // booted with `{ sandbox: 'site' }`. It is the whole reason the export
+    // works: the archive ships a `seed/` beside the shell, and this is what
+    // reads it. See `SandboxMode`.
     #[cfg(feature = "browser-site-runtime")]
     site_runtime::install(&sandbox).await;
 
@@ -289,14 +300,15 @@ fn bypass_rules_option(options: &JsValue) -> impresspress_core::blocks::dev::Byp
 }
 
 /// The `exportShell` option of `initialize()`: the root path at which this
-/// deployment carries its export shell — the bundle built as a site for the
-/// workspace's export to ship — rendered by `impresspress-bundle` from its one
-/// `EXPORT_SHELL_ROOT` (`EXPORT_SHELL` in `sw.js.tmpl`), or `null` for a
+/// deployment carries its export shell — the bundle built as a site, which
+/// the workspace's export ships — rendered by `impresspress-bundle` from its
+/// one `EXPORT_SHELL_ROOT` (`EXPORT_SHELL` in `sw.js.tmpl`), or `null` for a
 /// bundle built without one (`[sandbox] export_shell`).
 ///
-/// A root is a path that starts and ends with `/`. Anything else —
-/// missing, `null`, or a value that is not such a path — is the reason there
-/// is none, for the caller's warning.
+/// A root is a path that starts and ends with `/`; it roots the
+/// `BrowserShellSource` the export reads. Anything else — missing, `null`,
+/// or a value that is not such a path — is the reason there is none, for the
+/// caller's warning, and the export refuses.
 #[cfg(feature = "browser-devtools")]
 fn export_shell_option(options: &JsValue) -> Result<String, String> {
     let value = js_sys::Reflect::get(options, &JsValue::from_str("exportShell"))

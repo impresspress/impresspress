@@ -867,10 +867,10 @@ function recoveryError(error, status) {
 // The app's name, for text a PERSON reads — taken from the page this script
 // runs in (the title `index.html` shows, else the document's), never from a
 // constant rendered into this file. The page is what says whose app this is:
-// a shell that is copied and retitled (the development sandbox's export
-// retitles `index.html` for the exported site) must not go on naming the
-// deployment it was copied from. Console lines keep the build's own prefix;
-// they are for whoever built it.
+// a shell that is copied and retitled (the development sandbox's export ships
+// its export shell with `index.html` retitled for the exported site) must not
+// go on showing the name it was built with. Console lines keep the build's
+// own prefix; they are for whoever built it.
 function appTitle() {
     const shown = document.querySelector('[data-app-title]');
     return (shown && shown.textContent) || document.title || 'The app';

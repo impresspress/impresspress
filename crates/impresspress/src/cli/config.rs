@@ -52,9 +52,11 @@ pub struct Config {
 /// like an overlay's `from`, and the web flows copy it to
 /// `impresspress_bundle::bundle::EXPORT_SHELL_ROOT` after the bundler has
 /// listed the sandbox's own files (`helpers::overlays::apply_export_shell`),
-/// so none of its files is listed as the sandbox's. A mode other than
-/// `"workspace"` with an export shell does not parse: the shell is what a
-/// workspace's export ships, and nothing else would read it.
+/// so none of its files is listed as the sandbox's. It is the two-way rule
+/// of a workspace: a workspace without one does not parse — its export would
+/// have no site runtime to ship, and refuses rather than ship the sandbox's
+/// own — and neither does any other mode with one, since nothing else would
+/// read it.
 #[derive(Debug, Deserialize, Default)]
 #[serde(try_from = "RawSandboxConfig")]
 pub struct SandboxConfig {
@@ -77,12 +79,24 @@ impl TryFrom<RawSandboxConfig> for SandboxConfig {
 
     fn try_from(raw: RawSandboxConfig) -> Result<Self, Self::Error> {
         use impresspress_bundle::bundle::SandboxShell;
-        if raw.export_shell.is_some() && raw.mode != SandboxShell::Workspace {
-            return Err(format!(
-                "[sandbox] export_shell is for a workspace's export to ship, but mode is \
-                 \"{}\"; set mode = \"workspace\" or remove export_shell",
-                raw.mode.as_str()
-            ));
+        match (raw.mode, &raw.export_shell) {
+            (SandboxShell::Workspace, None) => {
+                return Err(
+                    "[sandbox] mode = \"workspace\" needs export_shell: the directory of the \
+                     bundle built as a site (mode = \"site\", around a browser-site-runtime \
+                     wasm) that the workspace's export ships; examples/dev-sandbox/build.sh \
+                     builds one"
+                        .to_string(),
+                );
+            }
+            (mode, Some(_)) if mode != SandboxShell::Workspace => {
+                return Err(format!(
+                    "[sandbox] export_shell is for a workspace's export to ship, but mode is \
+                     \"{}\"; set mode = \"workspace\" or remove export_shell",
+                    mode.as_str()
+                ));
+            }
+            _ => {}
         }
         Ok(Self {
             mode: raw.mode,
@@ -546,12 +560,16 @@ boot_redirect = "/"
     #[test]
     fn sandbox_table_parses_each_mode_and_defaults_to_none() {
         use impresspress_bundle::bundle::SandboxShell;
-        for (mode, expected) in [
-            ("none", SandboxShell::None),
-            ("site", SandboxShell::Site),
-            ("workspace", SandboxShell::Workspace),
+        for (mode, expected, extra) in [
+            ("none", SandboxShell::None, ""),
+            ("site", SandboxShell::Site, ""),
+            (
+                "workspace",
+                SandboxShell::Workspace,
+                "export_shell = \"export-shell/dist\"\n",
+            ),
         ] {
-            let cfg = parse(&format!("{APP}\n[sandbox]\nmode = \"{mode}\"\n")).unwrap();
+            let cfg = parse(&format!("{APP}\n[sandbox]\nmode = \"{mode}\"\n{extra}")).unwrap();
             assert_eq!(cfg.sandbox.mode, expected);
             // The word the toml takes is the word `sw.js` is rendered with.
             assert_eq!(expected.as_str(), mode);
@@ -583,9 +601,10 @@ boot_redirect = "/"
         );
     }
 
-    /// `export_shell` is a workspace's: with it the bundler is asked to name
-    /// the shell to the runtime; without it, not. Any other mode with one is
-    /// refused, naming the mode.
+    /// `export_shell` is a workspace's, and a workspace's alone: with it the
+    /// bundler is asked to name the shell to the runtime; a workspace without
+    /// one is refused, naming the key and the script that builds one; any
+    /// other mode with one is refused, naming the mode.
     #[test]
     fn an_export_shell_belongs_to_a_workspace() {
         let cfg = parse(&format!(
@@ -598,9 +617,19 @@ boot_redirect = "/"
         );
         assert!(cfg.bundle_app(Path::new(".")).unwrap().export_shell);
 
-        let cfg = parse(&format!("{APP}\n[sandbox]\nmode = \"workspace\"\n")).unwrap();
-        assert_eq!(cfg.sandbox.export_shell, None);
-        assert!(!cfg.bundle_app(Path::new(".")).unwrap().export_shell);
+        let err = parse(&format!("{APP}\n[sandbox]\nmode = \"workspace\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("export_shell") && err.contains("build.sh"),
+            "{err}"
+        );
+
+        for mode in ["none", "site"] {
+            let cfg = parse(&format!("{APP}\n[sandbox]\nmode = \"{mode}\"\n")).unwrap();
+            assert_eq!(cfg.sandbox.export_shell, None);
+            assert!(!cfg.bundle_app(Path::new(".")).unwrap().export_shell);
+        }
 
         for mode in ["none", "site"] {
             let err = parse(&format!(

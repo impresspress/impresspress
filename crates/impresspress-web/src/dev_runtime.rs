@@ -1,5 +1,5 @@
 //! The browser half of the sandbox's WORKSPACE: the dry-run probe, the runtime
-//! counter and the announcement to the `/b/dev` page, and the static shell the
+//! counter and the announcement to the `/b/dev` page, and the export shell the
 //! export copies. Compiled only by `browser-devtools`; a site build
 //! (`browser-site-runtime` alone) has none of it.
 //!
@@ -13,7 +13,7 @@
 //!   go live, the counter `GET /b/dev/api/status` reports, and the
 //!   `dev-generation` message `dev.js` listens for;
 //! * `BrowserShellSource`, the [`ShellSource`] the export reads the
-//!   deployment's static files through;
+//!   deployment's export shell through;
 //! * `shared` and `repair_llms`, the two calls `site_runtime`'s
 //!   `attach` and `install` make into this module, each under
 //!   `browser-devtools`: the `DevShared` with its workspace half, and the boot step
@@ -30,8 +30,9 @@
 //! `ShellSource` and `Context` are bounded on `wafer_run::MaybeSend +
 //! MaybeSync`, which is unbounded on `wasm32`. `clippy::arc_with_non_send_sync`
 //! fires in this module only at `DenyAllContext::clone_arc` — and NOT on
-//! `shared`'s `Arc::new(BrowserShellSource)`, because `BrowserShellSource`
-//! is a fieldless unit struct and so is genuinely `Send + Sync`.
+//! `shared`'s `Arc::new(BrowserShellSource { .. })`, because
+//! `BrowserShellSource` holds only its root, a `String`, and so is genuinely
+//! `Send + Sync`.
 
 use std::{cell::Cell, sync::Arc};
 
@@ -53,15 +54,22 @@ use crate::site_runtime::{describe_js, load_guest, BrowserRuntimeControl, SwFetc
 
 /// The `DevShared` of a `browser-devtools` build: `control` as both the
 /// `RuntimeControl` every activation uses and the `WorkspaceControl` the
-/// workspace asks, the bypass rules, and [`BrowserShellSource`] as the shell
-/// the export copies. Called by `site_runtime::attach`, which owns the order
-/// it happens in (see its doc and the module header there).
-pub(crate) fn shared(control: Arc<BrowserRuntimeControl>, bypass: BypassRules) -> Arc<DevShared> {
+/// workspace asks, the bypass rules, and a [`BrowserShellSource`] rooted at
+/// `export_shell` as the shell the export copies — or none, when the worker
+/// handed `initialize()` no export shell, which the export refuses. Called
+/// by `site_runtime::attach`, which owns the order it happens in (see its
+/// doc and the module header there).
+pub(crate) fn shared(
+    control: Arc<BrowserRuntimeControl>,
+    bypass: BypassRules,
+    export_shell: Option<String>,
+) -> Arc<DevShared> {
     // `ShellSource` is `MaybeSend + MaybeSync`, unbounded on wasm32, for the
     // same reason `RuntimeControl` is — this implementation resolves through a
     // `JsFuture`.
-    let shell: Arc<dyn ShellSource> = Arc::new(BrowserShellSource);
-    DevShared::new(control, bypass, shell)
+    let export_shell =
+        export_shell.map(|root| Arc::new(BrowserShellSource { root }) as Arc<dyn ShellSource>);
+    DevShared::new(control, bypass, export_shell)
 }
 
 /// The boot step `site_runtime::install` runs between convergence and the
@@ -369,38 +377,49 @@ async fn post_to_windows(message: &JsValue) -> Result<(), String> {
     Ok(())
 }
 
-/// [`ShellSource`] over `/asset-manifest.json` and the service worker's own
-/// `fetch` — how the export reads the static files this deployment was
-/// shipped as.
+/// [`ShellSource`] over the deployment's export shell, read with the service
+/// worker's own `fetch` — how the export reads the site bundle it ships.
 ///
 /// # Why fetching from in here reaches the network
 ///
-/// Two of the paths this fetches — `/` and `/index.html` — are ones the
-/// worker's own `fetch` handler deliberately INTERCEPTS (`sw.js.tmpl` says so
-/// outright: they are intercepted "so the consumer's router can render a UI
-/// block at root"), and `/sw.js` is on the bypass list. Neither matters here,
-/// because a service worker does not intercept its OWN outgoing requests: the
-/// `fetch` event fires for requests from the clients a worker controls, not
-/// for requests the worker itself makes. So `global.fetch('/index.html')`
-/// from inside this worker goes to the network — it is the deployment's real
-/// `index.html` that comes back, not the runtime's rendered landing page,
-/// which is exactly what an export has to copy.
+/// The shell's root is deliberately not on this worker's bypass list
+/// (`impresspress-bundle`'s `EXPORT_SHELL_ROOT`), and its `index.html` is a
+/// path the worker's fetch handler would otherwise hand to the runtime.
+/// Neither matters here, because a service worker does not intercept its OWN
+/// outgoing requests: the `fetch` event fires for requests from the clients a
+/// worker controls, not for requests the worker itself makes. So
+/// `global.fetch('<root>index.html')` from inside this worker goes to the
+/// network — it is the shell's real file that comes back, which is exactly
+/// what an export has to copy.
+///
+/// It is only a fetch. Whether a body is the file the shell lists — a static
+/// host's SPA fallback answers a missing file with `index.html` and a `200` —
+/// is `ShellListing`'s to decide, in `impresspress-core`, against the digest
+/// the shell's manifest gives each file.
 ///
 /// `cache: 'no-store'` because the HTTP cache is the one thing that could
-/// hand this a file from a previous deployment. An export naming this
-/// build's content-hashed script while carrying the previous build's bytes
-/// would be a folder that 404s its own runtime.
-struct BrowserShellSource;
+/// hand this a file from a previous deployment, which the digest check would
+/// then refuse.
+struct BrowserShellSource {
+    /// Where the shell is: `initialize({ exportShell })`, a path that starts
+    /// and ends with `/` (`crate::initialize` checks).
+    root: String,
+}
 
-impl BrowserShellSource {
-    /// One file, by absolute path, straight from the network.
-    async fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+#[wafer_block::wafer_async_trait]
+impl ShellSource for BrowserShellSource {
+    fn root(&self) -> &str {
+        &self.root
+    }
+
+    async fn fetch(&self, path: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{}{path}", self.root);
         let global: web_sys::ServiceWorkerGlobalScope = js_sys::global()
             .dyn_into()
-            .map_err(|_| "the static shell can only be read from a service worker".to_string())?;
+            .map_err(|_| "the export shell can only be read from a service worker".to_string())?;
         let init = web_sys::RequestInit::new();
         init.set_cache(web_sys::RequestCache::NoStore);
-        let request = web_sys::Request::new_with_str_and_init(url, &init)
+        let request = web_sys::Request::new_with_str_and_init(&url, &init)
             .map_err(|e| describe_js(&e, &format!("building a request for {url}")))?;
         let response: web_sys::Response = JsFuture::from(global.fetch_with_request(&request))
             .await
@@ -418,40 +437,5 @@ impl BrowserShellSource {
         .await
         .map_err(|e| describe_js(&e, &format!("reading {url}")))?;
         Ok(js_sys::Uint8Array::new(&buffer.unchecked_into::<js_sys::ArrayBuffer>()).to_vec())
-    }
-}
-
-/// Where the bundler writes the shell's own file listing.
-const ASSET_MANIFEST_URL: &str = "/asset-manifest.json";
-
-/// The one field of it this reads.
-#[derive(serde::Deserialize)]
-struct AssetManifestFiles {
-    /// Every file the bundler left in the dist directory, relative and
-    /// sorted (`impresspress-bundle`'s `AssetManifest::files`).
-    #[serde(default)]
-    files: Vec<String>,
-}
-
-#[wafer_block::wafer_async_trait]
-impl ShellSource for BrowserShellSource {
-    async fn list(&self) -> Result<Vec<String>, String> {
-        let bytes = self.get(ASSET_MANIFEST_URL).await?;
-        let manifest: AssetManifestFiles = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("{ASSET_MANIFEST_URL} did not parse: {e}"))?;
-        if manifest.files.is_empty() {
-            // An empty list is not "a shell with no files" — it is a manifest
-            // written by a bundler that predates the `files` field, and the
-            // export would silently produce a folder with no runtime in it.
-            return Err(format!(
-                "{ASSET_MANIFEST_URL} lists no files; this bundle was built by an \
-                 impresspress-bundle that does not write the shell's file list"
-            ));
-        }
-        Ok(manifest.files)
-    }
-
-    async fn fetch(&self, path: &str) -> Result<Vec<u8>, String> {
-        self.get(&format!("/{path}")).await
     }
 }

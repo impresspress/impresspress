@@ -43,7 +43,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "block-dev")]
-use super::repo::generations::GenerationCause;
+use super::{bypass::BypassRules, repo::generations::GenerationCause};
 
 /// Access tier a dynamically-registered block asks the router to apply to one
 /// of its route prefixes.
@@ -398,25 +398,30 @@ pub struct GenerationAnnouncement {
     pub changed_paths: Vec<String>,
 }
 
-/// The static shell the sandbox is running inside, as the export reads it.
+/// The export shell this deployment carries, as the export reads it: a
+/// complete bundle built as a SITE — `impresspress-bundle`'s
+/// `SandboxShell::Site`, around a wasm compiled without the workspace — that
+/// the sandbox deployment carries beside its own files
+/// (`impresspress-bundle`'s `EXPORT_SHELL_ROOT`, laid down by the
+/// `impresspress` CLI from `[sandbox] export_shell`).
 ///
 /// `impresspress-core` describes what an export bundle should contain, but it
-/// cannot read the deployment's own `index.html`, `sw.js` or wasm: those are
-/// static files the host serves, and the only thing that can fetch them is
-/// whatever is running the runtime — the service worker's own `fetch` in the
-/// browser, an in-memory map in the host tests. This is that seam, and it is
-/// the mirror of [`RuntimeControl`]: one describes the runtime the host
-/// builds, the other the files the host was shipped as.
+/// cannot read a deployment's static files: the only thing that can fetch
+/// them is whatever is running the runtime — the service worker's own `fetch`
+/// in the browser, an in-memory map in the host tests. This is that seam, and
+/// it is deliberately nothing more than a fetch: what the shell contains, and
+/// whether a fetched file is the one it lists, is [`ShellListing`]'s to say,
+/// in this crate, where the host tests run it.
 ///
-/// # Why a listing and not a fixed set of names
+/// # Why the export ships this, not the sandbox's own shell
 ///
-/// The shell's filenames are content-hashed and change with every build
-/// (`impresspress-bundle`'s `rename`), and the wasm-bindgen glue pulls in a
-/// `snippets/` tree whose shape depends on the crate. Nothing in this crate
-/// can know them. `impresspress-bundle` writes them all into
-/// `/asset-manifest.json`'s `files` for exactly this reason, and
-/// [`Self::list`] is what reads it back — so a file the bundler produced is
-/// a file the export ships, with no list to keep in step by hand.
+/// The sandbox's own shell is a WORKSPACE: its wasm carries `/b/dev`, the
+/// compiler adapter, the scaffold templates and the export itself. An export
+/// that copied it shipped all of that, dormant, to everyone the site was
+/// handed to. The export shell is the same runtime compiled without any of
+/// it, built by the same bundler with `const SANDBOX = 'site';`, no compiler
+/// bypass and no boot notice — so the export copies it file for file and
+/// edits nothing but the boot page's title, the site's own data.
 ///
 /// `MaybeSend + MaybeSync` for the same reason [`RuntimeControl`] is: the
 /// browser implementation resolves through a `JsFuture`, which is not `Send`,
@@ -426,17 +431,130 @@ pub struct GenerationAnnouncement {
 #[cfg(feature = "block-dev")]
 #[wafer_block::wafer_async_trait]
 pub trait ShellSource: wafer_run::MaybeSend + wafer_run::MaybeSync {
-    /// Every file of the running static shell, relative to the site root
-    /// (`index.html`, `vendor/sql-wasm.wasm`), as `/asset-manifest.json`'s
-    /// `files` lists them.
-    ///
-    /// `Err` — rather than an empty list — when the manifest cannot be read
-    /// or carries no `files`: an export with no runtime in it is a folder
-    /// that cannot be served, and it must fail loudly rather than quietly
-    /// produce one.
-    async fn list(&self) -> Result<Vec<String>, String>;
+    /// Where the shell is read from — the URL path its files are under — for
+    /// what a refusal says.
+    fn root(&self) -> &str;
 
-    /// The bytes of one file [`Self::list`] named, by that same relative
-    /// path.
+    /// The body of one file of the shell, by its path relative to the
+    /// shell's root ([`SHELL_MANIFEST`], `index.html`,
+    /// `vendor/sql-wasm.wasm`).
+    ///
+    /// `Err` for anything that is not a body the host answered with success —
+    /// a network failure, a status that is not 2xx. A `200` is not proof of
+    /// the file: a static host may answer a file it does not have with its
+    /// SPA fallback, which is why [`ShellListing`] checks every body.
     async fn fetch(&self, path: &str) -> Result<Vec<u8>, String>;
+}
+
+/// The file every bundle lists its own files in, relative to its root
+/// (`impresspress-bundle`'s `ASSET_MANIFEST`).
+#[cfg(feature = "block-dev")]
+pub const SHELL_MANIFEST: &str = "asset-manifest.json";
+
+/// The export shell's `asset-manifest.json`, as the export reads it: the three
+/// fields of `impresspress-bundle`'s `AssetManifest` it acts on. Read with
+/// [`Self::read`] and nothing else, so every reader gets its checks.
+///
+/// # Why a listing and not a fixed set of names
+///
+/// The shell's filenames are content-hashed and change with every build
+/// (`impresspress-bundle`'s `rename`), and the wasm-bindgen glue pulls in a
+/// `snippets/` tree whose shape depends on the crate. Nothing in this crate
+/// can know them. The bundler writes them all into `files` for exactly this
+/// reason — so a file the bundler produced is a file the export ships, with
+/// no list to keep in step by hand.
+#[cfg(feature = "block-dev")]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShellListing {
+    /// Every file of the shell, relative to its root, as the bundler listed
+    /// them — [`SHELL_MANIFEST`] itself included.
+    ///
+    /// `#[serde(default)]`, then refused by [`Self::read`] when empty: an
+    /// export with no runtime in it is a folder that cannot be served, and
+    /// must fail loudly rather than quietly produce one.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// The bypass rules the shell's `sw.js` was rendered with — the rules the
+    /// EXPORTED worker applies, so the ones a site file must not be shadowed
+    /// by. Required, with no serde default: empty rules would claim that
+    /// worker bypasses nothing, and a manifest without them is from a bundler
+    /// that predates them.
+    pub bypass: BypassRules,
+    /// Each listed file's SHA-256 (lowercase hex), but [`SHELL_MANIFEST`]'s
+    /// own. Required for the same reason: [`Self::fetch`] verifies every body
+    /// against it.
+    pub sha256: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(feature = "block-dev")]
+impl ShellListing {
+    /// Fetch and parse `shell`'s [`SHELL_MANIFEST`], returning the listing
+    /// and the manifest's own bytes — the one listed file the listing has no
+    /// digest for, which the export copies as read here.
+    ///
+    /// `Err`, naming the shell's root, when the manifest cannot be fetched,
+    /// is not JSON (an HTML body is called out: a static host's SPA fallback
+    /// answering a shell that is not deployed), lacks `bypass` or `sha256`,
+    /// lists no files, or lists a file without a digest.
+    pub async fn read(shell: &dyn ShellSource) -> Result<(Self, Vec<u8>), String> {
+        let root = shell.root();
+        let bytes = shell
+            .fetch(SHELL_MANIFEST)
+            .await
+            .map_err(|e| format!("at {root} could not be read: {e}"))?;
+        let listing: Self = serde_json::from_slice(&bytes).map_err(|e| {
+            if bytes.trim_ascii_start().starts_with(b"<") {
+                format!(
+                    "at {root} is missing from this deployment: its {SHELL_MANIFEST} came back \
+                     as HTML, which is a static host's answer for a file it does not have"
+                )
+            } else {
+                format!(
+                    "at {root} has a {SHELL_MANIFEST} this runtime cannot read ({e}); it was \
+                     built by a different impresspress-bundle than this runtime expects"
+                )
+            }
+        })?;
+        if listing.files.is_empty() {
+            return Err(format!("at {root} lists no files in its {SHELL_MANIFEST}"));
+        }
+        if let Some(file) = listing
+            .files
+            .iter()
+            .find(|file| *file != SHELL_MANIFEST && !listing.sha256.contains_key(*file))
+        {
+            return Err(format!(
+                "at {root} lists {file:?} in its {SHELL_MANIFEST} with no digest"
+            ));
+        }
+        Ok((listing, bytes))
+    }
+
+    /// The body of one listed file other than [`SHELL_MANIFEST`], verified
+    /// against its digest.
+    ///
+    /// A body that is not the listed one is refused, naming the file — never
+    /// shipped. The likeliest is a static host's SPA fallback: Cloudflare
+    /// answers a missing file with the root `index.html` and a `200`, which
+    /// would otherwise be zipped under the wasm's name.
+    pub async fn fetch(&self, shell: &dyn ShellSource, path: &str) -> Result<Vec<u8>, String> {
+        let root = shell.root();
+        let Some(listed) = self.sha256.get(path) else {
+            return Err(format!(
+                "at {root} has no digest for {path:?} in its {SHELL_MANIFEST}"
+            ));
+        };
+        let bytes = shell
+            .fetch(path)
+            .await
+            .map_err(|e| format!("at {root} could not be read: {e}"))?;
+        let found = super::blobs::sha256_hex(&bytes);
+        if &found != listed {
+            return Err(format!(
+                "at {root} is incomplete in this deployment: {path:?} came back with SHA-256 \
+                 {found}, not the {listed} its {SHELL_MANIFEST} lists"
+            ));
+        }
+        Ok(bytes)
+    }
 }

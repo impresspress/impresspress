@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   ADMIN_PASSWORD,
   bootServiceWorker,
+  expectASiteRuntime,
   loginToWorkspace,
   publishedPageTools,
   serveDirectory,
@@ -462,15 +463,21 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     for (const expected of ['README.md', 'index.html', 'sw.js', 'loader.js', 'seed/manifest.json']) {
       expect(inspected.names).toContain(expected);
     }
-    // The compiler tree is 72 MiB of toolchain for a `/b/dev` the exported
-    // site does not have. Nothing under it may be in here.
+    // Nothing of the sandbox's deployment: not its compiler tree (72 MiB of
+    // toolchain for a `/b/dev` the exported site does not have), not the
+    // export shell's own address — the export reads the shell from there and
+    // writes it at the root.
     expect(inspected.names.filter((n) => n.startsWith('__impresspress_dev/'))).toEqual([]);
 
-    // The shell boots as a SITE, in the one line that decides it — which is
-    // also what turns off the isolation-header passthrough, since both read
-    // the same constant and only a workspace takes the passthrough.
+    // The shell is the deployment's EXPORT SHELL, built as a site: the one
+    // line that decides the mode says so — which is also what keeps the
+    // isolation-header passthrough off, since both read the same constant
+    // and only a workspace takes the passthrough — it carries no export
+    // shell of its own, and it names nothing under `/__impresspress_dev/`.
     expect(inspected.sw).toContain("const SANDBOX = 'site';");
     expect(inspected.sw).not.toContain("const SANDBOX = 'workspace';");
+    expect(inspected.sw).toContain('const EXPORT_SHELL = null;');
+    expect(inspected.sw).not.toContain('/__impresspress_dev/');
     // …and `/seed/` is still bypassed, or the exported folder could never
     // import the seed shipped beside it.
     expect(inspected.sw).toContain("url.pathname.startsWith('/seed/')");
@@ -499,9 +506,9 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     // OPFS, its own service-worker registration and an empty database, so
     // this boots the exported bundle exactly as someone who received the zip
     // would — and the seed import is the only thing that can put a site
-    // there. The bundle boots with `const SANDBOX = 'site';`, so this also
-    // proves the fix that split `SandboxMode`: with the runtime half keyed on
-    // the workspace request, this page would be blank.
+    // there. The bundle is a site build booted with `const SANDBOX = 'site';`,
+    // so this also proves the site runtime alone serves an export: the seed
+    // import, the data snapshot and the products block all run on it.
     const runStart = Date.now();
     const unpacked = path.join(scratch, 'site');
     execFileSync('python3', [
@@ -510,6 +517,17 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       zipPath,
       unpacked,
     ]);
+    // The runtime it ships is the SITE runtime — not the sandbox's own
+    // binary under another name, and not one with any workspace code in it:
+    // the marker check build.sh runs on `pkg-site/`, run here on the bytes
+    // this export actually carried.
+    const exportedWasm = expectASiteRuntime(unpacked);
+    const sandboxWasm = (
+      (await (await page.request.get('/asset-manifest.json')).json()) as {
+        assets: Record<string, string>;
+      }
+    ).assets['impresspress_web_bg.wasm'].replace(/^\//, '');
+    expect(exportedWasm, 'the export ships a runtime of its own').not.toBe(sandboxWasm);
     const server = await serveDirectory(unpacked, WORKSPACE_EXPORT_PORT);
     const exportedContext = await browser.newContext({
       baseURL: `http://127.0.0.1:${WORKSPACE_EXPORT_PORT}`,
@@ -528,8 +546,8 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
         timeout: 60_000,
       });
 
-      // No workspace. The `/b/dev` route is not registered in an exported
-      // bundle, and the router is the gate — so this is a 404, not a 403.
+      // No workspace. The `/b/dev` route does not exist in an exported
+      // bundle — it is not compiled in — so this is a 404, not a 403.
       expect(await site.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(404);
       // …and no one-click entry. That page is PUBLIC in the workspace and
       // hands out an admin session, so its absence here is the boundary that

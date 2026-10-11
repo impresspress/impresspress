@@ -1,17 +1,18 @@
 //! `GET /b/dev/api/export` and `GET /b/dev/api/export/manifest` — the sandbox
 //! as a folder anyone can serve.
 //!
-//! Design §10.1. The archive is the running deployment's own static shell,
-//! with development mode switched off, plus a `seed/` tree in exactly the
-//! format [`super::seed`] reads on a cold boot. That symmetry is the whole
-//! design: there is one mechanism for "a fresh instance gets a site", and an
-//! export is a bundle that feeds it.
+//! Design §10.1. The archive is the deployment's EXPORT SHELL — the site
+//! runtime's own bundle, which a sandbox deployment carries at
+//! `impresspress-bundle`'s `EXPORT_SHELL_ROOT` — plus a `seed/` tree in
+//! exactly the format [`super::seed`] reads on a cold boot. That symmetry is
+//! the whole design: there is one mechanism for "a fresh instance gets a
+//! site", and an export is a bundle that feeds it.
 //!
 //! ```text
 //!     README.md                     how to serve it, what is inside, and the
 //!                                   disclosure about `data.json`
-//!     index.html sw.js loader.js …  the runtime shell, listed by
-//!                                   `/asset-manifest.json`'s `files`
+//!     index.html sw.js loader.js …  the export shell, listed by its own
+//!                                   `asset-manifest.json`'s `files`
 //!     seed/manifest.json            a `SeedManifest`: every file below with
 //!                                   its hash, size and served type
 //!     seed/site/**                  the site's files
@@ -35,27 +36,28 @@
 //! too; it is a browser-local read of a handful of files the service worker
 //! already has, on an explicit call.
 //!
-//! # Why the shell is rewritten rather than re-rendered
+//! # The shell is built as a site, not rewritten into one
 //!
 //! The exported site is a plain ImpressPress deployment: no `/b/dev`, no
-//! in-browser compiler, no cross-origin-isolation headers on static files.
-//! All three follow from one build-time constant in `sw.js`
-//! (`const SANDBOX = 'workspace';`, `impresspress-bundle`'s `sw.js.tmpl`),
-//! which `initialize({ sandbox: SANDBOX, … })` and the isolation-header
-//! passthrough both read — so turning the shell into a site's is one line
-//! rewritten, to `'site'`, and its absence is an [`ErrorCode::Internal`],
-//! never a silent pass-through of a shell that would come up as a second
-//! sandbox. (`'site'`, not `'none'`: the exported site imports the `seed/`
-//! beside it, which is the sandbox's runtime half.)
+//! in-browser compiler, no cross-origin-isolation headers on static files —
+//! and no workspace code in its wasm at all. The sandbox's own shell cannot
+//! be made into that by editing it: its `sw.js` can be told to boot a site,
+//! but its wasm is compiled with the whole workspace. So the deployment
+//! carries a second bundle, built by the same bundler around a wasm compiled
+//! without the workspace (`[sandbox] mode = "site"`, no compiler bypass, no
+//! boot notice — `examples/dev-sandbox/export-shell/`), and the export copies
+//! THAT one, file for file, each body checked against the digest its
+//! manifest lists ([`ShellListing`]).
 //!
-//! The boot page is the second edit: a deployment's boot notice (the sandbox
-//! says what it is and where its `llms.txt` is) describes the deployment, not
-//! the site, and comes out.
+//! One edit remains, and it is the site's data rather than the build's: the
+//! boot page shows the shell's placeholder title in `<title>` and twice in
+//! the body, and the exported site has a name of its own — the one the
+//! README is headed with. See [`index_with_title`].
 //!
-//! Its title is the third: the page shows the DEPLOYMENT's title ("…dev
-//! sandbox") in `<title>` and twice in the body, and the exported site has a
-//! name of its own — the one the README is headed with. See
-//! [`index_for_export`].
+//! A deployment without an export shell does not export. It never falls
+//! back to the sandbox's own shell: that would ship the workspace — the
+//! compiler adapter, the scaffold templates, this module — to everyone the
+//! site is handed to, which is what the export shell exists to prevent.
 //!
 //! # `llms.txt`
 //!
@@ -64,20 +66,20 @@
 //!
 //! The SANDBOX's — what the sandbox tells a reader about itself — is not
 //! exported, because nothing the export reads holds it. The static host's
-//! copy is a deployment overlay, laid down after the bundler listed the
-//! shell, so it is not in `/asset-manifest.json`'s `files` (the CLI's
-//! `flow_sealed_web` test pins that for the sandbox's own configuration).
-//! The runtime's copy is published by `super::publisher` without being in
-//! any generation's manifest, and `seed/site/**` is that manifest. A shell
-//! file the listing DOES name is the deployment's own bundled file and is
-//! copied like any other.
+//! copy is an overlay of the sandbox's deployment, and the export reads none
+//! of that deployment's files, only its export shell's, whose listing names
+//! the shell's own (the CLI refuses an overlay under the shell's root). The
+//! runtime's copy is published by `super::publisher` without being in any
+//! generation's manifest, and `seed/site/**` is that manifest. A shell file
+//! the listing DOES name is the shell's own bundled file and is copied like
+//! any other.
 //!
 //! The SITE's — `site/llms.txt`, if the site has one — is exported twice,
 //! from one read of one blob: as `seed/site/llms.txt`, which the exported
 //! runtime imports and serves once its worker controls the page, and as
 //! `llms.txt` at the archive's root, which the static host serves to a
 //! reader that runs no JavaScript and so never gets a worker. `/llms.txt`
-//! is not a path the worker leaves to the static host (the
+//! is not a path the exported worker leaves to the static host (the
 //! shadowed-site-file refusal below is about exactly those paths, and a
 //! site file at one of them is refused), so the root copy shadows nothing:
 //! it answers only where the runtime cannot. The two cannot say different
@@ -101,8 +103,8 @@ use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 
 use super::{
     artifacts, blobs,
-    bypass::BypassRules,
     contracts::{ExportFile, ExportManifest},
+    control::{ShellListing, SHELL_MANIFEST},
     data_snapshot, generation, no_store, no_store_db_error_internal, no_store_error_status, repo,
     scaffold,
     seed::{self, SeedBlock, SeedManifest},
@@ -112,36 +114,15 @@ use super::{
 };
 use crate::{config_vars::APP_NAME_KEY, http::err_internal};
 
-/// The line `sw.js` carries when it was built for the development sandbox
-/// (`[sandbox] mode = "workspace"`), and the one it must carry after an
-/// export (a site's).
-///
-/// Stated as a pair rather than as a `replace` call inline so the assertion
-/// and the rewrite cannot disagree about the text. `impresspress-bundle`'s
-/// `sw_passes_the_sandbox_mode_to_initialize` pins the producing half.
-const SW_DEV_ON: &str = "const SANDBOX = 'workspace';";
-const SW_DEV_OFF: &str = "const SANDBOX = 'site';";
-
-/// The shell's service worker: booted as a site, the compiler's bypass
-/// gone.
-const SW_PATH: &str = "sw.js";
-
-/// The shell's boot page, the other shell file this export edits: the
-/// deployment's boot notice comes out and its title becomes the exported
-/// site's ([`index_for_export`]).
+/// The shell's boot page, the one shell file this export edits: its title
+/// becomes the exported site's ([`index_with_title`]).
 const INDEX_PATH: &str = "index.html";
 
-/// The two comments the bundler renders a deployment's boot notice between
-/// (`impresspress-bundle`'s `BOOT_NOTICE_START` / `BOOT_NOTICE_END`,
-/// `index.html.tmpl`). Restated for the reason [`COMPILER_ROOT`] is: the
-/// bundler is not a dependency of this crate.
-/// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings.
-pub const BOOT_NOTICE_START: &str = "<!--boot-notice-->";
-pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
-
-/// What the bundler wraps each showing of the deployment's title in, in the
-/// boot page's body (`impresspress-bundle`'s `APP_TITLE_OPEN` /
-/// `APP_TITLE_CLOSE`). Restated and compared like the notice markers.
+/// What the bundler wraps each showing of the app's title in, in the boot
+/// page's body (`impresspress-bundle`'s `APP_TITLE_OPEN` /
+/// `APP_TITLE_CLOSE`). Restated because the bundler is not a dependency of
+/// this crate; `crates/impresspress/tests/seed_bypass_prefix.rs` compares the
+/// spellings.
 pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
 pub const APP_TITLE_CLOSE: &str = "</span>";
 
@@ -151,40 +132,6 @@ pub const APP_TITLE_CLOSE: &str = "</span>";
 /// `seed/{DATA_PATH}` is the archive entry — the two are the same string
 /// because [`seed`] owns the layout and this writes what it reads.
 const DATA_PATH: &str = "data.json";
-
-/// URL prefix the in-browser Rust toolchain's static assets are served under.
-///
-/// Two things in the exported bundle refer to it and both have to go: the
-/// files themselves (excluded from the shell listing by
-/// [`SHELL_EXCLUDED_PREFIXES`]) and the service worker's bypass for them
-/// ([`sw_without_compiler`]). Restated here rather than imported from
-/// the bundle's `impresspress.toml`, which is a deployment's file and not
-/// something this crate can read — `page.rs` and `dev.js` state the same
-/// prefix for the same reason.
-const COMPILER_ROOT: &str = "/__impresspress_dev/compiler/";
-
-/// Shell paths the export never copies, by prefix.
-///
-/// Both are things a DEPLOYMENT overlays on top of the bundler's output
-/// (`impresspress`'s `apply_overlays`, run after `bundle::run` returns), so
-/// neither is in `/asset-manifest.json`'s `files` today. They are excluded
-/// explicitly all the same, because "the manifest happens not to list them"
-/// is a property of the order two CLI steps run in, and this is a property of
-/// what an export MEANS:
-///
-/// * `seed/` — the exporting deployment's own starter bundle. The archive
-///   writes its own `seed/`, and a copied one would either be overwritten or
-///   (worse, if it sorted later) overwrite the export's.
-/// * `__impresspress_dev/` — the in-browser Rust toolchain: 72 MiB of
-///   compiler that only `/b/dev` loads, and the exported site has no `/b/dev`.
-const SHELL_EXCLUDED_PREFIXES: &[&str] = &["seed/", "__impresspress_dev/"];
-
-/// Whether the export leaves a listed shell file behind.
-fn shell_excluded(path: &str) -> bool {
-    SHELL_EXCLUDED_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-}
 
 /// The README template, rendered with this export's own numbers.
 const README_TEMPLATE: &str = include_str!("templates/export-readme.md");
@@ -335,16 +282,31 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
         return Err(Refusal::NothingPublished);
     };
 
-    // A site file the EXPORTED worker would shadow, before anything is read.
-    // The exported runtime's seed import refuses a whole bundle over one such
-    // file (`seed::import`), so an export carrying it would be a folder that
-    // boots with no site at all. The sandbox refuses the write itself, so
-    // this only fires for a file that predates the check — written under an
-    // older `sw.js` that handed over no rules.
-    let exported_rules = without_compiler(shared.bypass.clone());
+    // The export shell's listing: one small read, and the rules the EXPORTED
+    // worker applies, which the check below needs. A deployment that carries
+    // no shell is refused here, before anything else is read.
+    let Some(source) = shared.workspace.export_shell.as_deref() else {
+        return Err(Refusal::Shell(
+            "is not part of this deployment: its service worker handed initialize() no \
+             exportShell"
+                .to_string(),
+        ));
+    };
+    let (listing, listing_bytes) = ShellListing::read(source).await.map_err(Refusal::Shell)?;
+
+    // A site file the EXPORTED worker would shadow, before any content is
+    // read. The exported runtime's seed import refuses a whole bundle over
+    // one such file (`seed::import`), so an export carrying it would be a
+    // folder that boots with no site at all. Checked against the export
+    // shell's own rules — the ones its `sw.js` was rendered with — not this
+    // sandbox's: the two workers differ (the sandbox's leaves its compiler
+    // tree to the static host, the site's has none), and the sandbox
+    // refuses a write by its own rules, so this fires for a file at a path
+    // only the exported worker bypasses, or one that predates the check.
     for entry in &manifest.site.files {
         let workspace_path = format!("{}{}", workspace::SITE_PREFIX, entry.path);
-        exported_rules
+        listing
+            .bypass
             .refuse_shadowed(&workspace_path)
             .map_err(Refusal::ShadowedSiteFile)?;
     }
@@ -363,10 +325,11 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
 
     // --- the data snapshot -----------------------------------------------
     //
-    // First, before the shell and before any stored content: it is the one
-    // part of the bundle with a size limit, and an export that is going to be
-    // refused should cost one snapshot, not the runtime's wasm and the whole
-    // site as well.
+    // First, before the shell's files and before any stored content: it is
+    // the one part of the bundle with a size limit, and an export that is
+    // going to be refused should cost one snapshot (and the shell's small
+    // manifest, read above), not the runtime's wasm and the whole site as
+    // well.
     //
     // Compact, not pretty-printed: the file's reader is the importer, and
     // indentation repeated on every row would spend a sizeable share of
@@ -389,36 +352,36 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let title = exported_title(ctx).await.map_err(Refusal::Internal)?;
 
     // --- the shell -------------------------------------------------------
-    let listed = shared
-        .workspace
-        .shell
-        .list()
-        .await
-        .map_err(Refusal::Shell)?;
-    let mut shell: Vec<Entry> = Vec::new();
-    for path in listed {
-        if shell_excluded(&path) {
-            continue;
+    //
+    // Every file the export shell lists, in its order, each body checked
+    // against the digest the listing gives it — and the manifest itself as
+    // it was read above, the one file that cannot carry its own digest.
+    let mut shell: Vec<Entry> = Vec::with_capacity(listing.files.len());
+    for path in &listing.files {
+        // The archive writes its own `seed/`. A shell that listed one would
+        // put two entries under one name; a bundle never lists one (the
+        // sandbox's seed is an overlay the bundler does not list), so this
+        // is a shell built some other way.
+        if path.starts_with(archive_seed_prefix()) {
+            return Err(Refusal::Shell(format!(
+                "lists {path:?}, under the {} the export writes itself",
+                archive_seed_prefix()
+            )));
         }
-        let bytes = shared
-            .workspace
-            .shell
-            .fetch(&path)
-            .await
-            .map_err(|e| Refusal::Shell(format!("{path}: {e}")))?;
-        let bytes = if path == SW_PATH {
-            sw_without_compiler(sw_with_dev_off(&bytes)?)?
-        } else if path == INDEX_PATH {
-            index_for_export(bytes, &title)?
+        let bytes = if path == SHELL_MANIFEST {
+            listing_bytes.clone()
+        } else {
+            listing.fetch(source, path).await.map_err(Refusal::Shell)?
+        };
+        let bytes = if path == INDEX_PATH {
+            index_with_title(bytes, &title)?
         } else {
             bytes
         };
-        shell.push(Entry { path, bytes });
-    }
-    if shell.is_empty() {
-        return Err(Refusal::Shell(
-            "/asset-manifest.json listed no files, so there is no runtime to export".to_string(),
-        ));
+        shell.push(Entry {
+            path: path.clone(),
+            bytes,
+        });
     }
 
     // --- the seed --------------------------------------------------------
@@ -525,8 +488,8 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             sha256: blobs::sha256_hex(&data_bytes),
             size: data_bytes.len() as u64,
         }),
-        // An export boots with the workspace off — no `/b/dev`, no reference
-        // tool — so a guide would describe tools the bundle does not have.
+        // An exported site has no workspace — no `/b/dev`, no reference tool
+        // — so a guide would describe tools the bundle does not have.
         sandbox: None,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&seed_manifest)
@@ -630,122 +593,28 @@ fn preview(assembled: &Assembled) -> ExportManifest {
     }
 }
 
-/// `sw.js` with the workspace turned off: booted as a site.
-///
-/// A missing marker is [`ErrorCode::Internal`], never a pass-through: this
-/// runs on a shell the deployment built for itself, so its absence means the
-/// bundler and this function disagree about the constant — and the failure
-/// mode of guessing is an exported folder that comes up as a second
-/// development sandbox, with `/b/dev` and an in-browser compiler on a site
-/// its owner meant to hand to someone else.
-fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
-    let text = std::str::from_utf8(bytes).map_err(|_| {
-        Refusal::Internal(WaferError::new(
-            ErrorCode::Internal,
-            "the deployment's sw.js is not valid UTF-8, so its sandbox mode cannot be set to site",
-        ))
-    })?;
-    // EXACTLY one occurrence, not "at least one". Two would mean the marker
-    // is ambiguous — a comment quoting the declaration, say — and a blanket
-    // `replace` would edit both, leaving a file whose prose contradicts its
-    // code and, worse, no longer telling this function which line it is
-    // meant to own. `sw.js.tmpl` is written so the declaration is the only
-    // occurrence; this is what keeps that true.
-    let occurrences = text.matches(SW_DEV_ON).count();
-    if occurrences != 1 {
-        return Err(Refusal::Internal(WaferError::new(
-            ErrorCode::Internal,
-            format!(
-                "the deployment's sw.js contains {occurrences} occurrences of {SW_DEV_ON:?} \
-                 and the export needs exactly one, so it cannot boot the shell as a site; \
-                 the bundle was built by a different impresspress-bundle than this runtime \
-                 expects"
-            ),
-        )));
-    }
-    Ok(text.replace(SW_DEV_ON, SW_DEV_OFF).into_bytes())
-}
-
-/// The boot page as the exported site's: the deployment's boot notice taken
-/// out, and the deployment's title replaced by the site's name.
-///
-/// Both are things the bundler rendered from the DEPLOYMENT's configuration
-/// (`[app] boot_notice`, `[app] title`), and both are found by the exact
-/// text the bundler renders them in — never by guessing at the sandbox's
-/// wording, which this crate does not know.
-fn index_for_export(bytes: Vec<u8>, title: &str) -> Result<Vec<u8>, Refusal> {
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Err(index_malformed("is not valid UTF-8"));
-    };
-    let text = index_without_boot_notice(text)?;
-    let text = index_with_title(&text, title)?;
-    Ok(text.into_bytes())
-}
-
-/// The refusal for a boot page the export cannot edit safely.
-fn index_malformed(what: &str) -> Refusal {
-    Refusal::Internal(WaferError::new(
-        ErrorCode::Internal,
-        format!(
-            "the deployment's index.html {what}, so the export cannot make it the exported \
-             site's boot page; the bundle was built by a different impresspress-bundle than \
-             this runtime expects"
-        ),
-    ))
-}
-
-/// The page with its boot notice region emptied.
-///
-/// The sandbox's boot page says what the sandbox is and sends an agent to
-/// `/llms.txt` and `/b/dev/enter` — none of which the exported site has. The
-/// bundler renders that text between two comments
-/// ([`BOOT_NOTICE_START`], [`BOOT_NOTICE_END`]) and renders the comments with
-/// nothing between them for an app that has no notice, so emptying the region
-/// leaves exactly what a plain bundle of this shell would have had there.
-///
-/// A page with neither comment has no notice to remove — a deployment may
-/// overlay a boot page of its own. One comment without the other, either of
-/// them twice, or the pair out of order is [`ErrorCode::Internal`] rather
-/// than a guess at where the sandbox's text ends.
-fn index_without_boot_notice(text: &str) -> Result<String, Refusal> {
-    let starts = text.matches(BOOT_NOTICE_START).count();
-    let ends = text.matches(BOOT_NOTICE_END).count();
-    if starts == 0 && ends == 0 {
-        return Ok(text.to_string());
-    }
-    if starts != 1 || ends != 1 {
-        return Err(index_malformed(&format!(
-            "contains {starts} of {BOOT_NOTICE_START:?} and {ends} of {BOOT_NOTICE_END:?} \
-             where the export needs one of each"
-        )));
-    }
-    let (before, rest) = text
-        .split_once(BOOT_NOTICE_START)
-        .expect("counted exactly one");
-    let Some((_notice, after)) = rest.split_once(BOOT_NOTICE_END) else {
-        return Err(index_malformed(&format!(
-            "closes its boot notice ({BOOT_NOTICE_END:?}) before opening it"
-        )));
-    };
-    Ok(format!(
-        "{before}{BOOT_NOTICE_START}{BOOT_NOTICE_END}{after}"
-    ))
-}
-
-/// The page with `title` everywhere the bundler showed the deployment's.
+/// The boot page with `title` everywhere the bundler showed the shell's
+/// placeholder.
 ///
 /// The bundler shows the title in `<title>` and, in the body, inside
 /// [`APP_TITLE_OPEN`]…[`APP_TITLE_CLOSE`] (the heading and the `<noscript>`
 /// line), always as escaped text — so the closing tag that ends each one is
 /// the first one after it opens.
 ///
-/// A page with no wrapped title in its body is not the bundler's page (an
-/// overlaid boot page) and is left exactly as it is, `<title>` included: its
-/// author chose that title. A bundler page must have exactly one `<title>`,
-/// and every wrapper must close; anything else is [`ErrorCode::Internal`].
-fn index_with_title(text: &str, title: &str) -> Result<String, Refusal> {
+/// The page is the export shell's, which is always the bundler's: the CLI
+/// lays the shell down whole and refuses an overlay under its root, and
+/// [`ShellListing::fetch`] has verified these bytes against its digest. So a
+/// page with no wrapped title, more or fewer than one `<title>`, or a wrapper
+/// that does not close is a shell built by some other bundler, and refused —
+/// never shipped with the placeholder.
+fn index_with_title(bytes: Vec<u8>, title: &str) -> Result<Vec<u8>, Refusal> {
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Err(index_malformed("is not valid UTF-8"));
+    };
     if !text.contains(APP_TITLE_OPEN) {
-        return Ok(text.to_string());
+        return Err(index_malformed(&format!(
+            "shows no title wrapped in {APP_TITLE_OPEN:?}"
+        )));
     }
     let title = html_text(title);
     let replaced = replace_between(text, "<title>", "</title>", &title)?;
@@ -755,7 +624,19 @@ fn index_with_title(text: &str, title: &str) -> Result<String, Refusal> {
             replaced.1
         )));
     }
-    Ok(replace_between(&replaced.0, APP_TITLE_OPEN, APP_TITLE_CLOSE, &title)?.0)
+    Ok(
+        replace_between(&replaced.0, APP_TITLE_OPEN, APP_TITLE_CLOSE, &title)?
+            .0
+            .into_bytes(),
+    )
+}
+
+/// The refusal for a boot page the export cannot title safely.
+fn index_malformed(what: &str) -> Refusal {
+    Refusal::Shell(format!(
+        "'s {INDEX_PATH} {what}, so the export cannot give the exported site its name; it was \
+         built by a different impresspress-bundle than this runtime expects"
+    ))
 }
 
 /// `text` with the content of every `open`…`close` span replaced by `with`,
@@ -791,99 +672,6 @@ fn html_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-/// The rules the exported worker applies: the deployment's, minus the
-/// compiler prefix [`sw_without_compiler`] removes from the exported `sw.js`.
-fn without_compiler(mut rules: BypassRules) -> BypassRules {
-    rules.prefixes.retain(|prefix| prefix != COMPILER_ROOT);
-    rules
-}
-
-/// The declaration `sw.js.tmpl` renders the rules the worker hands
-/// `initialize({ bypass })` into: one line, `const BYPASS_RULES = {…};`.
-const SW_BYPASS_RULES: &str = "const BYPASS_RULES = ";
-
-/// `sw.js` with the compiler's bypass removed, if it has one — from BOTH
-/// places the bundler renders it: the fetch handler's condition and the
-/// `BYPASS_RULES` the worker hands its runtime.
-///
-/// A deployment that ships the in-browser toolchain adds
-/// `/__impresspress_dev/compiler/` to the service worker's bypass list (the
-/// bundle's `extra_bypass_prefix`). The export does not copy those assets —
-/// there is no `/b/dev` in an exported site to load them — so a clause for it
-/// would be a bypass for a tree that is not there: every request under the
-/// prefix waved past the runtime to a 404 from the static host. And the rules
-/// the exported worker hands its runtime must say what its condition does:
-/// that runtime's seed import refuses a site file at any path they list.
-///
-/// # The condition
-///
-/// `impresspress-bundle`'s `BypassRules::render_condition` renders the prefix
-/// as one `url.pathname.startsWith('…')` clause on a line of its own, led by
-/// its `||` (exact rules always precede it, so it is never the first clause).
-/// The clause is matched by that exact text rather than loosely, so a clause
-/// this does not recognise is left alone instead of half-edited, and removing
-/// the whole clause keeps the remaining expression exactly as the bundler
-/// would have rendered it for a bundle that never asked.
-///
-/// # The data
-///
-/// The declaration is found by its exact text and must occur at most once:
-/// absent, it is a `sw.js` from a bundler that predates it and is left alone
-/// (its runtime gets no rules); present twice, this cannot know which one the
-/// worker uses, and refuses rather than guess.
-///
-/// # They must agree
-///
-/// The prefix's absence is not an error — it is an app's own bypass entry
-/// (CI's foundations bundle ships no compiler and never adds it). But when
-/// the declaration exists, the data listing the prefix and the condition
-/// carrying the clause are one fact rendered twice: one without the other
-/// means the clause's text is not what this expects, and exporting anyway
-/// would ship a worker whose condition and stated rules differ. That is an
-/// export error, never a silent half-strip.
-fn sw_without_compiler(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
-    let text = String::from_utf8(bytes)
-        .map_err(|e| Refusal::Shell(format!("the deployment's sw.js is not UTF-8: {e}")))?;
-
-    let clause = format!(" ||\n        url.pathname.startsWith('{COMPILER_ROOT}')");
-    let had_clause = text.contains(&clause);
-    let text = text.replace(&clause, "");
-
-    match text.matches(SW_BYPASS_RULES).count() {
-        0 => return Ok(text.into_bytes()),
-        1 => {}
-        n => {
-            return Err(Refusal::Shell(format!(
-                "the deployment's sw.js declares {SW_BYPASS_RULES:?} {n} times; the export \
-                 needs exactly one to remove the compiler's rule from it"
-            )))
-        }
-    }
-    let start = text.find(SW_BYPASS_RULES).expect("counted once") + SW_BYPASS_RULES.len();
-    let len = text[start..].find(";\n").ok_or_else(|| {
-        Refusal::Shell("the deployment's sw.js leaves BYPASS_RULES unterminated".to_string())
-    })?;
-    let rules: BypassRules = serde_json::from_str(&text[start..start + len]).map_err(|e| {
-        Refusal::Shell(format!(
-            "the deployment's sw.js BYPASS_RULES did not parse: {e}"
-        ))
-    })?;
-    let listed = rules.prefixes.iter().any(|prefix| prefix == COMPILER_ROOT);
-    if listed != had_clause {
-        return Err(Refusal::Shell(format!(
-            "the deployment's sw.js disagrees with itself about {COMPILER_ROOT:?}: its \
-             BYPASS_RULES {} the prefix and its fetch condition {} the clause the export \
-             removes, so the export cannot remove the compiler's bypass from both; the bundle \
-             was built by a different impresspress-bundle than this runtime expects",
-            if listed { "list" } else { "do not list" },
-            if had_clause { "has" } else { "does not have" },
-        )));
-    }
-    let rendered = serde_json::to_string(&without_compiler(rules))
-        .map_err(|e| Refusal::Shell(format!("BYPASS_RULES did not serialize: {e}")))?;
-    Ok(format!("{}{rendered}{}", &text[..start], &text[start + len..]).into_bytes())
 }
 
 /// The first eight characters of a generation id — what the downloaded file
@@ -1060,9 +848,9 @@ const WORKSPACE_CHANGED: &str = "the workspace changed while the export was bein
 ///
 /// Three shapes, because they reach the caller three different ways: a
 /// precondition the agent can act on (publish something first, trim the
-/// data), a host-side failure the agent cannot (the shell would not read),
-/// and everything the storage or ledger refused, which is already a
-/// [`WaferError`].
+/// data), a deployment the agent cannot export from until it is rebuilt (its
+/// export shell is missing or broken), and everything the storage or ledger
+/// refused, which is already a [`WaferError`].
 enum Refusal {
     /// Nothing has been published, so there is no site to export.
     NothingPublished,
@@ -1079,7 +867,11 @@ enum Refusal {
     /// A site file of the active generation is at a path the exported worker
     /// would shadow; the message names it and the rule.
     ShadowedSiteFile(String),
-    /// The static shell could not be listed or read.
+    /// The deployment's export shell is missing, could not be read, or is
+    /// not the bundle its manifest describes; the message completes "its
+    /// export shell …". Nothing the caller sent can fix it — the deployment
+    /// has to be rebuilt — but the caller is the one who has to be told, so
+    /// it is answered in full rather than as a sanitized internal error.
     Shell(String),
     /// A storage, ledger or encoding failure.
     Internal(WaferError),
@@ -1092,6 +884,16 @@ fn shadowed_site_file(refused: &str) -> String {
     format!(
         "this site cannot be exported: {refused} The exported site would refuse to import a \
          bundle that carries it. Delete the file or move it to another path, then export again."
+    )
+}
+
+/// What [`Refusal::Shell`] says, on both surfaces. `detail` completes "its
+/// export shell …".
+fn export_shell_unavailable(detail: &str) -> String {
+    format!(
+        "this sandbox cannot export: its export shell {detail}. The export shell is the site \
+         runtime an export ships; rebuild and redeploy the sandbox with \
+         examples/dev-sandbox/build.sh, which builds it."
     )
 }
 
@@ -1174,7 +976,13 @@ impl Refusal {
                 400,
                 &shadowed_site_file(&refused),
             ),
-            Self::Shell(message) => err_internal("dev export shell", message),
+            // 503 and `Unavailable`: the request is fine and the deployment
+            // cannot serve it until it is rebuilt.
+            Self::Shell(detail) => no_store_error_status(
+                ErrorCode::Unavailable,
+                503,
+                &export_shell_unavailable(&detail),
+            ),
             Self::Internal(error) => no_store_db_error_internal(error, "dev export"),
         }
     }
@@ -1194,10 +1002,9 @@ impl Refusal {
             Self::ShadowedSiteFile(refused) => {
                 WaferError::new(ErrorCode::FailedPrecondition, shadowed_site_file(&refused))
             }
-            Self::Shell(message) => WaferError::new(
-                ErrorCode::Internal,
-                format!("the static shell could not be read: {message}"),
-            ),
+            Self::Shell(detail) => {
+                WaferError::new(ErrorCode::Unavailable, export_shell_unavailable(&detail))
+            }
             Self::Internal(error) => error,
         }
     }
@@ -1218,38 +1025,6 @@ mod tests {
         assert_eq!(short_id("0123456789abcdef"), "01234567");
         assert_eq!(short_id("short"), "short");
         assert_eq!(short_id(""), "");
-    }
-
-    #[test]
-    fn setting_the_sandbox_to_site_rewrites_exactly_one_line() {
-        let sw = b"const SANDBOX = 'workspace';\nif (SANDBOX === 'workspace' && x) {}\n";
-        let Ok(out) = sw_with_dev_off(sw) else {
-            panic!("a workspace shell must rewrite");
-        };
-        let text = String::from_utf8(out).expect("utf8");
-        assert!(text.contains("const SANDBOX = 'site';"), "{text}");
-        // The passthrough branch is untouched: it reads the constant, so
-        // changing the declaration turns it off too. That is the whole
-        // reason the bundler renders one constant instead of two literals.
-        assert!(
-            text.contains("if (SANDBOX === 'workspace' && x) {}"),
-            "{text}"
-        );
-        assert!(!text.contains("const SANDBOX = 'workspace';"), "{text}");
-    }
-
-    /// A second occurrence — a comment quoting the declaration, most likely
-    /// — makes the marker ambiguous, and a blanket replace would edit both.
-    #[test]
-    fn a_shell_with_two_markers_is_refused() {
-        let sw = b"// set const SANDBOX = 'workspace'; to site\nconst SANDBOX = 'workspace';\n";
-        let Err(refusal) = sw_with_dev_off(sw) else {
-            panic!("an ambiguous marker must be refused");
-        };
-        assert!(
-            refusal.into_error().message.contains("2 occurrences"),
-            "the refusal must say how many it found"
-        );
     }
 
     /// The README's disclosure about `data.json` is the archive's only
@@ -1308,20 +1083,5 @@ mod tests {
         // claim about their encoding.
         assert_eq!(for_a_charsetless_host(b"caf\xe9".to_vec()), b"caf\xe9");
         assert_eq!(for_a_charsetless_host(Vec::new()), b"");
-    }
-
-    /// The one thing this must never do is pass a shell through unchanged.
-    #[test]
-    fn a_shell_without_the_marker_is_refused() {
-        let Err(refusal) = sw_with_dev_off(b"await initialize({ sandbox: 'workspace' });") else {
-            panic!("a shell with no marker must be refused");
-        };
-        let error = refusal.into_error();
-        assert_eq!(error.code, ErrorCode::Internal);
-        assert!(
-            error.message.contains("const SANDBOX = 'workspace';"),
-            "{}",
-            error.message
-        );
     }
 }

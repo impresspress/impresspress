@@ -833,11 +833,10 @@ impl TestContext {
         self,
         control: Arc<dyn crate::blocks::dev::WorkspaceControl>,
     ) -> Self {
-        // The default shell is a plausible one rather than an empty one: a
-        // fixture that had no shell at all could not tell "this test does not
-        // exercise the export" apart from "the export produced a folder with
-        // no runtime in it", and the second is precisely what
-        // `blocks::dev::export` refuses.
+        // The default export shell is a plausible one rather than none: a
+        // fixture with no shell could not tell "this test does not exercise
+        // the export" apart from "this deployment carries no export shell",
+        // and the second is something `blocks::dev::export` refuses.
         self.with_dev_added_and_shell(
             control,
             Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
@@ -845,13 +844,14 @@ impl TestContext {
         .await
     }
 
-    /// [`Self::with_dev_added`] with an explicit [`crate::blocks::dev::ShellSource`].
+    /// [`Self::with_dev_added`] with an explicit export shell
+    /// ([`crate::blocks::dev::ShellSource`]).
     ///
     /// For the export tests, whose subject IS the shell: which files it
-    /// carries, what its `sw.js` says, and what happens when it cannot be
-    /// listed. Everything else about the fixture is identical — this is the
-    /// one function that wires the dev block, and `with_dev_added` is a call
-    /// to it with the default shell.
+    /// carries, what its manifest says, and what happens when it is missing
+    /// or incomplete. Everything else about the fixture is identical — this
+    /// is the one function that wires the dev block, and `with_dev_added` is
+    /// a call to it with the default shell.
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added_and_shell(
         self,
@@ -860,27 +860,29 @@ impl TestContext {
     ) -> Self {
         self.with_dev_added_and_bypass(
             control,
-            shell,
+            Some(shell),
             crate::blocks::dev::test_support::fake_bypass_rules(),
         )
         .await
     }
 
     /// [`Self::with_dev_added_and_shell`] with explicit service-worker bypass
-    /// rules — what the worker handed `initialize({ bypass })`. The other
-    /// two constructors pass the rules a dev-sandbox worker renders
-    /// (`fake_bypass_rules`); this is for the tests whose subject is the
-    /// rules themselves, such as an older worker that hands none.
+    /// rules — what the worker handed `initialize({ bypass })` — and an
+    /// export shell that may be absent, as `initialize({ exportShell })` may
+    /// hand none. The other two constructors pass the rules a dev-sandbox
+    /// worker renders (`fake_bypass_rules`); this is for the tests whose
+    /// subject is the rules themselves, such as an older worker that hands
+    /// none, or a deployment that carries no export shell.
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added_and_bypass(
         self,
         control: Arc<dyn crate::blocks::dev::WorkspaceControl>,
-        shell: Arc<dyn crate::blocks::dev::ShellSource>,
+        export_shell: Option<Arc<dyn crate::blocks::dev::ShellSource>>,
         bypass: crate::blocks::dev::BypassRules,
     ) -> Self {
         use crate::blocks::dev;
 
-        let shared = dev::DevShared::new(control, bypass, shell);
+        let shared = dev::DevShared::new(control, bypass, export_shell);
         let block = dev::DevBlock::with_workspace(shared.clone());
         self.with_dev_block_added(shared, block, dev::WORKSPACE_ROUTES)
             .await
@@ -933,7 +935,7 @@ impl TestContext {
         let shared = dev::DevShared::new(
             control,
             dev::test_support::fake_bypass_rules(),
-            Arc::new(dev::test_support::FakeShell::new()),
+            Some(Arc::new(dev::test_support::FakeShell::new())),
         );
         let block = dev::DevBlock::runtime_only();
         self.with_dev_block_added(shared, block, &[]).await
@@ -4299,7 +4301,7 @@ pub fn real_block_infos() -> Vec<BlockInfo> {
     let block = crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
         crate::blocks::dev::test_support::FakeControl::new(),
         crate::blocks::dev::test_support::fake_bypass_rules(),
-        Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
+        Some(Arc::new(crate::blocks::dev::test_support::FakeShell::new())),
     ));
     #[cfg(all(feature = "site-runtime", not(feature = "block-dev")))]
     let block = crate::blocks::dev::DevBlock::runtime_only();

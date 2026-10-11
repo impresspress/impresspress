@@ -128,7 +128,8 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
    `[sandbox] export_shell = "export-shell/dist"` lays the shell down at
    `dist/__impresspress_dev/export-shell/`, and the script checks that the
    wasm shipped there is byte for byte the one step 3 built (or
-   `--site-pkg-dir` named).
+   `--site-pkg-dir` named). That shell is what an export (`dev_export`)
+   ships, file for file; a deployment built without one refuses to export.
 
 `--pkg-dir DIR` and `--site-pkg-dir DIR` skip steps 2 and 3, assembling from
 an existing wasm-pack output of each feature set instead.

@@ -276,9 +276,16 @@ serve from any ordinary static file host. (`dev_export_manifest` answers the
 same question without downloading anything: every file the bundle would
 carry, with its size, and how many rows of each data table.) The zip holds:
 
-- the runtime shell (the same files the sandbox itself serves, with the
-  developer-mode flag turned off and the in-browser compiler's assets left
-  out entirely);
+- the runtime shell: not the files the sandbox itself serves, but its
+  *export shell* — a second bundle every sandbox deployment carries at
+  `/__impresspress_dev/export-shell/`, built as a plain site around a
+  runtime compiled without the workspace (no `/b/dev`, no compiler adapter,
+  no agent tooling — not even switched off). The export copies it file for
+  file, checking each against the digest its manifest lists, and changes only
+  the boot page's title to your site's name. A deployment built without one
+  refuses to export, with a message saying to rebuild it with
+  `examples/dev-sandbox/build.sh`; it never ships the sandbox's own runtime
+  instead;
 - `seed/site/**` — your site files;
 - `seed/blocks/<name>.wasm` and `seed/blocks/<name>/src/**` — every backend
   block's compiled artifact *and* its source, so the export stays editable
@@ -324,8 +331,8 @@ python3 -m http.server -d <unzipped dir>
 ```
 
 Then open the printed URL and sign in with your account. The exported
-bundle always boots with the in-browser workspace turned off — there is no
-`/b/dev` on it, and no in-browser compiler.
+bundle is a site, not a sandbox — there is no `/b/dev` on it and no
+in-browser compiler, because neither is compiled into its runtime.
 
 **Change the admin password before serving an export anywhere but
 localhost.** Every sandbox is seeded with the same starter admin account

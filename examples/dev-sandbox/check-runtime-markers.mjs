@@ -7,7 +7,9 @@
 // `<site.wasm>` is `impresspress-web` built with `browser-site-runtime` (the
 // runtime the export shell ships); `<dev.wasm>` is the same crate built with
 // `browser-devtools` (the sandbox's own). `build.sh` runs this after compiling
-// both, and fails the build on a non-zero exit.
+// both, and fails the build on a non-zero exit; the dev-sandbox e2e runs it
+// again on the runtime binary a real export carried (`expectASiteRuntime` in
+// `crates/impresspress-web/tests/e2e/fixtures/dev-sandbox.ts`).
 //
 // The site build compiles none of the dev block's workspace half — its
 // routes, its tools, the compiler adapter — by construction (`#[cfg(feature =

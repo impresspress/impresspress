@@ -42,8 +42,8 @@ pub fn apply_overlays(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Result
 ///
 /// The directory must be a finished bundle: its `asset-manifest.json` parses
 /// as the bundler's [`AssetManifest`](impresspress_bundle::bundle::manifest::AssetManifest)
-/// — `bypass` included, which that type requires — and every file it lists is
-/// there. A path that names the shell's configuration directory instead of
+/// — `bypass` and `sha256` included, which that type requires — and every
+/// file it lists is there with the digest it lists. A path that names the shell's configuration directory instead of
 /// its `dist/`, or a shell that was never built, fails the build here rather
 /// than shipping a sandbox whose export has nothing to copy. And no
 /// `[[assets.overlay]]` may write under the root: its files would be mixed
@@ -70,12 +70,12 @@ pub fn apply_export_shell(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Re
              shell with a current impresspress"
         ));
     }
-    if let Some(missing) = manifest.files.iter().find(|file| !src.join(file).is_file()) {
-        return Err(anyhow!(
-            "[sandbox] export_shell {src:?}: asset-manifest.json lists {missing:?}, which is \
-             not there"
-        ));
-    }
+    // The files the export will fetch are the ones the manifest describes,
+    // digests and all: a shell edited, or half-copied, after it was built
+    // fails here rather than in every export of the deployment.
+    manifest.verify(&src).map_err(|e| {
+        anyhow!("[sandbox] export_shell {src:?} is not the bundle its manifest describes: {e:#}")
+    })?;
     let root = impresspress_bundle::bundle::EXPORT_SHELL_ROOT.trim_matches('/');
     if let Some(overlay) = cfg.assets.overlay.iter().find(|overlay| {
         let to = overlay.to.trim_start_matches('/');
@@ -223,8 +223,9 @@ mod tests {
     }
 
     /// A directory that is not a finished bundle is refused, naming it: never
-    /// built, its manifest without the `bypass` the bundler's type requires,
-    /// or a file the manifest lists that is not there.
+    /// built, its manifest without the `bypass` or `sha256` the bundler's type
+    /// requires, a listed file whose bytes are not the ones it lists, or a
+    /// listed file that is not there.
     #[test]
     fn an_export_shell_that_is_not_a_finished_bundle_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
@@ -255,13 +256,33 @@ mod tests {
             .to_string();
         assert!(err.contains("bypass") && err.contains("rebuild"), "{err}");
 
+        let mut no_digests = manifest.clone();
+        no_digests.as_object_mut().unwrap().remove("sha256");
+        fs::write(&manifest_path, no_digests.to_string()).unwrap();
+        let err = apply_export_shell(&cfg, root, &dist)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sha256") && err.contains("rebuild"), "{err}");
+
         fs::write(&manifest_path, manifest.to_string()).unwrap();
+        let loader = fs::read(shell.join("loader.js")).unwrap();
+        fs::write(shell.join("loader.js"), b"// edited after the build").unwrap();
+        let err = apply_export_shell(&cfg, root, &dist)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("loader.js") && err.contains("SHA-256"),
+            "{err}"
+        );
+
         fs::remove_file(shell.join("loader.js")).unwrap();
         let err = apply_export_shell(&cfg, root, &dist)
             .unwrap_err()
             .to_string();
         assert!(err.contains("loader.js"), "{err}");
         assert!(!dist.join("__impresspress_dev").exists());
+        fs::write(shell.join("loader.js"), loader).unwrap();
+        apply_export_shell(&cfg, root, &dist).expect("the shell as it was built");
     }
 
     #[test]

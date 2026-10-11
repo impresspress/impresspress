@@ -108,7 +108,7 @@ use wafer_run::{
 };
 
 #[cfg(feature = "block-dev")]
-pub use self::control::{ShellSource, WorkspaceControl};
+pub use self::control::{ShellListing, ShellSource, WorkspaceControl};
 pub use self::{
     bypass::{BypassRule, BypassRules},
     control::{
@@ -418,9 +418,10 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
     EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/export", Route::ApiExport)
         .summary("Export the site as a runnable static bundle")
         .description(
-            "A zip of the runtime shell with the sandbox turned off, the site files, \
-             every compiled block and its source, and a data snapshot — servable from \
-             any static host and re-importable as a seed.",
+            "A zip of the site runtime's shell (the deployment's export shell: no \
+             workspace compiled in), the site files, every compiled block and its source, \
+             and a data snapshot — servable from any static host and re-importable as a \
+             seed.",
         ),
 ];
 
@@ -630,7 +631,7 @@ pub struct DevShared {
     /// holding that, or while waiting on the activation queue.
     pub maintenance: futures::lock::Mutex<()>,
     /// What only the workspace half uses: the host's workspace calls, the
-    /// static shell the export copies, and the compile lock.
+    /// export shell the export copies, and the compile lock.
     ///
     /// No `Option`: a `block-dev` build always has a workspace host (even
     /// when it serves an exported bundle and routes no `/b/dev`), and a build
@@ -646,13 +647,17 @@ pub struct Workspace {
     /// status endpoint's runtime counter, and the announcement the `/b/dev`
     /// page listens for. The same host object as [`DevShared::control`].
     pub control: Arc<dyn WorkspaceControl>,
-    /// The static shell this deployment is running inside of, which
-    /// [`export`] copies into the bundle it hands the user.
+    /// The export shell this deployment carries — the site runtime's own
+    /// bundle, which [`export`] copies into the bundle it hands the user — or
+    /// `None` when its service worker handed `initialize()` none (a
+    /// deployment built without `[sandbox] export_shell`). [`export`] refuses
+    /// then, naming the missing shell: it never ships the sandbox's own
+    /// shell, whose wasm carries the whole workspace.
     ///
     /// Beside `control` rather than inside it because the two answer
     /// different questions — one builds a runtime, the other reads files the
-    /// host was shipped as.
-    pub shell: Arc<dyn ShellSource>,
+    /// host was shipped with.
+    pub export_shell: Option<Arc<dyn ShellSource>>,
     /// Serializes every change to the *block* set.
     ///
     /// A block change is resolved as a whole desired set —
@@ -701,8 +706,9 @@ impl DevShared {
 
     /// Build the shared state with its workspace half. `control` is held
     /// twice: as itself for the workspace's calls and, upcast, as the
-    /// [`RuntimeControl`] every activation uses. `shell` is the static shell
-    /// the export reads.
+    /// [`RuntimeControl`] every activation uses. `export_shell` is the
+    /// export shell the export reads, if the deployment carries one
+    /// ([`Workspace::export_shell`]).
     ///
     /// The `Arc` is not `Send`/`Sync` on wasm32, for the reason the site
     /// build's constructor gives.
@@ -710,7 +716,7 @@ impl DevShared {
     pub fn new(
         control: Arc<dyn WorkspaceControl>,
         bypass: BypassRules,
-        shell: Arc<dyn ShellSource>,
+        export_shell: Option<Arc<dyn ShellSource>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             control: control.clone(),
@@ -720,7 +726,7 @@ impl DevShared {
             maintenance: futures::lock::Mutex::new(()),
             workspace: Workspace {
                 control,
-                shell,
+                export_shell,
                 compile: futures::lock::Mutex::new(()),
             },
         })
@@ -1087,7 +1093,7 @@ mod tests {
         let declared = DevBlock::with_workspace(DevShared::new(
             test_support::FakeControl::new(),
             test_support::fake_bypass_rules(),
-            std::sync::Arc::new(test_support::FakeShell::new()),
+            Some(std::sync::Arc::new(test_support::FakeShell::new())),
         ))
         .info()
         .endpoints;

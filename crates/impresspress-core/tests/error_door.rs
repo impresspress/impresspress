@@ -708,20 +708,11 @@ const INVENTORIED_TAILS: &[(&str, &[Tail])] = &[
     ),
     (
         "dev/export.rs",
-        &[
-            Tail {
-                label: "dev export archive",
-                count: 1,
-                why: "invariant: writing the zip into memory",
-            },
-            Tail {
-                label: "dev export shell",
-                count: 1,
-                why:
-                    "provider: `ShellSource` answers the host's static shell as a `String` error, \
-                      a type with no database code",
-            },
-        ],
+        &[Tail {
+            label: "dev export archive",
+            count: 1,
+            why: "invariant: writing the zip into memory",
+        }],
     ),
     (
         "dev/mod.rs",

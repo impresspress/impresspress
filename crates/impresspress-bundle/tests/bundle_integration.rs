@@ -1,8 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use impresspress_bundle::bundle::{
-    run, AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, BOOT_NOTICE_END,
-    BOOT_NOTICE_START, EXPORT_SHELL_ROOT,
+    run, AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, EXPORT_SHELL_ROOT,
 };
 
 /// Every mode a bundle can be built in, in `[sandbox] mode`'s order.
@@ -282,6 +281,42 @@ fn the_manifest_lists_every_file_of_the_rendered_shell() {
     let mut sorted = files.clone();
     sorted.sort();
     assert_eq!(files, sorted, "the listing must be sorted");
+}
+
+/// `sha256` digests every listed file as it is LEFT on disk — after the
+/// rename, after the glue's rewrite, after rendering — so a reader that
+/// fetches a listed file and hashes it gets the digest the manifest states.
+/// The manifest itself is the one listed file with none.
+#[test]
+fn the_manifest_digests_every_listed_file_as_it_is_on_disk() {
+    use sha2::{Digest, Sha256};
+    let tmp = pkg_copy();
+    std::fs::create_dir_all(tmp.path().join("snippets/inner")).unwrap();
+    std::fs::write(tmp.path().join("snippets/inner/glue.js"), "export {};").unwrap();
+
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+
+    let manifest: impresspress_bundle::bundle::manifest::AssetManifest =
+        serde_json::from_str(&fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap())
+            .unwrap();
+    let listed: Vec<&String> = manifest
+        .files
+        .iter()
+        .filter(|file| *file != "asset-manifest.json")
+        .collect();
+    assert_eq!(
+        manifest.sha256.keys().collect::<Vec<_>>(),
+        listed,
+        "one digest per listed file but the manifest"
+    );
+    for file in listed {
+        let bytes = fs::read(tmp.path().join(file)).unwrap();
+        assert_eq!(
+            manifest.sha256[file],
+            hex::encode(Sha256::digest(&bytes)),
+            "{file}"
+        );
+    }
 }
 
 #[test]
@@ -849,10 +884,7 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    // The exact clause text the sandbox's export removes
-    // (`impresspress-core`'s `blocks::dev::export::sw_without_compiler`):
-    // a clause that led with anything else would survive into every export.
-    assert!(sw.contains(" ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/')"));
+    assert!(sw.contains("url.pathname.startsWith('/__impresspress_dev/compiler/')"));
     assert!(sw.contains("url.pathname.startsWith('/seed/')"));
 }
 
@@ -1178,10 +1210,10 @@ const NOTICE: &str =
     r#"<p>This is a build sandbox. Read <a href="/llms.txt">/llms.txt</a> first.</p>"#;
 
 /// An app's boot notice is in the HTML the static host serves — readable by
-/// a client that never runs `loader.js` — between the two markers that let it
-/// be found again, and beside the status line `loader.js` writes to.
+/// a client that never runs `loader.js` — once, under the title and beside
+/// the status line `loader.js` writes to.
 #[test]
-fn the_boot_shell_carries_an_apps_boot_notice_between_its_markers() {
+fn the_boot_shell_carries_an_apps_boot_notice() {
     let tmp = production_pkg_copy_with_index();
     let app = AppConfig {
         app_title: Some("Sandbox".to_string()),
@@ -1190,25 +1222,22 @@ fn the_boot_shell_carries_an_apps_boot_notice_between_its_markers() {
     };
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
     let index = fs::read_to_string(tmp.path().join("index.html")).unwrap();
-    assert!(
-        index.contains(&format!("{BOOT_NOTICE_START}{NOTICE}{BOOT_NOTICE_END}")),
-        "{index}"
-    );
-    assert_eq!(index.matches(BOOT_NOTICE_START).count(), 1, "{index}");
-    assert_eq!(index.matches(BOOT_NOTICE_END).count(), 1, "{index}");
+    assert_eq!(index.matches(NOTICE).count(), 1, "{index}");
     // What #117's loader needs is still there, after the notice.
+    let title = index.find("</h1>").expect("the heading");
     let status = index
         .find(r#"<p id="status">Loading...</p>"#)
         .expect("status line");
-    assert!(index.find(NOTICE).unwrap() < status, "{index}");
+    let notice = index.find(NOTICE).unwrap();
+    assert!(title < notice && notice < status, "{index}");
     assert!(index.contains(r#"<script src="/loader.js"></script>"#));
 }
 
-/// The template is generic: an app with no notice gets the empty region and
-/// a `<noscript>` line built from its own title — and not a word about a
-/// sandbox, an `llms.txt` or `/b/dev`.
+/// The template is generic: an app with no notice gets nothing between its
+/// heading and its status line, and a `<noscript>` line built from its own
+/// title — and not a word about a sandbox, an `llms.txt` or `/b/dev`.
 #[test]
-fn a_plain_boot_shell_has_an_empty_notice_region_and_no_sandbox_wording() {
+fn a_plain_boot_shell_has_no_notice_and_no_sandbox_wording() {
     let tmp = production_pkg_copy_with_index();
     let app = AppConfig {
         app_title: Some("My Shop".to_string()),
@@ -1216,10 +1245,11 @@ fn a_plain_boot_shell_has_an_empty_notice_region_and_no_sandbox_wording() {
     };
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
     let index = fs::read_to_string(tmp.path().join("index.html")).unwrap();
-    assert!(
-        index.contains(&format!("{BOOT_NOTICE_START}{BOOT_NOTICE_END}")),
-        "{index}"
-    );
+    let after_heading = &index[index.find("</h1>").expect("the heading") + "</h1>".len()..];
+    let before_status = &after_heading[..after_heading
+        .find(r#"<p id="status">"#)
+        .expect("status line")];
+    assert_eq!(before_status.trim(), "", "{index}");
     assert!(
         index.contains(
             "<noscript><p><span data-app-title>My Shop</span> runs in your browser and needs JavaScript to start.</p></noscript>"
@@ -1262,8 +1292,9 @@ fn the_boot_shell_shows_the_title_only_where_it_can_be_found_again() {
 /// `loader.js` names the app to a PERSON only by what the page shows
 /// (`appTitle()`); the name it was built with appears in console lines and
 /// nowhere else. A baked name in visible text would survive a copy of the
-/// shell that retitles `index.html` — the development sandbox's export —
-/// and go on telling the copied site's visitors "Loading dev-sandbox...".
+/// shell that retitles `index.html` — the development sandbox's export of
+/// its export shell — and go on telling the copied site's visitors the name
+/// the shell was built with.
 #[test]
 fn the_loader_bakes_the_app_name_into_console_lines_only() {
     let tmp = production_pkg_copy();
@@ -1285,22 +1316,6 @@ fn the_loader_bakes_the_app_name_into_console_lines_only() {
         );
     }
     assert!(loader.contains("document.querySelector('[data-app-title]')"));
-}
-
-/// A notice carrying one of the markers would end its own region early (or
-/// open a second), and whoever removes the notice later would cut in the
-/// wrong place.
-#[test]
-fn a_boot_notice_containing_a_marker_is_refused() {
-    for marker in [BOOT_NOTICE_START, BOOT_NOTICE_END] {
-        let tmp = production_pkg_copy_with_index();
-        let app = AppConfig {
-            boot_notice_html: Some(format!("<p>hi</p>{marker}")),
-            ..AppConfig::default()
-        };
-        let err = run(tmp.path(), tmp.path(), app).expect_err("refused");
-        assert!(err.to_string().contains("boot notice"), "{err}");
-    }
 }
 
 /// `/llms.txt` is not the bundler's: no bundle — in any sandbox mode, with a

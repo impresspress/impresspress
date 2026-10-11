@@ -1,7 +1,8 @@
 import { expect, type BrowserContext, type Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Getting a page onto the browser development sandbox.
@@ -404,6 +405,49 @@ export async function serveDirectory(dir: string, port: number): Promise<ChildPr
 }
 
 /**
+ * The checker `examples/dev-sandbox/build.sh` runs on the two wasms it
+ * compiles — the one checker, not a copy of its marker list or its migration
+ * subtraction.
+ */
+const RUNTIME_MARKER_CHECK = fileURLToPath(
+  new URL('../../../../../examples/dev-sandbox/check-runtime-markers.mjs', import.meta.url),
+);
+
+/**
+ * The `browser-devtools` wasm the checker's positive control reads:
+ * `DEV_PKG_WASM`, or the `pkg-dev/` `build.sh` compiled the sandbox from.
+ */
+const DEV_WASM =
+  process.env.DEV_PKG_WASM ??
+  fileURLToPath(new URL('../../../pkg-dev/impresspress_web_bg.wasm', import.meta.url));
+
+/**
+ * Prove an unpacked export runs a SITE runtime: the runtime binary its own
+ * `asset-manifest.json` names, checked by `check-runtime-markers.mjs` against
+ * the sandbox's devtools wasm — no workspace endpoint, tool or compiler path
+ * in it, every one of them in the devtools build. Returns the binary's path
+ * within the bundle.
+ *
+ * Run on the bytes the export actually carried, so it fails if the export
+ * ever ships the sandbox's own runtime again — a check on `pkg-site/` alone
+ * (which `build.sh` makes) cannot see what the export picked up.
+ */
+export function expectASiteRuntime(unpacked: string): string {
+  const manifest = JSON.parse(readFileSync(path.join(unpacked, 'asset-manifest.json'), 'utf8')) as {
+    assets: Record<string, string>;
+  };
+  const wasm = manifest.assets['impresspress_web_bg.wasm']?.replace(/^\//, '');
+  expect(wasm, 'the exported manifest names its runtime binary').toBeTruthy();
+  const check = spawnSync('node', [RUNTIME_MARKER_CHECK, path.join(unpacked, wasm!), DEV_WASM], {
+    encoding: 'utf8',
+  });
+  expect(check.status, `check-runtime-markers on the exported ${wasm}:\n${check.stdout}${check.stderr}`).toBe(
+    0,
+  );
+  return wasm!;
+}
+
+/**
  * The ports the specs serve a bundle of their own on, beside the sandbox's
  * `TEST_PORT`: the exported bundles, and the bootstrap seed's bundle.
  *
@@ -415,6 +459,8 @@ export async function serveDirectory(dir: string, port: number): Promise<ChildPr
  * mean neither half of that can go unnoticed.
  */
 export const WORKSPACE_EXPORT_PORT = 8098;
+/** Where `dev-foundations.spec.ts` serves its export of a site with a guest block. */
+export const FOUNDATIONS_EXPORT_PORT = 8089;
 export const SCENARIO_EXPORT_PORT = 8099;
 /** Where `dev-bootstrap.spec.ts` serves the bootstrap seed's own bundle. */
 export const BOOTSTRAP_PORT = 8097;

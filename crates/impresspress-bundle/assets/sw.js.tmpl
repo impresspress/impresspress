@@ -10,25 +10,19 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // ONE constant, read by BOTH places the mode decides something: the
 // `initialize({ sandbox: SANDBOX, … })` below, and the isolation-header
 // passthrough in the fetch handler, which only a workspace takes. A shipped
-// `sw.js` states the fact once — and the dev sandbox's export
-// (`blocks/dev/export.rs`), which ships the workspace's runtime shell as a
-// site, finds and rewrites exactly one rendering and asserts it. One line,
-// one rewrite, one assertion: changing the declaration below from workspace
-// to site is the whole of changing the mode, and the one edit the export
-// makes for it. (It is not the whole export: that also takes the compiler's
-// bypass out of this file and edits `index.html` — see `export.rs`.)
-// (Deliberately NOT spelled out here as a literal: the export finds the
-// declaration by exact text and requires it to occur exactly once, so a
-// comment quoting it would be a second, ambiguous match.)
+// `sw.js` states the fact once. Nothing rewrites it after the build: the
+// development sandbox's export ships the export shell (`EXPORT_SHELL` below),
+// a bundle BUILT with `[sandbox] mode = "site"`, byte for byte.
 const SANDBOX = '__SANDBOX__';
 
 // Where this deployment carries its export shell — a complete bundle built
-// as a site, for the workspace's export to ship — or null when it carries
-// none: `impresspress-bundle`'s `EXPORT_SHELL_ROOT` when the bundle was built
-// with `[sandbox] export_shell` (a workspace only), rendered from that one
-// constant. Handed to the runtime in `initialize()`, where only a workspace
-// looks at it. Not on the bypass list: the shell's files are for the
-// workspace's export to read with this worker's own `fetch` — which the fetch
+// as a site, which the workspace's export ships as the exported site's
+// runtime shell — or null when it carries none: `impresspress-bundle`'s
+// `EXPORT_SHELL_ROOT` when the bundle was built with `[sandbox] export_shell`
+// (a workspace only), rendered from that one constant. Handed to the runtime
+// in `initialize()`, where only a workspace looks at it; a workspace handed
+// null refuses to export. Not on the bypass list: the shell's files are for
+// the export to read with this worker's own `fetch` — which the fetch
 // handler below never sees — not for a page to load.
 const EXPORT_SHELL = __EXPORT_SHELL__;
 
@@ -626,9 +620,7 @@ self.addEventListener('fetch', (event) => {
         // rather than decided by the runtime — and a 'site' or 'none' bundle
         // keeps the plain early return it always had: only the workspace runs
         // the compiler that needs isolation, and a site wants its pages free
-        // to embed a third-party iframe. That one line is also the line the
-        // sandbox's export rewrites, from workspace to site, to change the
-        // mode (`blocks/dev/export.rs`).
+        // to embed a third-party iframe.
         // ------------------------------------------------------------------
         if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {
             event.respondWith(passthrough(event.request));
