@@ -73,7 +73,7 @@ async fn expect_wrap_denial(
     } else {
         serde_json::to_vec(&body).expect("encode body")
     };
-    let out = DevBlock::with_workspace(fixture.dev_shared())
+    let out = DevBlock::new(fixture.dev_shared())
         .handle(ctx, msg, InputStream::from_bytes(bytes))
         .await;
     let parts = wafer_block::http_codec::collect_http_response(out).await;

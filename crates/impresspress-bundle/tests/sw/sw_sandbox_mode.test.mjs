@@ -1,9 +1,10 @@
 // What the rendered service worker does in each sandbox mode.
 //
 // `sw.js` declares the mode once (`const SANDBOX = '…';`, rendered from
-// `[sandbox] mode`) and two places read it: the `initialize()` call, which
-// tells the runtime which half of the sandbox the bundle asked for, and the
-// fetch handler's bypass branch, which in a workspace answers every bypassed
+// `[sandbox] mode`) and two places read it: the check, before `initialize()`
+// is called, that the runtime was compiled as that mode
+// (`compiled_sandbox_mode()` — the runtime is never TOLD the mode, it is the
+// build's), and the fetch handler's bypass branch, which in a workspace answers every bypassed
 // same-origin request itself with the cross-origin-isolation pair the
 // in-browser compiler needs. A site — what the sandbox exports — must not:
 // isolation is what stops a page from embedding a third-party iframe, so an
@@ -46,20 +47,48 @@ async function worker(variable) {
 }
 
 for (const { sandbox, variable } of MODES) {
-  test(`a '${sandbox}' worker hands initialize() its mode`, async (t) => {
+  test(`a '${sandbox}' worker checks its runtime's mode and hands initialize() none`, async (t) => {
     captureConsole(t);
     const sw = await worker(variable);
 
     const { response } = await sw.request('/b/auth/login');
     assert.equal(await response.text(), 'from the runtime');
+    assert.deepEqual(sw.modeChecks, [1], 'asked once, after init()');
     assert.equal(sw.initialized.length, 1);
-    assert.equal(sw.initialized[0].sandbox, sandbox);
-    // The option this replaced is gone, not merely joined.
+    // The mode is the build's: neither option that once carried a request
+    // for it is handed.
+    assert.equal('sandbox' in sw.initialized[0], false);
     assert.equal('dev' in sw.initialized[0], false);
     // None of these was built with an export shell, and says so: the option
     // is handed, as null.
     assert.equal(sw.initialized[0].exportShell, null);
   });
+
+  for (const { sandbox: compiled } of MODES.filter((mode) => mode.sandbox !== sandbox)) {
+    test(`a '${sandbox}' worker over a runtime compiled as '${compiled}' stops before initialize()`, async (t) => {
+      captureConsole(t);
+      const initialized = [];
+      const sw = await loadWorker(
+        {
+          compiledSandboxMode: compiled,
+          initialize: async (options) => {
+            initialized.push(options);
+          }
+        },
+        { variable }
+      );
+
+      const { response } = await sw.request('/b/auth/login');
+      assert.equal(response.status, 503);
+      const body = await response.json();
+      assert.deepEqual(initialized, []);
+      assert.equal(body.stage, 'build');
+      assert.equal(
+        body.cause,
+        `this bundle's service worker is built for sandbox mode '${sandbox}' but its runtime was compiled as '${compiled}' — rebuild the bundle`
+      );
+    });
+  }
 
   test(`a '${sandbox}' worker leaves /seed/ to the static host only if it runs the site runtime`, async (t) => {
     captureConsole(t);
@@ -102,6 +131,5 @@ test('a workspace with an export shell hands initialize() its root', async (t) =
 
   await sw.request('/b/auth/login');
   assert.equal(sw.initialized.length, 1);
-  assert.equal(sw.initialized[0].sandbox, 'workspace');
   assert.equal(sw.initialized[0].exportShell, '/__impresspress_dev/export-shell/');
 });

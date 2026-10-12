@@ -1,5 +1,5 @@
 // @generated build: __BUILD_ID__ — Service Worker that runs Impresspress via WASM
-import init, { initialize, handle_request } from '__WASM_JS__';
+import init, { compiled_sandbox_mode, initialize, handle_request } from '__WASM_JS__';
 
 // Which half of the browser sandbox this bundle boots — 'none', 'site' (the
 // sandbox's runtime half: an exported site that imports the `seed/` it ships)
@@ -7,9 +7,12 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // `[sandbox] mode` at BUILD time (`impresspress-bundle`'s `SandboxShell`,
 // `SANDBOX` var).
 //
-// ONE constant, read by BOTH places the mode decides something: the
-// `initialize({ sandbox: SANDBOX, … })` below, and the isolation-header
-// passthrough in the fetch handler, which only a workspace takes. A shipped
+// ONE constant, read by BOTH places the mode decides something: the check,
+// before `initialize()` is called, that the runtime binary was compiled as
+// this mode (`compiled_sandbox_mode()`; a mismatch stops the worker at
+// `STAGE_BUILD`), and the isolation-header passthrough in the fetch handler,
+// which only a workspace takes. The runtime is not told the mode: it is the
+// build's, and the check is what holds the two to the same one. A shipped
 // `sw.js` states the fact once. Nothing rewrites it after the build: the
 // development sandbox's export ships the export shell (`EXPORT_SHELL` below),
 // a bundle BUILT with `[sandbox] mode = "site"`, byte for byte.
@@ -146,7 +149,8 @@ let poisoned = false;
 // every request this worker refuses from then on can say what happened —
 // see `runtimeStopped`.
 let poisonReason = '';
-// WHERE it failed — `STAGE_LOAD`, `STAGE_INITIALIZE` or `STAGE_REQUEST` —
+// WHERE it failed — `STAGE_LOAD`, `STAGE_BUILD`, `STAGE_INITIALIZE` or
+// `STAGE_REQUEST` —
 // stated by the code that caught the failure and sent beside the cause on
 // every road to `loader.js` (the message, the Cache Storage entry, the 503).
 // It is what the loader's recovery decides on, so it is a field of its own:
@@ -165,6 +169,12 @@ let poisonId = '';
 // failure, a module the browser cannot compile. Says nothing about the data
 // this browser stores for the app.
 const STAGE_LOAD = 'load';
+// The runtime binary was compiled for another sandbox mode than this worker
+// was built for (`SANDBOX` against `compiled_sandbox_mode()`): a bundle
+// assembled from the wrong runtime. Found before `initialize()` is called, so
+// before anything has opened the database: a defect of the build, never of
+// the data this browser stores for the app, and no recovery erases for it.
+const STAGE_BUILD = 'build';
 // The runtime's `initialize()` failed: opening the database, migrating it,
 // importing the seed. The one failure that can mean the stored data is not
 // what this build can use.
@@ -315,10 +325,23 @@ async function ensureInitialized() {
             await selfDestruct(`wasm module load failed: ${e}`, STAGE_LOAD, true);
             throw e;
         }
+        // Before `initialize()`, and so before anything opens the database: a
+        // worker built for one sandbox mode over a runtime compiled as another
+        // would boot a site with a workspace's headers, or a workspace with no
+        // `/b/dev`. Fatal, and `STAGE_BUILD` — nothing about the stored data
+        // is in question, so no recovery erases it.
+        const compiled = compiled_sandbox_mode();
+        if (compiled !== SANDBOX) {
+            const reason =
+                `this bundle's service worker is built for sandbox mode '${SANDBOX}' but its ` +
+                `runtime was compiled as '${compiled}' — rebuild the bundle`;
+            await selfDestruct(reason, STAGE_BUILD, true);
+            throw new Error(reason);
+        }
         console.log('[__APP_NAME__] Initializing runtime...');
         await eraseSettled();
         try {
-            await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
+            await initialize({ exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
             throw e;
@@ -614,8 +637,8 @@ self.addEventListener('fetch', (event) => {
         // stale script.
         //
         // The condition below reads `SANDBOX`, the single build-time
-        // constant declared at the top of this file (the same one
-        // `initialize()` is passed), so the difference between the workspace
+        // constant declared at the top of this file (the same one the
+        // runtime binary is checked against before `initialize()`), so the difference between the workspace
         // and every other bundle is visible in ONE line of the shipped file
         // rather than decided by the runtime — and a 'site' or 'none' bundle
         // keeps the plain early return it always had: only the workspace runs

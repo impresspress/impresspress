@@ -42,6 +42,20 @@ const MANIFEST = {
 /** A stand-in for the archive body — the page never looks inside it. */
 const ZIP = 'PK' + 'x'.repeat(96);
 
+// What the archive endpoint answers a deployment that carries no export
+// shell: a 503 `Unavailable` whose message names the shell and the build that
+// makes one (`blocks/dev/export.rs`'s `Refusal::Shell`, worded by
+// `export_shell_unavailable`; `tests/dev_export.rs` pins it in Rust), in the
+// runtime's error shape (`wafer_block::http_codec::error_to_http_response`).
+const SHELL_REFUSAL =
+  'this sandbox cannot export: its export shell is not part of this deployment: its service ' +
+  'worker handed initialize() no exportShell. The export shell is the site runtime an export ' +
+  'ships; rebuild and redeploy the sandbox with examples/dev-sandbox/build.sh, which builds it.';
+const REFUSED_ARCHIVE = {
+  status: 503,
+  body: JSON.stringify({ error: 'Unavailable', message: SHELL_REFUSAL })
+};
+
 test('exportSite asks for the manifest, then the archive, and downloads it', async () => {
   const { handle, fetchCalls, downloads } = instantiate({ exportManifest: MANIFEST });
   await settle();
@@ -105,17 +119,18 @@ test('an instance with nothing published reports the refusal, not a broken downl
 test('a failed archive request names the status and the server own message', async () => {
   const { handle, downloads } = instantiate({
     exportManifest: MANIFEST,
-    exportZip: { status: 500, body: 'the static shell could not be read' }
+    exportZip: REFUSED_ARCHIVE
   });
   await settle();
 
   await assert.rejects(
     () => handle.exportSite(),
     (error) => {
-      assert.match(error.message, /export failed: HTTP 500/);
-      // The server's own message, not a bare status: "the static shell could
-      // not be read" is the difference between a bug report and a shrug.
-      assert.match(error.message, /the static shell could not be read/);
+      assert.match(error.message, /export failed: HTTP 503/);
+      // The server's own message, not a bare status: "rebuild and redeploy
+      // the sandbox with examples/dev-sandbox/build.sh" is the difference
+      // between a bug report and a shrug.
+      assert.ok(error.message.includes(SHELL_REFUSAL), error.message);
       return true;
     }
   );
@@ -352,7 +367,7 @@ test('a failed export gives the button back', async () => {
   // outcome than the refusal itself.
   const { handle, elements } = instantiate({
     exportManifest: MANIFEST,
-    exportZip: { status: 500, body: 'the static shell could not be read' },
+    exportZip: REFUSED_ARCHIVE,
     status: {
       runtime_generation: 0,
       blocks: [],

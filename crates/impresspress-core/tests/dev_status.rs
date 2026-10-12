@@ -286,7 +286,7 @@ async fn every_response_is_never_cached() {
 /// `/openapi.json` (and registered as an agent tool) while 404-ing.
 #[test]
 fn routes_and_endpoints_stay_in_lockstep() {
-    let info = DevBlock::with_workspace(DevShared::new(
+    let info = DevBlock::new(DevShared::new(
         FakeControl::new(),
         fake_bypass_rules(),
         Some(std::sync::Arc::new(FakeShell::new())),
@@ -345,51 +345,6 @@ fn routes_and_endpoints_stay_in_lockstep() {
             endpoint.path
         );
     }
-}
-
-/// The same invariant one level up: an EXPORTED bundle registers this block
-/// without routing it, so it must declare no HTTP surface at all.
-///
-/// `routes_and_endpoints_stay_in_lockstep` above compares the dispatch table
-/// against the declarations and cannot see this — in `Exported` the dispatch
-/// table is still there, it is the *route* that is absent, and a `BlockInfo`
-/// is published for every registered block whether or not one exists. A
-/// declared endpoint would then be a 404 in `/openapi.json`, and `admin_url`
-/// an "Open" button on `/b/admin/blocks` pointing at a page the exported site
-/// does not serve.
-#[test]
-fn an_exported_bundle_declares_no_surface_it_does_not_route() {
-    let shared = DevShared::new(
-        FakeControl::new(),
-        fake_bypass_rules(),
-        Some(std::sync::Arc::new(FakeShell::new())),
-    );
-    let exported = DevBlock::runtime_only().info();
-
-    assert!(
-        exported.endpoints.is_empty(),
-        "an unrouted block must publish no endpoints: {:?}",
-        exported
-            .endpoints
-            .iter()
-            .map(|e| e.path.as_str())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        exported.admin_url.is_empty(),
-        "an unrouted block must offer no admin link: {}",
-        exported.admin_url
-    );
-
-    // Everything that is true in both modes stays: the block still owns its
-    // ledger tables, and its migrations still have to run.
-    let workspace = DevBlock::with_workspace(shared).info();
-    assert_eq!(exported.name, workspace.name);
-    assert_eq!(exported.collections.len(), workspace.collections.len());
-    assert!(!exported.collections.is_empty());
-    assert!(!exported.can_disable);
-    assert!(!workspace.endpoints.is_empty());
-    assert!(!workspace.admin_url.is_empty());
 }
 
 #[tokio::test]

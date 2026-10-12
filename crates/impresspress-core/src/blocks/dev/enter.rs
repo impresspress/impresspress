@@ -38,14 +38,12 @@
 //!
 //! # Where it exists
 //!
-//! Only in a sandbox **workspace**. Two things make that so, and neither is
-//! the row's presence in `ROUTES` (the dispatch table is the same in every
-//! mode): `WORKSPACE_ROUTES`, which only a workspace hands the router, and
-//! the `workspace` guard at the top of `DevBlock::handle`, which refuses
-//! every request on a runtime-only block. So an exported bundle — which
-//! registers the block without routing it — has no such page, and a
-//! deployment built without `block-dev` has no such code. That boundary is what makes a
-//! public page carrying a password acceptable: it is public only to the one
+//! Only in a sandbox **workspace** — a `block-dev` build, which is always
+//! one. Two things make that so: `WORKSPACE_ROUTES`, which only a workspace
+//! hands the router, and the build itself — an exported site is built
+//! without `block-dev`, so it has neither the route nor this page's code, and
+//! its `DevBlock::handle` has no dispatch table to find it in. That boundary
+//! is what makes a public page carrying a password acceptable: it is public only to the one
 //! visitor whose browser the instance lives in, and the password it carries
 //! is the one that instance's own workspace page prints.
 

@@ -1208,6 +1208,78 @@ and read together with this list.
     Tool console below, or the file editor", or that the tools are
     registered. Both seeds' guides and suggested prompts point an agent
     without WebMCP at the console.
+23. **§10.1 / §13 / §21 / amendments 19 and 21 — the export ships a site
+    build, and the build is the mode (2026-10-13).** Amendment 19 kept the
+    export on the sandbox's own runtime: a `browser-devtools` wasm whose
+    `sw.js` the export rewrote to turn the workspace off, so every exported
+    site carried the whole `impresspress/dev` workspace — the compiler
+    adapter, the scaffold templates, the export writer, the `Public`
+    `/b/dev/enter` handler — compiled in and unrouted. §13's "absent, not
+    merely disabled" was false for exactly the one shipped artifact a
+    stranger receives. The owner's requirement (2026-10-11): the dev block
+    is for development only. This amendment supersedes amendment 19's
+    `Exported` half and amendment 21's account of how an export lacks
+    `/b/dev/enter`. The export-runtime program (planned 2026-10-11; PRs
+    #176 and #179–#183, and the one that adds this amendment) carries the
+    detail.
+
+    **Two features, each crate.** `impresspress-core` splits `dev/` in two:
+    `site-runtime` (the ledger and its migrations, seed import and its data
+    snapshot, activation and boot convergence, the publisher and the stores
+    behind them) and `block-dev`, which implies it (the block's whole HTTP
+    surface, its page and assets, the tool manifest, the export and its zip
+    writer — and the `crc32fast`/`miniz_oxide` dependencies). The host seam
+    splits the same way: `RuntimeControl` (`inspect`, `rebuild`,
+    `restore_previous`) for the runtime, `WorkspaceControl` (`probe`,
+    `runtime_generation`, `announce_active`) for the workspace.
+    `impresspress-web` mirrors it: `browser-site-runtime` (`site_runtime.rs`)
+    and `browser-devtools` (`dev_runtime.rs`), which implies it.
+
+    **The build is the mode.** `SandboxMode` is `Absent` (neither feature),
+    `Site` (`browser-site-runtime` alone) or `Workspace` (`browser-devtools`),
+    and `SandboxMode::COMPILED` is the only reading of the features; the
+    runtime takes no mode from `initialize()`, and a devtools build can never
+    boot as a site. Amendment 19's split of the two halves stands — the
+    runtime half runs in both sandbox builds, the workspace half (the
+    `/b/dev` routes, the widened CSP, `frame_ancestors`,
+    `cross_origin_isolation`) only in `Workspace` — but it is decided by
+    which code exists, not by a flag. `DevBlock` has one form per build:
+    `DevBlock::new(shared)` under `block-dev`, always routed, and
+    `DevBlock::new()` without it, which holds nothing, declares no endpoint
+    and no `admin_url`, and answers anything that reaches it with a 404
+    because it has no dispatch table. A site build refuses a seed carrying a
+    `sandbox` section, naming it: that section is a sandbox's guide and
+    `llms.txt`.
+
+    **The bundle states the mode once and holds the runtime to it.** `[sandbox]
+    mode = "site" | "workspace"` in `impresspress.toml` (replacing `[dev]
+    enabled`) renders `const SANDBOX = '…';` into `sw.js` (`'none'` without a
+    `[sandbox]` table). After loading the module and before `initialize()`,
+    the worker compares it with the runtime's `compiled_sandbox_mode()`; a
+    mismatch — a bundle assembled from the wrong runtime — stops the worker
+    with stage `build`. Nothing has opened the database by then, so that
+    stage is never one a recovery erases data for, even in a build rendered
+    with `opfs_wipe_on_recovery`; the loader restarts once and then shows the
+    cause, which says to rebuild the bundle.
+
+    **The export copies a shell; it rewrites nothing.**
+    `examples/dev-sandbox/build.sh` compiles a second runtime with
+    `browser-site-runtime` (`pkg-site`), checks the built wasms
+    (`check-runtime-markers.mjs`: every workspace endpoint, tool name and the
+    compiler root absent from the site wasm and present in the devtools one),
+    bundles it as a site (`export-shell/impresspress.toml`, no boot notice,
+    no compiler bypass), and lays that bundle into the sandbox's deployment at
+    `/__impresspress_dev/export-shell/` (`[sandbox] export_shell`, mandatory
+    for a workspace). Its `asset-manifest.json` lists the shell's files, the
+    bypass rules its `sw.js` applies, and each file's SHA-256. The export
+    reads the shell through that manifest, verifies every body against its
+    digest (a static host's HTML fallback for a missing file is refused, not
+    shipped), checks the site's files against the SHELL's bypass rules, and
+    copies every shell file byte for byte — the boot page's title, the
+    site's own name, is the one edit. A deployment without a shell refuses to export;
+    it never falls back to the sandbox's own runtime. The exported wasm is
+    the site runtime: about 6 % smaller than the devtools one, which was
+    never the reason — the security property is.
 
 ## 21. Definition of done
 

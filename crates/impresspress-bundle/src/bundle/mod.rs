@@ -52,19 +52,21 @@ pub const EXPORT_SHELL_ROOT: &str = "/__impresspress_dev/export-shell/";
 
 /// Which half of the browser sandbox a bundle's service worker boots: `sw.js.tmpl`'s
 /// `__SANDBOX__` placeholder renders [`Self::as_str`] into ONE constant,
-/// `const SANDBOX = '…';`, which `initialize({ sandbox: SANDBOX, … })` and the
+/// `const SANDBOX = '…';`, which the check before `initialize()` and the
 /// isolation-header passthrough both read.
 ///
 /// The spelling is the same everywhere it appears: `[sandbox] mode = "site"`
 /// in `impresspress.toml` (no `[sandbox]` table is [`Self::None`]), this
 /// enum, and `const SANDBOX = 'site';` in the shipped `sw.js`.
 ///
-/// The service worker states what it was BUILT for; the runtime wasm still
-/// has to have been COMPILED with the matching `impresspress-web` feature
-/// for the mode to exist (`browser-site-runtime` for [`Self::Site`],
-/// `browser-devtools` for [`Self::Workspace`]). A mode the binary did not
-/// compile is the mode the binary has, with one console warning from
-/// `initialize()` — `impresspress-web`'s `SandboxMode` states the rule.
+/// The service worker states what it was BUILT for; the runtime wasm states
+/// what it was COMPILED as — `impresspress-web`'s `SandboxMode`, decided by
+/// its features (none, `browser-site-runtime` for [`Self::Site`],
+/// `browser-devtools` for [`Self::Workspace`]) and answered by its
+/// `compiled_sandbox_mode()`. The worker compares the two after loading the
+/// module and before `initialize()`; a mismatch — a bundle assembled from
+/// the wrong runtime — stops it there with stage `build`, which erases
+/// nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxShell {

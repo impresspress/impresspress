@@ -11,12 +11,13 @@
 //
 // One substitution is made here, and only one. The worker's first statement
 // imports the wasm-bindgen glue from an absolute URL (`/app-<hash>.js`), which
-// nothing in Node can resolve; that line is replaced with the three bindings
+// nothing in Node can resolve; that line is replaced with the four bindings
 // it would have produced, taken from the stubs a test passes in. Everything
 // below it runs as shipped, against a stub `self` and a stub `fetch`.
 import fs from 'node:fs';
 
-const GLUE_IMPORT = /^import init, \{ initialize, handle_request \} from '[^']+';$/m;
+const GLUE_IMPORT =
+  /^import init, \{ compiled_sandbox_mode, initialize, handle_request \} from '[^']+';$/m;
 
 function source(variable) {
   const file = process.env[variable];
@@ -32,7 +33,7 @@ function source(variable) {
   }
   return rendered.replace(
     GLUE_IMPORT,
-    'const { init, initialize, handle_request } = globalThis.__swRuntimeStubs;'
+    'const { init, compiled_sandbox_mode, initialize, handle_request } = globalThis.__swRuntimeStubs;'
   );
 }
 
@@ -71,9 +72,19 @@ export const SHELL_HTML = '<!DOCTYPE html><title>the boot shell</title>';
 
 let instances = 0;
 
+/// The sandbox mode a rendering was built for: its `const SANDBOX`.
+function sandboxOf(rendered) {
+  const declared = rendered.match(/^const SANDBOX = '([^']*)';$/m);
+  if (!declared) throw new Error('the rendered sw.js no longer declares SANDBOX');
+  return declared[1];
+}
+
 /// One fresh worker: its own module instance (so its own `poisoned` state),
-/// its own stubs. `runtime` supplies `init` / `initialize` / `handle_request`;
-/// each defaults to succeeding. `runtime.host(url)` is the static host's
+/// its own stubs. `runtime` supplies `init` / `compiled_sandbox_mode` /
+/// `initialize` / `handle_request`; each defaults to succeeding —
+/// `compiled_sandbox_mode` to answering the mode the rendering was built
+/// for, as a runtime from the same build does; `runtime.compiledSandboxMode`
+/// is another answer, a runtime from another build. `runtime.host(url)` is the static host's
 /// answer to a request the worker makes; by default it has the boot shell at
 /// `/` and nothing else — a plain file server, with no fallback for the paths
 /// only the runtime serves, and the runtime binary at RUNTIME_URL. `wipe`
@@ -108,6 +119,9 @@ export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) 
 
   // What `init()` was handed, each time it was called.
   const inits = [];
+  // Each time the worker asked the runtime which sandbox mode it was
+  // compiled as: how many `init()` calls had been made by then.
+  const modeChecks = [];
   const client = {
     url: CLIENT_URL,
     postMessage: (message) => posted.push(message),
@@ -163,6 +177,10 @@ export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) 
     init: async (options) => {
       inits.push(options);
       if (runtime.init) return runtime.init(options);
+    },
+    compiled_sandbox_mode: () => {
+      modeChecks.push(inits.length);
+      return runtime.compiledSandboxMode ?? sandboxOf(source);
     },
     initialize: async (options) => {
       timeline.push('initialize');
@@ -299,6 +317,9 @@ export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) 
 
     /// What `init()` was handed on each call.
     inits,
+    /// Each `compiled_sandbox_mode()` call, as the number of `init()` calls
+    /// made before it.
+    modeChecks,
     /// The entry kept for `url` in the runtime cache: its bytes and headers.
     keptEntry: (url) => store(RUNTIME_CACHE).get(keyOf(url)),
     /// The URLs kept in the runtime cache, as paths.

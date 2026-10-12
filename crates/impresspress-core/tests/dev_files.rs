@@ -633,7 +633,7 @@ async fn every_files_response_is_never_cached() {
 /// client-side error, and one that is laxer turns it into a 400.
 #[test]
 fn the_write_schema_and_the_handler_agree_on_what_is_required() {
-    let info = DevBlock::with_workspace(DevShared::new(
+    let info = DevBlock::new(DevShared::new(
         FakeControl::new(),
         fake_bypass_rules(),
         Some(std::sync::Arc::new(FakeShell::new())),

@@ -27,11 +27,11 @@
 //!
 //! Every other impresspress feature block goes through
 //! [`crate::impresspress_feature_block!`], which generates a zero-argument
-//! `new()`. This block's workspace form ([`DevBlock`]'s `with_workspace`,
-//! `block-dev`) takes the shared state its handlers serve, and its `info()`
-//! and `handle()` differ by build, so the struct and `impl Block` are written
-//! out in the same shape the macro would produce (as `impresspress/llm`
-//! already is).
+//! `new()`. This block's workspace build (`block-dev`) takes the shared
+//! state its handlers serve in [`DevBlock::new`], and its `info()` and
+//! `handle()` differ by build, so the struct and `impl Block` are written out
+//! in the same shape the macro would produce (as `impresspress/llm` already
+//! is).
 //!
 //! # Why it is not in the block manifest
 //!
@@ -39,9 +39,9 @@
 //! and `add_route`, gated on `impresspress-web`'s `browser-site-runtime`
 //! feature (which its `browser-devtools` implies) — the block is registered
 //! wherever that is compiled in, and only its `/b/dev` ROUTE is keyed on the
-//! deployment being a workspace (a `browser-devtools` build booted with
-//! `[sandbox] mode = "workspace"`) rather than an exported bundle (`SandboxMode`, spec
-//! amendment 19) — never on a stored variable. `feature_block_manifest!` only
+//! build being a workspace (`browser-devtools`, which compiles `block-dev`)
+//! rather than an exported site (`impresspress-web`'s `SandboxMode`, spec
+//! amendment 23) — never on a stored variable. `feature_block_manifest!` only
 //! enumerates blocks whose constructors take no arguments, and — more to the
 //! point — the sandbox's
 //! security model (design §13) depends on this block being absent from every
@@ -155,8 +155,7 @@ pub const ENTER_PATH: &str = "/b/dev/enter";
 /// has to come first, or the `Admin` prefix would claim it and the page whose
 /// whole purpose is to sign a visitor in would demand a session.
 ///
-/// A build without `block-dev` has no such list; a `block-dev` build running
-/// as an exported bundle ([`DevBlock::runtime_only`]) registers none of them.
+/// A build without `block-dev` has no such list, and registers none of them.
 #[cfg(feature = "block-dev")]
 pub const WORKSPACE_ROUTES: &[(&str, crate::routing::RouteAccess)] = &[
     (ENTER_PATH, crate::routing::RouteAccess::Public),
@@ -221,10 +220,8 @@ pub enum Route {
 
 /// The block's HTTP surface: what `handle()` dispatches on and what the
 /// workspace `info()` generates its endpoints from. A build without
-/// `block-dev` has no such table, and a `block-dev` build running as an
-/// exported bundle declares none of it ([`DevBlock::runtime_only`]). Every row
-/// but one is
-/// `Admin` (design §13); the router is the sole gate, so the declaration is
+/// `block-dev` has no such table, and its [`DevBlock`] declares none of it.
+/// Every row but one is `Admin` (design §13); the router is the sole gate, so the declaration is
 /// what pins that tier where the router can enforce it. The exception is the
 /// entry page, which is `Public` because signing the visitor in is its job
 /// ([`enter`]). The matcher binds
@@ -633,8 +630,7 @@ pub struct DevShared {
     /// What only the workspace half uses: the host's workspace calls, the
     /// export shell the export copies, and the compile lock.
     ///
-    /// No `Option`: a `block-dev` build always has a workspace host (even
-    /// when it serves an exported bundle and routes no `/b/dev`), and a build
+    /// No `Option`: a `block-dev` build is always a workspace, and a build
     /// without `block-dev` has no field to fill.
     #[cfg(feature = "block-dev")]
     pub workspace: Workspace,
@@ -737,62 +733,48 @@ impl DevShared {
 ///
 /// Its `info()` and `lifecycle()` read no shared state, so only the
 /// workspace's dispatch holds any: a build without `block-dev` has no field.
+/// Each build has one form, and it is the form that build's runtime
+/// registers — a `block-dev` build always routes `/b/dev`
+/// ([`WORKSPACE_ROUTES`]), and a build without it never does.
+#[cfg_attr(not(feature = "block-dev"), derive(Default))]
 pub struct DevBlock {
-    /// The shared state the workspace's handlers serve — `Some` exactly when
-    /// the runtime that registered this block also routed [`ROUTE_PREFIX`].
-    ///
-    /// A `block-dev` build registers the block in both of `SandboxMode`'s
-    /// compiled-in modes, because its `lifecycle(Init)` is what creates the
-    /// ledger tables the seed import and the generation history write to.
-    /// Only the workspace mode routes it. This field carries that difference
-    /// into the two places that would otherwise describe or serve a surface
-    /// that is not there: [`Block::info`] — whose `endpoints` become
-    /// `/openapi.json` and whose `admin_url` becomes an "Open" button on
-    /// `/b/admin/blocks`, for every registered block, routed or not — and
-    /// [`Block::handle`], which has no state to dispatch to without it.
+    /// The shared state the workspace's handlers serve.
     #[cfg(feature = "block-dev")]
-    workspace: Option<Arc<DevShared>>,
+    shared: Arc<DevShared>,
 }
 
 impl DevBlock {
-    /// The sandbox with its workspace half: this runtime routes
-    /// [`ROUTE_PREFIX`], so the endpoints below are real and `/b/dev` is
-    /// where an admin goes to reach them.
+    /// The sandbox with its workspace half: the runtime routes
+    /// [`ROUTE_PREFIX`], so the endpoints [`Block::info`] declares are real
+    /// and `/b/dev` is where an admin goes to reach them.
     #[cfg(feature = "block-dev")]
-    pub fn with_workspace(shared: Arc<DevShared>) -> Self {
-        Self {
-            workspace: Some(shared),
-        }
+    pub fn new(shared: Arc<DevShared>) -> Self {
+        Self { shared }
     }
 
-    /// The runtime half alone — **an exported bundle**.
+    /// The runtime half alone — **an exported site**.
     ///
     /// Registered for its migrations, its ledger and its seed import, with no
-    /// `/b/dev` route (design amendment 19). Declaring the endpoints anyway
-    /// would publish a dozen 404s in the exported site's `/openapi.json` and
-    /// put an "Open" link to a page that does not exist on its admin's own
-    /// blocks page — the exact drift
-    /// `routes_and_endpoints_stay_in_lockstep` exists to catch, one level up
-    /// from where that test can see it.
+    /// `/b/dev` route (design amendment 23). It declares no endpoint and no
+    /// `admin_url`: declaring them anyway would publish a dozen 404s in the
+    /// exported site's `/openapi.json` and put an "Open" link to a page that
+    /// does not exist on its admin's own blocks page.
     ///
     /// Takes nothing: the shared state the host built is the host's to hold
     /// (the activation queue and the boot run on it), and nothing this block
-    /// does without a route reads it. The only form a build without
-    /// `block-dev` has.
-    pub fn runtime_only() -> Self {
-        Self {
-            #[cfg(feature = "block-dev")]
-            workspace: None,
-        }
+    /// does without a route reads it.
+    #[cfg(not(feature = "block-dev"))]
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
 #[wafer_block::wafer_async_trait]
 impl Block for DevBlock {
     fn info(&self) -> BlockInfo {
-        // The half that is true in both modes: the block exists, it owns
-        // these tables, and its migrations ran. An exported bundle's ledger
-        // is as real as a workspace's.
+        // The half that is true in both builds: the block exists, it owns
+        // these tables, and its migrations ran. An exported site's ledger is
+        // as real as a workspace's.
         let base = BlockInfo::new(BLOCK_NAME, "0.1.0", "http-handler@v1", SUMMARY)
             .instance_mode(InstanceMode::Singleton)
             .requires(vec![
@@ -813,15 +795,13 @@ impl Block for DevBlock {
             // toggle that would leave a half-live control plane behind.
             .can_disable(false);
 
-        // The half that depends on a route existing. An exported bundle has
-        // none of it — see `Self::runtime_only` — and a build without
-        // `block-dev` has no route table to declare it from.
+        // The half that depends on a route existing, which only the
+        // workspace build has. A build without `block-dev` has no route table
+        // to declare it from, and an exported site none of it.
         #[cfg(feature = "block-dev")]
-        if self.workspace.is_some() {
-            return base
-                .endpoints(endpoint_match::declare(ROUTES))
-                .admin_url(ROUTE_PREFIX);
-        }
+        let base = base
+            .endpoints(endpoint_match::declare(ROUTES))
+            .admin_url(ROUTE_PREFIX);
         base
     }
 
@@ -832,15 +812,7 @@ impl Block for DevBlock {
         mut msg: Message,
         input: InputStream,
     ) -> OutputStream {
-        // An exported bundle has no HTTP surface. The router already says so
-        // — nothing routes to this block there — and this says it again from
-        // the inside, because one row of `ROUTES` is `Public` and hands out a
-        // session: that page must not be one stray route registration away
-        // from existing on a site that was exported to be served for real.
-        // A block built without the workspace has no state to serve it from.
-        let Some(shared) = &self.workspace else {
-            return no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found");
-        };
+        let shared = &self.shared;
         let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
             return no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found");
         };
@@ -874,9 +846,12 @@ impl Block for DevBlock {
         }
     }
 
-    /// A build without `block-dev` has no HTTP surface at all: no dispatch
-    /// table, no handler, no route registered for it. Anything that reaches
-    /// the block anyway is answered as a route that does not exist.
+    /// A build without `block-dev` — an exported site — has no HTTP surface
+    /// at all: no dispatch table, no handler, no route registered for it.
+    /// Anything that reaches the block anyway is answered as a route that
+    /// does not exist. One row of the workspace's `ROUTES` is `Public` and
+    /// hands out a session; on a site build that page is not one stray route
+    /// registration away from existing, because its code is not there.
     #[cfg(not(feature = "block-dev"))]
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
         no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found")
@@ -1090,7 +1065,7 @@ mod tests {
     fn info_endpoints_come_from_the_table() {
         use wafer_run::Block as _;
 
-        let declared = DevBlock::with_workspace(DevShared::new(
+        let declared = DevBlock::new(DevShared::new(
             test_support::FakeControl::new(),
             test_support::fake_bypass_rules(),
             Some(std::sync::Arc::new(test_support::FakeShell::new())),

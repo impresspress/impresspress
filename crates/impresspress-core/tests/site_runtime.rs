@@ -213,7 +213,7 @@ async fn a_seed_boots_into_a_live_site_with_its_block_and_data() {
 /// no admin page, and a summary of what it is in this build.
 #[tokio::test]
 async fn the_block_declares_no_workspace_surface() {
-    let info = DevBlock::runtime_only().info();
+    let info = DevBlock::new().info();
 
     assert_eq!(info.name, dev::BLOCK_NAME);
     assert!(
@@ -258,7 +258,7 @@ async fn openapi_publishes_no_workspace_path() {
 #[tokio::test]
 async fn no_workspace_path_answers() {
     let (ctx, _control) = fixture().await;
-    let block = DevBlock::runtime_only();
+    let block = DevBlock::new();
     for path in [
         "/b/dev",
         "/b/dev/enter",

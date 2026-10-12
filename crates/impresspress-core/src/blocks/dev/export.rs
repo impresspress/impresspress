@@ -52,7 +52,13 @@
 //! One edit remains, and it is the site's data rather than the build's: the
 //! boot page shows the shell's placeholder title in `<title>` and twice in
 //! the body, and the exported site has a name of its own — the one the
-//! README is headed with. See [`index_with_title`].
+//! README is headed with. See [`index_with_title`]. The shell's
+//! `asset-manifest.json` is still copied as the bytes it parsed, so its
+//! `sha256` for `index.html` is the digest of the shell's placeholder-titled
+//! page, not of the retitled one the archive ships: nothing in the exported
+//! site reads that digest (the worker only bypasses the manifest), but
+//! `AssetManifest::verify` over an exported folder reports `index.html` as
+//! changed — which it is, by exactly this edit.
 //!
 //! A deployment without an export shell does not export. It never falls
 //! back to the sandbox's own shell: that would ship the workspace — the
@@ -634,8 +640,8 @@ fn index_with_title(bytes: Vec<u8>, title: &str) -> Result<Vec<u8>, Refusal> {
 /// The refusal for a boot page the export cannot title safely.
 fn index_malformed(what: &str) -> Refusal {
     Refusal::Shell(format!(
-        "'s {INDEX_PATH} {what}, so the export cannot give the exported site its name; it was \
-         built by a different impresspress-bundle than this runtime expects"
+        "has an {INDEX_PATH} that {what}, so the export cannot give the exported site its name; \
+         it was built by a different impresspress-bundle than this runtime expects"
     ))
 }
 

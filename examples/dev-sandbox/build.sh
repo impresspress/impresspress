@@ -417,9 +417,10 @@ IMPRESSPRESS_WEB_PKG_DIR="$PKG_DIR" \
 DIST="$HERE/dist"
 [ -f "$DIST/sw.js" ] || { echo "build.sh: $DIST/sw.js was not produced" >&2; exit 1; }
 # The one build-time constant `sw.js` renders `[sandbox] mode` into
-# (`impresspress-bundle`'s `sw.js.tmpl`): `initialize({ sandbox: SANDBOX })`
-# and the isolation-header passthrough both read it, so this single line is
-# the whole of "this bundle is the workspace".
+# (`impresspress-bundle`'s `sw.js.tmpl`): the check that holds the runtime to
+# that mode before `initialize()` (`compiled_sandbox_mode()`) and the
+# isolation-header passthrough both read it, so this single line is the
+# whole of "this bundle is the workspace".
 grep -q "const SANDBOX = 'workspace';" "$DIST/sw.js" || {
   echo "build.sh: $DIST/sw.js does not declare \"const SANDBOX = 'workspace';\" — is [sandbox] mode = \"workspace\" set?" >&2
   exit 1

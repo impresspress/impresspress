@@ -380,25 +380,34 @@ fn rendered_sw(sandbox: SandboxShell, app: AppConfig) -> String {
     fs::read_to_string(tmp.path().join("sw.js")).unwrap()
 }
 
+/// The mode is the build's: `sw.js` states the one it was built for and
+/// holds the runtime binary to it (`compiled_sandbox_mode()`, compared before
+/// `initialize()`), and never hands it to `initialize()` — the runtime has no
+/// mode option to hand. The behaviour is driven in
+/// `tests/sw/sw_sandbox_mode.test.mjs`; this pins the text.
 #[test]
-fn sw_passes_the_sandbox_mode_to_initialize() {
+fn sw_checks_the_runtime_against_its_sandbox_mode() {
     for (sandbox, declaration) in [
         (SandboxShell::Site, "const SANDBOX = 'site';"),
         (SandboxShell::Workspace, "const SANDBOX = 'workspace';"),
     ] {
         let sw = rendered_sw(sandbox, AppConfig::default());
-        // ONE rendered constant, read by `initialize()` and by the
-        // passthrough branch alike — see `sw.js.tmpl`'s header for why the
-        // mode is stated once rather than substituted at each use. Exactly
-        // once: the export finds it by this text.
+        // ONE rendered constant, read by the check and by the passthrough
+        // branch alike — see `sw.js.tmpl`'s header for why the mode is
+        // stated once rather than substituted at each use.
         assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
         assert_eq!(sw.matches("const SANDBOX = ").count(), 1, "sw.js = {sw}");
         assert!(
-            sw.contains(
-                "initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
-            ),
-            "initialize() must read the one constant; sw.js = {sw}"
+            sw.contains("if (compiled !== SANDBOX) {"),
+            "the check must read the one constant; sw.js = {sw}"
         );
+        assert!(
+            sw.contains(
+                "initialize({ exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
+            ),
+            "initialize() is handed no mode; sw.js = {sw}"
+        );
+        assert!(!sw.contains("sandbox: SANDBOX"), "sw.js = {sw}");
     }
 }
 
@@ -430,7 +439,7 @@ fn only_a_workspace_with_an_export_shell_names_it() {
         "sw.js = {sw}"
     );
     assert!(
-        sw.contains("initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, "),
+        sw.contains("initialize({ exportShell: EXPORT_SHELL, "),
         "initialize() must read the one constant; sw.js = {sw}"
     );
 
@@ -479,14 +488,13 @@ fn sw_defaults_the_sandbox_mode_to_none() {
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
     // The sandbox is off unless a bundle asks for it: an app with no
-    // `[sandbox]` table must ship a service worker that boots the runtime
-    // with the mode explicitly 'none', not merely absent.
+    // `[sandbox]` table must ship a service worker built for the mode
+    // explicitly 'none', not merely absent — which is what it holds its
+    // runtime to before `initialize()`.
     assert!(sw.contains("const SANDBOX = 'none';"), "sw.js = {sw}");
     assert!(
-        sw.contains(
-            "initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
-        ),
-        "initialize() must read the one constant; sw.js = {sw}"
+        sw.contains("if (compiled !== SANDBOX) {"),
+        "the check must read the one constant; sw.js = {sw}"
     );
     assert!(
         !sw.contains("__SANDBOX__"),
@@ -635,7 +643,7 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
         let handed = sw_initialize_rules(&sw);
 
         assert!(
-            sw.contains("await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
+            sw.contains("await initialize({ exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
             "sw.js = {sw}"
         );
         // Rule for rule, in order.

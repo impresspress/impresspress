@@ -600,7 +600,19 @@ async fn a_deployment_without_an_export_shell_refuses_to_export() {
         json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
     )
     .await;
-    assert_the_export_shell_refusal(&ctx, &["is not part of this deployment", "exportShell"]).await;
+    // The whole sentence, because `dev/assets/test/dev_export.test.mjs` serves
+    // it as the archive endpoint's answer: the page's half of this refusal is
+    // tested against what this half really says.
+    assert_the_export_shell_refusal(
+        &ctx,
+        &[
+            "this sandbox cannot export: its export shell is not part of this deployment: its \
+           service worker handed initialize() no exportShell. The export shell is the site \
+           runtime an export ships; rebuild and redeploy the sandbox with \
+           examples/dev-sandbox/build.sh, which builds it.",
+        ],
+    )
+    .await;
 }
 
 /// A shell the deployment names but does not serve, or serves a manifest of
@@ -654,7 +666,11 @@ async fn an_export_shell_that_is_missing_or_unreadable_is_refused() {
             "no digests",
             site.serve()
                 .serving("asset-manifest.json", &without("sha256")),
-            vec!["sha256"],
+            vec![
+                FAKE_SHELL_ROOT,
+                "carries a manifest (asset-manifest.json) this runtime cannot read",
+                "sha256",
+            ],
         ),
         (
             "no files",
@@ -1012,7 +1028,7 @@ async fn the_exported_sw_is_the_export_shells_a_site_with_no_workspace() {
     assert!(!sw.contains("/__impresspress_dev/"), "{sw}");
     assert!(sw.contains("url.pathname.startsWith('/seed/')"), "{sw}");
     assert!(
-        sw.contains("await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
+        sw.contains("await initialize({ exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
         "{sw}"
     );
     let listing: impresspress_core::blocks::dev::ShellListing =
@@ -1088,7 +1104,8 @@ async fn a_boot_page_the_export_cannot_retitle_is_refused() {
             json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
         )
         .await;
-        assert_the_export_shell_refusal(&ctx, &["index.html", says]).await;
+        assert_the_export_shell_refusal(&ctx, &["export shell has an index.html that ", says])
+            .await;
     }
 }
 

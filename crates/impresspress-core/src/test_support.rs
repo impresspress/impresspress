@@ -883,16 +883,19 @@ impl TestContext {
         use crate::blocks::dev;
 
         let shared = dev::DevShared::new(control, bypass, export_shell);
-        let block = dev::DevBlock::with_workspace(shared.clone());
+        let block = dev::DevBlock::new(shared.clone());
         self.with_dev_block_added(shared, block, dev::WORKSPACE_ROUTES)
             .await
     }
 
     /// Build a `TestContext` with admin + dev-sandbox migrations applied and
-    /// the `impresspress/dev` block registered the way an exported site
-    /// registers it: the runtime half alone
-    /// ([`crate::blocks::dev::DevBlock::runtime_only`]), with no route, over
-    /// a `DevShared` built around `control`.
+    /// the `impresspress/dev` block registered the way this build's runtime
+    /// registers it, over a `DevShared` built around `control`. Without
+    /// `block-dev` that is how an exported site registers it: the runtime
+    /// half alone ([`crate::blocks::dev::DevBlock::new`], which holds
+    /// nothing), with no route. A `block-dev` build has one form, the
+    /// workspace, and registers it routed, as `Self::with_dev` does — the
+    /// runtime-half tests that use this fixture never reach the routes.
     ///
     /// Everything else is what `Self::with_dev` (`block-dev`) applies — the
     /// storage wiring, the [`crate::blocks::dev::wrap_grants`] and WRAP
@@ -919,33 +922,35 @@ impl TestContext {
     /// that needs another block's tables first (a seed whose `data.json`
     /// carries products rows needs the products block's), the way
     /// `with_dev_added` serves the workspace.
-    #[cfg(feature = "site-runtime")]
+    #[cfg(all(feature = "site-runtime", not(feature = "block-dev")))]
     pub async fn with_site_runtime_added(
         self,
         control: Arc<crate::blocks::dev::test_support::FakeControl>,
     ) -> Self {
         use crate::blocks::dev;
 
-        #[cfg(not(feature = "block-dev"))]
         let shared = dev::DevShared::new(control, dev::test_support::fake_bypass_rules());
-        // The workspace half a `block-dev` build's `DevShared` always has.
-        // Nothing the runtime half does reads it; the default shell is the
-        // plausible one `with_dev_added` uses.
-        #[cfg(feature = "block-dev")]
-        let shared = dev::DevShared::new(
-            control,
-            dev::test_support::fake_bypass_rules(),
-            Some(Arc::new(dev::test_support::FakeShell::new())),
-        );
-        let block = dev::DevBlock::runtime_only();
-        self.with_dev_block_added(shared, block, &[]).await
+        self.with_dev_block_added(shared, dev::DevBlock::new(), &[])
+            .await
+    }
+
+    /// [`Self::with_site_runtime`] on top of an EXISTING fixture, in a
+    /// `block-dev` build: the workspace that build always is, exactly as
+    /// `Self::with_dev_added` registers it. Nothing the runtime half does
+    /// reads the workspace half of its `DevShared`.
+    #[cfg(feature = "block-dev")]
+    pub async fn with_site_runtime_added(
+        self,
+        control: Arc<crate::blocks::dev::test_support::FakeControl>,
+    ) -> Self {
+        self.with_dev_added(control).await
     }
 
     /// The one function that wires the `impresspress/dev` block into a
-    /// fixture, in whichever form the caller built: its migrations, the
-    /// block, the object store behind `wafer-run/storage`, the extra routes
-    /// the form registers (none for the runtime half), the WRAP grants and
-    /// the after-response deferral.
+    /// fixture, in the one form this build has: its migrations, the block,
+    /// the object store behind `wafer-run/storage`, the extra routes that
+    /// form registers (none for the runtime half), the WRAP grants and the
+    /// after-response deferral.
     #[cfg(feature = "site-runtime")]
     async fn with_dev_block_added(
         mut self,
@@ -4292,19 +4297,19 @@ pub fn real_block_infos() -> Vec<BlockInfo> {
 
     // The dev sandbox is registered by the browser runtime alone
     // (`impresspress-web`), so it is not in the build's block manifest, and
-    // ships only under its own (non-default) features — in the form each
-    // build registers: the workspace under `block-dev`, the runtime half
-    // alone under `site-runtime` without it. Its `info()` is declarative —
+    // ships only under its own (non-default) features — in the one form each
+    // build has: the workspace under `block-dev`, the runtime half alone
+    // under `site-runtime` without it. Its `info()` is declarative —
     // nothing the workspace form is built with is ever called here, so the
     // test doubles suffice — and the runtime half is built with nothing.
     #[cfg(feature = "block-dev")]
-    let block = crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
+    let block = crate::blocks::dev::DevBlock::new(crate::blocks::dev::DevShared::new(
         crate::blocks::dev::test_support::FakeControl::new(),
         crate::blocks::dev::test_support::fake_bypass_rules(),
         Some(Arc::new(crate::blocks::dev::test_support::FakeShell::new())),
     ));
     #[cfg(all(feature = "site-runtime", not(feature = "block-dev")))]
-    let block = crate::blocks::dev::DevBlock::runtime_only();
+    let block = crate::blocks::dev::DevBlock::new();
     #[cfg(feature = "site-runtime")]
     infos.push(block.info());
 

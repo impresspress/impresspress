@@ -65,7 +65,7 @@ fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
             .as_str()
             .unwrap_or_else(|| panic!("the write made a generation: {generations}"))
             .to_string();
-        let block = Arc::new(DevBlock::with_workspace(ctx.dev_shared()));
+        let block = Arc::new(DevBlock::new(ctx.dev_shared()));
         Fixture {
             ctx,
             site: Site(vec![block as Arc<dyn Block>]),
