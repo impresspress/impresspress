@@ -1,5 +1,5 @@
 //! Test doubles for the [`RuntimeControl`], `WorkspaceControl`,
-//! `ShellSource` and [`seed::SeedFetch`] seams, plus the request helpers
+//! `ShellSource` (the export shell) and [`seed::SeedFetch`] seams, plus the request helpers
 //! every `dev_*.rs` integration file needs to reach the block at all.
 //!
 //! Exposed under `test-support` (as well as `cfg(test)`) so the `tests/`
@@ -462,95 +462,52 @@ pub fn seed_file(path: &str, bytes: &[u8]) -> SeedFile {
 }
 
 // ---------------------------------------------------------------------------
-// The static-shell seam
+// The export-shell seam
 // ---------------------------------------------------------------------------
 
-/// A [`ShellSource`] over an in-memory `path -> bytes` map — the same contract
-/// the browser's `/asset-manifest.json` reader (`impresspress-web`'s
+/// A [`ShellSource`] over an in-memory `path -> body` map — the same contract
+/// the browser's export-shell reader (`impresspress-web`'s
 /// `BrowserShellSource`) satisfies, driveable here without a service worker.
 ///
-/// [`Self::new`] carries a plausible shell: the three rendered templates, the
-/// hashed wasm-pack pair, `vendor/sql-wasm.wasm` and the asset manifest
-/// itself. Its `sw.js` is a workspace bundle's — it declares
-/// `const SANDBOX = 'workspace';` and reads that constant in the
-/// isolation-header passthrough, exactly as `impresspress-bundle`'s template
-/// renders it — and its bypass list carries the compiler prefix the way a
-/// deployment that ships the in-browser toolchain does. So a test can assert
-/// BOTH edits the export makes to a shell file: the mode set to `'site'`, and
-/// the bypass for a compiler tree the export does not copy removed.
+/// It is only a fetch, like the seam: [`ShellListing`](super::ShellListing)
+/// reads its `asset-manifest.json` and verifies every body, so a fixture whose
+/// manifest disagrees with its files is refused exactly as a deployment's
+/// would be.
 ///
-/// Its `sw.js` also declares the `BYPASS_RULES` the worker hands
-/// `initialize()` — [`fake_bypass_rules`], the rules a real dev-sandbox bundle
-/// renders — so a test can assert the export strips the compiler prefix from
-/// those too.
+/// [`Self::new`] serves a plausible site shell — the three rendered
+/// templates, the hashed wasm-pack pair, `vendor/sql-wasm.wasm` and a
+/// manifest listing them with their digests and [`fake_site_bypass_rules`] —
+/// for the many tests that need the export to work and are not about the
+/// shell. The export tests build theirs from what the real bundler renders
+/// (`tests/dev_export.rs`'s `site_shell`, through [`Self::from_files`]).
 #[cfg(feature = "block-dev")]
 pub struct FakeShell {
     files: BTreeMap<String, Vec<u8>>,
-    /// Set by [`Self::failing_to_list`]: what `list` refuses with.
-    list_failure: Option<String>,
-    /// How many files `fetch` has been asked for — read by [`Self::fetches`].
-    fetched: std::sync::atomic::AtomicUsize,
+    /// Every path `fetch` has been asked for, in order — read by
+    /// [`Self::fetched`].
+    fetched: Mutex<Vec<String>>,
 }
 
-/// The `sw.js` [`FakeShell::new`] serves — a workspace bundle's, trimmed to the
-/// lines the export acts on (the `SANDBOX` declaration and the compiler's
-/// bypass clause) plus the ones it must leave exactly alone (the constant's
-/// two readers and the `/seed/` bypass, without which an exported folder
-/// could never import the seed shipped beside it). The bypass condition is
-/// laid out the way `impresspress-bundle`'s `BypassRules::render_condition`
-/// renders one: a clause per line, each after the first leading with its `||`.
-/// `PAGE_ENGINES` and `EXPORT_SHELL` are declared as the bundler renders them
-/// for the dev sandbox (which is built with an export shell), so the
-/// `initialize()` call reads constants that exist. `tests/dev_export.rs`
-/// holds the rules, the engines, the `SANDBOX` and `EXPORT_SHELL`
-/// declarations, the `initialize()` call and the passthrough guard here to
-/// what the bundler actually renders
-/// (`the_fake_shell_states_what_the_bundler_renders`), so this copy cannot
-/// drift from it.
+/// The root the fake says it reads from: where a dev-sandbox deployment
+/// carries its export shell (`impresspress-bundle`'s `EXPORT_SHELL_ROOT`,
+/// restated because the bundler is not a dependency of this crate).
 #[cfg(feature = "block-dev")]
-pub const FAKE_SW_JS: &str = concat!(
-    "const SANDBOX = 'workspace';\n",
-    r#"const EXPORT_SHELL = "/__impresspress_dev/export-shell/";"#,
-    "\n",
-    "const BYPASS_RULES = ",
-    r#"{"exact":["/sw.js","/loader.js","/manifest.json","/asset-manifest.json","#,
-    r#""/webllm-engine.js","/embed-engine.js","/t2i-engine.js","#,
-    r#""/vendor/sql-wasm-esm.js","/vendor/sql-wasm.wasm"],"#,
-    r#""prefixes":["/impresspress_web","/snippets/","/cdn-cgi/","#,
-    r#""/__impresspress_dev/compiler/","/seed/"]};"#,
-    "\n",
-    r#"const PAGE_ENGINES = ["/webllm-engine.js","/embed-engine.js","/t2i-engine.js"];"#,
-    "\n",
-    "await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });\n",
-    "if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') { passthrough(); }\n",
-    "if (url.pathname.startsWith('/snippets/') ||\n        ",
-    "url.pathname.startsWith('/cdn-cgi/') ||\n        ",
-    "url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        ",
-    "url.pathname.startsWith('/seed/')) { return; }\n",
-);
+pub const FAKE_SHELL_ROOT: &str = "/__impresspress_dev/export-shell/";
+
+/// The title [`FakeShell::new`]'s boot page shows, wrapped the way the
+/// bundler wraps one, for the export to replace.
+#[cfg(feature = "block-dev")]
+pub const FAKE_SHELL_TITLE: &str = "ImpressPress site";
 
 /// The bypass rules a dev-sandbox worker hands `initialize()`: what
 /// `impresspress-bundle` renders for the dev-sandbox deployment
 /// (`examples/dev-sandbox/impresspress.toml` — a workspace bundle with the
-/// compiler prefix), with `FakeShell`'s wasm-pack base name. `FAKE_SW_JS` (`block-dev`)
-/// declares exactly these, and the test fixtures build `DevShared` with them
-/// in both builds. `tests/dev_export.rs` checks them against the bundler's
-/// own.
+/// compiler prefix), with `FakeShell`'s wasm-pack base name. The test
+/// fixtures build `DevShared` with them in both builds; `tests/dev_export.rs`
+/// checks them against the bundler's own.
 pub fn fake_bypass_rules() -> BypassRules {
     BypassRules {
-        exact: [
-            "/sw.js",
-            "/loader.js",
-            "/manifest.json",
-            "/asset-manifest.json",
-            "/webllm-engine.js",
-            "/embed-engine.js",
-            "/t2i-engine.js",
-            "/vendor/sql-wasm-esm.js",
-            "/vendor/sql-wasm.wasm",
-        ]
-        .map(String::from)
-        .to_vec(),
+        exact: fake_exact_rules(),
         prefixes: [
             "/impresspress_web",
             "/snippets/",
@@ -563,6 +520,38 @@ pub fn fake_bypass_rules() -> BypassRules {
     }
 }
 
+/// The bypass rules [`FakeShell::new`]'s manifest states: what
+/// `impresspress-bundle` renders for the export shell
+/// (`examples/dev-sandbox/export-shell/impresspress.toml` — a site bundle,
+/// no compiler), with the same base name. `tests/dev_export.rs` checks them
+/// against the bundler's own too.
+#[cfg(feature = "block-dev")]
+pub fn fake_site_bypass_rules() -> BypassRules {
+    BypassRules {
+        exact: fake_exact_rules(),
+        prefixes: ["/impresspress_web", "/snippets/", "/cdn-cgi/", "/seed/"]
+            .map(String::from)
+            .to_vec(),
+    }
+}
+
+/// The exact rules every sandbox bundle renders, whatever its mode.
+fn fake_exact_rules() -> Vec<String> {
+    [
+        "/sw.js",
+        "/loader.js",
+        "/manifest.json",
+        "/asset-manifest.json",
+        "/webllm-engine.js",
+        "/embed-engine.js",
+        "/t2i-engine.js",
+        "/vendor/sql-wasm-esm.js",
+        "/vendor/sql-wasm.wasm",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
 #[cfg(feature = "block-dev")]
 impl Default for FakeShell {
     fn default() -> Self {
@@ -572,60 +561,99 @@ impl Default for FakeShell {
 
 #[cfg(feature = "block-dev")]
 impl FakeShell {
-    /// A shell with the seven files a real bundle's `files` listing carries.
+    /// A site shell with the files a real bundle's listing carries, and a
+    /// manifest that lists them.
     pub fn new() -> Self {
-        let mut files = BTreeMap::new();
-        files.insert("index.html".to_string(), b"<!doctype html>".to_vec());
-        files.insert("sw.js".to_string(), FAKE_SW_JS.as_bytes().to_vec());
-        files.insert("loader.js".to_string(), b"// loader".to_vec());
-        files.insert(
-            "impresspress_web-abc123.js".to_string(),
-            b"// glue".to_vec(),
-        );
-        files.insert(
-            "impresspress_web_bg-abc123.wasm".to_string(),
-            b"\0asm\x01\0\0\0".to_vec(),
-        );
-        files.insert(
-            "vendor/sql-wasm.wasm".to_string(),
-            b"\0asm\x01\0\0\0".to_vec(),
-        );
-        files.insert(
-            "asset-manifest.json".to_string(),
-            br#"{"buildId":"abc123","assets":{},"files":[]}"#.to_vec(),
-        );
+        Self::from_files([
+            (
+                "index.html".to_string(),
+                format!(
+                    "<!doctype html><title>{FAKE_SHELL_TITLE}</title>\
+                     <h1><span data-app-title>{FAKE_SHELL_TITLE}</span></h1>"
+                )
+                .into_bytes(),
+            ),
+            ("sw.js".to_string(), b"// sw".to_vec()),
+            ("loader.js".to_string(), b"// loader".to_vec()),
+            (
+                "impresspress_web-abc123.js".to_string(),
+                b"// glue".to_vec(),
+            ),
+            (
+                "impresspress_web_bg-abc123.wasm".to_string(),
+                b"\0asm\x01\0\0\0".to_vec(),
+            ),
+            (
+                "vendor/sql-wasm.wasm".to_string(),
+                b"\0asm\x01\0\0\0".to_vec(),
+            ),
+        ])
+        .relisted()
+    }
+
+    /// A shell serving exactly `files`, `asset-manifest.json` included if it
+    /// is among them — what a directory the bundler rendered serves, read
+    /// back file by file.
+    pub fn from_files(files: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
         Self {
-            files,
-            list_failure: None,
-            fetched: std::sync::atomic::AtomicUsize::new(0),
+            files: files.into_iter().collect(),
+            fetched: Mutex::new(Vec::new()),
         }
     }
 
-    /// How many shell files have been fetched so far: what an export that
-    /// was refused before it read the runtime has to leave at zero.
-    pub fn fetches(&self) -> usize {
-        self.fetched.load(std::sync::atomic::Ordering::SeqCst)
+    /// The paths fetched so far, in order: what an export refused before it
+    /// read the runtime has to have left at the manifest alone.
+    pub fn fetched(&self) -> Vec<String> {
+        self.fetched.lock().expect("fetched mutex").clone()
     }
 
-    /// Add or replace one file, chainable.
-    pub fn with(mut self, path: &str, bytes: &[u8]) -> Self {
+    /// Serve `bytes` at `path` and list it — the manifest rewritten to name
+    /// it with its digest, as the bundler would have for a bundle carrying
+    /// the file. Chainable.
+    pub fn with_listed(mut self, path: &str, bytes: &[u8]) -> Self {
+        self.files.insert(path.to_string(), bytes.to_vec());
+        self.relisted()
+    }
+
+    /// Serve `bytes` at `path` WITHOUT touching the manifest — what a static
+    /// host does when it answers a path with something other than the file
+    /// the shell lists (an SPA fallback's `index.html`, say), or when the
+    /// manifest itself is replaced. Chainable.
+    pub fn serving(mut self, path: &str, bytes: &[u8]) -> Self {
         self.files.insert(path.to_string(), bytes.to_vec());
         self
     }
 
-    /// Drop one file, chainable — for the cases where what matters is what
-    /// the shell does NOT carry.
+    /// Serve nothing at `path`, manifest untouched — a listed file the host
+    /// does not have. Chainable.
     pub fn without(mut self, path: &str) -> Self {
         self.files.remove(path);
         self
     }
 
-    /// A shell whose `list` refuses: what a deployment whose
-    /// `/asset-manifest.json` is missing, unparseable or `files`-less looks
-    /// like. An export must fail loudly rather than produce a folder with no
-    /// runtime in it.
-    pub fn failing_to_list(mut self, message: &str) -> Self {
-        self.list_failure = Some(message.to_string());
+    /// `asset-manifest.json` rewritten to list every file this serves, with
+    /// its digest, and [`fake_site_bypass_rules`].
+    fn relisted(mut self) -> Self {
+        self.files.remove(super::control::SHELL_MANIFEST);
+        let mut files: Vec<String> = self.files.keys().cloned().collect();
+        let sha256: BTreeMap<&String, String> = self
+            .files
+            .iter()
+            .map(|(path, bytes)| (path, blobs::sha256_hex(bytes)))
+            .collect();
+        files.push(super::control::SHELL_MANIFEST.to_string());
+        files.sort();
+        let manifest = serde_json::json!({
+            "buildId": "abc123",
+            "assets": {},
+            "files": files,
+            "bypass": fake_site_bypass_rules(),
+            "sha256": sha256,
+        });
+        self.files.insert(
+            super::control::SHELL_MANIFEST.to_string(),
+            serde_json::to_vec_pretty(&manifest).expect("a manifest serializes"),
+        );
         self
     }
 }
@@ -633,19 +661,18 @@ impl FakeShell {
 #[cfg(feature = "block-dev")]
 #[wafer_block::wafer_async_trait]
 impl ShellSource for FakeShell {
-    async fn list(&self) -> Result<Vec<String>, String> {
-        if let Some(message) = &self.list_failure {
-            return Err(message.clone());
-        }
-        Ok(self.files.keys().cloned().collect())
+    fn root(&self) -> &str {
+        FAKE_SHELL_ROOT
     }
 
     async fn fetch(&self, path: &str) -> Result<Vec<u8>, String> {
         self.fetched
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .lock()
+            .expect("fetched mutex")
+            .push(path.to_string());
         self.files
             .get(path)
             .cloned()
-            .ok_or_else(|| format!("{path}: not served by this shell"))
+            .ok_or_else(|| format!("fetching {FAKE_SHELL_ROOT}{path}: HTTP 404"))
     }
 }

@@ -289,7 +289,7 @@ fn routes_and_endpoints_stay_in_lockstep() {
     let info = DevBlock::with_workspace(DevShared::new(
         FakeControl::new(),
         fake_bypass_rules(),
-        std::sync::Arc::new(FakeShell::new()),
+        Some(std::sync::Arc::new(FakeShell::new())),
     ))
     .info();
 
@@ -362,7 +362,7 @@ fn an_exported_bundle_declares_no_surface_it_does_not_route() {
     let shared = DevShared::new(
         FakeControl::new(),
         fake_bypass_rules(),
-        std::sync::Arc::new(FakeShell::new()),
+        Some(std::sync::Arc::new(FakeShell::new())),
     );
     let exported = DevBlock::runtime_only().info();
 

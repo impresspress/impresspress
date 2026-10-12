@@ -37,15 +37,17 @@ browser-site-runtime = [
 # `impresspress/dev` control plane (`impresspress-core/block-dev`). Off by
 # default; a bundle built with it still needs `[sandbox] mode = "workspace"`
 # in `impresspress.toml` to route `/b/dev`, and with any other mode it boots
-# as an exported site (runtime half only, the workspace compiled in but
-# unrouted). A bundle built without it cannot honour `"workspace"`, and
+# its runtime half only, the workspace compiled in but unrouted. (An exported
+# site is not such a bundle: the export ships the deployment's export shell,
+# a `browser-site-runtime` build that compiles none of the workspace.) A
+# bundle built without it cannot honour `"workspace"`, and
 # boots in the mode the binary has.
 # `Clients` + `Client` + `ClientQueryOptions` + `ClientType`: an activation
 # posts the generation that went live to every window the worker controls
 # (`dev_runtime`'s `announce_active`, design §2.6).
 # `RequestInit` + `RequestCache`: `dev_runtime`'s `BrowserShellSource`
-# fetches the static shell with `cache: 'no-store'` — an export must never
-# copy a previous deployment's bytes out of the HTTP cache under this
+# fetches the export shell with `cache: 'no-store'` — an export must never
+# read a previous deployment's bytes out of the HTTP cache under this
 # build's content-hashed names.
 # Both workspace-only, so a site build does not compile those bindings.
 browser-devtools = [

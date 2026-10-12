@@ -1212,9 +1212,9 @@ jobs:
           path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
-      # `pkg/` (downloaded above) and `pkg-dev/` (built by build.sh, above)
-      # both already exist at this point, so this only measures — it never
-      # rebuilds. Fails the job on a size-threshold breach; see measure.sh's
+      # `pkg/` (downloaded above), and `pkg-site/` and `pkg-dev/` (built by
+      # build.sh, above), all already exist at this point, so this only
+      # measures — it never rebuilds. Fails the job on a size-threshold breach; see measure.sh's
       # header for what's gated and why.
       - name: Measure dev-sandbox bundle sizes
         run: examples/dev-sandbox/measure.sh >> "$GITHUB_STEP_SUMMARY"

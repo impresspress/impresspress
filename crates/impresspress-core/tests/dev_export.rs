@@ -9,8 +9,11 @@
 //!
 //! Three claims, and the third is the one the design rests on:
 //!
-//!  1. the archive carries the runtime shell **with development mode off**,
-//!     the site, every compiled block with its source, and a data snapshot;
+//!  1. the archive carries the deployment's EXPORT SHELL — the site runtime's
+//!     own bundle, as the real bundler renders it ([`site_shell`]) — file for
+//!     file and byte for byte but for its title, the site, every compiled
+//!     block with its source, and a data snapshot; and no export at all from
+//!     a deployment whose shell is missing or not the bundle it lists;
 //!  2. the manifest endpoint describes exactly that archive without producing
 //!     it;
 //!  3. the `seed/` half of the archive is not an export format at all — it is
@@ -21,6 +24,7 @@
 //! never with the writer's own parser: `blocks::dev::zip` writing something
 //! only it can read would satisfy a round trip through itself and nothing
 //! else.
+
 #![cfg(feature = "block-dev")]
 
 use std::{collections::HashMap, io::Read as _};
@@ -39,7 +43,8 @@ use impresspress_core::{
         seed::{self, SeedManifest},
         stored_types,
         test_support::{
-            dev_get, dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell, FAKE_SW_JS,
+            dev_get, dev_post, fake_bypass_rules, fake_site_bypass_rules, hello_info, FakeControl,
+            FakeShell, FAKE_SHELL_ROOT,
         },
         workspace, BypassRules, DevShared, WAFER_GUEST_VERSION,
     },
@@ -205,6 +210,95 @@ fn sorted(entries: &HashMap<String, Vec<u8>>) -> Vec<String> {
     names
 }
 
+/// The export shell, rendered by the real bundler the way
+/// `examples/dev-sandbox/build.sh` builds `export-shell/dist/`: the shipped
+/// templates, a wasm-pack pair named as `impresspress-web`'s is, and the
+/// `[app]` and `[sandbox]` of `examples/dev-sandbox/export-shell/impresspress.toml`
+/// — a site bundle with no compiler bypass and no boot notice.
+///
+/// `files` is every file its `asset-manifest.json` lists, by that path, as
+/// rendered; [`SiteShell::serve`] is a [`FakeShell`] serving exactly those.
+/// The wasm-pack pair is renamed in place by `bundle::run`, so its names
+/// are read from the rendered manifest, never guessed.
+struct SiteShell {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    /// The hashed runtime binary's path, from the manifest's `assets`.
+    wasm: String,
+    /// The placeholder title it was rendered with.
+    title: String,
+}
+
+impl SiteShell {
+    fn serve(&self) -> FakeShell {
+        FakeShell::from_files(self.files.clone())
+    }
+
+    fn text(&self, path: &str) -> String {
+        String::from_utf8(self.files[path].clone()).expect("utf8")
+    }
+}
+
+fn site_shell() -> SiteShell {
+    let shell_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/dev-sandbox/export-shell");
+    let config = std::fs::read_to_string(shell_dir.join("impresspress.toml")).expect("toml");
+    let value = |key: &str| -> String {
+        config
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key} = \"")))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("export-shell/impresspress.toml has no {key}"))
+            .to_string()
+    };
+    assert_eq!(value("mode"), "site", "the export shell is a site bundle");
+    assert!(
+        !config.contains("boot_notice") && !config.contains("extra_bypass"),
+        "the export shell has no notice and no extra bypass"
+    );
+    let title = value("title");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("impresspress_web_bg.wasm"),
+        b"\0asm\x01\0\0\0 the site runtime",
+    )
+    .expect("wasm");
+    std::fs::write(
+        dir.path().join("impresspress_web.js"),
+        b"export default function init() { return fetch('impresspress_web_bg.wasm'); }\n",
+    )
+    .expect("glue");
+    impresspress_bundle::assets::write_to(dir.path()).expect("shell assets");
+    impresspress_bundle::bundle::run(
+        dir.path(),
+        dir.path(),
+        impresspress_bundle::bundle::AppConfig {
+            app_name: Some(value("name")),
+            app_title: Some(title.clone()),
+            boot_redirect: Some(value("boot_redirect")),
+            sandbox: impresspress_bundle::bundle::SandboxShell::Site,
+            ..Default::default()
+        },
+    )
+    .expect("render the export shell");
+    let manifest: impresspress_bundle::bundle::manifest::AssetManifest = serde_json::from_slice(
+        &std::fs::read(dir.path().join("asset-manifest.json")).expect("manifest"),
+    )
+    .expect("the bundler's manifest");
+    let files = manifest
+        .files
+        .iter()
+        .map(|file| {
+            let bytes = std::fs::read(dir.path().join(file)).expect("a listed file");
+            (file.clone(), bytes)
+        })
+        .collect();
+    let wasm = manifest.assets["impresspress_web_bg.wasm"]
+        .trim_start_matches('/')
+        .to_string();
+    SiteShell { files, wasm, title }
+}
+
 /// A sandbox with the products block, a shop page, one compiled block and one
 /// product — the state the scenario in design §16 leaves behind.
 async fn shop_instance(control: &std::sync::Arc<FakeControl>) -> TestContext {
@@ -268,7 +362,8 @@ async fn shop_instance_with_shell(
 #[tokio::test]
 async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     let control = FakeControl::new();
-    let ctx = shop_instance(&control).await;
+    let site = site_shell();
+    let ctx = shop_instance_with_shell(&control, std::sync::Arc::new(site.serve())).await;
 
     // Read through `http_codec`, so these are the header and body a client
     // actually receives — `Content-Type` travels as `resp.content_type` meta,
@@ -313,15 +408,25 @@ async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     );
 
     let entries = entries(bytes);
+    // The shell: every file the export shell's `asset-manifest.json` lists,
+    // at the path it lists, byte for byte as the bundler rendered it — `sw.js`
+    // and the runtime binary included. The boot page is the one file the
+    // export edits, and only its title (`the_exported_boot_page_is_the_shells_titled_as_the_site`).
+    for (path, rendered) in &site.files {
+        let exported = entries
+            .get(path)
+            .unwrap_or_else(|| panic!("{path} is not in the archive: {:?}", sorted(&entries)));
+        if path == "index.html" {
+            continue;
+        }
+        assert!(
+            exported == rendered,
+            "{path} is not the export shell's file"
+        );
+    }
+    assert!(entries.contains_key(&site.wasm), "{}", site.wasm);
     for expected in [
         "README.md",
-        // The shell, at the paths `/asset-manifest.json` listed.
-        "index.html",
-        "sw.js",
-        "loader.js",
-        "impresspress_web-abc123.js",
-        "impresspress_web_bg-abc123.wasm",
-        "vendor/sql-wasm.wasm",
         // The seed, in exactly the layout `seed::import` reads.
         "seed/manifest.json",
         "seed/site/index.html",
@@ -375,25 +480,14 @@ async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
         "the guest crate is not a seed entry: {listed:?}"
     );
 
-    // The shell boots as a SITE, and the ONE line that says so is the one
-    // the bundler renders (`impresspress-bundle`'s `sw.js.tmpl`): the
-    // isolation passthrough reads the same constant and only takes a
-    // workspace, so it is off too.
+    // The shell boots as a SITE because it was BUILT as one: the bundler
+    // rendered `'site'` into its one constant, which `initialize()` and the
+    // isolation passthrough both read — nothing rewrote it.
     let sw = text(&entries, "sw.js");
     assert!(sw.contains("const SANDBOX = 'site';"), "{sw}");
     assert!(!sw.contains("const SANDBOX = 'workspace';"), "{sw}");
-    assert!(
-        sw.contains(
-            "initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES })"
-        ),
-        "{sw}"
-    );
-    assert!(
-        sw.contains("if (SANDBOX === 'workspace' && url.pathname !== '/sw.js')"),
-        "{sw}"
-    );
-    // …and `/seed/` is still bypassed, or the exported folder could never
-    // import the seed the archive ships beside it.
+    // …and `/seed/` is bypassed, or the exported folder could never import
+    // the seed the archive ships beside it.
     assert!(sw.contains("url.pathname.startsWith('/seed/')"), "{sw}");
 
     // The seed manifest describes the seed half of the archive.
@@ -433,9 +527,10 @@ async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     assert!(readme.contains("password hashes"), "{readme}");
     assert!(!readme.contains("{{"), "unsubstituted hole in {readme}");
 
-    // The compiler tree and the exporting deployment's own `seed/` are never
-    // copied: the archive writes its own `seed/`, and the 72 MiB toolchain is
-    // for a `/b/dev` the exported site does not have.
+    // Nothing of the sandbox's deployment is in it: not the compiler tree
+    // (72 MiB of toolchain for a `/b/dev` the exported site does not have),
+    // not the export shell's own address — the export reads the shell from
+    // there and writes it at the archive's root.
     assert!(
         !entries
             .keys()
@@ -445,84 +540,59 @@ async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     );
 }
 
-/// The deployment's own overlays are excluded by rule, not by luck: a shell
-/// that DOES list them (a bundler that ran after the overlays, say) still
-/// exports without them.
-#[tokio::test]
-async fn the_compiler_tree_and_the_deployments_own_seed_are_never_copied() {
-    let control = FakeControl::new();
-    control.set_validated_info(hello_info("site/hello"));
-    let shell = FakeShell::new()
-        .with("__impresspress_dev/compiler/manifest.json", b"{}")
-        .with("seed/manifest.json", b"{\"schema_version\":1}")
-        .with("seed/site/index.html", b"<h1>welcome</h1>");
-    let ctx = TestContext::with_admin()
-        .await
-        .with_dev_added_and_shell(control, std::sync::Arc::new(shell))
+/// What both routes and the non-HTTP caller are told when the deployment's
+/// export shell is not there to ship: a `503` whose message names the shell
+/// and the script that builds it — never an archive, and never one built
+/// from the sandbox's own shell instead.
+async fn assert_the_export_shell_refusal(ctx: &TestContext, says: &[&str]) {
+    for route in ["/b/dev/api/export", "/b/dev/api/export/manifest"] {
+        let parts = wafer_block::http_codec::collect_http_response(
+            ctx.dispatch_resolved(admin_msg("retrieve", route)).await,
+        )
         .await;
-    dev_post(
-        &ctx,
-        "/b/dev/api/files/write",
-        json!({"path": "site/index.html", "content": "<h1>shop</h1>", "expected_sha256": null}),
-    )
-    .await;
-
-    let bytes = output_body(
-        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
-            .await,
-    )
-    .await;
-    let entries = entries(bytes);
-    assert!(
-        !entries
-            .keys()
-            .any(|path| path.starts_with("__impresspress_dev/")),
-        "{:?}",
-        sorted(&entries)
-    );
-    // The archive's own `seed/site/index.html` is the exported site, NOT the
-    // deployment's welcome page that the shell also listed.
-    assert_eq!(
-        entries.get("seed/site/index.html").map(Vec::as_slice),
-        Some(SHOP_HTML)
-    );
+        assert_eq!(parts.status, 503, "{route}");
+        let header = |name: &str| {
+            parts
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("content-disposition"), None, "{route}");
+        assert_eq!(header("cache-control"), Some("no-store"), "{route}");
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).expect("json");
+        let message = body["message"].as_str().expect("message");
+        assert!(
+            message.contains("export shell") && message.contains("examples/dev-sandbox/build.sh"),
+            "{route}: {message}"
+        );
+        for said in says {
+            assert!(message.contains(said), "{route}: {said:?} in {message}");
+        }
+    }
+    let error = export::build(ctx, &ctx.dev_shared())
+        .await
+        .expect_err("no archive without the export shell");
+    assert_eq!(error.code, wafer_run::ErrorCode::Unavailable);
+    for said in says {
+        assert!(
+            error.message.contains(said),
+            "{said:?} in {}",
+            error.message
+        );
+    }
 }
 
-/// The one edit the export makes to a shell file has to be verifiable, so a
-/// shell whose `sw.js` does not carry the marker is a 500 — never a silent
-/// pass-through of a service worker that would come up as a second sandbox.
+/// A deployment whose worker handed `initialize()` no export shell — built
+/// without `[sandbox] export_shell` — does not export. It must not fall back
+/// to the shell the sandbox runs in: that is the workspace runtime, and an
+/// export of it ships `/b/dev`, the compiler adapter and this exporter to
+/// everyone the site is handed to.
 #[tokio::test]
-async fn a_shell_whose_sw_js_has_no_workspace_marker_is_refused() {
-    let control = FakeControl::new();
-    let shell = FakeShell::new().with("sw.js", b"await initialize({ sandbox: 'workspace' });");
+async fn a_deployment_without_an_export_shell_refuses_to_export() {
     let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_shell(control, std::sync::Arc::new(shell))
-        .await;
-    dev_post(
-        &ctx,
-        "/b/dev/api/files/write",
-        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
-    )
-    .await;
-
-    let status = output_http_status(
-        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
-            .await,
-    )
-    .await;
-    assert_eq!(status, 500);
-}
-
-/// And a shell that cannot be listed at all: an export with no runtime in it
-/// is a folder that cannot be served, so it must fail rather than produce one.
-#[tokio::test]
-async fn a_shell_that_cannot_be_listed_is_refused() {
-    let control = FakeControl::new();
-    let shell = FakeShell::new().failing_to_list("/asset-manifest.json: HTTP 404");
-    let ctx = TestContext::with_admin()
-        .await
-        .with_dev_added_and_shell(control, std::sync::Arc::new(shell))
+        .with_dev_added_and_bypass(FakeControl::new(), None, fake_bypass_rules())
         .await;
     dev_post(
         &ctx,
@@ -530,28 +600,177 @@ async fn a_shell_that_cannot_be_listed_is_refused() {
         json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
     )
     .await;
-
-    let status = output_http_status(
-        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
-            .await,
-    )
-    .await;
-    assert_eq!(status, 500);
+    assert_the_export_shell_refusal(&ctx, &["is not part of this deployment", "exportShell"]).await;
 }
 
-/// A site file the exported worker would shadow refuses the export, on both
+/// A shell the deployment names but does not serve, or serves a manifest of
+/// that this runtime cannot use: each refused by name, after reading the
+/// manifest and nothing else.
+///
+/// The HTML case is the one a real deployment produces: Cloudflare's
+/// `not_found_handling = "single-page-application"` answers the missing
+/// manifest of a sandbox deployed before it carried a shell with the root
+/// `index.html` and a `200`.
+#[tokio::test]
+async fn an_export_shell_that_is_missing_or_unreadable_is_refused() {
+    let site = site_shell();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&site.files["asset-manifest.json"]).expect("json");
+    let without = |field: &str| {
+        let mut manifest = manifest.clone();
+        manifest.as_object_mut().unwrap().remove(field);
+        serde_json::to_vec(&manifest).unwrap()
+    };
+    let mut no_files = manifest.clone();
+    no_files["files"] = json!([]);
+    let mut undigested = manifest.clone();
+    undigested["sha256"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sw.js");
+    let cases: Vec<(&str, FakeShell, Vec<&str>)> = vec![
+        (
+            "not deployed",
+            site.serve().without("asset-manifest.json"),
+            vec![FAKE_SHELL_ROOT, "could not be read", "HTTP 404"],
+        ),
+        (
+            "the SPA fallback",
+            site.serve()
+                .serving("asset-manifest.json", &site.files["index.html"]),
+            vec![
+                FAKE_SHELL_ROOT,
+                "is missing from this deployment",
+                "as HTML",
+            ],
+        ),
+        (
+            "no bypass rules",
+            site.serve()
+                .serving("asset-manifest.json", &without("bypass")),
+            vec!["bypass"],
+        ),
+        (
+            "no digests",
+            site.serve()
+                .serving("asset-manifest.json", &without("sha256")),
+            vec!["sha256"],
+        ),
+        (
+            "no files",
+            site.serve().serving(
+                "asset-manifest.json",
+                &serde_json::to_vec(&no_files).unwrap(),
+            ),
+            vec!["lists no files"],
+        ),
+        (
+            "a file without a digest",
+            site.serve().serving(
+                "asset-manifest.json",
+                &serde_json::to_vec(&undigested).unwrap(),
+            ),
+            vec!["\"sw.js\"", "no digest"],
+        ),
+    ];
+    for (case, shell, says) in cases {
+        let shell = std::sync::Arc::new(shell);
+        let ctx = TestContext::with_admin()
+            .await
+            .with_dev_added_and_shell(FakeControl::new(), shell.clone())
+            .await;
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+        )
+        .await;
+        assert_the_export_shell_refusal(&ctx, &says).await;
+        assert!(
+            shell
+                .fetched()
+                .iter()
+                .all(|path| path == "asset-manifest.json"),
+            "{case}: read past the manifest: {:?}",
+            shell.fetched()
+        );
+    }
+}
+
+/// A listed file the host answers with anything but the bytes the shell
+/// lists is refused, naming the file — never zipped. The SPA fallback again:
+/// a shell deployed with one file missing gets `index.html` and a `200` for
+/// it, which would otherwise ship as the exported site's runtime binary.
+#[tokio::test]
+async fn a_listed_file_that_is_not_the_listed_bytes_is_refused() {
+    let site = site_shell();
+    let quoted = format!("{:?}", site.wasm);
+    let cases: Vec<(FakeShell, Vec<&str>)> = vec![
+        (
+            // The SPA fallback.
+            site.serve().serving(&site.wasm, &site.files["index.html"]),
+            vec![&quoted, "is incomplete in this deployment", "SHA-256"],
+        ),
+        (
+            // A host that says so.
+            site.serve().without(&site.wasm),
+            vec![&site.wasm, "HTTP 404"],
+        ),
+    ];
+    for (shell, says) in cases {
+        let ctx = TestContext::with_admin()
+            .await
+            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+            .await;
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+        )
+        .await;
+        assert_the_export_shell_refusal(&ctx, &says).await;
+    }
+}
+
+/// The archive writes its own `seed/`. A shell that listed a file under it
+/// would put two entries under one name — so it is refused, not merged and
+/// not skipped. (A bundle never lists one: the sandbox's own seed is an
+/// overlay the bundler does not list, and the CLI refuses an overlay under
+/// the export shell's root.)
+#[tokio::test]
+async fn a_shell_that_lists_a_seed_file_is_refused() {
+    let shell = FakeShell::new().with_listed("seed/manifest.json", b"{\"schema_version\":1}");
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    assert_the_export_shell_refusal(&ctx, &["\"seed/manifest.json\""]).await;
+}
+
+/// A site file the EXPORTED worker would shadow refuses the export, on both
 /// surfaces, by path and rule — the exported runtime's seed import would
 /// refuse the whole bundle over it and the exported site would come up empty.
 ///
-/// The sandbox refuses the write itself, so such a file can only predate the
-/// check: here it is written through a worker that handed over no rules, and
-/// then exported by one that hands over a dev-sandbox worker's.
+/// The rules are the export shell's, from its `asset-manifest.json` — the
+/// ones the exported `sw.js` was rendered with — not the sandbox's. Here the
+/// sandbox's worker handed over none (an older `sw.js`), so it let the file
+/// be written, and only the shell's rules can refuse it.
 #[tokio::test]
 async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
     let shell = std::sync::Arc::new(FakeShell::new());
     let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_bypass(FakeControl::new(), shell.clone(), BypassRules::default())
+        .with_dev_added_and_bypass(
+            FakeControl::new(),
+            Some(shell.clone()),
+            BypassRules::default(),
+        )
         .await;
     for path in ["site/index.html", "site/manifest.json"] {
         dev_post(
@@ -561,18 +780,12 @@ async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
         )
         .await;
     }
-    // Under the rules it was written with, the workspace exports: the check
-    // is the rules', not a refusal of every export.
-    export::build(&ctx, &ctx.dev_shared())
-        .await
-        .expect("no rules, nothing shadowed");
 
-    // The same workspace behind a worker that does hand its rules over.
-    let current = DevShared::new(FakeControl::new(), fake_bypass_rules(), shell.clone());
-    let fetched = shell.fetches();
     for error in [
-        export::build(&ctx, &current).await.expect_err("refused"),
-        export::manifest_preview(&ctx, &current)
+        export::build(&ctx, &ctx.dev_shared())
+            .await
+            .expect_err("refused"),
+        export::manifest_preview(&ctx, &ctx.dev_shared())
             .await
             .expect_err("refused"),
     ] {
@@ -583,8 +796,12 @@ async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
         assert!(message.contains("the exact path"), "{message}");
         assert!(message.contains("Delete the file or move it"), "{message}");
     }
-    // Refused before the runtime was read.
-    assert_eq!(shell.fetches(), fetched);
+    // Refused before the runtime was read: the shell's manifest, which holds
+    // the rules, is the one file either call fetched.
+    assert_eq!(
+        shell.fetched(),
+        ["asset-manifest.json", "asset-manifest.json"]
+    );
 }
 
 /// What a caller of the two ROUTES is told about that refusal — the page's
@@ -600,19 +817,21 @@ async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
 /// message on whole. So what the handler says and what the agent is shown are
 /// one text, checked from both ends.
 ///
-/// The workspace is the one the test above builds: the file is written
-/// through a worker that handed over no rules, and the routes are then asked
-/// by the block a newer worker registers over the same workspace.
+/// Over the export shell the real bundler renders ([`site_shell`]): its
+/// manifest's `bypass` is what refuses, and the sandbox in front of the
+/// workspace handed over no rules of its own.
 #[tokio::test]
 async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it() {
-    use impresspress_core::blocks::dev::{DevBlock, BLOCK_NAME};
-
     const ROUTES: [&str; 2] = ["/b/dev/api/export", "/b/dev/api/export/manifest"];
 
-    let shell = std::sync::Arc::new(FakeShell::new());
-    let mut ctx = TestContext::with_admin()
+    let shell = std::sync::Arc::new(site_shell().serve());
+    let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_bypass(FakeControl::new(), shell.clone(), BypassRules::default())
+        .with_dev_added_and_bypass(
+            FakeControl::new(),
+            Some(shell.clone()),
+            BypassRules::default(),
+        )
         .await;
     for path in ["site/index.html", "site/manifest.json"] {
         dev_post(
@@ -622,26 +841,6 @@ async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it(
         )
         .await;
     }
-    // The routes themselves are not what refuses: under the rules the file
-    // was written with, both answer.
-    for route in ROUTES {
-        assert_eq!(
-            output_http_status(ctx.dispatch_resolved(admin_msg("retrieve", route)).await).await,
-            200,
-            "{route}"
-        );
-    }
-
-    // The same workspace, now behind a worker that hands its rules over.
-    ctx.register_block(
-        BLOCK_NAME,
-        std::sync::Arc::new(DevBlock::with_workspace(DevShared::new(
-            FakeControl::new(),
-            fake_bypass_rules(),
-            shell.clone(),
-        ))),
-    );
-    let fetched = shell.fetches();
 
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/blocks/dev/assets/test/fixtures/export-shadowed-site-file.json");
@@ -687,19 +886,33 @@ async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it(
             fixture.display()
         );
     }
-    // Both routes refused before the runtime shell was read.
-    assert_eq!(shell.fetches(), fetched);
+    // Both routes refused before the runtime was read.
+    assert!(
+        shell
+            .fetched()
+            .iter()
+            .all(|path| path == "asset-manifest.json"),
+        "{:?}",
+        shell.fetched()
+    );
 }
 
-/// The compiler prefix is NOT one of the exported worker's rules — the export
-/// strips it from the exported `sw.js` — so a site file under it does not
-/// refuse the export, however it got there.
+/// The other half of "the exported worker's rules": a prefix only the
+/// SANDBOX's worker bypasses — its compiler tree, which the export shell has
+/// no bypass for — does not refuse the export, however the file got there.
+/// The file is written through a worker that handed over no rules, and
+/// exported by one that hands over a dev-sandbox worker's, compiler prefix
+/// and all.
 #[tokio::test]
-async fn the_compiler_prefix_is_not_an_exported_rule() {
+async fn a_prefix_only_the_sandbox_bypasses_is_not_an_exported_rule() {
     let shell = std::sync::Arc::new(FakeShell::new());
     let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_bypass(FakeControl::new(), shell.clone(), BypassRules::default())
+        .with_dev_added_and_bypass(
+            FakeControl::new(),
+            Some(shell.clone()),
+            BypassRules::default(),
+        )
         .await;
     dev_post(
         &ctx,
@@ -707,53 +920,12 @@ async fn the_compiler_prefix_is_not_an_exported_rule() {
         json!({"path": "site/__impresspress_dev/compiler/notes.txt", "content": "x", "expected_sha256": null}),
     )
     .await;
-    let current = DevShared::new(FakeControl::new(), fake_bypass_rules(), shell);
+    let current = DevShared::new(FakeControl::new(), fake_bypass_rules(), Some(shell));
+    assert!(current
+        .bypass
+        .refuse_shadowed("site/__impresspress_dev/compiler/notes.txt")
+        .is_err());
     export::build(&ctx, &current).await.expect("exports");
-}
-
-/// The export removes the compiler's bypass from two renderings of one fact
-/// in `sw.js`: the fetch condition's clause and the `BYPASS_RULES` data. A
-/// worker whose data lists the prefix while its condition lacks the clause
-/// the export recognises (or the reverse) cannot be stripped consistently,
-/// and exporting it anyway would ship a worker that says one thing and does
-/// another — so it is an export error.
-#[tokio::test]
-async fn an_sw_whose_condition_and_rules_disagree_about_the_compiler_is_refused() {
-    let listed_only = "const SANDBOX = 'workspace';\n\
-        const BYPASS_RULES = {\"exact\":[\"/sw.js\"],\"prefixes\":[\"/__impresspress_dev/compiler/\",\"/seed/\"]};\n\
-        if (url.pathname === '/sw.js' || url.pathname.startsWith('/__impresspress_dev/compiler/') || url.pathname.startsWith('/seed/')) { return; }\n";
-    let clause_only = "const SANDBOX = 'workspace';\n\
-        const BYPASS_RULES = {\"exact\":[\"/sw.js\"],\"prefixes\":[\"/seed/\"]};\n\
-        if (url.pathname === '/sw.js' ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        url.pathname.startsWith('/seed/')) { return; }\n";
-    for sw in [listed_only, clause_only] {
-        let shell = FakeShell::new().with("sw.js", sw.as_bytes());
-        let ctx = TestContext::with_admin()
-            .await
-            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
-            .await;
-        dev_post(
-            &ctx,
-            "/b/dev/api/files/write",
-            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
-        )
-        .await;
-
-        let error = export::build(&ctx, &ctx.dev_shared())
-            .await
-            .expect_err("a worker that disagrees with itself is not exported");
-        assert_eq!(error.code, wafer_run::ErrorCode::Internal, "{sw}");
-        assert!(
-            error.message.contains("disagrees with itself"),
-            "{}",
-            error.message
-        );
-        let status = output_http_status(
-            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
-                .await,
-        )
-        .await;
-        assert_eq!(status, 500, "{sw}");
-    }
 }
 
 /// Two exports of one generation are byte-identical — the WHOLE archive,
@@ -813,15 +985,18 @@ async fn the_readme_is_dated_by_the_generation_not_the_download() {
     );
 }
 
-/// The exported `sw.js` keeps `/seed/` on the bypass list — without it the
-/// folder could never import the seed shipped beside it — and DROPS the
-/// compiler's, because the export copies none of those assets. A bypass for a
-/// tree that is not there waves every request under the prefix past the
-/// runtime to a 404 from the static host.
+/// The exported `sw.js` is the export shell's, byte for byte — a worker
+/// BUILT as a site: `const SANDBOX = 'site';`, no export shell of its own
+/// (`const EXPORT_SHELL = null;`), and nothing under `/__impresspress_dev/`
+/// at all — no compiler bypass, no shell root. `/seed/` stays bypassed, or
+/// the folder could never import the seed shipped beside it, and the rules
+/// the worker hands its runtime are the ones the shell's manifest states,
+/// which are the ones the export refused shadowed site files by.
 #[tokio::test]
-async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
+async fn the_exported_sw_is_the_export_shells_a_site_with_no_workspace() {
     let control = FakeControl::new();
-    let ctx = shop_instance(&control).await;
+    let site = site_shell();
+    let ctx = shop_instance_with_shell(&control, std::sync::Arc::new(site.serve())).await;
     let archive = entries(
         output_body(
             ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
@@ -830,65 +1005,43 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
         .await,
     );
     let sw = text(&archive, "sw.js");
+    assert_eq!(sw, site.text("sw.js"), "the shell's own worker, unedited");
 
-    assert!(
-        !sw.contains("/__impresspress_dev/compiler/"),
-        "the compiler bypass must be gone; {sw}"
-    );
+    assert_eq!(sw.matches("const SANDBOX = 'site';").count(), 1, "{sw}");
+    assert_eq!(sw.matches("const EXPORT_SHELL = null;").count(), 1, "{sw}");
+    assert!(!sw.contains("/__impresspress_dev/"), "{sw}");
     assert!(sw.contains("url.pathname.startsWith('/seed/')"), "{sw}");
-    // Only that one clause: the app's other bypasses are untouched, and the
-    // expression still reads the way the bundler would have rendered it for a
-    // bundle that never asked for the compiler.
-    assert!(sw.contains("url.pathname.startsWith('/snippets/')"), "{sw}");
-    assert!(
-        sw.contains(
-            "if (url.pathname.startsWith('/snippets/') ||\n        \
-             url.pathname.startsWith('/cdn-cgi/') ||\n        \
-             url.pathname.startsWith('/seed/')) { return; }"
-        ),
-        "the remaining expression must be exactly what a compiler-less bundle renders; {sw}"
-    );
-
-    // And the rules the exported worker hands its runtime say the same: that
-    // runtime's seed import refuses a site file at any path they list, and a
-    // prefix the exported fetch handler no longer bypasses would refuse paths
-    // that site can serve. Every other rule is kept, in order.
-    let mut expected = fake_bypass_rules();
-    expected
-        .prefixes
-        .retain(|prefix| prefix != "/__impresspress_dev/compiler/");
-    let declaration = format!(
-        "const BYPASS_RULES = {};\n",
-        serde_json::to_string(&expected).unwrap()
-    );
-    assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
     assert!(
         sw.contains("await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });"),
         "{sw}"
     );
+    let listing: impresspress_core::blocks::dev::ShellListing =
+        serde_json::from_slice(&archive["asset-manifest.json"]).expect("the shell's manifest");
+    let declaration = format!(
+        "const BYPASS_RULES = {};\n",
+        serde_json::to_string(&listing.bypass).unwrap()
+    );
+    assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
 }
 
-/// A shell with no compiler bypass to begin with is left alone — CI's
-/// foundations bundle ships no compiler, and its absence is an ordinary
-/// build rather than a mismatched one.
+/// The boot page is the shell's, with the placeholder title the shell was
+/// built with replaced by the site's name — in `<title>` and in both wrapped
+/// places in the body, escaped as the bundler escapes one — and otherwise
+/// byte for byte.
 #[tokio::test]
-async fn a_shell_with_no_compiler_bypass_is_exported_unchanged() {
-    let control = FakeControl::new();
-    control.set_validated_info(hello_info("site/hello"));
-    let plain_sw = "const SANDBOX = 'workspace';\n\
-                    if (url.pathname.startsWith('/seed/')) { return; }\n";
-    let shell = FakeShell::new().with("sw.js", plain_sw.as_bytes());
+async fn the_exported_boot_page_is_the_shells_titled_as_the_site() {
+    let site = site_shell();
     let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_shell(control, std::sync::Arc::new(shell))
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(site.serve()))
         .await;
+    name_the_site(&ctx, "Kiln & Co").await;
     dev_post(
         &ctx,
         "/b/dev/api/files/write",
         json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
     )
     .await;
-
     let archive = entries(
         output_body(
             ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
@@ -896,11 +1049,47 @@ async fn a_shell_with_no_compiler_bypass_is_exported_unchanged() {
         )
         .await,
     );
+    let rendered = site.text("index.html");
+    assert_eq!(rendered.matches(&site.title).count(), 3, "{rendered}");
     assert_eq!(
-        text(&archive, "sw.js"),
-        plain_sw.replace("const SANDBOX = 'workspace';", "const SANDBOX = 'site';"),
-        "only the sandbox mode may change on a shell with no compiler bypass"
+        text(&archive, "index.html"),
+        rendered.replace(&site.title, "Kiln &amp; Co")
     );
+}
+
+/// A boot page the export cannot retitle is refused, not shipped with the
+/// shell's placeholder: the export shell's page is always the bundler's, so
+/// one without the wrapped title, with two `<title>`s, or with a wrapper
+/// that never closes is a shell from some other bundler.
+#[tokio::test]
+async fn a_boot_page_the_export_cannot_retitle_is_refused() {
+    for (page, says) in [
+        (
+            "<!doctype html><title>x</title><h1>x</h1>",
+            "shows no title",
+        ),
+        (
+            "<title>x</title><title>y</title><span data-app-title>x</span>",
+            "2 <title> elements",
+        ),
+        (
+            "<title>x</title><span data-app-title>x",
+            "without closing it",
+        ),
+    ] {
+        let shell = FakeShell::new().with_listed("index.html", page.as_bytes());
+        let ctx = TestContext::with_admin()
+            .await
+            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+            .await;
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+        )
+        .await;
+        assert_the_export_shell_refusal(&ctx, &["index.html", says]).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,7 +1392,9 @@ async fn the_archive_deflates_the_runtime_and_the_manifest_reports_content_sizes
     let control = FakeControl::new();
     let ctx = shop_instance_with_shell(
         &control,
-        std::sync::Arc::new(FakeShell::new().with("impresspress_web_bg-abc123.wasm", &runtime)),
+        std::sync::Arc::new(
+            FakeShell::new().with_listed("impresspress_web_bg-abc123.wasm", &runtime),
+        ),
     )
     .await;
 
@@ -1555,14 +1746,19 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
     set_notes(&a, len + 1).await;
     for path in ["/b/dev/api/export", "/b/dev/api/export/manifest"] {
         let before = a.storage_reads().len();
-        let shell_before = a_shell.fetches();
+        let shell_before = a_shell.fetched().len();
         let refused = wafer_block::http_codec::collect_http_response(
             a.dispatch_resolved(admin_msg("retrieve", path)).await,
         )
         .await;
         // Refused before the runtime or any stored content was read: the
-        // snapshot is built and measured first.
-        assert_eq!(a_shell.fetches(), shell_before, "{path} fetched the shell");
+        // snapshot is built and measured first, after only the shell's
+        // manifest (the rules a site file is checked against).
+        assert_eq!(
+            a_shell.fetched()[shell_before..],
+            ["asset-manifest.json"],
+            "{path} fetched the shell"
+        );
         let reads = a.storage_reads()[before..].to_vec();
         assert!(
             !reads
@@ -1594,67 +1790,28 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
 /// The sandbox's own `llms.txt`, as a seed import records it.
 const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here.\n";
 
-/// The sandbox deployment's own boot shell, as built from `seed`: the shipped
-/// templates, rendered by the bundler with `examples/dev-sandbox`'s `[app]`
-/// name, that seed's title and the real boot notice, `[sandbox] mode =
-/// "workspace"` and the compiler's bypass — what `build.sh --seed <seed>` produces, minus the
-/// wasm. Returned as a [`FakeShell`] over the three files the export edits or
-/// a visitor reads text from, with the title it was rendered under.
-fn sandbox_shell(seed: &str) -> (FakeShell, String) {
-    let sandbox =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/dev-sandbox");
-    let config = std::fs::read_to_string(sandbox.join("impresspress.toml")).expect("toml");
-    // The name and the title, read from where the deployment keeps them so
-    // this cannot go on testing strings the sandbox no longer has: the name
-    // from its configuration, the title from the seed's `sandbox.json` —
-    // which is where `build.sh` takes it from (`[app] title_file`).
-    let name = config
-        .lines()
-        .find_map(|line| line.strip_prefix("name = \""))
-        .and_then(|rest| rest.strip_suffix('"'))
-        .expect("impresspress.toml has no [app] name")
-        .to_string();
-    let seed_json: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(sandbox.join("seeds").join(seed).join("sandbox.json"))
-            .expect("sandbox.json"),
-    )
-    .expect("sandbox.json is JSON");
-    let title = seed_json["title"]
-        .as_str()
-        .unwrap_or_else(|| panic!("seeds/{seed}/sandbox.json has no title"))
-        .to_string();
-    assert!(name.contains("sandbox") && title.contains("sandbox"));
-    let notice = std::fs::read_to_string(sandbox.join("boot-notice.html")).expect("notice");
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    impresspress_bundle::assets::write_to(dir.path()).expect("shell assets");
-    impresspress_bundle::bundle::run(
-        dir.path(),
-        dir.path(),
-        impresspress_bundle::bundle::AppConfig {
-            app_name: Some(name),
-            app_title: Some(title.clone()),
-            boot_notice_html: Some(notice),
-            sandbox: impresspress_bundle::bundle::SandboxShell::Workspace,
-            extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
-            ..Default::default()
-        },
-    )
-    .expect("render the shell");
-    let mut shell = FakeShell::new();
-    for file in ["index.html", "loader.js", "sw.js"] {
-        let bytes = std::fs::read(dir.path().join(file)).expect("rendered file");
-        if file == "index.html" {
-            // What the export is about to be asked to take out is really
-            // there. (No committed title has a character the bundler escapes.)
-            assert!(
-                String::from_utf8_lossy(&bytes).contains(&format!("<title>{title}</title>")),
-                "the {seed} shell is not titled {title:?}"
-            );
-        }
-        shell = shell.with(file, &bytes);
-    }
-    (shell, title)
+/// The titles the sandbox's boot page shows, one per seed — read from where
+/// `build.sh` takes them (`seeds/<seed>/sandbox.json`, `[app] title_file`),
+/// so this cannot go on testing strings the sandbox no longer has.
+fn sandbox_titles() -> Vec<String> {
+    let seeds = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/dev-sandbox/seeds");
+    ["blank", "bootstrap"]
+        .iter()
+        .map(|seed| {
+            let seed_json: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(seeds.join(seed).join("sandbox.json"))
+                    .expect("sandbox.json"),
+            )
+            .expect("sandbox.json is JSON");
+            let title = seed_json["title"]
+                .as_str()
+                .unwrap_or_else(|| panic!("seeds/{seed}/sandbox.json has no title"))
+                .to_string();
+            assert!(title.contains("sandbox"), "{title}");
+            title
+        })
+        .collect()
 }
 
 /// Every string literal and every piece of markup text in `source`, minus
@@ -1699,26 +1856,18 @@ async fn name_the_site(ctx: &TestContext, name: &str) {
 /// The exported site is not the sandbox, and nothing the sandbox says about
 /// itself goes with it: not its `llms.txt` (which the runtime IS publishing
 /// for this site, and which is in no manifest the export reads), and not a
-/// word a visitor could read on its boot shell — the page's notice is gone,
-/// its title is the site's, and the loader names the app by that title.
+/// word a visitor could read on its boot shell — the shell is the export
+/// shell, built with no notice, its title is the site's, and the loader
+/// names the app by that title.
 ///
-/// Checked on the shell the bundler really renders for the sandbox
-/// ([`sandbox_shell`]), so a new place the templates show the deployment's
-/// name or wording fails here.
+/// Checked on the shell the bundler really renders ([`site_shell`]), so a
+/// new place the templates show a deployment's name or wording fails here.
 #[tokio::test]
 async fn nothing_the_sandbox_says_about_itself_is_exported() {
-    // Each seed heads its boot page with a title of its own, so each is
-    // exported: the one that names its template has more to leave behind.
-    for seed in ["blank", "bootstrap"] {
-        nothing_a_sandbox_built_from_this_seed_says_is_exported(seed).await;
-    }
-}
-
-async fn nothing_a_sandbox_built_from_this_seed_says_is_exported(seed: &str) {
-    let (shell, sandbox_title) = sandbox_shell(seed);
+    let site = site_shell();
     let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(site.serve()))
         .await;
     record_sandbox_llms(&ctx).await;
     name_the_site(&ctx, "Kiln & Co").await;
@@ -1755,8 +1904,8 @@ async fn nothing_a_sandbox_built_from_this_seed_says_is_exported(seed: &str) {
     assert_eq!(manifest.site.len(), 1);
 
     // The boot page is the exported site's: its own name everywhere the
-    // sandbox's title was (escaped, as the bundler escapes one), an empty
-    // notice region, and not a word about a sandbox anywhere in the file.
+    // shell's placeholder was (escaped, as the bundler escapes one), and not
+    // a word about a sandbox anywhere in the file.
     let index = text(&entries, "index.html");
     assert!(index.contains("<title>Kiln &amp; Co</title>"), "{index}");
     assert_eq!(
@@ -1766,19 +1915,22 @@ async fn nothing_a_sandbox_built_from_this_seed_says_is_exported(seed: &str) {
         2,
         "{index}"
     );
-    assert!(
-        index.contains("<!--boot-notice--><!--/boot-notice-->"),
-        "{index}"
-    );
-    for word in ["sandbox", "llms.txt", "/b/dev", sandbox_title.as_str()] {
+    let mut words = vec![
+        "sandbox".to_string(),
+        "llms.txt".to_string(),
+        "/b/dev".to_string(),
+        site.title.clone(),
+    ];
+    words.extend(sandbox_titles());
+    for word in &words {
         assert!(
             !index.to_lowercase().contains(&word.to_lowercase()),
-            "the exported boot page of the {seed} sandbox says {word:?}: {index}"
+            "the exported boot page says {word:?}: {index}"
         );
     }
     // The loader is copied as it is, and that is safe because nothing in it
-    // that a visitor reads names the deployment: it takes the app's name
-    // from the page above.
+    // that a visitor reads names a deployment: it takes the app's name from
+    // the page above.
     let loader = text(&entries, "loader.js");
     assert!(
         loader.contains("[data-app-title]"),
@@ -1794,14 +1946,14 @@ async fn nothing_a_sandbox_built_from_this_seed_says_is_exported(seed: &str) {
     assert!(text(&entries, "README.md").contains("Kiln & Co"));
 }
 
-/// A deployment that is NOT the sandbox may bundle an `llms.txt` of its own
-/// in its shell — listed in its asset manifest like any shell file. The
-/// export copies it: there is no rule about the name, only about what the
-/// export reads. (The sandbox's own is an overlay the listing never names.)
+/// An export shell may bundle an `llms.txt` of its own — listed in its asset
+/// manifest like any shell file. The export copies it: there is no rule
+/// about the name, only about what the export reads. (The sandbox's own is
+/// an overlay of the sandbox's deployment, which the export does not read.)
 #[tokio::test]
 async fn a_shell_file_named_llms_txt_is_exported_like_any_other() {
     let bundled = b"# An app that ships its own\n";
-    let shell = FakeShell::new().with("llms.txt", bundled);
+    let shell = FakeShell::new().with_listed("llms.txt", bundled);
     let ctx = TestContext::with_admin()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
@@ -2351,77 +2503,32 @@ async fn the_readme_starts_with_a_byte_order_mark() {
     );
 }
 
-/// A boot page with no notice region has nothing to remove and is exported
-/// byte for byte — a deployment may overlay its own.
-#[tokio::test]
-async fn a_boot_page_with_no_notice_region_is_exported_unchanged() {
-    let page = b"<!doctype html><h1>My app</h1>";
-    let shell = FakeShell::new().with("index.html", page);
-    let ctx = TestContext::with_admin()
-        .await
-        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
-        .await;
-    dev_post(
-        &ctx,
-        "/b/dev/api/files/write",
-        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
-    )
-    .await;
-    let entries = entries(
-        output_body(
-            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
-                .await,
-        )
-        .await,
-    );
-    assert_eq!(
-        entries.get("index.html").map(Vec::as_slice),
-        Some(&page[..])
-    );
-}
-
-/// A region the export cannot delimit is a 500, never a guess at where the
-/// sandbox's text ends.
-#[tokio::test]
-async fn a_boot_page_whose_notice_region_is_malformed_is_refused() {
-    for page in [
-        "<!--boot-notice--><p>sandbox</p>",
-        "<p>sandbox</p><!--/boot-notice-->",
-        "<!--/boot-notice--><p>sandbox</p><!--boot-notice-->",
-        "<!--boot-notice-->a<!--/boot-notice--><!--boot-notice-->b<!--/boot-notice-->",
-    ] {
-        let shell = FakeShell::new().with("index.html", page.as_bytes());
-        let ctx = TestContext::with_admin()
-            .await
-            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
-            .await;
-        dev_post(
-            &ctx,
-            "/b/dev/api/files/write",
-            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
-        )
-        .await;
-        let status = output_http_status(
-            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
-                .await,
-        )
-        .await;
-        assert_eq!(status, 500, "{page}");
-    }
-}
-
-/// [`FAKE_SW_JS`] and [`fake_bypass_rules`] are a copy of what the bundler
-/// renders for the dev sandbox (`examples/dev-sandbox/impresspress.toml`:
-/// `[sandbox] mode = "workspace"`, an `export_shell`, the compiler prefix),
-/// kept in `test_support` because the fixture is feature code that cannot
-/// depend on the bundler. This is where the copy is held to the original: the
-/// bypass rules, the page engines (`impresspress_bundle::assets::PAGE_ENGINES`),
-/// the `SANDBOX` declaration the export rewrites, the `EXPORT_SHELL` one, and
-/// the two lines that read the mode, exactly as the bundler renders them into
-/// the worker it builds.
+/// [`fake_bypass_rules`] and [`fake_site_bypass_rules`] are copies of what
+/// the bundler renders — for the dev sandbox (`examples/dev-sandbox/impresspress.toml`:
+/// a workspace, the compiler prefix) and for its export shell
+/// (`examples/dev-sandbox/export-shell/impresspress.toml`: a site) — kept in
+/// `test_support` because the fixtures are feature code that cannot depend
+/// on the bundler. This is where the copies are held to the originals, both
+/// rendered around a wasm-pack pair named as `impresspress-web`'s is.
 #[test]
-fn the_fake_shell_states_what_the_bundler_renders() {
+fn the_fake_bypass_rules_are_what_the_bundler_renders() {
+    // The export shell's: what its manifest states, rule for rule.
+    let listing: impresspress_core::blocks::dev::ShellListing =
+        serde_json::from_slice(&site_shell().files["asset-manifest.json"]).expect("manifest");
+    assert_eq!(listing.bypass, fake_site_bypass_rules());
+
+    // The sandbox's: what its `sw.js` hands `initialize()`.
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("impresspress_web_bg.wasm"),
+        b"\0asm\x01\0\0\0",
+    )
+    .expect("wasm");
+    std::fs::write(
+        dir.path().join("impresspress_web.js"),
+        b"fetch('impresspress_web_bg.wasm');\n",
+    )
+    .expect("glue");
     impresspress_bundle::assets::write_to(dir.path()).expect("shell assets");
     impresspress_bundle::bundle::run(
         dir.path(),
@@ -2433,52 +2540,19 @@ fn the_fake_shell_states_what_the_bundler_renders() {
             ..Default::default()
         },
     )
-    .expect("render the shell");
+    .expect("render the sandbox's shell");
     let sw = std::fs::read_to_string(dir.path().join("sw.js")).expect("sw.js");
-    // The lines the export rewrites, or must leave reading what it rewrote,
-    // are the bundler's to the byte.
-    for line in [
-        "const SANDBOX = 'workspace';",
-        r#"const EXPORT_SHELL = "/__impresspress_dev/export-shell/";"#,
-        "await initialize({ sandbox: SANDBOX, exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });",
-        "if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {",
-    ] {
-        assert_eq!(sw.matches(line).count(), 1, "{line} in the rendered {sw}");
-        assert_eq!(FAKE_SW_JS.matches(line).count(), 1, "{line} in FAKE_SW_JS");
-    }
-    let declared = |name: &str, text: &str| -> String {
-        let declaration = format!("const {name} = ");
-        assert_eq!(text.matches(&declaration).count(), 1, "{name} in {text}");
-        let start = text.find(&declaration).unwrap() + declaration.len();
-        text[start..start + text[start..].find(";\n").expect("declaration ends")].to_string()
-    };
+    let declaration = "const BYPASS_RULES = ";
+    assert_eq!(sw.matches(declaration).count(), 1, "{sw}");
+    let start = sw.find(declaration).unwrap() + declaration.len();
+    let rendered: BypassRules =
+        serde_json::from_str(&sw[start..start + sw[start..].find(";\n").expect("ends")])
+            .expect("BYPASS_RULES is JSON");
+    assert_eq!(rendered, fake_bypass_rules());
 
-    let rendered: serde_json::Value =
-        serde_json::from_str(&declared("BYPASS_RULES", &sw)).expect("BYPASS_RULES is JSON");
-    // The first prefix is the wasm-pack glue's, named after the crate the
-    // bundler finds: the fake shell's is `/impresspress_web`, while this
-    // directory holds no glue and renders the bundler's `/app` fallback.
-    // Every other rule must match exactly.
-    let fake = fake_bypass_rules();
-    let rendered_exact: Vec<String> = serde_json::from_value(rendered["exact"].clone()).unwrap();
-    let rendered_prefixes: Vec<String> =
-        serde_json::from_value(rendered["prefixes"].clone()).unwrap();
-    assert_eq!(fake.exact, rendered_exact);
-    assert_eq!(rendered_prefixes[0], "/app");
-    assert_eq!(fake.prefixes[0], "/impresspress_web");
-    assert_eq!(fake.prefixes[1..], rendered_prefixes[1..]);
-
+    // Both carry the page engines (`impresspress_bundle::assets::PAGE_ENGINES`).
     let engines: Vec<String> = impresspress_bundle::assets::page_engine_scripts().collect();
-    assert!(engines.iter().all(|engine| fake.exact.contains(engine)));
-    assert_eq!(
-        declared("PAGE_ENGINES", &sw),
-        serde_json::to_string(&engines).unwrap()
-    );
-    assert_eq!(
-        declared("PAGE_ENGINES", FAKE_SW_JS),
-        declared("PAGE_ENGINES", &sw)
-    );
-    let fake_rules: serde_json::Value =
-        serde_json::from_str(&declared("BYPASS_RULES", FAKE_SW_JS)).unwrap();
-    assert_eq!(fake_rules, serde_json::to_value(&fake).unwrap());
+    for rules in [fake_bypass_rules(), fake_site_bypass_rules()] {
+        assert!(engines.iter().all(|engine| rules.exact.contains(engine)));
+    }
 }

@@ -394,8 +394,9 @@ if grep -q "/__impresspress_dev/" "$SHELL_DIST/sw.js"; then
   echo "build.sh: $SHELL_DIST/sw.js names /__impresspress_dev/ — the export shell must not carry the sandbox's trees" >&2
   exit 1
 fi
-# Its manifest lists its files and states the rules its worker bypasses —
-# the two things a reader of the shell takes from it.
+# Its manifest lists its files, states the rules its worker bypasses and
+# gives each file's digest — the three things the export takes from it (the
+# CLI checks the digests against the files when it lays the shell down).
 python3 - "$SHELL_DIST/asset-manifest.json" <<'SHELLMANIFEST' || exit 1
 import json, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -403,6 +404,8 @@ if not manifest.get("files"):
     raise SystemExit(f"build.sh: {sys.argv[1]} lists no files")
 if not isinstance(manifest.get("bypass"), dict):
     raise SystemExit(f"build.sh: {sys.argv[1]} states no bypass rules")
+if not isinstance(manifest.get("sha256"), dict):
+    raise SystemExit(f"build.sh: {sys.argv[1]} gives no file digests")
 SHELLMANIFEST
 
 # 2. The sandbox, with the shell laid down at /__impresspress_dev/export-shell/.

@@ -281,7 +281,7 @@ async fn the_dev_sandbox_configuration_does_not_build_without_its_seeds_title() 
 }
 
 /// A build with no configuration is an ordinary app: no `llms.txt`, and a
-/// boot page with nothing between the notice markers.
+/// boot page with nothing between its heading and its status line.
 #[tokio::test]
 async fn a_plain_build_has_no_llms_txt_and_no_boot_notice() {
     let tmp = tempdir().unwrap();
@@ -289,9 +289,10 @@ async fn a_plain_build_has_no_llms_txt_and_no_boot_notice() {
     let dist = tmp.path().join("dist");
     assert!(!dist.join("llms.txt").exists());
     let index = fs::read_to_string(dist.join("index.html")).unwrap();
-    assert!(
-        index.contains("<!--boot-notice--><!--/boot-notice-->"),
-        "{index}"
-    );
+    let after_heading = &index[index.find("</h1>").expect("the heading") + "</h1>".len()..];
+    let before_status = &after_heading[..after_heading
+        .find(r#"<p id="status">"#)
+        .expect("status line")];
+    assert_eq!(before_status.trim(), "", "{index}");
     assert!(!index.contains("llms.txt"), "{index}");
 }

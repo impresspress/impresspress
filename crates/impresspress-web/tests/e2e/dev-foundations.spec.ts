@@ -1,7 +1,18 @@
 import { test, expect, type Page } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootServiceWorker, loginAdmin, WELCOME_PHRASE } from './fixtures/dev-sandbox';
+import {
+  bootServiceWorker,
+  expectASiteRuntime,
+  FOUNDATIONS_EXPORT_PORT,
+  loginAdmin,
+  serveDirectory,
+  WELCOME_PHRASE,
+} from './fixtures/dev-sandbox';
+import { SHOP_PRODUCT } from './fixtures/shop-fixture';
 
 /**
  * Plan 1 checkpoint for the browser development sandbox.
@@ -34,9 +45,14 @@ import { bootServiceWorker, loginAdmin, WELCOME_PHRASE } from './fixtures/dev-sa
  *  4. **A real guest, staged over HTTP, is compiled, probed and served.** The
  *     single most valuable assertion in Plan 1.
  *  5. **A refused build does not poison the live runtime.**
- *  6. **A service-worker restart rebuilds the active generation** from
+ *  6. **The export runs on the site runtime alone.** A product is stocked,
+ *     the site exported, unzipped and served on another origin: the
+ *     exported runtime is the export shell's (no workspace code in it, by
+ *     the marker check), and it imports the seed, rebuilds with the guest
+ *     block and serves it, and carries the product.
+ *  7. **A service-worker restart rebuilds the active generation** from
  *     `artifacts/<sha>.wasm` and re-serves both halves.
- *  7. **Rollback removes the block** and leaves the site it did not change.
+ *  8. **Rollback removes the block** and leaves the site it did not change.
  *
  * # Two product defects this file found on its first run
  *
@@ -212,7 +228,7 @@ test('a fresh origin seeds itself, serves the seeded site, and keeps the sandbox
   expect(csp, `CSP was: ${csp}`).toContain("frame-ancestors 'self'");
 });
 
-test('the dev sandbox stages a guest, survives a restart and rolls back', async ({ page }) => {
+test('the dev sandbox stages a guest, exports it, survives a restart and rolls back', async ({ page }) => {
   // A cold boot compiles the wasm, creates the OPFS database, runs every
   // block's migrations and imports the seed; the restart below does most of
   // it a second time. The default 60 s is a boot budget, not a test budget.
@@ -336,6 +352,77 @@ test('the dev sandbox stages a guest, survives a restart and rolls back', async 
   const afterRefusal = await getJson(page, '/b/dev/api/status');
   expect(afterRefusal.runtime_generation).toBe(afterStage.runtime_generation);
   expect(afterRefusal.blocks).toHaveLength(1);
+
+  // --- 6b. The export runs on the site runtime -------------------------
+  //
+  // The block that just went live, and a product, exported together and
+  // booted somewhere else: a NEW CONTEXT on a DIFFERENT ORIGIN, with its own
+  // OPFS, its own worker and an empty database, so the seed import is the
+  // only thing that can put the site, the block and the product there. The
+  // runtime that boots is the deployment's export shell — a site build — so
+  // this is the proof that a dynamic block and seeded data run without the
+  // workspace compiled in. Everything about the archive's CONTENTS is pinned
+  // by `impresspress-core/tests/dev_export.rs`.
+  const product = await postWithStatus(page, '/b/products/api/admin/products', {
+    ...SHOP_PRODUCT,
+    status: 'active',
+  });
+  expect(product.status, JSON.stringify(product.body)).toBe(200);
+
+  const exportStart = Date.now();
+  const exported = await page.evaluate(async () => {
+    const response = await fetch('/b/dev/api/export');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return { status: response.status, base64: btoa(binary) };
+  });
+  expect(exported.status, Buffer.from(exported.base64, 'base64').toString('utf8')).toBe(200);
+  const scratch = mkdtempSync(path.join(tmpdir(), 'dev-foundations-export-'));
+  try {
+    const zipPath = path.join(scratch, 'export.zip');
+    writeFileSync(zipPath, Buffer.from(exported.base64, 'base64'));
+    const unpacked = path.join(scratch, 'site');
+    execFileSync('python3', [
+      '-c',
+      'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])',
+      zipPath,
+      unpacked,
+    ]);
+    expectASiteRuntime(unpacked);
+
+    const server = await serveDirectory(unpacked, FOUNDATIONS_EXPORT_PORT);
+    const exportedContext = await page.context().browser()!.newContext({
+      baseURL: `http://127.0.0.1:${FOUNDATIONS_EXPORT_PORT}`,
+    });
+    try {
+      const site = await exportedContext.newPage();
+      await bootServiceWorker(site);
+      // The site, from the seed.
+      await site.goto('/', { waitUntil: 'commit' });
+      await expect(site.locator('h1')).toHaveText('sandbox v1', { timeout: 60_000 });
+      // The guest block, rebuilt into the exported runtime from
+      // `seed/blocks/hello.wasm` and served — on a runtime with no
+      // workspace.
+      const guest = await site.evaluate(async () => (await fetch('/b/hello/')).text());
+      expect(guest).toContain(GUEST_GREETING);
+      // The product, from `seed/data.json`, on the public catalog.
+      const catalog = await site.evaluate(async () => (await fetch('/b/products/catalog')).json());
+      expect(catalog.records.map((record: { name: string }) => record.name)).toEqual([
+        SHOP_PRODUCT.name,
+      ]);
+      // And no workspace: the route is not compiled into this runtime.
+      expect(await site.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(404);
+      console.log(`export → serve → boot with a guest block: ${Date.now() - exportStart} ms`);
+    } finally {
+      await exportedContext.close();
+      server.kill('SIGKILL');
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 
   // --- 7. A service-worker restart rebuilds from the ledger -------------
   // Unregistering drops the worker AND its in-memory `Rc<Wafer>`; the next

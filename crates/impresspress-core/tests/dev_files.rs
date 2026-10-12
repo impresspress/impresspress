@@ -636,7 +636,7 @@ fn the_write_schema_and_the_handler_agree_on_what_is_required() {
     let info = DevBlock::with_workspace(DevShared::new(
         FakeControl::new(),
         fake_bypass_rules(),
-        std::sync::Arc::new(FakeShell::new()),
+        Some(std::sync::Arc::new(FakeShell::new())),
     ))
     .info();
     let write = info
@@ -1745,7 +1745,7 @@ async fn a_worker_that_hands_over_no_bypass_rules_refuses_nothing() {
         .await
         .with_dev_added_and_bypass(
             FakeControl::new(),
-            std::sync::Arc::new(FakeShell::new()),
+            Some(std::sync::Arc::new(FakeShell::new())),
             BypassRules::default(),
         )
         .await;

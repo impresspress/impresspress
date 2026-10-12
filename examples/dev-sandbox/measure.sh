@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
-# Measure the dev-sandbox's two size regressions and print a Markdown table.
+# Measure the dev-sandbox's size regressions and print a Markdown table.
 #
-# The sandbox ships two wasm bundles that must both exist and diverge only by
-# the `browser-devtools` feature (design §13, see build.sh's header): `pkg/`
-# (the ordinary, feature-off bundle every other consumer serves) and
-# `pkg-dev/` (the same crate compiled with
-# `--features browser-devtools`, which is what dev.impresspress.org actually
-# serves). The feature adds real weight (wasmi `inspect`/`probe`, the runtime
-# rebuild path) — the point of this script is not that the delta is zero, but
-# that it stays bounded, because `pkg-dev/` never ships in the ordinary
-# (non-dev) bundle but a silent size creep there is still a signal the crate
-# is dragging avoidable weight into a feature that everyone building the
-# `browser-devtools` target pays for.
+# The sandbox deployment ships wasm bundles that must all exist and diverge
+# only by `impresspress-web`'s sandbox features (design §13, see build.sh's
+# header): `pkg/` (the ordinary, feature-off bundle every other consumer
+# serves), `pkg-site/` (`--features browser-site-runtime`: the site runtime
+# alone, the wasm of the export shell the sandbox deployment carries at
+# `/__impresspress_dev/export-shell/` and every export ships) and `pkg-dev/`
+# (`--features browser-devtools`: the site runtime plus the workspace, which
+# is what dev.impresspress.org itself serves). Each feature adds real weight —
+# wasmi and the seed/ledger/rebuild path for the site runtime, the workspace
+# page, the compiler adapter and the rest of `/b/dev` on top for devtools —
+# so the point of this script is not that the deltas are zero, but that they
+# stay bounded: a silent size creep is a signal the crate is dragging
+# avoidable weight into a build everyone who receives an export, or opens
+# the sandbox, pays for.
 #
-# build.sh compiles a third, `pkg-site/` (`--features browser-site-runtime`:
-# the site runtime alone, the wasm of the export shell the sandbox deployment
-# carries at `/__impresspress_dev/export-shell/`). This script does not
-# measure it; what gates that build is `check-runtime-markers.mjs`, which
-# build.sh runs over it and `pkg-dev/` — no workspace code in it — not its size.
+# Size is not what keeps workspace code out of `pkg-site/`: that is
+# `check-runtime-markers.mjs`, which build.sh runs over it and `pkg-dev/`.
 #
 # It also measures
 # `examples/dev-sandbox/compiler/dist/` — the in-browser Rust compiler, by
@@ -31,15 +31,22 @@
 # Usage:
 #   examples/dev-sandbox/measure.sh
 #
-# `PKG_DIR` / `PKG_DEV_DIR` override where the two bundles live (default
-# `crates/impresspress-web/pkg` and `crates/impresspress-web/pkg-dev`, same
-# as build.sh's `--out-dir`). A missing one is built with `wasm-pack build
-# --target web --release` (`pkg-dev` additionally gets
+# `PKG_DIR` / `PKG_SITE_DIR` / `PKG_DEV_DIR` override where the three
+# bundles live (default `crates/impresspress-web/pkg`, `…/pkg-site` and
+# `…/pkg-dev`, the same directories build.sh writes). A missing one is built
+# with `wasm-pack build --target web --release` (`pkg-site` additionally gets
+# `-- --features browser-site-runtime`, `pkg-dev`
 # `-- --features browser-devtools`); an existing one is measured as-is and
 # NOT rebuilt — wasm-pack's release profile already runs wasm-opt, so
 # re-running this script never re-optimizes, it only re-measures.
 #
 # Thresholds (all overridable, all in the units named):
+#   MEASURE_MAX_SITE_DELTA_KIB       default 1024  — site gzip minus default
+#                                                     gzip, in KiB
+#     (the site runtime carries wasmi — about 0.5 MiB gzipped on its own —
+#     and the seed import, ledger and rebuild path; measured at about
+#     +640 KiB when the export shell was introduced, so the guard is against
+#     runaway growth, not this delta)
 #   MEASURE_MAX_DEV_DELTA_KIB        default 1536  — dev gzip minus default
 #                                                     gzip, in KiB
 #     (the dev-only bundle carries the workspace page, the compiler adapter,
@@ -65,9 +72,9 @@
 # `e2e-dev-sandbox` job composes `--fast` on a compiler-cache miss, so this
 # is a state the usual caller really reaches: the sizes are still reported
 # (they are the honest numbers for the tree on disk) and the two compiler
-# thresholds are skipped, with a line saying so. The dev-delta threshold is
-# unaffected — it measures `pkg/` vs `pkg-dev/`, which have nothing to do
-# with the compiler compose.
+# thresholds are skipped, with a line saying so. The site and dev delta
+# thresholds are unaffected — they measure `pkg-site/` and `pkg-dev/` against
+# `pkg/`, which have nothing to do with the compiler compose.
 #
 # Exit status: non-zero if any threshold is breached, with a line naming
 # which. The Markdown table is always printed to stdout first (even on a
@@ -96,6 +103,7 @@ fail() { printf 'measure.sh: FAIL: %s\n' "$*" >&2; FAILED=1; }
 
 FAILED=0
 
+MEASURE_MAX_SITE_DELTA_KIB="${MEASURE_MAX_SITE_DELTA_KIB:-1024}"
 MEASURE_MAX_DEV_DELTA_KIB="${MEASURE_MAX_DEV_DELTA_KIB:-1536}"
 MEASURE_MAX_COMPILER_TOTAL_MIB="${MEASURE_MAX_COMPILER_TOTAL_MIB:-80}"
 MEASURE_MAX_COMPILER_FILE_BYTES="${MEASURE_MAX_COMPILER_FILE_BYTES:-25165824}"
@@ -114,6 +122,7 @@ abspath() {
 }
 
 PKG_DIR="$(abspath "${PKG_DIR:-$CRATE_DIR/pkg}")"
+PKG_SITE_DIR="$(abspath "${PKG_SITE_DIR:-$CRATE_DIR/pkg-site}")"
 PKG_DEV_DIR="$(abspath "${PKG_DEV_DIR:-$CRATE_DIR/pkg-dev}")"
 
 # wasm-pack's --out-dir is applied relative to the crate directory it runs
@@ -138,19 +147,19 @@ build_missing() {
 }
 
 build_missing "$PKG_DIR"
+build_missing "$PKG_SITE_DIR" -- --features browser-site-runtime
 build_missing "$PKG_DEV_DIR" -- --features browser-devtools
 
 DEFAULT_WASM="$PKG_DIR/impresspress_web_bg.wasm"
+SITE_WASM="$PKG_SITE_DIR/impresspress_web_bg.wasm"
 DEV_WASM="$PKG_DEV_DIR/impresspress_web_bg.wasm"
 
-[ -f "$DEFAULT_WASM" ] || {
-  echo "measure.sh: $DEFAULT_WASM does not exist after build_missing" >&2
-  exit 1
-}
-[ -f "$DEV_WASM" ] || {
-  echo "measure.sh: $DEV_WASM does not exist after build_missing" >&2
-  exit 1
-}
+for wasm in "$DEFAULT_WASM" "$SITE_WASM" "$DEV_WASM"; do
+  [ -f "$wasm" ] || {
+    echo "measure.sh: $wasm does not exist after build_missing" >&2
+    exit 1
+  }
+done
 
 raw_size() { wc -c <"$1" | tr -d ' '; }
 gz_size() { gzip -9 -c "$1" | wc -c | tr -d ' '; }
@@ -161,27 +170,37 @@ fmt_signed_kib() { awk -v b="$1" 'BEGIN{s=(b>=0)?"+":"-"; v=(b>=0)?b:-b; printf 
 
 DEFAULT_RAW="$(raw_size "$DEFAULT_WASM")"
 DEFAULT_GZ="$(gz_size "$DEFAULT_WASM")"
+SITE_RAW="$(raw_size "$SITE_WASM")"
+SITE_GZ="$(gz_size "$SITE_WASM")"
 DEV_RAW="$(raw_size "$DEV_WASM")"
 DEV_GZ="$(gz_size "$DEV_WASM")"
-DELTA_GZ="$((DEV_GZ - DEFAULT_GZ))"
+SITE_DELTA_GZ="$((SITE_GZ - DEFAULT_GZ))"
+DEV_DELTA_GZ="$((DEV_GZ - DEFAULT_GZ))"
 
-MAX_DELTA_BYTES="$((MEASURE_MAX_DEV_DELTA_KIB * 1024))"
-DELTA_STATUS="PASS"
-if [ "$DELTA_GZ" -gt "$MAX_DELTA_BYTES" ]; then
-  DELTA_STATUS="FAIL"
-  fail "dev gzip - default gzip = $(fmt_kib "$DELTA_GZ") > ${MEASURE_MAX_DEV_DELTA_KIB} KiB (MEASURE_MAX_DEV_DELTA_KIB)"
+SITE_DELTA_STATUS="PASS"
+if [ "$SITE_DELTA_GZ" -gt "$((MEASURE_MAX_SITE_DELTA_KIB * 1024))" ]; then
+  SITE_DELTA_STATUS="FAIL"
+  fail "site gzip - default gzip = $(fmt_kib "$SITE_DELTA_GZ") > ${MEASURE_MAX_SITE_DELTA_KIB} KiB (MEASURE_MAX_SITE_DELTA_KIB)"
+fi
+DEV_DELTA_STATUS="PASS"
+if [ "$DEV_DELTA_GZ" -gt "$((MEASURE_MAX_DEV_DELTA_KIB * 1024))" ]; then
+  DEV_DELTA_STATUS="FAIL"
+  fail "dev gzip - default gzip = $(fmt_kib "$DEV_DELTA_GZ") > ${MEASURE_MAX_DEV_DELTA_KIB} KiB (MEASURE_MAX_DEV_DELTA_KIB)"
 fi
 
 echo "## Dev-sandbox size report"
 echo
-echo "wasm-opt: applied by \`wasm-pack build --release\` for both bundles (release profile default; not re-run here)."
+echo "wasm-opt: applied by \`wasm-pack build --release\` for every bundle (release profile default; not re-run here)."
 echo
 echo "| bundle | raw | gzip -9 |"
 echo "| --- | --- | --- |"
 echo "| default (\`pkg/\`) | $(fmt_mib "$DEFAULT_RAW") | $(fmt_mib "$DEFAULT_GZ") |"
+echo "| site (\`pkg-site/\`, \`--features browser-site-runtime\`: the export shell's) | $(fmt_mib "$SITE_RAW") | $(fmt_mib "$SITE_GZ") |"
 echo "| dev (\`pkg-dev/\`, \`--features browser-devtools\`) | $(fmt_mib "$DEV_RAW") | $(fmt_mib "$DEV_GZ") |"
 echo
-echo "Δ gzip (dev − default): $(fmt_signed_kib "$DELTA_GZ") — threshold ≤ ${MEASURE_MAX_DEV_DELTA_KIB} KiB — **${DELTA_STATUS}**"
+echo "Δ gzip (site − default): $(fmt_signed_kib "$SITE_DELTA_GZ") — threshold ≤ ${MEASURE_MAX_SITE_DELTA_KIB} KiB — **${SITE_DELTA_STATUS}**"
+echo
+echo "Δ gzip (dev − default): $(fmt_signed_kib "$DEV_DELTA_GZ") — threshold ≤ ${MEASURE_MAX_DEV_DELTA_KIB} KiB — **${DEV_DELTA_STATUS}**"
 echo
 
 # `dist/` is gitignored and composed by `build-compiler.sh` (restored from

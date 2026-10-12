@@ -17,7 +17,9 @@
 //!
 //! The same value is the third rendering, outside `sw.js`: `asset-manifest.json`'s
 //! `bypass` ([`super::manifest::AssetManifest::bypass`]), for a reader that
-//! holds the bundle's files rather than its running worker.
+//! holds the bundle's files rather than its running worker — the development
+//! sandbox's export reads its export shell's, to refuse a site file the
+//! exported worker would never route to the runtime.
 //!
 //! A rule the condition applied but the data did not state would be exactly
 //! that silent shadowing again, which is why there is no second list.
@@ -131,11 +133,8 @@ impl BypassRules {
     /// to: every
     /// exact rule, then every prefix rule, OR'd one clause per line.
     ///
-    /// Every clause after the first LEADS with its `||`, so a clause can be
-    /// removed by its exact text without leaving the expression dangling —
-    /// the sandbox's export (`impresspress-core`'s `blocks::dev::export`)
-    /// removes the compiler prefix's clause that way. Each value is quoted
-    /// and escaped against a quote or backslash in the path.
+    /// Every clause after the first leads with its `||`. Each value is
+    /// quoted and escaped against a quote or backslash in the path.
     pub fn render_condition(&self) -> String {
         let clauses = self
             .exact

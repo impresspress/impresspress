@@ -12,25 +12,15 @@ use serde::{Deserialize, Serialize};
 
 pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
 
-/// The two comments `index.html.tmpl` renders [`AppConfig::boot_notice_html`]
-/// between — always, with nothing between them when the app has no notice.
-///
-/// They exist so the notice can be taken back out by exact text: a
-/// development sandbox's notice describes the sandbox, and the sandbox's
-/// export ships this same `index.html` as the shell of a plain site
-/// (`impresspress-core`'s `blocks::dev::export`, which restates the pair;
-/// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings).
-pub const BOOT_NOTICE_START: &str = "<!--boot-notice-->";
-pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
-
 /// What `index.html.tmpl` wraps each place it shows [`AppConfig::app_title`]
 /// in the page body in, so the title can be replaced by exact text. The
 /// third place is `<title>` itself, which needs no wrapper.
 ///
-/// For the same consumer as the notice markers: the title is the DEPLOYMENT's
-/// (`[app] title`), and a development sandbox's export ships this page as the
-/// boot shell of a site that has a name of its own. The export restates the
-/// pair; the same test compares the spellings.
+/// For the development sandbox's export: the title is the export shell's
+/// (`[app] title` of the bundle the sandbox deployment carries at
+/// [`EXPORT_SHELL_ROOT`]), and the export ships that page as the boot shell
+/// of a site that has a name of its own. The export restates the pair;
+/// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings.
 pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
 pub const APP_TITLE_CLOSE: &str = "</span>";
 
@@ -45,10 +35,10 @@ pub const SHELL_URL: &str = "/";
 
 /// Where a development sandbox's deployment carries its EXPORT SHELL: a
 /// complete bundle built with [`SandboxShell::Site`] — around the site
-/// runtime's own wasm, with no workspace compiled in — for the sandbox's
-/// export to ship as the shell of the site it hands the user, instead of the
-/// sandbox's own. The `impresspress` CLI lays the shell
-/// down here (`[sandbox] export_shell`), and `sw.js.tmpl`'s `__EXPORT_SHELL__`
+/// runtime's own wasm, with no workspace compiled in — which the sandbox's
+/// export ships, file for file as its `asset-manifest.json` lists them, as
+/// the shell of the site it hands the user. The `impresspress` CLI lays the
+/// shell down here (`[sandbox] export_shell`), and `sw.js.tmpl`'s `__EXPORT_SHELL__`
 /// renders this value into the one constant the worker hands
 /// `initialize({ exportShell })` — one value, so the directory the files are
 /// in and the address the runtime is told cannot disagree.
@@ -163,17 +153,24 @@ pub struct AppConfig {
     /// not, `null`. Driven by `[sandbox] export_shell` in `impresspress.toml`,
     /// whose directory the `impresspress` CLI copies there after `run`
     /// returns — `run` itself writes no file for it.
+    ///
+    /// `run` does NOT require it of a workspace bundle. It could only require
+    /// the flag, never the files — those are the CLI's to lay down — so the
+    /// rule that a workspace carries a shell lives where both are known: the
+    /// CLI's `[sandbox]` parser refuses a workspace without `export_shell`. A
+    /// workspace bundle built some other way without one still boots, and its
+    /// export refuses, naming the missing shell — never falls back to the
+    /// sandbox's own runtime.
     pub export_shell: bool,
-    /// An HTML fragment the boot shell (`index.html`) shows under its title,
-    /// between [`BOOT_NOTICE_START`] and [`BOOT_NOTICE_END`]. **Default:
-    /// none.**
+    /// An HTML fragment the boot shell (`index.html`) shows under its title.
+    /// **Default: none.**
     ///
     /// The boot shell is the only document the static host serves, and until
     /// the service worker is installed it is the whole of what a visitor — or
     /// a reader that runs no JavaScript at all — gets: a title and
     /// "Loading...". An app whose first visitor needs to be told something
     /// before the runtime exists says it here. The fragment is the app's own
-    /// markup, rendered verbatim; it may not contain either marker.
+    /// markup, rendered verbatim.
     pub boot_notice_html: Option<String>,
 }
 
@@ -367,17 +364,6 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    rendered from this one value — see `bypass`'s module docs for why
     //    there must not be a second list.
     let base_name = pair.as_ref().map(|(b, _, _)| b.as_str()).unwrap_or("app");
-    if let Some(notice) = &app.boot_notice_html {
-        // The markers are how the notice is found again; a notice carrying
-        // one would end the region early or open a second.
-        for marker in [BOOT_NOTICE_START, BOOT_NOTICE_END] {
-            if notice.contains(marker) {
-                anyhow::bail!(
-                    "the boot notice contains {marker:?}, which marks where it is rendered"
-                );
-            }
-        }
-    }
     let bypass = BypassRules::for_bundle(&wasm_js_prefix_val, &app);
     let vars = build_template_vars(
         build_id.clone(),
@@ -393,9 +379,11 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
 
     // 6. The manifest, last: `assets` (the two logical names templates
     //    reference), `files` (the whole shell, for a runtime that needs
-    //    to enumerate the static files it was shipped inside of — see
-    //    `AssetManifest::files`) and `bypass` (the same rules value
-    //    `sw.js` was rendered from in step 5 — see `AssetManifest::bypass`).
+    //    to enumerate the static files of a bundle — see
+    //    `AssetManifest::files`), `bypass` (the same rules value `sw.js`
+    //    was rendered from in step 5 — see `AssetManifest::bypass`) and
+    //    `sha256` (each listed file's digest, taken after every file is
+    //    final — see `AssetManifest::sha256`).
     //
     //    `asset-manifest.json` names itself in `files`. That is deliberate
     //    and costs nothing: the listing is of NAMES, taken before the file
@@ -412,18 +400,20 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    metadata wasm-pack wrote is already sitting beside the assets.
     //    `list_dist_files` holds those back — see `is_package_metadata`.
     let mut files = manifest::list_dist_files(pkg_dir)?;
-    let manifest_name = "asset-manifest.json".to_string();
+    let manifest_name = manifest::ASSET_MANIFEST.to_string();
     if !files.contains(&manifest_name) {
         files.push(manifest_name);
         files.sort();
     }
+    let sha256 = manifest::digest_files(pkg_dir, &files)?;
     let manifest = manifest::AssetManifest {
         build_id,
         assets: manifest_assets,
         files,
         bypass,
+        sha256,
     };
-    manifest.write(&pkg_dir.join("asset-manifest.json"))?;
+    manifest.write(&pkg_dir.join(manifest::ASSET_MANIFEST))?;
 
     Ok(())
 }

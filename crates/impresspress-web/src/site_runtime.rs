@@ -11,7 +11,7 @@
 //! `seed/`, converge its activation journal, and run its guest blocks.
 //!
 //! The WORKSPACE half — the dry-run probe, the runtime counter and the
-//! announcement to the `/b/dev` page (`WorkspaceControl`), and the static
+//! announcement to the `/b/dev` page (`WorkspaceControl`), and the export
 //! shell the export copies (`ShellSource`) — is `dev_runtime`, compiled only
 //! by `browser-devtools`. Nothing here names it except through the two
 //! `browser-devtools`-gated calls in [`attach`] and [`install`], so a site
@@ -560,6 +560,22 @@ pub struct Sandbox {
     shared: Arc<DevShared>,
 }
 
+/// What the service worker handed `initialize()` that the sandbox keeps — the
+/// options [`attach`] builds its `DevShared` from, read by `crate::initialize`
+/// from the object `sw.js` passes.
+pub struct SandboxOptions {
+    /// `initialize({ bypass })`: the rules the running worker's fetch handler
+    /// applies, kept on the `DevShared` for every site write and the seed
+    /// import to refuse a shadowed file by.
+    pub bypass: BypassRules,
+    /// `initialize({ exportShell })`: the root at which this deployment
+    /// carries its export shell, or `None` when the worker handed none —
+    /// the workspace's export then refuses. A `browser-devtools` build's
+    /// alone: a site build has no export, and so nothing to read it.
+    #[cfg(feature = "browser-devtools")]
+    pub export_shell: Option<String>,
+}
+
 /// Attach the sandbox control plane to `factory`, before the first runtime is
 /// built, and return the shared factory handle and the [`Sandbox`]
 /// [`install`] needs.
@@ -582,18 +598,15 @@ pub struct Sandbox {
 /// The `DevShared` is the one this build's `impresspress-core` defines: a
 /// site build's takes the control and the bypass rules; a `browser-devtools`
 /// build's also takes the workspace half, which `dev_runtime::shared` builds
-/// (the `WorkspaceControl` and the static shell the export copies). That
+/// (the `WorkspaceControl`, and the export shell the export copies). That
 /// call is this function's one reference to the workspace, and it is gated
 /// with it.
-///
-/// `bypass` is the rules the service worker handed `initialize({ bypass })`
-/// (see `crate::initialize`), kept on the `DevShared` this builds.
-pub fn attach(factory: RuntimeFactory, bypass: BypassRules) -> (Rc<RuntimeFactory>, Sandbox) {
+pub fn attach(factory: RuntimeFactory, options: SandboxOptions) -> (Rc<RuntimeFactory>, Sandbox) {
     let control = BrowserRuntimeControl::new();
     #[cfg(not(feature = "browser-devtools"))]
-    let shared = DevShared::new(control.clone(), bypass);
+    let shared = DevShared::new(control.clone(), options.bypass);
     #[cfg(feature = "browser-devtools")]
-    let shared = crate::dev_runtime::shared(control.clone(), bypass);
+    let shared = crate::dev_runtime::shared(control.clone(), options.bypass, options.export_shell);
     let factory = Rc::new(factory.with_dev(shared.clone()));
     control.set_factory(&factory);
     (factory, Sandbox { control, shared })

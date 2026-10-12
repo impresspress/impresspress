@@ -226,7 +226,7 @@ async fn an_exported_bundle_has_no_entry_page() {
     let shared = DevShared::new(
         FakeControl::new(),
         fake_bypass_rules(),
-        Arc::new(FakeShell::new()),
+        Some(Arc::new(FakeShell::new())),
     );
     let exported = Arc::new(DevBlock::runtime_only());
 

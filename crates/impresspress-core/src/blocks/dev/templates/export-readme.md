@@ -28,12 +28,13 @@ nothing else; put it behind https to share it.
 
 ## What is in here
 
-    index.html loader.js sw.js *.js *.wasm snippets/ vendor/
-        The runtime shell — {{SHELL_FILES}} files, copied from the sandbox
-        that exported this. It boots as a site, not as the development
-        sandbox (`const SANDBOX = 'site';` in `sw.js`), so there is no
-        `/b/dev` workspace, no in-browser compiler and no agent tooling here.
-        This is the site, not the sandbox that built it.
+    index.html loader.js sw.js asset-manifest.json *.js *.wasm snippets/ vendor/
+        The runtime shell — {{SHELL_FILES}} files, the site runtime the
+        sandbox that exported this carries for its exports. It was built as
+        a site (`const SANDBOX = 'site';` in `sw.js`) around a runtime
+        compiled without the development sandbox's workspace: there is no
+        `/b/dev`, no in-browser compiler and no agent tooling in it, not even
+        switched off. This is the site, not the sandbox that built it.
 
     llms.txt
         Only if your site has one (`seed/site/llms.txt`): the same text,

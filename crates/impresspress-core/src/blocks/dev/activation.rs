@@ -1730,7 +1730,9 @@ mod tests {
             &super::super::DevShared::new(
                 FakeControl::new(),
                 super::super::test_support::fake_bypass_rules(),
-                std::sync::Arc::new(super::super::test_support::FakeShell::new()),
+                Some(std::sync::Arc::new(
+                    super::super::test_support::FakeShell::new(),
+                )),
             ),
             &SiteManifest {
                 files: vec![entry("index.html", "old")],

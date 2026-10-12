@@ -149,7 +149,8 @@ pub enum SandboxMode {
     /// site**. Either a site build ([`CompiledSandbox::Site`], whatever the
     /// bundle asked for: the workspace is not in the binary) or a
     /// `browser-devtools` build booted with any request other than
-    /// `sandbox: 'workspace'` (the export's `'site'`). The runtime half is
+    /// `sandbox: 'workspace'` — which no deployment ships any more: an export
+    /// ships the deployment's export shell, a site build. The runtime half is
     /// fully live (it imports its `seed/`, converges its journal, rebuilds
     /// with its dynamic blocks and serves `/`), and the workspace half is
     /// not reachable: no `/b/dev` route, no widened CSP, and no cross-origin
@@ -283,8 +284,9 @@ const _: () = {
         CompiledSandbox::COMPILED,
         CompiledSandbox::Devtools
     ));
-    // Not `'workspace'` — an exported site. The runtime half IS live; this
-    // is the assertion whose absence made an exported bundle boot empty.
+    // Not `'workspace'` — the runtime half alone, as an exported site has
+    // it. The runtime half IS live; this is the assertion whose absence made
+    // an exported bundle boot empty, when exports were this build.
     assert!(matches!(
         SandboxMode::resolve(CompiledSandbox::COMPILED, false),
         SandboxMode::Exported
