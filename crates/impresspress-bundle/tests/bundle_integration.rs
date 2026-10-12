@@ -787,8 +787,9 @@ fn a_site_page_named_sql_something_is_not_bypassed() {
 fn a_workspace_bundle_adds_the_isolation_headers_to_bypassed_responses() {
     let sw = rendered_sw(SandboxShell::Workspace, AppConfig::default());
     // Gated on the one build-time constant, not decided by the runtime — the
-    // same constant `initialize()` is passed, so a bundle cannot be a
-    // workspace in one half of this file and not in the other.
+    // same constant the runtime's compiled mode is checked against before
+    // `initialize()`, so a bundle cannot be a workspace in one half of this
+    // file and not in the other.
     assert!(
         sw.contains("const SANDBOX = 'workspace';")
             && sw.contains("if (SANDBOX === 'workspace' && url.pathname !== '/sw.js') {"),
@@ -1043,8 +1044,10 @@ fn the_rendered_worker_keeps_its_own_runtime() {
 }
 
 /// What each sandbox mode's rendered worker does, driven in Node rather than
-/// read as text: it hands `initialize()` its mode and its export shell (the
-/// root for a workspace built with one, `null` otherwise), leaves `/seed/` to the
+/// read as text: it checks the runtime was compiled as its mode before
+/// `initialize()` and stops at stage `build` when it was not, hands
+/// `initialize()` its export shell and no mode (the shell's root for a
+/// workspace built with one, `null` otherwise), leaves `/seed/` to the
 /// static host in a site and a workspace only, and answers a bypassed request
 /// itself with the cross-origin-isolation pair in a workspace only — a site
 /// and a plain bundle leave it to the network, so an exported site is not

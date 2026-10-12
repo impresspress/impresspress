@@ -481,8 +481,9 @@ async fn export_zip_contains_shell_seed_sources_and_data_booted_as_a_site() {
     );
 
     // The shell boots as a SITE because it was BUILT as one: the bundler
-    // rendered `'site'` into its one constant, which `initialize()` and the
-    // isolation passthrough both read — nothing rewrote it.
+    // rendered `'site'` into its one constant, which the check against the
+    // runtime's compiled mode (before `initialize()`) and the isolation
+    // passthrough both read — nothing rewrote it.
     let sw = text(&entries, "sw.js");
     assert!(sw.contains("const SANDBOX = 'site';"), "{sw}");
     assert!(!sw.contains("const SANDBOX = 'workspace';"), "{sw}");

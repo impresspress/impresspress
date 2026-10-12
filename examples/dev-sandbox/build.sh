@@ -15,8 +15,11 @@
 #     `impresspress.toml`), which is what renders
 #     `const SANDBOX = 'workspace';` into `sw.js` and puts `/seed/` on the
 #     service worker's bypass list.
-# Building either half without the other is a bundle with no `/b/dev`, so both
-# are done here rather than left to the caller.
+# Building either half without the other is a bundle whose service worker
+# stops before `initialize()` — it compares `const SANDBOX` with the wasm's
+# `compiled_sandbox_mode()`, and a mismatch is fatal at stage `build`
+# (nothing erased; the cause says to rebuild) — so both are done here rather
+# than left to the caller.
 #
 # The same holds for the EXPORT SHELL the sandbox carries — the static files
 # for the site its export hands the user, built as a site rather than copied

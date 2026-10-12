@@ -39,11 +39,14 @@ pub struct Config {
 ///   in-browser compiler, dynamic guest blocks).
 ///
 /// No `[sandbox]` table is a plain bundle (`"none"`, the default). The mode
-/// is what the service worker asks for; the wasm it boots must also have been
-/// COMPILED with the matching `impresspress-web` feature
-/// (`browser-site-runtime`, or `browser-devtools` for a workspace) — a mode
-/// the binary never compiled is the mode the binary has, with one console
-/// warning.
+/// must match the wasm package the bundle is built around: the runtime's mode
+/// is decided by its `impresspress-web` features (none for `"none"`,
+/// `browser-site-runtime` for `"site"`, `browser-devtools` for
+/// `"workspace"`), and the service worker compares the two
+/// (`compiled_sandbox_mode()`) before it calls `initialize()`. A mismatch is
+/// a bundle assembled from the wrong runtime: the worker stops there with
+/// stage `build` — before anything has opened the database, so the recovery
+/// erases nothing — and its cause says to rebuild the bundle.
 ///
 /// `export_shell = "<dir>"` (a workspace only) names a finished bundle built
 /// as a site — `[sandbox] mode = "site"`, around a `browser-site-runtime`

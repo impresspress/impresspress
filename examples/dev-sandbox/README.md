@@ -108,8 +108,10 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
    the bundle cannot seed itself.
 2. Builds `impresspress-web` to wasm with `--features browser-devtools` into
    `crates/impresspress-web/pkg-dev` (this is what puts the `/b/dev`
-   control-plane code in the binary at all — `[sandbox] mode = "workspace"`
-   alone only wires the service-worker plumbing around it).
+   control-plane code in the binary at all; `[sandbox] mode = "workspace"`
+   must match it — the service worker compares the two before
+   `initialize()`, and a bundle built around any other package stops at
+   stage `build`, erasing nothing).
 3. Builds it again with `--features browser-site-runtime` into
    `crates/impresspress-web/pkg-site`: the sandbox's runtime half alone —
    seed import, generation ledger, dynamic blocks — with no workspace

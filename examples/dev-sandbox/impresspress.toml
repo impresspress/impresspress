@@ -1,15 +1,16 @@
 # dev.impresspress.org — the browser development sandbox.
 #
 # `[sandbox] mode = "workspace"` (at the end) renders
-# `const SANDBOX = 'workspace';` into `sw.js`, which hands
-# `initialize({ sandbox })` the request for the workspace — the `/b/dev`
-# control-plane page — on top of the runtime half that imports
-# `/seed/manifest.json` as generation 0 on a fresh origin
-# (`impresspress-core::blocks::dev::seed`); it also puts `/seed/` on the
-# service worker's bypass list and turns on the isolation headers. The wasm
-# this bundle embeds must ALSO be built with `impresspress-web/browser-devtools`
-# (see `build.sh`) — the mode alone does not put the dev block's code in the
-# binary, it only turns on the service-worker plumbing around it.
+# `const SANDBOX = 'workspace';` into `sw.js`; it also puts `/seed/` on the
+# service worker's bypass list and turns on the isolation headers. The
+# workspace itself — the `/b/dev` control-plane page, on top of the runtime
+# half that imports `/seed/manifest.json` as generation 0 on a fresh origin
+# (`impresspress-core::blocks::dev::seed`) — is in the wasm only because it is
+# built with `impresspress-web/browser-devtools` (see `build.sh`): the build
+# decides the mode, and the runtime is told nothing. The two must match: the
+# service worker compares `const SANDBOX` with the runtime's
+# `compiled_sandbox_mode()` before `initialize()`, and a mismatch stops it at
+# stage `build` (nothing erased; the cause says to rebuild the bundle).
 [app]
 name = "dev-sandbox"
 # The boot page's title is the seed's: each seed names itself in its
