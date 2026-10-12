@@ -110,8 +110,15 @@ const WORKER_URL = '/sw.js';
 const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
 // The stage sw.js reports for a failure of the runtime's `initialize()`
 // (`STAGE_INITIALIZE` there): opening the database, migrating it, importing
-// the seed. Its other stages — the wasm module could not be loaded, a started
-// runtime died on a request — say nothing about the stored data.
+// the seed. Its other stages say nothing about the stored data:
+//   'load'    the wasm module could not be loaded;
+//   'build'   the runtime was compiled for another sandbox mode than the
+//             worker was built for — a bundle assembled from the wrong
+//             runtime, found before `initialize()` was ever called, which
+//             only a rebuild of the bundle fixes;
+//   'request' a started runtime died on a request.
+// Each is recovered from as any failure that keeps the data is: one restart,
+// then the stopped screen with the cause, which for 'build' says to rebuild.
 const STAGE_INITIALIZE = 'initialize';
 // How long the shell waits for the app to answer, each time it asks
 // (`askApp`) — however many probes that takes. A pending Service Worker

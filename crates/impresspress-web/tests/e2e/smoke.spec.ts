@@ -81,9 +81,11 @@ test('the default bundle has no dev block', async ({ page }) => {
   // The sandbox's security model (design §13) is that `impresspress/dev` is
   // ABSENT from a normal deployment, not merely disabled in one. `pkg/` is
   // built with neither of the sandbox's features (`browser-site-runtime`, or
-  // `browser-devtools`, which implies it) and without a `[sandbox]` table, so
-  // both halves of that must hold: no route, and no relaxed header for the
-  // compiler worker / preview iframe the sandbox would need.
+  // `browser-devtools`, which implies it) — the build IS the mode, and this
+  // bundle's `sw.js` (no `[sandbox]` table: `const SANDBOX = 'none'`) refuses
+  // to boot any other — so both halves of that must hold: no route, and no
+  // relaxed header for the compiler worker / preview iframe the sandbox would
+  // need.
   //
   // Wait for the SW-served boot redirect to land rather than for
   // `navigator.serviceWorker.controller`: loader.js navigates to

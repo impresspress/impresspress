@@ -28,6 +28,11 @@ const ERASES =
 
 const TRAPPED = 'error handling request: Error: unreachable executed';
 
+// What a worker built with no sandbox ('none', the default rendering) says
+// over a runtime compiled as `compiled`.
+const builtFor = (compiled) =>
+  `this bundle's service worker is built for sandbox mode 'none' but its runtime was compiled as '${compiled}' — rebuild the bundle`;
+
 /// The 503, whole. Answers the death's `id`, which is the worker's to make:
 /// a test checks its shape here and its constancy across roads where that
 /// is the subject.
@@ -100,7 +105,12 @@ test('a request from a page that the runtime dies on gets the cause, and the pag
 
 test('a dead worker stays registered, whatever killed it', async (t) => {
   captureConsole(t);
-  for (const runtime of [{ init: trap() }, { initialize: trap() }, { handle_request: trap() }]) {
+  for (const runtime of [
+    { init: trap() },
+    { compiledSandboxMode: 'site' },
+    { initialize: trap() },
+    { handle_request: trap() }
+  ]) {
     for (const mode of ['cors', 'navigate']) {
       const worker = await loadWorker(runtime);
       await worker.request('/b/auth/login', { mode });
@@ -206,7 +216,8 @@ test('the answer says what a reload will do, and erasing is said only where it h
   const cases = [
     [{ handle_request: trap() }, TRAPPED, 'request'],
     [{ init: trap() }, 'wasm module load failed: Error: unreachable executed', 'load'],
-    [{ initialize: trap() }, 'runtime initialize() failed: Error: unreachable executed', 'initialize']
+    [{ initialize: trap() }, 'runtime initialize() failed: Error: unreachable executed', 'initialize'],
+    [{ compiledSandboxMode: 'workspace' }, builtFor('workspace'), 'build']
   ];
   for (const [runtime, cause, stage] of cases) {
     for (const wipe of [false, true]) {
@@ -238,6 +249,45 @@ test('a wasm module that fails to load does the same, as its own stage', async (
 
   await assertStoppedAnswer(response, cause, 'load');
   assertSentToBootShell(worker, cause, 'load');
+});
+
+// A worker built for one sandbox mode over a runtime compiled as another is a
+// bundle assembled from the wrong runtime. It is found before `initialize()`
+// is ever called — so before anything opens the database — and reported as
+// stage `build`, which no recovery erases data for: nothing about the data
+// is in question, and only a rebuild fixes it.
+test('a runtime compiled for another sandbox mode is never initialized', async (t) => {
+  captureConsole(t);
+  for (const wipe of [false, true]) {
+    let initialized = 0;
+    const worker = await loadWorker(
+      {
+        compiledSandboxMode: 'site',
+        initialize: async () => {
+          initialized += 1;
+        }
+      },
+      { wipe }
+    );
+    const cause = builtFor('site');
+
+    const { response } = await worker.request('/', { method: 'GET' });
+
+    assert.equal(initialized, 0, 'initialize() must not be called over the wrong runtime');
+    assert.ok(!worker.timeline.includes('initialize'));
+    // Asked once, after the module was loaded — the binding only exists then.
+    assert.deepEqual(worker.modeChecks, [1]);
+    // The cause names both modes, and the answer promises no erase even in a
+    // build rendered to erase.
+    assert.match(cause, /'none'.*'site'/);
+    await assertStoppedAnswer(response, cause, 'build', RESTART);
+    assertSentToBootShell(worker, cause, 'build');
+
+    // Poisoned: a later request neither asks again nor initializes.
+    await worker.request(LOGIN, { method: 'POST' });
+    assert.equal(initialized, 0);
+    assert.deepEqual(worker.modeChecks, [1]);
+  }
 });
 
 // The stage is stated by the code that caught the failure, never read back

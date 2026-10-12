@@ -1,27 +1,25 @@
 //! `GET /b/dev/enter` — the sandbox's one-click entry page.
 //!
 //! What a host test can reach: who may load the page, what it is rendered
-//! with, that those credentials really do open the workspace through the auth
-//! block's login route, and that an exported bundle has no such page. The
-//! script's half — the `fetch`, the cookie, the navigation — runs only in a
-//! browser, and `crates/impresspress-web/tests/e2e/dev-enter.spec.ts` drives
-//! it there.
+//! with, and that those credentials really do open the workspace through the
+//! auth block's login route. That an exported site has no such page is
+//! `tests/site_runtime.rs`'s to show: a site build has neither the route nor
+//! the code. The script's half — the `fetch`, the cookie, the navigation —
+//! runs only in a browser, and
+//! `crates/impresspress-web/tests/e2e/dev-enter.spec.ts` drives it there.
 #![cfg(feature = "block-dev")]
-
-use std::sync::Arc;
 
 use impresspress_core::{
     blocks::{
         auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
         dev::{
             self,
-            test_support::{dev_with_accounts, fake_bypass_rules, FakeControl, FakeShell},
-            DevBlock, DevShared,
+            test_support::{dev_with_accounts, FakeControl},
         },
     },
     test_support::{anon_msg, output_html, output_http_header, output_http_status, TestContext},
 };
-use wafer_run::{Block as _, Message};
+use wafer_run::Message;
 
 /// The sandbox admin a browser build seeds (`impresspress-web/src/config.rs`),
 /// under other values so no assertion here can be satisfied by the address
@@ -216,57 +214,4 @@ async fn without_a_configured_password_the_page_only_offers_the_login_page() {
     assert!(!html.contains("data-email"), "{html}");
     assert!(html.contains("One-click entry is off"), "{html}");
     assert!(html.contains("/b/auth/login?redirect=/b/dev"), "{html}");
-}
-
-/// An exported bundle registers the block and routes none of it, so the
-/// entry page does not exist there — neither declared, nor routed, nor
-/// answered by the block if something reached it anyway.
-#[tokio::test]
-async fn an_exported_bundle_has_no_entry_page() {
-    let shared = DevShared::new(
-        FakeControl::new(),
-        fake_bypass_rules(),
-        Some(Arc::new(FakeShell::new())),
-    );
-    let exported = Arc::new(DevBlock::runtime_only());
-
-    // 1. Not declared: nothing in `/openapi.json`, nothing for the router to
-    //    refine a route with.
-    assert!(exported.info().endpoints.is_empty());
-    // …while the workspace declares it, `Public`.
-    let workspace = DevBlock::with_workspace(shared).info();
-    let entry = workspace
-        .endpoints
-        .iter()
-        .find(|endpoint| endpoint.path == dev::ENTER_PATH)
-        .expect("the workspace declares the entry page");
-    assert_eq!(entry.auth, wafer_run::AuthLevel::Public);
-
-    // 2. Not routed: registered exactly as the browser runtime registers an
-    //    exported bundle's — the block, and no route — the path is the
-    //    site's ordinary 404, with the bootstrap credentials configured.
-    let mut ctx = TestContext::with_admin()
-        .await
-        .with_auth_added()
-        .await
-        .with_sign_in_added();
-    ctx.set_config(BOOTSTRAP_ADMIN_EMAIL_KEY, EMAIL);
-    ctx.set_config(BOOTSTRAP_ADMIN_PASSWORD_KEY, PASSWORD);
-    ctx.register_block(dev::BLOCK_NAME, exported.clone());
-    let routed = ctx
-        .request(navigation(anon_msg("retrieve", dev::ENTER_PATH)))
-        .await;
-    assert_eq!(output_http_status(routed).await, 404);
-
-    // 3. Not answered: handed the request directly, past any router, the
-    //    runtime-only block still refuses — and discloses nothing.
-    let ctx = ctx.running_as(dev::BLOCK_NAME);
-    let direct = exported
-        .handle(
-            &ctx,
-            anon_msg("retrieve", dev::ENTER_PATH),
-            wafer_run::InputStream::empty(),
-        )
-        .await;
-    assert_eq!(output_http_status(direct).await, 404);
 }

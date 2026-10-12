@@ -27,19 +27,18 @@ use crate::SandboxMode;
 /// and return the full variable map. Browser-equivalent of the native
 /// `variables::seed_and_load()` — there are no process env vars in the browser,
 /// only the local defaults below plus auto-generated secrets.
-/// `mode` is the *resolved* verdict from [`SandboxMode::resolve`], never the
-/// raw `initialize({ sandbox })` request: on a build without the sandbox (neither
-/// `browser-site-runtime` nor `browser-devtools`) it does not exist, so such a
-/// boot must leave a database indistinguishable from one that never asked
-/// for a sandbox — which is why `WAFER_RUN_SHARED__HAS_LANDING_PAGE` below is
-/// written on EVERY verdict rather than only on the affirmative one. It
-/// follows [`SandboxMode::runtime_present`]: an exported bundle — a site
-/// build, or a devtools build booted with `sandbox: 'site'` — always has a site
-/// (its `seed/` guarantees one), so `/` must serve it there exactly as it
-/// does in the workspace.
+///
+/// What the sandbox contributes is this build's [`SandboxMode::COMPILED`]: on
+/// a build without the sandbox (neither `browser-site-runtime` nor
+/// `browser-devtools`) it does not exist, so such a boot must leave a
+/// database indistinguishable from one that never had a sandbox — which is
+/// why `WAFER_RUN_SHARED__HAS_LANDING_PAGE` below is written by EVERY build
+/// rather than only by the ones with a site. It follows
+/// [`SandboxMode::runtime_present`]: an exported site — a site build —
+/// always has a site (its `seed/` guarantees one), so `/` must serve it
+/// there exactly as it does in the workspace.
 pub async fn seed_and_load_variables(
     db: &Arc<dyn DatabaseService>,
-    mode: SandboxMode,
 ) -> Result<HashMap<String, String>, String> {
     // Browser-only defaults. Both keys ARE declared, by
     // `auth::config::auth_config_vars`, but each declares an EMPTY default,
@@ -111,7 +110,7 @@ pub async fn seed_and_load_variables(
     impresspress_core::platform_state::variables::set(
         db,
         HAS_LANDING_PAGE_KEY,
-        if mode.runtime_present() {
+        if SandboxMode::COMPILED.runtime_present() {
             "true"
         } else {
             "false"

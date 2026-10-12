@@ -510,7 +510,8 @@ impl ShellListing {
                 )
             } else {
                 format!(
-                    "at {root} has a {SHELL_MANIFEST} this runtime cannot read ({e}); it was \
+                    "at {root} carries a manifest ({SHELL_MANIFEST}) this runtime cannot read \
+                     ({e}); it was \
                      built by a different impresspress-bundle than this runtime expects"
                 )
             }

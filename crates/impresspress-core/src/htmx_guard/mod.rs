@@ -192,15 +192,15 @@ fn registered() -> Vec<BlockInfo> {
     )]
     let mut infos = crate::blocks::all_block_infos();
     #[cfg(feature = "block-dev")]
-    infos.push(wafer_run::Block::info(
-        &crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
+    infos.push(wafer_run::Block::info(&crate::blocks::dev::DevBlock::new(
+        crate::blocks::dev::DevShared::new(
             crate::blocks::dev::test_support::FakeControl::new(),
             crate::blocks::dev::test_support::fake_bypass_rules(),
             Some(std::sync::Arc::new(
                 crate::blocks::dev::test_support::FakeShell::new(),
             )),
-        )),
-    ));
+        ),
+    )));
     infos
 }
 

@@ -1014,9 +1014,9 @@ jobs:
         run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
 
       # The other two configurations `impresspress-web` has. Each compiles its
-      # own block of `runtime_factory.rs`'s const assertions — the compiled
-      # sandbox, the mode every `initialize({ sandbox })` request resolves to, and
-      # for a site build that the factory routes no `/b/dev` path — so these
+      # own block of `runtime_factory.rs`'s const assertions — the sandbox mode
+      # the features compile (`SandboxMode::COMPILED`) and, for a site build,
+      # that the factory routes no `/b/dev` path — so these
       # steps are what check that wiring, and they are where a site build's
       # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
       # are linted at all. Nothing else compiles a site build; `build-wasm`
