@@ -11,6 +11,9 @@ const SW_RECOVER_KEY = '__impresspress_sw_recover';
 // why it is Cache Storage).
 const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';
 const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
+// The cache the worker keeps its runtime binary in (`RUNTIME_CACHE` in sw.js
+// says why; the same name). A recovery drops it (`dropCaches`).
+const RUNTIME_CACHE = '__impresspress_runtime';
 // A cause older than this was left for a navigation that never reached a
 // boot shell (the tab was closed first, or the static host could not be
 // reached for the shell). It is not about THIS load, and acting on it would
@@ -209,19 +212,27 @@ function goOn(status, navigate) {
     status.textContent = 'Opening the page you asked for… If this page stays, reload it.';
 }
 
-// Drop Cache Storage. RECOVERED_CACHE is not dropped: it is this script's
-// own record, not the app's state. The runtime binary the worker keeps
-// (`RUNTIME_CACHE` in sw.js) goes with the rest, so the replacement fetches
-// its own afresh at install. No worker is unregistered — `replaceWorker`
-// says how a dead one is replaced.
+// Drop the Cache Storage caches the app keeps, BY NAME: the runtime binary
+// the worker keeps (RUNTIME_CACHE, so the replacement fetches its own afresh
+// at install) and any stop cause still left (STOP_CAUSE_CACHE, about the
+// death being recovered from). RECOVERED_CACHE is not dropped: it is this
+// script's own record, not the app's state. No worker is unregistered —
+// `replaceWorker` says how a dead one is replaced.
+//
+// Only these. Every other cache of this origin belongs to someone else —
+// most of all the model weights the page engines download, which are a
+// gigabyte or more and which their libraries keep in Cache Storage
+// (WebLLM's `webllm/*` caches, transformers.js's `transformers-cache`). A
+// recovery that took them would cost every person a re-download for a
+// failure that is not theirs: they are not the runtime's state, so no
+// runtime failure is fixed by dropping them.
 async function dropCaches() {
-    try {
-        const keys = await caches.keys();
-        for (const k of keys) {
-            if (k !== RECOVERED_CACHE) await caches.delete(k);
+    for (const name of [RUNTIME_CACHE, STOP_CAUSE_CACHE]) {
+        try {
+            await caches.delete(name);
+        } catch (e) {
+            console.error('[__APP_NAME__] cache wipe failed:', e);
         }
-    } catch (e) {
-        console.error('[__APP_NAME__] cache wipe failed:', e);
     }
 }
 
@@ -746,7 +757,7 @@ async function updateUnderway(registration, failure, status, { alreadyIn = true,
 }
 
 // Replace the worker in place (WORKER_URL says how and why): drop the
-// caches, note that a recovery ran, register the replacement over the live
+// app's own caches (`dropCaches`), note that a recovery ran, register the replacement over the live
 // registration, and record the death as recovered. Called holding
 // RECOVERY_LOCK. `failure` is what is being recovered from, or `null` when
 // nothing was reported. Answers the registration, whose newest version is
@@ -925,8 +936,9 @@ function renderChoices({ title, said, next, buttons }) {
 
 // "Reset local data and reload", on both screens below: erase everything
 // this origin stores for the app — OPFS whatever the build and whatever the
-// failure, and the browser's other storage for it — and start the app from
-// its boot URL on a new worker. The person has explicitly opted in by
+// failure, the app's own caches, and the browser's other storage for it —
+// and start the app from its boot URL on a new worker. Not the model weights
+// the page engines downloaded: they are not the app's (`dropCaches`). The person has explicitly opted in by
 // clicking.
 function resetButton(failure, status, busy = 'Resetting…') {
     return {
@@ -1370,8 +1382,8 @@ async function boot() {
     try {
         // Recovery path: a SW self-destructed and left its cause, for this
         // page (the breaker) or for whichever boot shell loaded next (the
-        // cache entry). Replace the worker in place and drop all cache
-        // state — and OPFS too, where `erasesFor` allows it.
+        // cache entry). Replace the worker in place and drop the app's own
+        // caches (`dropCaches`) — and OPFS too, where `erasesFor` allows it.
         //
         // The OPFS wipe is for the schema-drift class of bug: if the OPFS DB
         // was written by a prior build with an incompatible schema, a fresh

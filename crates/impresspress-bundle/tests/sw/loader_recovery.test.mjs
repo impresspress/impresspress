@@ -46,10 +46,13 @@ import {
   loadShell,
   NEW_RUNTIME,
   OLD_RUNTIME,
+  MODEL_CACHES,
   ORIGIN,
   RECOVERED_CACHE,
   RECOVERY_DONE,
   RECOVERY_LOCK,
+  RUNTIME_CACHE,
+  SEEDED_CACHES,
   STOP_CACHE,
   stoppedResponse
 } from './loader_harness.mjs';
@@ -71,10 +74,11 @@ const left = (stage, at = NOW - 2_000, death = {}) => ({ reason: CAUSE, stage, a
 const sessionOf = (shell) => Object.fromEntries(shell.session.map);
 
 /// The worker was replaced in place — by the automatic recovery, or by a
-/// button: nothing unregistered, every cache dropped but the record of
-/// deaths, the replacement registered under a new script URL, and what was
-/// done noted. `erased` is whether it took the local data with it.
-function assertReplaced(shell, { erased, automatic = true, caches = [] }) {
+/// button: nothing unregistered, the app's own caches dropped and every other
+/// cache left (`caches`: the model weights the engines keep, and the record
+/// of deaths), the replacement registered under a new script URL, and what
+/// was done noted. `erased` is whether it took the local data with it.
+function assertReplaced(shell, { erased, automatic = true, caches = MODEL_CACHES }) {
   if (automatic) assert.ok(shell.statusLines.includes(erased ? ERASING : KEEPING), shell.statusLines);
   assert.deepEqual(shell.written(RECOVERY_DONE).slice(-1), [erased ? 'erased' : 'restarted']);
   assert.equal(shell.unregistered(), 0, 'a dead worker is replaced, never unregistered');
@@ -104,7 +108,7 @@ function assertEntered(shell, to = null) {
 function assertUntouched(shell) {
   assert.equal(shell.unregistered(), 0);
   assert.ok(!shell.registeredUrls.includes(REPLACEMENT), 'no replacement was registered');
-  assert.deepEqual(shell.cacheNames(), ['assets-v1']);
+  assert.deepEqual(shell.cacheNames(), SEEDED_CACHES);
   assert.deepEqual(shell.opfs(), ['app.sqlite']);
   assert.deepEqual(shell.location.replaced, []);
   assert.equal(shell.location.reloads, 0);
@@ -151,6 +155,23 @@ test('an initialize() failure is recovered from by erasing, in a build rendered 
 
   assertReplaced(shell, { erased: true });
   assertEntered(shell);
+});
+
+// A recovery drops the caches that are the app's — the runtime binary the
+// worker kept, any stop cause still left — BY NAME, and nothing else: the
+// model weights the page engines' libraries keep in Cache Storage (WebLLM,
+// transformers.js) are a gigabyte or more each, and no runtime failure is
+// fixed by downloading them again. Checked on the recovery that erases most.
+test('a recovery that erases drops the app’s own caches by name and keeps the model weights', async () => {
+  const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
+  await shell.booted;
+
+  assert.deepEqual(shell.opfs(), [], 'the erase ran');
+  for (const name of MODEL_CACHES) {
+    assert.ok(shell.cacheNames().includes(name), `${name} survived the recovery`);
+  }
+  assert.ok(!shell.cacheNames().includes(RUNTIME_CACHE), 'the kept runtime binary was dropped');
+  assert.ok(!shell.cacheNames().includes(STOP_CACHE), 'the stop cause was dropped');
 });
 
 test('the same failure in a default build restarts and keeps the data', async () => {
@@ -247,7 +268,7 @@ test('a cause is read once: the entry is gone after the load that took it', asyn
   });
   await shell.booted;
 
-  assert.deepEqual(shell.cacheNames(), ['assets-v1']);
+  assert.deepEqual(shell.cacheNames(), SEEDED_CACHES);
 });
 
 // The breaker is this tab's own note, and like the entry it is about the load
@@ -399,11 +420,14 @@ for (const { spent, stage, wipe, tried, offer, label, erases } of [
     assertEntered(shell, `${ORIGIN}/`);
 
     // "Reset" erases whatever the build and the failure, and keeps nothing
-    // of this tab's state.
+    // of this tab's state — but the model weights are not the app's state,
+    // and stay.
     const other = stuck();
     await other.booted;
     await other.stuck('impresspress-reset').click();
     assert.deepEqual(other.opfs(), []);
+    assert.ok(!other.cacheNames().includes(RUNTIME_CACHE));
+    assert.deepEqual(other.cacheNames().filter((name) => MODEL_CACHES.includes(name)), MODEL_CACHES);
     assert.equal(other.unregistered(), 0);
     assert.deepEqual(other.registeredUrls, [REPLACEMENT]);
     assert.deepEqual(other.location.replaced, [`${ORIGIN}/`]);
@@ -615,7 +639,7 @@ for (const [branch, search, destination] of [
       );
       assert.equal(slow.stuck('impresspress-stopped-cause'), null);
       assert.deepEqual(slow.registeredUrls, ['/sw.js'], 'the worker that is starting is left alone');
-      assert.deepEqual(slow.cacheNames(), ['assets-v1']);
+      assert.deepEqual(slow.cacheNames(), SEEDED_CACHES);
       assert.deepEqual(slow.opfs(), ['app.sqlite']);
       assert.deepEqual(slow.written(RECOVERY_DONE), []);
       if (destination === null) {
@@ -776,7 +800,7 @@ test('a probe that threw proves nothing, clears nothing and erases nothing', asy
 
   assert.equal(shell.session.getItem(RECOVERY_DONE), 'restarted');
   assert.deepEqual(shell.registeredUrls, ['/sw.js']);
-  assert.deepEqual(shell.cacheNames(), ['assets-v1']);
+  assert.deepEqual(shell.cacheNames(), SEEDED_CACHES);
   assert.deepEqual(shell.opfs(), ['app.sqlite']);
   assert.equal(shell.stuck('impresspress-stopped-cause'), null);
   assertUntouched(shell);
@@ -965,7 +989,7 @@ test('a recovery reads, decides, wipes and registers holding the lock, and recor
     { name: RECOVERY_LOCK, registrations: 0, unregistered: 0, opfs: ['app.sqlite'] }
   ]);
   // …and everything was done under it.
-  assertReplaced(shell, { erased: true, caches: [RECOVERED_CACHE] });
+  assertReplaced(shell, { erased: true, caches: [...MODEL_CACHES, RECOVERED_CACHE] });
   assert.deepEqual(shell.recoveryRecord(), [{ id: DEATH.id, at: NOW }]);
 });
 
@@ -998,7 +1022,7 @@ for (const [road, source] of [
 
     assert.deepEqual(shell.registeredUrls, [registered], 'the worker tab A registered is the one used');
     assert.deepEqual(shell.opfs(), ['app.sqlite'], 'the data written since is left alone');
-    assert.ok(shell.cacheNames().includes('assets-v1'));
+    assert.deepEqual(shell.cacheNames(), [...SEEDED_CACHES, RECOVERED_CACHE], 'no cache was dropped');
     assert.equal(shell.session.getItem(BREAKER), null, 'the breaker is consumed');
     assert.deepEqual(shell.written(RECOVERY_DONE), [], 'nothing was spent');
     assert.equal(shell.stuck('impresspress-stopped-cause'), null);
@@ -1017,7 +1041,7 @@ test('a different death is recovered from, and both are on record', async () => 
   });
   await shell.booted;
 
-  assertReplaced(shell, { erased: true, caches: [RECOVERED_CACHE] });
+  assertReplaced(shell, { erased: true, caches: [...MODEL_CACHES, RECOVERED_CACHE] });
   assert.deepEqual(shell.recovered(), ['another-death', DEATH.id]);
 });
 
@@ -1090,7 +1114,7 @@ test('a browser with no Web Locks never erases automatically', async () => {
   });
   await shell.booted;
 
-  assertReplaced(shell, { erased: false, caches: [RECOVERED_CACHE] });
+  assertReplaced(shell, { erased: false, caches: [...MODEL_CACHES, RECOVERED_CACHE] });
   assert.deepEqual(shell.lockRequests, []);
 
   // The person still can, from the stopped screen: the button says it erases.
@@ -1355,7 +1379,7 @@ test('a dead worker an update is replacing is left to the update: nothing replac
   assert.deepEqual(shell.registeredUrls, [], 'nothing was registered over the update');
   assert.deepEqual(shell.opfs(), ['app.sqlite']);
   assert.deepEqual(shell.written(RECOVERY_DONE), [], 'no recovery was spent');
-  assert.deepEqual(shell.cacheNames().sort(), ['assets-v1', RECOVERED_CACHE].sort());
+  assert.deepEqual(shell.cacheNames().sort(), [...SEEDED_CACHES, RECOVERED_CACHE].sort());
   // What it waited on, in turn: the check, then the new version's install.
   const waits = shell.statusLines.filter((line) => !line.startsWith('The app') && line.endsWith('…'));
   assert.deepEqual(waits.slice(0, 2), ['Checking for a new version…', 'Updating the app…']);
@@ -1460,7 +1484,7 @@ test('an update that fails to install leaves the recovery to run', async () => {
   await shell.booted;
 
   assert.deepEqual(shell.events, ['update discarded', `register ${REPLACEMENT}`]);
-  assertReplaced(shell, { erased: false, caches: [RECOVERED_CACHE] });
+  assertReplaced(shell, { erased: false, caches: [...MODEL_CACHES, RECOVERED_CACHE] });
   assertEntered(shell);
 });
 
