@@ -138,6 +138,28 @@ pub struct AppConfig {
     pub name: String,
     pub title: AppTitle,
     pub boot_redirect: String,
+    /// `shell_path = "/…"`: the boot shell's own URL path — the path the
+    /// static host answers with the shell document (`index.html`, or an
+    /// overlay of it that loads `/loader.js`). **Default: `/`.** An app that
+    /// keeps another document at `/` (a landing page on
+    /// `[assets] extra_bypass_exact`) names the path its host serves the
+    /// shell at instead, e.g. `"/chat"` beside a `chat.html` overlay that
+    /// Cloudflare Pages serves at `/chat`.
+    ///
+    /// The service worker fetches the shell from here to answer a navigation
+    /// once its runtime is dead, and the loader goes on to `boot_redirect`
+    /// only from a shell standing here; a shell anywhere else is a page of
+    /// the app and stays. So the host MUST answer this path with the shell,
+    /// with a `200` and no redirect to another spelling, or a dead runtime
+    /// is never recovered from.
+    ///
+    /// An absolute path: it starts with `/`; no scheme, host, query or
+    /// fragment; no empty, `.` or `..` segment; no percent-encoding. A
+    /// trailing slash is significant (`/chat` and `/chat/` are different
+    /// paths); write the one the host answers. Refused when parsed
+    /// otherwise, and by `impresspress build` when a bypass rule covers it —
+    /// see `impresspress_bundle::bundle::ShellPath`.
+    pub shell_path: impresspress_bundle::bundle::ShellPath,
     /// An HTML fragment file (relative to the directory holding
     /// `impresspress.toml`, like an overlay's `from`) that the boot shell
     /// shows under its title — what a first visitor, or a reader that runs no
@@ -173,29 +195,38 @@ struct RawAppConfig {
     title_file: Option<String>,
     boot_redirect: String,
     #[serde(default)]
+    shell_path: Option<String>,
+    #[serde(default)]
     boot_notice: Option<String>,
 }
 
 impl TryFrom<RawAppConfig> for AppConfig {
-    type Error = &'static str;
+    type Error = String;
 
     fn try_from(raw: RawAppConfig) -> Result<Self, Self::Error> {
         let title = match (raw.title, raw.title_file) {
             (Some(title), None) => AppTitle::Inline(title),
             (None, Some(file)) => AppTitle::File(file),
             (Some(_), Some(_)) => {
-                return Err("[app] sets both `title` and `title_file`; give exactly one")
+                return Err("[app] sets both `title` and `title_file`; give exactly one".to_string())
             }
             (None, None) => {
                 return Err(
-                    "[app] needs a `title` (or a `title_file` naming the file that holds it)",
+                    "[app] needs a `title` (or a `title_file` naming the file that holds it)"
+                        .to_string(),
                 )
             }
+        };
+        let shell_path = match raw.shell_path {
+            Some(path) => impresspress_bundle::bundle::ShellPath::parse(&path)
+                .map_err(|error| format!("[app] {error}"))?,
+            None => impresspress_bundle::bundle::ShellPath::default(),
         };
         Ok(Self {
             name: raw.name,
             title,
             boot_redirect: raw.boot_redirect,
+            shell_path,
             boot_notice: raw.boot_notice,
         })
     }
@@ -204,8 +235,14 @@ impl TryFrom<RawAppConfig> for AppConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AssetsConfig {
+    /// Path prefixes the service worker leaves to the static host
+    /// (`impresspress_bundle::bundle::AppConfig::extra_bypass_prefix`).
     #[serde(default)]
     pub extra_bypass_prefix: Vec<String>,
+    /// Exact paths the service worker leaves to the static host — e.g. `/`
+    /// for a landing page the worker never intercepts. Listing `/` needs
+    /// `[app] shell_path` elsewhere: `impresspress build` refuses a shell path
+    /// any bypass rule (exact or prefix) matches.
     #[serde(default)]
     pub extra_bypass_exact: Vec<String>,
     #[serde(default)]
@@ -277,6 +314,7 @@ impl Config {
             app_name: Some(self.app.name.clone()),
             app_title: Some(self.app_title(repo_root)?),
             boot_redirect: Some(self.app.boot_redirect.clone()),
+            shell_path: self.app.shell_path.clone(),
             extra_bypass_prefix: self.assets.extra_bypass_prefix.clone(),
             extra_bypass_exact: self.assets.extra_bypass_exact.clone(),
             opfs_wipe_on_recovery: self.assets.opfs_wipe_on_recovery,
@@ -411,6 +449,52 @@ out_dir = "dist"
         assert_eq!(cfg.assets.overlay[0].from, "site/index.html");
         assert_eq!(cfg.assets.overlay[0].to, "index.html");
         assert_eq!(cfg.wasm.out_dir, "dist");
+    }
+
+    /// `[app] shell_path` defaults to `/` and reaches the bundler as
+    /// written; a value that is not an absolute path is refused when the
+    /// file is parsed, with an error that names the field and the value.
+    #[test]
+    fn the_shell_path_defaults_to_the_root_and_is_validated() {
+        let app = |lines: &str| {
+            format!("[app]\nname = \"x\"\ntitle = \"X\"\nboot_redirect = \"/chat\"\n{lines}")
+        };
+        let tmp = tempfile::tempdir().unwrap();
+
+        let default = parse(&app("")).unwrap();
+        assert_eq!(default.app.shell_path.as_str(), "/");
+        assert_eq!(
+            default.bundle_app(tmp.path()).unwrap().shell_path.as_str(),
+            "/"
+        );
+
+        for path in ["/chat", "/chat/", "/app/shell"] {
+            let cfg = parse(&app(&format!("shell_path = {path:?}\n"))).unwrap();
+            assert_eq!(cfg.app.shell_path.as_str(), path);
+            assert_eq!(
+                cfg.bundle_app(tmp.path()).unwrap().shell_path.as_str(),
+                path
+            );
+        }
+
+        for (path, reason) in [
+            ("chat", "is not an absolute path"),
+            ("https://example.com/chat", "is not an absolute path"),
+            ("//example.com/chat", "empty segment"),
+            ("/chat?x=1", "query"),
+            ("/chat#top", "fragment"),
+            ("/a/../chat", "`..` segment"),
+            ("/ch%61t", "percent-encoded"),
+            ("/ch at", "does not carry"),
+        ] {
+            let msg = parse(&app(&format!("shell_path = {path:?}\n")))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains(&format!("[app] shell_path {path:?} ")) && msg.contains(reason),
+                "{path:?}: {msg}"
+            );
+        }
     }
 
     #[test]

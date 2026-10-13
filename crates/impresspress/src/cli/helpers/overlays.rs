@@ -42,12 +42,17 @@ pub fn apply_overlays(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Result
 ///
 /// The directory must be a finished bundle: its `asset-manifest.json` parses
 /// as the bundler's [`AssetManifest`](impresspress_bundle::bundle::manifest::AssetManifest)
-/// — `bypass` and `sha256` included, which that type requires — and every
+/// — `bypass`, `shellPath` and `sha256` included, which that type requires — and every
 /// file it lists is there with the digest it lists. A path that names the shell's configuration directory instead of
 /// its `dist/`, or a shell that was never built, fails the build here rather
-/// than shipping a sandbox whose export has nothing to copy. And no
-/// `[[assets.overlay]]` may write under the root: its files would be mixed
-/// into the shell.
+/// than shipping a sandbox whose export has nothing to copy. Its shell must
+/// be at `/` (the manifest's `shellPath`, `[app] shell_path` of the shell's
+/// own configuration): the export is a folder for any static file server,
+/// and those answer the root with `index.html` and have no other route to
+/// the shell — a shell anywhere else would
+/// be fetched from a path the server answers with a 404 once the exported
+/// runtime is dead, and never recovered from. And no `[[assets.overlay]]`
+/// may write under the root: its files would be mixed into the shell.
 pub fn apply_export_shell(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Result<()> {
     let Some(shell) = &cfg.sandbox.export_shell else {
         return Ok(());
@@ -68,6 +73,15 @@ pub fn apply_export_shell(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Re
         return Err(anyhow!(
             "[sandbox] export_shell {src:?}: asset-manifest.json lists no files; rebuild the \
              shell with a current impresspress"
+        ));
+    }
+    if manifest.shell_path != impresspress_bundle::bundle::ShellPath::default() {
+        return Err(anyhow!(
+            "[sandbox] export_shell {src:?} was built with [app] shell_path = {:?}, but an \
+             export is served by any static file server, which answers the root with the \
+             shell's index.html and has no other route to the shell; rebuild the shell \
+             without shell_path",
+            manifest.shell_path.as_str()
         ));
     }
     // The files the export will fetch are the ones the manifest describes,
@@ -155,6 +169,11 @@ mod tests {
     /// A site bundle, rendered by the real bundler into `dir` — what
     /// `examples/dev-sandbox/build.sh` builds `export-shell/dist/` as.
     fn built_site_shell(dir: &Path) {
+        built_site_shell_at(dir, impresspress_bundle::bundle::ShellPath::default());
+    }
+
+    /// [`built_site_shell`] with its boot shell at `shell_path`.
+    fn built_site_shell_at(dir: &Path, shell_path: impresspress_bundle::bundle::ShellPath) {
         fs::create_dir_all(dir).unwrap();
         impresspress_bundle::assets::write_to(dir).unwrap();
         impresspress_bundle::bundle::run(
@@ -162,6 +181,7 @@ mod tests {
             dir,
             impresspress_bundle::bundle::AppConfig {
                 sandbox: impresspress_bundle::bundle::SandboxShell::Site,
+                shell_path,
                 ..Default::default()
             },
         )
@@ -256,6 +276,17 @@ mod tests {
             .to_string();
         assert!(err.contains("bypass") && err.contains("rebuild"), "{err}");
 
+        let mut no_shell_path = manifest.clone();
+        no_shell_path.as_object_mut().unwrap().remove("shellPath");
+        fs::write(&manifest_path, no_shell_path.to_string()).unwrap();
+        let err = apply_export_shell(&cfg, root, &dist)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("shellPath") && err.contains("rebuild"),
+            "{err}"
+        );
+
         let mut no_digests = manifest.clone();
         no_digests.as_object_mut().unwrap().remove("sha256");
         fs::write(&manifest_path, no_digests.to_string()).unwrap();
@@ -283,6 +314,29 @@ mod tests {
         assert!(!dist.join("__impresspress_dev").exists());
         fs::write(shell.join("loader.js"), loader).unwrap();
         apply_export_shell(&cfg, root, &dist).expect("the shell as it was built");
+    }
+
+    /// An export is served by any static file server, which answers the root
+    /// with the shell and has no other route to it: a shell built to be at another path is refused, naming
+    /// the path, and nothing is laid down.
+    #[test]
+    fn an_export_shell_not_at_the_root_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        built_site_shell_at(
+            &root.join("shell/dist"),
+            impresspress_bundle::bundle::ShellPath::parse("/chat").unwrap(),
+        );
+        let dist = root.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        let err = apply_export_shell(&workspace_cfg(""), root, &dist)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("shell/dist") && err.contains("shell_path = \"/chat\""),
+            "{err}"
+        );
+        assert!(!dist.join("__impresspress_dev").exists());
     }
 
     #[test]

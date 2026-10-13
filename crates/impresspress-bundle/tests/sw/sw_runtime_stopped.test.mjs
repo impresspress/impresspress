@@ -53,14 +53,15 @@ async function assertStoppedAnswer(response, cause, stage, next = RESTART) {
   return id;
 }
 
-/// The navigation was answered with the boot shell the host has at `/`, and
-/// the host was asked for nothing else — in particular not for the path that
-/// was navigated to, which it would answer with its 404.
+/// The navigation was answered with the boot shell the host has at the
+/// shell's path (`/` by default), and the host was asked for nothing else —
+/// in particular not for the path that was navigated to, which it would
+/// answer with its 404.
 async function assertAnsweredWithBootShell(worker, response) {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-type'), 'text/html');
   assert.equal(await response.text(), SHELL_HTML);
-  assert.deepEqual(worker.network, ['/']);
+  assert.deepEqual(worker.network, [worker.shellUrl]);
 }
 
 /// The page is left exactly as it is: not told, not navigated, nothing left
@@ -177,6 +178,41 @@ test('a deep link opened after the runtime failed to start gets the boot shell t
   await assertAnsweredWithBootShell(worker, response);
   assert.equal(worker.leftForBootShell().stage, 'initialize');
   assert.equal(starts, 1, 'this instance does not try the runtime again');
+});
+
+// An app that keeps a landing page of its own at `/` serves its shell
+// elsewhere and says so (`[app] shell_path = "/chat"`, rendered into
+// `SW_JS_SHELL`). The dead worker fetches the shell from THERE — never the
+// landing page, which loads no loader, so no recovery would ever run — for a
+// navigation to the shell's own path and to any other page alike.
+test('a worker whose shell is not at `/` answers a dead-runtime navigation with the shell from its path', async (t) => {
+  captureConsole(t);
+  for (const pathname of ['/chat', '/b/auth/login']) {
+    const worker = await loadWorker({ handle_request: trap() }, { variable: 'SW_JS_SHELL' });
+    assert.equal(worker.shellUrl, '/chat');
+
+    const { response } = await worker.request(pathname, { mode: 'navigate' });
+
+    await assertAnsweredWithBootShell(worker, response);
+    assert.deepEqual(worker.network, ['/chat'], pathname);
+  }
+  // The landing page itself is on the bypass list: the worker leaves it to
+  // the host, dead runtime or not.
+  const worker = await loadWorker({ handle_request: trap() }, { variable: 'SW_JS_SHELL' });
+  const { response } = await worker.request('/', { mode: 'navigate' });
+  assert.equal(response, undefined);
+});
+
+// The default rendering's shell is at `/`.
+test('a worker built with no shell path fetches the shell from `/`', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({ handle_request: trap() });
+  assert.equal(worker.shellUrl, '/');
+
+  const { response } = await worker.request('/chat', { mode: 'navigate' });
+
+  await assertAnsweredWithBootShell(worker, response);
+  assert.deepEqual(worker.network, ['/']);
 });
 
 test('the shell answer is a document of its own, not the host’s response handed on', async (t) => {

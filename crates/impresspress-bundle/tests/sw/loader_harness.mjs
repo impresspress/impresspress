@@ -27,6 +27,30 @@ function source(variable) {
 }
 
 const SOURCES = { plain: source('LOADER_JS'), wipe: source('LOADER_JS_WIPE') };
+// The rendering with a shell path of its own (`[app] shell_path`), read the
+// first time a test asks for it — see `NON_ROOT_SHELL`.
+let nonRootShellSource;
+function nonRootShell() {
+  nonRootShellSource ??= source('LOADER_JS_SHELL');
+  return nonRootShellSource;
+}
+let shellIsBootSource;
+function shellIsBoot() {
+  shellIsBootSource ??= source('LOADER_JS_SHELL_IS_BOOT');
+  return shellIsBootSource;
+}
+
+/// The rendering in `LOADER_JS_SHELL`: built with `shell_path = "/chat"` and
+/// `boot_redirect = "/b/home"`, as an app that keeps another document at `/`
+/// (a landing page) and serves its boot shell at `/chat` is. `loadShell`'s
+/// `nonRootShell` picks it.
+export const NON_ROOT_SHELL = { path: '/chat', bootUrl: '/b/home' };
+
+/// The rendering in `LOADER_JS_SHELL_IS_BOOT`: `shell_path = "/chat"` and
+/// `boot_redirect = "/chat"` with `/` on the bypass list — gizza.ai's own
+/// shape, where the app is opened where the shell stands. `loadShell`'s
+/// `shellIsBoot` picks it.
+export const SHELL_IS_BOOT = { path: '/chat' };
 
 /// The timers the loader sets, by the constant each is set with, read from the
 /// rendered source: the stub below tells them apart by their delay, so it
@@ -156,6 +180,10 @@ function element() {
 ///                 request a document makes once a navigation away from it
 ///                 has begun, the request under way included
 /// - `wipe`      — the `opfs_wipe_on_recovery` rendering
+/// - `nonRootShell` — the rendering whose shell is not at `/`
+///                 (`NON_ROOT_SHELL`)
+/// - `shellIsBoot` — the rendering whose shell is not at `/` and is its boot
+///                 URL too (`SHELL_IS_BOOT`)
 /// - `now`       — what `Date.now()` returns
 /// - `path`      — the path the shell was loaded at; `/` is its own, anything
 ///                 else is a shell sw.js answered a dead-runtime navigation
@@ -220,6 +248,8 @@ export function loadShell({
   stop,
   probe,
   wipe = false,
+  nonRootShell: atNonRootShell = false,
+  shellIsBoot: atShellIsBoot = false,
   now = 1_000_000,
   path = '/',
   search = '',
@@ -611,7 +641,11 @@ export function loadShell({
     'clearTimeout',
     'Date',
     'console',
-    SOURCES[wipe ? 'wipe' : 'plain']
+    atShellIsBoot
+      ? shellIsBoot()
+      : atNonRootShell
+        ? nonRootShell()
+        : SOURCES[wipe ? 'wipe' : 'plain']
   );
   const booted = run(
     window,

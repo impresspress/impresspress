@@ -4,6 +4,7 @@ pub mod hash;
 pub mod manifest;
 pub mod rename;
 pub mod sandbox_mode;
+pub mod shell_path;
 pub mod template;
 
 use std::{collections::BTreeMap, path::Path};
@@ -11,7 +12,10 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
+pub use self::{
+    bypass::{BypassRules, SEED_BYPASS_PREFIX},
+    shell_path::{InvalidShellPath, ShellPath},
+};
 
 /// What `index.html.tmpl` wraps each place it shows [`AppConfig::app_title`]
 /// in the page body in, so the title can be replaced by exact text. The
@@ -24,15 +28,6 @@ pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
 /// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings.
 pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
 pub const APP_TITLE_CLOSE: &str = "</span>";
-
-/// The boot shell's own URL, rendered into both `sw.js.tmpl` and
-/// `loader.js.tmpl` as `SHELL_URL`: the one address the static host itself
-/// must answer, because a first visit — no worker yet — starts there. The
-/// worker fetches the shell from it to answer a navigation once its runtime
-/// is dead, and the loader tells a shell standing there (the app being
-/// opened) from one standing at a page of the app. One value, so the two
-/// scripts cannot disagree about where the shell is.
-pub const SHELL_URL: &str = "/";
 
 /// Where a development sandbox's deployment carries its EXPORT SHELL: a
 /// complete bundle built with [`SandboxShell::Site`] — around the site
@@ -137,6 +132,18 @@ pub struct AppConfig {
     /// URL the loader navigates to after the Service Worker activates.
     /// Defaults to `"/"`.
     pub boot_redirect: Option<String>,
+    /// The boot shell's own URL path — [`ShellPath`], whose module docs give
+    /// what a valid one is and the static host's contract: the host must
+    /// answer this path with the shell document. **Default: `/`.** Rendered
+    /// into both `sw.js.tmpl` and `loader.js.tmpl` as `SHELL_URL`, and
+    /// recorded in `asset-manifest.json` ([`manifest::AssetManifest::shell_path`]).
+    /// Driven by `[app] shell_path` in `impresspress.toml`.
+    ///
+    /// [`run`] refuses a shell path any of the bundle's bypass rules matches:
+    /// the worker would leave the shell's own address to the static host, so
+    /// the runtime could never answer it — and a boot URL that is the shell's
+    /// address would send the shell back to itself.
+    pub shell_path: ShellPath,
     /// Additional URL path prefixes that the Service Worker's fetch handler
     /// should bypass (let the origin serve directly). Each entry joins the
     /// bundle's [`BypassRules`] as a prefix rule, rendered into `sw.js` as a
@@ -146,7 +153,9 @@ pub struct AppConfig {
     /// Additional exact URL paths the Service Worker's fetch handler should
     /// bypass. Unlike `extra_bypass_prefix` (a prefix rule), each entry is an
     /// exact rule, rendered as `url.pathname === <path>` — needed for `/` and
-    /// `/index.html`, which cannot be expressed as a prefix.
+    /// `/index.html`, which cannot be expressed as a prefix. Listing `/` (or
+    /// any other path the shell would stand at) needs [`Self::shell_path`]
+    /// elsewhere: [`run`] refuses a shell path a bypass rule matches.
     pub extra_bypass_exact: Vec<String>,
     /// Whether loader.js's recovery path should wipe OPFS when the Service
     /// Worker self-destructs. **Default: false** — for production apps that
@@ -279,6 +288,30 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
         ),
     }
 
+    // --- Bypass rules --------------------------------------------------------
+    // Computed ONCE, here: `sw.js`'s fetch condition, the rules it hands the
+    // runtime in `initialize()` and the manifest's `bypass` are all rendered
+    // from this one value — see `bypass`'s module docs for why there must not
+    // be a second list. Here rather than beside the templates because the
+    // shell path is checked against it, and a refusal leaves `pkg_dir` as it
+    // was. The glue's prefix is the discovered base name, which the hashing
+    // below keeps (`{base}-<hash>.js`, `{base}_bg-<hash>.wasm`).
+    let wasm_js_prefix = match &pair {
+        Some((base, _, _)) => format!("/{base}"),
+        // Template-only: a harmless fallback so the rules still render.
+        None => "/app".to_string(),
+    };
+    let bypass = BypassRules::for_bundle(&wasm_js_prefix, &app);
+    if let Some(rule) = bypass.rule_matching(app.shell_path.as_str()) {
+        anyhow::bail!(
+            "shell_path {:?} is on this bundle's service-worker bypass list ({rule}): the \
+             worker would hand the boot shell's own address to the static host, so the \
+             runtime could never answer it, and a boot that ends there would load the shell \
+             again; take the path off the bypass list or give the shell another path",
+            app.shell_path.as_str()
+        );
+    }
+
     // --- Cleanup -------------------------------------------------------------
     // Dev rebuilds re-run wasm-pack, which writes the un-hashed pair (e.g.
     // `gizza_ai.js`, `gizza_ai_bg.wasm`) and then hits the same hashing path
@@ -294,7 +327,7 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     let mut renamed: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
 
     // --- Derive template vars from discovery + AppConfig ---------------------
-    let (wasm_js_val, wasm_bin_val, wasm_js_prefix_val) = if let Some((base, js, wasm)) = &pair {
+    let (wasm_js_val, wasm_bin_val) = if let Some((_, js, wasm)) = &pair {
         // 1. Hash + rename the wasm, then write its hashed name into the
         //    glue, and only THEN hash + rename the glue.
         //
@@ -343,18 +376,10 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
             .into_owned();
         let hashed_wasm_name = new_wasm_name;
 
-        (
-            format!("/{hashed_js_name}"),
-            format!("/{hashed_wasm_name}"),
-            format!("/{base}"),
-        )
+        (format!("/{hashed_js_name}"), format!("/{hashed_wasm_name}"))
     } else {
         // No pair found — provide harmless fallbacks so template vars resolve.
-        (
-            "/app.js".to_string(),
-            "/app_bg.wasm".to_string(),
-            "/app".to_string(),
-        )
+        ("/app.js".to_string(), "/app_bg.wasm".to_string())
     };
 
     // 3. Build ID.
@@ -395,12 +420,9 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    would name three `*.tmpl` files that no longer exist and omit the
     //    three real ones.
     //
-    //    The bypass rules are computed ONCE, here: `sw.js`'s fetch condition
-    //    and the rules it hands the runtime in `initialize()` are both
-    //    rendered from this one value — see `bypass`'s module docs for why
-    //    there must not be a second list.
+    //    `sw.js`'s fetch condition and the rules it hands the runtime in
+    //    `initialize()` are both rendered from the one `bypass` value above.
     let base_name = pair.as_ref().map(|(b, _, _)| b.as_str()).unwrap_or("app");
-    let bypass = BypassRules::for_bundle(&wasm_js_prefix_val, &app);
     let vars = build_template_vars(
         build_id.clone(),
         wasm_js_val,
@@ -447,6 +469,7 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
         assets: manifest_assets,
         files,
         bypass,
+        shell_path: app.shell_path,
         sha256,
     };
     manifest.write(&pkg_dir.join(manifest::ASSET_MANIFEST))?;
@@ -551,7 +574,13 @@ fn build_template_vars(
     // closing tag whoever replaces it looks for.
     vars.insert("APP_TITLE".to_string(), html_text(&app_title));
     vars.insert("BOOT_REDIRECT".to_string(), boot_redirect);
-    vars.insert("SHELL_URL".to_string(), SHELL_URL.to_string());
+    // Rendered as a JavaScript value, `const SHELL_URL = __SHELL_URL__;`: the
+    // path as a JSON string, so no character a valid path may carry (`'`
+    // among them) can end the literal early.
+    vars.insert(
+        "SHELL_URL".to_string(),
+        serde_json::to_string(app.shell_path.as_str()).expect("a string serializes"),
+    );
     vars.insert(
         "BOOT_NOTICE".to_string(),
         app.boot_notice_html.clone().unwrap_or_default(),

@@ -143,14 +143,15 @@ const BOOT_PROBE_TIMEOUT_MS = 60_000;
 // made (`askApp`). While a navigation away from this document is under way,
 // WebKit refuses each one at once, so this is how often it asks then.
 const PROBE_RETRY_MS = 1_000;
-// The boot shell's own URL: the address a first visit starts at. A shell
+// The boot shell's own URL: the address a visit that boots the app starts
+// at, and the one the static host must answer with the shell. A shell
 // standing THERE is the app being opened, and goes on to the boot URL; a
 // shell standing anywhere else is a page of the app that was asked for (a
 // deep link the host answered with the shell, or a navigation sw.js answered
 // with it because its runtime is dead), and goes on to that page
-// (`destination`). Rendered from the bundler's one `SHELL_URL`, which sw.js
-// is rendered with too.
-const SHELL_URL = '__SHELL_URL__';
+// (`destination`). `[app] shell_path` (default `/`), rendered as a JSON
+// string from the bundler's one value, which sw.js is rendered with too.
+const SHELL_URL = __SHELL_URL__;
 
 // Whether a navigation away from this document has begun. Every boot ends
 // with the shell navigating itself on to the app (`enterApp`), and that is

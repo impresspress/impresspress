@@ -52,6 +52,19 @@ pub struct AssetManifest {
     /// of one. A manifest from a bundler that predates the field does not
     /// parse as this type.
     pub bypass: BypassRules,
+    /// The boot shell's own URL path this bundle's `sw.js` and `loader.js`
+    /// were rendered with ([`super::AppConfig::shell_path`]) — the path the
+    /// static host serving this bundle must answer with the shell document.
+    /// Written here so a reader that holds only the bundle's files can learn
+    /// that contract: the `impresspress` CLI refuses an export shell whose
+    /// shell is not at `/`, because a development sandbox's export is
+    /// served by any static file server, and those answer the root with
+    /// `index.html` and have no other route to the shell.
+    ///
+    /// No `#[serde(default)]`, like [`Self::bypass`]: a manifest from a
+    /// bundler that predates the field does not parse as this type.
+    #[serde(rename = "shellPath")]
+    pub shell_path: super::ShellPath,
     /// The SHA-256 (lowercase hex) of every file in [`Self::files`] as
     /// [`run`](super::run) wrote it, by the same relative path — except
     /// `asset-manifest.json` itself, which cannot carry its own digest.
@@ -205,6 +218,7 @@ mod tests {
                 exact: vec!["/sw.js".into()],
                 prefixes: vec!["/seed/".into()],
             },
+            shell_path: crate::bundle::ShellPath::parse("/chat").unwrap(),
             sha256: BTreeMap::from([
                 ("index.html".into(), "aa".repeat(32)),
                 ("vendor/sql-wasm.wasm".into(), "bb".repeat(32)),
@@ -224,6 +238,9 @@ mod tests {
         assert_eq!(parsed.bypass, m.bypass);
         // The digests round-trip as a plain `{path: hex}` object.
         assert_eq!(parsed.sha256, m.sha256);
+        // The shell path as the plain string the templates are rendered with.
+        assert!(contents.contains("\"shellPath\": \"/chat\""), "{contents}");
+        assert_eq!(parsed.shell_path, m.shell_path);
         let raw: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(
             raw["bypass"],
@@ -237,7 +254,7 @@ mod tests {
     #[test]
     fn a_manifest_without_files_still_parses() {
         let parsed: AssetManifest = serde_json::from_str(
-            r#"{"buildId": "x", "assets": {}, "bypass": {"exact": [], "prefixes": []}, "sha256": {}}"#,
+            r#"{"buildId": "x", "assets": {}, "bypass": {"exact": [], "prefixes": []}, "shellPath": "/", "sha256": {}}"#,
         )
         .unwrap();
         assert!(parsed.files.is_empty());
@@ -248,7 +265,7 @@ mod tests {
     #[test]
     fn a_manifest_without_bypass_does_not_parse() {
         let error = serde_json::from_str::<AssetManifest>(
-            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "sha256": {}}"#,
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "shellPath": "/", "sha256": {}}"#,
         )
         .unwrap_err();
         assert!(error.to_string().contains("bypass"), "{error}");
@@ -259,10 +276,31 @@ mod tests {
     #[test]
     fn a_manifest_without_digests_does_not_parse() {
         let error = serde_json::from_str::<AssetManifest>(
-            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "bypass": {"exact": [], "prefixes": []}}"#,
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "bypass": {"exact": [], "prefixes": []}, "shellPath": "/"}"#,
         )
         .unwrap_err();
         assert!(error.to_string().contains("sha256"), "{error}");
+    }
+
+    /// Nor one without `shellPath`: a reader holding only the files would
+    /// not know where the host has to serve the shell.
+    #[test]
+    fn a_manifest_without_a_shell_path_does_not_parse() {
+        let error = serde_json::from_str::<AssetManifest>(
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "bypass": {"exact": [], "prefixes": []}, "sha256": {}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("shellPath"), "{error}");
+    }
+
+    /// And one whose shell path is not a valid one is refused as such.
+    #[test]
+    fn a_manifest_with_an_invalid_shell_path_does_not_parse() {
+        let error = serde_json::from_str::<AssetManifest>(
+            r#"{"buildId": "x", "assets": {}, "files": ["sw.js"], "bypass": {"exact": [], "prefixes": []}, "shellPath": "chat", "sha256": {}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("shell_path \"chat\""), "{error}");
     }
 
     /// Every listed file is hashed as it is on disk, except the manifest,
@@ -364,6 +402,7 @@ mod tests {
             assets,
             files: Vec::new(),
             bypass: BypassRules::default(),
+            shell_path: crate::bundle::ShellPath::default(),
             sha256: BTreeMap::new(),
         };
         m.write(&path).unwrap();

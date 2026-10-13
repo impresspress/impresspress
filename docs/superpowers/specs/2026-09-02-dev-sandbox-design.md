@@ -1320,6 +1320,36 @@ and read together with this list.
     `initialize()` stays, for a bundle put together some other way than by
     the CLI; its stage `build` and its no-erase rule are unchanged.
 
+26. **Amendment 24 — the boot shell's address is configured (2026-10-14).**
+    The boot shell's own URL path was the constant `/`, rendered into
+    `sw.js` and `loader.js` as `SHELL_URL`: the worker fetches the shell
+    from it to answer a navigation once its runtime is dead (`bootShell`),
+    and the loader's `destination` tells a shell standing there (the app
+    being opened, which goes on to `boot_redirect`) from one standing at a
+    page of the app (which stays). An app that keeps another document at
+    `/` — gizza.ai's chooser, on its bypass list and loading no loader —
+    therefore answered a dead-runtime navigation to `/chat` with the
+    chooser, and no recovery ran. `[app] shell_path` (default `/`) replaces
+    the constant: `impresspress-bundle`'s `ShellPath` validates it (an
+    absolute path; no scheme, host, query or fragment; no empty, `.` or
+    `..` segment; no percent-encoding; a trailing slash is significant and
+    kept), and the bundler renders the one value into both scripts as a
+    JSON string and records it in `asset-manifest.json` as `shellPath`.
+    **The static host must answer the shell path with the shell document**
+    (`index.html`, or an overlay of it that loads `/loader.js`), with a
+    `200` and no redirect to another spelling. §15's "serve `index.html`
+    for unknown paths" is a broader requirement (SPA fallback, so a deep
+    link boots on a first visit); a host that follows it also meets the
+    default's contract, since it answers `/` with the shell. The bundler
+    refuses a shell path any bypass rule matches — the worker would leave
+    the shell's address to the host, and a boot URL that is the shell's
+    would load the shell again — so `extra_bypass_exact = ["/"]` without a
+    `shell_path` elsewhere no longer builds. The sandbox and its export
+    shell keep the default: the CLI refuses an export shell whose
+    `shellPath` is not `/`, because an export is served by any static file
+    server, which answers the root with `index.html` and has no other route
+    to the shell.
+
 ## 21. Definition of done
 
 - `browser-devtools` is off by default and absent from a normal bundle; the
