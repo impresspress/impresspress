@@ -804,8 +804,11 @@ jobs:
           NODE_OPTIONS: --import ./js/test/node-hooks.mjs
         run: scripts/wasm-pack-locked.sh crates/impresspress-browser test --node
 
-      # impresspress-web's own wasm tests (the browser runtime factory's
-      # infrastructure config). The crate links impresspress-browser, so its
+      # impresspress-web's own wasm tests. It has none today: the boot
+      # funnel's (the infrastructure config, the app seed, the build→boot
+      # gap) moved to impresspress-browser with the funnel and run in the step
+      # above. This step still builds the crate's wasm32 test target and runs
+      # whatever test it gains. The crate links impresspress-browser, so its
       # test module imports bridge.js too and needs the same hook; the path is
       # relative to `crates/impresspress-web`, where `wasm-pack` runs. That is
       # also why `crates/impresspress-web/` is in the change gate above.
