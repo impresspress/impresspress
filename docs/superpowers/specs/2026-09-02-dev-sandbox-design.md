@@ -1307,10 +1307,15 @@ and read together with this list.
     another mode, no section, two, an unknown spelling, bytes that are not a
     module — is refused, naming both modes, before `run` renames, renders or
     removes a file; the sealed flow adds where its runtime came from and how
-    to get the right one. The flow has already prepared the directory by
-    then — the sealed flow has rebuilt `dist/` around the runtime, the embed
-    flow has run wasm-pack into its out dir — so a refused build leaves that
-    preparation, not a bundle. A directory with no wasm (template-only) is
+    to get the right one. A refused build exits non-zero, and the flow has
+    already prepared the directory by then. The sealed flow has rebuilt
+    `dist/` around the runtime, so `dist/` holds no bundle. The embed flow
+    has run wasm-pack into its out dir and written the templates there, but
+    wasm-pack does not clear that directory and `run` cleans up an earlier
+    build's hashed files only after the check, so an earlier successful
+    build's `sw.js`, `loader.js`, `index.html`, `asset-manifest.json` and
+    hashed wasm and glue are still there. A deploy must check the exit code,
+    not the directory. A directory with no wasm (template-only) is
     still rendered, with its warning. The worker's comparison before
     `initialize()` stays, for a bundle put together some other way than by
     the CLI; its stage `build` and its no-erase rule are unchanged.
