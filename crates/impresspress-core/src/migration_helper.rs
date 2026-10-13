@@ -30,7 +30,7 @@
 //! - **Cloudflare**: the `/_deploy/prepare` / `/_deploy/init` funnel, before
 //!   the new version is promoted. A failure fails the deploy.
 //! - **browser**: every runtime build, because loading a bundle is its
-//!   deploy (`impresspress-web`'s `RuntimeFactory::build`).
+//!   deploy (`impresspress_browser::boot`'s `BrowserServices::builder`).
 //!
 //! Cloudflare's request-path builds are the only ones that do not, so step 5
 //! is reached only there, by a version serving before its deploy funnel ran.

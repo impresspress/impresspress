@@ -50,10 +50,6 @@
     )
 )]
 
-use std::sync::Arc;
-
-use impresspress_core::builder;
-use wafer_core::interfaces::config::service::ConfigService;
 use wasm_bindgen::prelude::*;
 
 pub mod config;
@@ -68,7 +64,7 @@ pub mod runtime_factory;
 #[cfg(feature = "browser-site-runtime")]
 pub mod site_runtime;
 
-pub use runtime_factory::{RuntimeFactory, RuntimeOptions};
+pub use runtime_factory::RuntimeFactory;
 
 /// The operator-level `csp` the browser runtime hands `wafer-run/security-headers`,
 /// which merges it directive by directive over its own baseline and refuses
@@ -95,6 +91,12 @@ const IMPRESSPRESS_CSP: &str = concat!(
 /// `__PAGE_ENGINES__` placeholders. `exportShell` roots the export shell a
 /// workspace's export reads (see `export_shell_option`). `bypass` is the
 /// paths this worker leaves to the static host (see `bypass_rules_option`).
+/// `pageEngines` is the model engines the runtime's pages load (see
+/// [`page_engines_option`]).
+///
+/// The boot itself is `impresspress-browser`'s funnel
+/// ([`impresspress_browser::boot`]); this crate adds its own blocks, routes,
+/// headers and seeds at the seams it leaves ([`RuntimeFactory::build`]).
 ///
 /// There is no mode option: what the sandbox contributes is
 /// [`SandboxMode::COMPILED`], decided by the cargo features (this crate's
@@ -111,27 +113,17 @@ const IMPRESSPRESS_CSP: &str = concat!(
 ///
 /// [`SandboxMode::COMPILED`]: impresspress_core::sandbox_mode::SandboxMode::COMPILED
 /// [`compiled_sandbox_mode`]: impresspress_browser::sandbox_mode::compiled_sandbox_mode
+/// [`page_engines_option`]: impresspress_browser::boot::page_engines_option
 #[wasm_bindgen]
 pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
-    // Before anything that can log. `tracing`'s default dispatcher discards
-    // every event, so until this is installed each `warn!`/`error!` in
-    // `impresspress-core`, `wafer-run` and the browser adapter goes nowhere —
-    // and a framework failure the code deliberately survives (a malformed LLM
-    // chunk, a refused subrequest) leaves a console with nothing in it.
-    // Idempotent, and a `false` here only means someone installed a subscriber
-    // first, which is their prerogative.
-    let _ = impresspress_browser::init_console_tracing();
+    // Before anything that can log, and before the re-entry check: the
+    // console tracing subscriber and the queued deferral mode. See
+    // `impresspress_browser::boot::prepare_worker`.
+    impresspress_browser::boot::prepare_worker();
 
     if impresspress_browser::is_initialized() {
         return Ok(());
     }
-
-    // Work a handler defers joins its own request's after-response queue,
-    // which `handle_request` hands the service worker to keep alive with
-    // `event.waitUntil`. The default, a bare `spawn_local`, is tied to no
-    // event, so nothing kept the worker alive for it. See
-    // `impresspress_core::deferred`.
-    impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Queued);
 
     // A workspace whose deployment carries no export shell still boots — the
     // shell is what its export ships, not what the workspace runs on — but
@@ -153,10 +145,12 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
 
     impresspress_browser::db_init().await?;
 
-    let factory = RuntimeFactory::new(RuntimeOptions {
-        page_engine_scripts: page_engines_option(&options),
-    })
-    .map_err(|e| JsValue::from_str(&e))?;
+    let factory = RuntimeFactory::new(
+        impresspress_browser::boot::BrowserServices::new(
+            impresspress_browser::boot::page_engines_option(&options),
+        )
+        .map_err(|e| JsValue::from_str(&e))?,
+    );
 
     // The sandbox control plane is attached BEFORE the first build, so the
     // cold-start runtime already carries the dev block — whose `Init` creates
@@ -270,154 +264,6 @@ fn describe_option(value: &JsValue) -> String {
         .ok()
         .and_then(|json| json.as_string())
         .unwrap_or_else(|| format!("{value:?}"))
-}
-
-/// The `pageEngines` option of `initialize()`: the page-side model engines the
-/// bundle ships, as URL paths, rendered by `impresspress-bundle` from its one
-/// list (`PAGE_ENGINES` in `sw.js.tmpl`). The runtime's pages load exactly
-/// these, so the runtime publishes what the bundle actually shipped rather
-/// than a list of its own.
-///
-/// Missing or malformed — a `sw.js` rendered before the option existed — is
-/// NO engines, with a console warning: the pages then carry no engine
-/// scripts, and `bridge.js` refuses each model request at once ("no open page
-/// runs the … engine") rather than the runtime failing to boot.
-fn page_engines_option(options: &JsValue) -> Vec<String> {
-    let value = js_sys::Reflect::get(options, &JsValue::from_str("pageEngines"))
-        .unwrap_or(JsValue::UNDEFINED);
-    let parsed: Result<Vec<String>, String> = if value.is_undefined() || value.is_null() {
-        Err("initialize() was not handed any".to_string())
-    } else {
-        js_sys::JSON::stringify(&value)
-            .ok()
-            .and_then(|json| json.as_string())
-            .ok_or_else(|| "the option is not JSON-serializable".to_string())
-            .and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
-    };
-    parsed.unwrap_or_else(|reason| {
-        web_sys::console::warn_1(
-            &format!(
-                "impresspress: no page engine scripts ({reason}); pages will load no model \
-                 engine and every LLM, image and embedding request will be refused — \
-                 rebuild the bundle with a current impresspress-bundle"
-            )
-            .into(),
-        );
-        Vec::new()
-    })
-}
-
-/// [`BootHooks`](impresspress_core::builder::BootHooks) impl for the browser
-/// target. After `init_block(admin)` has created the variables /
-/// block_settings tables, this seeds them (auto-gen + JWT + browser-only
-/// defaults) and the #222 block-settings hash-gate, then publishes the loaded
-/// state into the services the wafer already holds:
-///  - `config_svc` — the same `Arc<dyn ConfigService>` (mutated via `.set()`).
-///  - `config_source` — the `SharedConfigSource` the runtime resolves every
-///    block's declared `ConfigVar`s from at its first `lifecycle(Init)`.
-///  - `block_settings_handle` — the same `Arc<RwLock<BlockSettings>>` the
-///    router's `FeatureConfig` reads, so the write is visible to the
-///    remaining blocks' `Init` and every later request.
-///  - `crypto` — the concrete `BrowserCryptoService`, rotated to the real JWT
-///    secret so any not-yet-initialised block signs/verifies with it.
-///
-/// `db` is a fresh `BrowserDatabaseService` handle; the service is a stateless
-/// unit struct over global OPFS, so it points at the same database the wafer
-/// uses.
-struct BrowserBootHooks {
-    db: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
-    config_svc: Arc<dyn ConfigService>,
-    /// The runtime's per-block config source, empty until this hook fills it.
-    config_source: Arc<impresspress_core::config_source::SharedConfigSource>,
-    block_settings_handle: Arc<std::sync::RwLock<impresspress_core::features::BlockSettings>>,
-    jwt_secret_handle: Arc<std::sync::RwLock<String>>,
-    crypto: Arc<impresspress_browser::crypto::BrowserCryptoService>,
-    /// The bundle's page engines, comma-joined
-    /// ([`RuntimeOptions::page_engine_scripts`]), published as
-    /// `impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`.
-    page_engine_scripts: String,
-}
-
-#[wafer_block::wafer_async_trait]
-impl builder::BootHooks for BrowserBootHooks {
-    async fn seed_after_admin_init(&self, wafer: &mut wafer_run::Wafer) -> Result<(), String> {
-        let vars = config::seed_and_load_variables(&self.db).await?;
-        web_sys::console::log_1(
-            &format!(
-                "impresspress: {} variables loaded from database",
-                vars.len()
-            )
-            .into(),
-        );
-        let features = config::load_block_settings(&self.db).await?;
-
-        // The runtime resolves every block's DECLARED `ConfigVar`s through the
-        // config source before it calls that block's `lifecycle(Init)` — a
-        // required key it cannot resolve is `InitError::Permanent`, and the
-        // block is then dead for the life of the runtime however well its
-        // handlers would have coped with the value being absent. So the
-        // seeded map goes here as well as onto the two config surfaces: this
-        // is the half the remaining blocks' Init actually consults.
-        self.config_source.publish(vars.clone());
-
-        // Both config surfaces, published together — but only the values
-        // something has to read SYNCHRONOUSLY or that the runtime owns, not a
-        // copy of the variables table. The config block serves every stored
-        // variable from the table itself (`impresspress_core::blocks::config`),
-        // and now learns of this seeding through the config-write generation
-        // `variables::insert_if_absent` bumps. A table copy here would only put
-        // admin-editable keys onto the boot-frozen `ctx.config_get` snapshot,
-        // where the first synchronous reader of one silently gets a stale
-        // value — the defect class the config-store work removed.
-        let mut published = builder::RuntimeConfig::new();
-        published
-            // This adapter executes inside an end user's browser. The config
-            // block treats `__…__` keys as runtime-owned and never serves them
-            // from the table, so a database/admin value cannot enable Stripe
-            // secret-key operations locally. Static pages may still use a
-            // remote trusted commerce API or pre-created Payment Links.
-            .both(
-                impresspress_core::runtime_kind::RUNTIME_KIND_CONFIG_KEY,
-                "browser",
-            )
-            .both(
-                impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
-                features.to_config_json(),
-            )
-            // The pages the runtime renders load the engines its services
-            // post to: the ones the bundle shipped (`initialize({ pageEngines })`).
-            .both(
-                impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY,
-                self.page_engine_scripts.clone(),
-            );
-        // `csrf` and `auth::service` read the secret per request off the
-        // synchronous snapshot; seeding just generated it if it was absent.
-        if let Some(secret) = vars.get(impresspress_core::blocks::auth::JWT_SECRET_KEY) {
-            published.both(
-                impresspress_core::blocks::auth::JWT_SECRET_KEY,
-                secret.clone(),
-            );
-        }
-        published.republish(wafer, &self.config_svc);
-
-        *self
-            .block_settings_handle
-            .write()
-            .expect("BlockSettings RwLock poisoned") = features;
-        if let Some(secret) = vars.get(impresspress_core::blocks::auth::JWT_SECRET_KEY) {
-            // Rotate BOTH holders of the secret to the seeded value: the crypto
-            // service that SIGNS tokens and the router lock the pipeline VERIFIES
-            // against. Rotating only the crypto service (the old bug) left the
-            // router verifying with the empty build-time secret, so every
-            // authenticated request 403'd after a successful login.
-            self.crypto.set_jwt_secret(secret.clone());
-            *self
-                .jwt_secret_handle
-                .write()
-                .expect("jwt_secret handle RwLock poisoned") = secret.clone();
-        }
-        Ok(())
-    }
 }
 
 /// Answer one fetch event: resolves to `{ response, after }`, where

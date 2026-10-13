@@ -804,16 +804,29 @@ jobs:
           NODE_OPTIONS: --import ./js/test/node-hooks.mjs
         run: scripts/wasm-pack-locked.sh crates/impresspress-browser test --node
 
-      # impresspress-web's own wasm tests (the browser runtime factory's
-      # infrastructure config). The crate links impresspress-browser, so its
-      # test module imports bridge.js too and needs the same hook; the path is
-      # relative to `crates/impresspress-web`, where `wasm-pack` runs. That is
-      # also why `crates/impresspress-web/` is in the change gate above.
+      # impresspress-web's own wasm tests: its runtime factory booted through
+      # the `impresspress_browser::boot` funnel on a fresh in-memory database
+      # (`impresspress-browser`'s `test-support` fixtures, a dev-dependency
+      # feature), asserting the seeds this app adds. The crate links
+      # impresspress-browser, so its test module imports bridge.js too and
+      # needs the same hook; the path is relative to `crates/impresspress-web`,
+      # where `wasm-pack` runs. That is also why `crates/impresspress-web/` is
+      # in the change gate above.
       - name: Run impresspress-web wasm tests (Node)
         if: steps.browser-changes.outputs.skip != 'true'
         env:
           NODE_OPTIONS: --import ../impresspress-browser/js/test/node-hooks.mjs
         run: scripts/wasm-pack-locked.sh crates/impresspress-web test --node
+
+      # The same tests with the sandbox's runtime half compiled in. The seeds
+      # force `WAFER_RUN_SHARED__HAS_LANDING_PAGE` in both directions, and the
+      # plain build above can only see one of them: its `"false"` is also the
+      # key's declared default, so a seed that wrote nothing would pass there.
+      - name: Run impresspress-web wasm tests, browser-site-runtime (Node)
+        if: steps.browser-changes.outputs.skip != 'true'
+        env:
+          NODE_OPTIONS: --import ../impresspress-browser/js/test/node-hooks.mjs
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web test --node . --features browser-site-runtime
 
   # E2E is split into a single build stage plus two independent test stages so
   # the browser-WASM smoke tests (port 8080) and the native-server visual

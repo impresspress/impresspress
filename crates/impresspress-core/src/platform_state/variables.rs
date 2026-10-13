@@ -1165,8 +1165,8 @@ pub async fn seed_and_load(
     //    It is read even when `env_vars` is empty so the answer is available to
     //    the loop without a second branch, but the GATE ROW is only written when
     //    the loop had something to decide (below). A target with no process
-    //    environment — Cloudflare's deploy hook, the browser's
-    //    `config::seed_and_load_variables` — must not record a transition it
+    //    environment — Cloudflare's deploy hook, the browser's boot hook
+    //    (`impresspress_browser::boot`) — must not record a transition it
     //    never performed, and must not bump the config-write generation for it.
     let transition_done = transition_has_run(db).await;
 
@@ -3399,7 +3399,7 @@ mod boot_tests {
     /// A target with NO process environment must record nothing.
     ///
     /// Cloudflare never calls this at all and the browser calls it with `&[]`
-    /// (`impresspress-web`'s `config::seed_and_load_variables`), so the gate row
+    /// (`impresspress_browser::boot`'s `BrowserBootHooks`), so the gate row
     /// must not be written there: it would claim a transition that never ran,
     /// and it would bump the config-write generation — invalidating every
     /// memoized config reader — for nothing.

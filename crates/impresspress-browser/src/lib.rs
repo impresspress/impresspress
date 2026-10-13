@@ -4,9 +4,11 @@
 //! This crate is the browser half of Impresspress's framework layer. It provides
 //! factory functions for platform services (sql.js database, OPFS storage,
 //! fetch network, browser crypto, console logger, SW asset loader), an async
-//! `db_init` helper, and thread_local SW runtime plumbing
-//! (`store_wafer`/`dispatch_request`/`is_initialized`). Consumers compose these
-//! in their own `#[wasm_bindgen]` entrypoints using any app-level builder.
+//! `db_init` helper, the boot funnel that turns those services into a booted
+//! runtime (the `boot` module), and thread_local SW runtime plumbing
+//! (`store_wafer`/`dispatch_request`/`is_initialized`). Consumers call these
+//! from their own `#[wasm_bindgen]` entrypoints, adding their own blocks,
+//! routes and seeds at the seams `boot` leaves them.
 //!
 //! One entrypoint of the framework's `sw.js` is this crate's rather than the
 //! consumer's: [`sandbox_mode::compiled_sandbox_mode`], which the worker
@@ -49,6 +51,10 @@ mod storage_cache;
 // wasm32-only — use wasm-bindgen, web-sys, js-sys.
 #[cfg(target_arch = "wasm32")]
 pub mod asset_loader;
+// The boot funnel every browser app runs between `db_init` and
+// `store_wafer`; see its module doc for the sequence.
+#[cfg(target_arch = "wasm32")]
+pub mod boot;
 #[cfg(target_arch = "wasm32")]
 pub mod bridge;
 #[cfg(target_arch = "wasm32")]

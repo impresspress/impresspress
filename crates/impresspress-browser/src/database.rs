@@ -996,16 +996,19 @@ mod conformance {
     }
 }
 
-/// The sql.js-on-Node fixtures every live database test in this crate shares:
+/// The sql.js-on-Node fixtures every live database test shares — this
+/// crate's, and those of a crate built on it (`impresspress-web`'s boot
+/// tests), which turns on the `test-support` feature for its test build only:
 /// an in-memory OPFS, a count of the writes made to it, and a fresh database
 /// on it.
 ///
 /// Under `wasm-pack test --node`, `js/test/node-hooks.mjs` points bridge.js's
 /// `/vendor/sql-wasm-esm.js` import at the vendored sql.js build, and
 /// [`install_memory_opfs`](test_support::install_memory_opfs) stands in for
-/// the OPFS directory `dbInit` reads and `dbFlush` writes.
-#[cfg(all(test, target_arch = "wasm32"))]
-pub(crate) mod test_support {
+/// the OPFS directory `dbInit` reads and `dbFlush` writes. Never compiled
+/// into a shipped bundle: nothing but a dev-dependency enables the feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use wasm_bindgen::prelude::wasm_bindgen;
 
     use super::BrowserDatabaseService;
@@ -1060,22 +1063,22 @@ export function installMemoryOpfs() {
         /// An in-memory OPFS: `navigator.storage.getDirectory()` answering
         /// the file-handle calls bridge.js makes, starting empty.
         #[wasm_bindgen(js_name = installMemoryOpfs)]
-        pub(crate) fn install_memory_opfs();
+        pub fn install_memory_opfs();
 
         /// How many times a file was written to the OPFS installed last —
         /// one per `dbFlush`.
         #[wasm_bindgen(js_name = opfsWrites)]
-        pub(crate) fn opfs_writes() -> u32;
+        pub fn opfs_writes() -> u32;
 
         /// Make the next write to the OPFS installed last fail at its
         /// `close()` — where a real quota error surfaces — leaving the file
         /// as it was and the write uncounted. One-shot.
         #[wasm_bindgen(js_name = failNextOpfsWrite)]
-        pub(crate) fn fail_next_opfs_write();
+        pub fn fail_next_opfs_write();
     }
 
     /// A fresh in-memory OPFS and a fresh, empty sql.js database on it.
-    pub(crate) async fn fresh_db() -> BrowserDatabaseService {
+    pub async fn fresh_db() -> BrowserDatabaseService {
         install_memory_opfs();
         crate::db_init().await.expect("sql.js loads");
         BrowserDatabaseService
