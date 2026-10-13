@@ -3,7 +3,9 @@
 # CI runs `cargo audit` as a BLOCKING check (the `audit` job in
 # `.github/workflows/audit.yml`, which both gates call through
 # `ci-shared.yml` and which also runs weekly on its own schedule). A new
-# advisory that isn't listed below fails CI.
+# vulnerability advisory that isn't listed below fails CI; informational
+# advisories (unmaintained / unsound) and yanked crates are reported as
+# warnings and never fail plain `cargo audit`.
 #
 # Every entry in `ignore` must carry an owner + expiry so it gets
 # re-triaged instead of living here forever: run `cargo audit --no-fetch`
@@ -13,55 +15,41 @@
 # (with a reason) or drop the entry once the dependency is upgraded past
 # the affected range. owner = @impresspress-maintainers unless noted.
 #
-# Verified 2026-07-17 against Cargo.lock: of the 9 IDs previously listed
-# here (all without owner/expiry), 6 no longer match anything in the
-# dependency tree — the underlying crates were already upgraded past the
-# affected version range (lru 0.16.4, rand 0.8.6/0.9.4, rustls-webpki
-# 0.103.13 all satisfy their advisories' `patched` ranges; `number_prefix`
-# isn't even in Cargo.lock anymore). Pruned rather than kept as inert
-# entries — a stale "temporary exception" that matches nothing is clutter,
-# not an accepted risk. Only the 3 below still match a real advisory today.
+# Re-triaged 2026-10-13 against Cargo.lock (live advisory-db). None of the
+# three entries that were here is needed any more:
+#   RUSTSEC-2023-0071 (rsa): `rsa` left Cargo.lock in 141ff742, when the
+#     sqlx 0.8 -> 0.9 move made sqlx-mysql stop depending on it; the entry
+#     has matched nothing since.
+#   RUSTSEC-2024-0370 (proc-macro-error): maud 0.27 replaced it with
+#     proc-macro2-diagnostics; the workspace now depends on maud 0.27.
+#   RUSTSEC-2024-0436 (paste): still in Cargo.lock, with no upgrade path
+#     (opt-in `block-fastembed` only: fastembed -> tokenizers 0.23.2 ->
+#     macro_rules_attribute, and image -> ravif -> rav1e 0.8.1, all at their
+#     latest releases and all requiring `paste ^1`). But it is an
+#     informational "unmaintained" warning, which plain `cargo audit` never
+#     fails on — the ignore entry changed nothing about pass/fail, it only
+#     hid the warning. Dropped so it stays visible, same as the policy below.
+# Add an entry here only for an advisory that actually fails `cargo audit`
+# (a vulnerability), with owner + expiry.
 [advisories]
-ignore = [
-    "RUSTSEC-2023-0071", # rsa timing side-channel — no fix available upstream (sqlx-mysql -> rsa 0.9.10). The only entry here that's an actual "vulnerability" (not just a Warning); without it, plain `cargo audit` fails. owner=@impresspress-maintainers expiry=2026-10-15
-    "RUSTSEC-2024-0370", # proc-macro-error unmaintained — transitive via maud_macros, no direct usage. owner=@impresspress-maintainers expiry=2026-10-15
-    "RUSTSEC-2024-0436", # paste unmaintained — transitive via fastembed -> tokenizers/rav1e. owner=@impresspress-maintainers expiry=2026-10-15
-]
+ignore = []
+
 # Deliberately NOT setting `informational_warnings`: it acts as an allowlist
 # — advisories whose `informational` field isn't in the list are dropped
-# from the report entirely, not just treated as non-blocking. The previous
+# from the report entirely, not just treated as non-blocking. A previous
 # `informational_warnings = ["unmaintained"]` here silently hid `anyhow`
 # 1.0.102's RUSTSEC-2026-0190 ("unsound", not "unmaintained") from every
-# `cargo audit` run — a real, un-reviewed finding with zero visibility.
-# Leaving this unset shows every informational category; none of them
-# block CI by default (only actual vulnerabilities and an explicit `-D` do),
-# so nothing here changes pass/fail — it only restores visibility.
-
-# Yanked releases we've reviewed and accept for now.
+# `cargo audit` run. Leaving this unset shows every informational category;
+# none of them block CI by default (only actual vulnerabilities and an
+# explicit `-D` do), so nothing here changes pass/fail — it only keeps them
+# visible.
 #
-# cargo-audit's `ignore` list above only takes RUSTSEC advisory IDs — a
-# yanked-crate warning has no such ID, so it can't be silenced the same way.
-# `cargo audit` (as CI runs it, with no `-D`/`--deny` flag) does NOT fail on
-# yanked warnings by default; only `-D yanked` / `-D warnings` would. CI
-# intentionally does not pass either, so these are non-blocking today. This
-# block exists so a human (or a future `-D yanked` change) has a paper trail
-# instead of two unexplained warnings.
-#
-#   spin 0.9.8  — yanked by its author. Pulled in transitively via wasmi
-#                 0.44.1 (wafer-run's WASM runtime) and a few dev/test-only
-#                 chains (lazy_static -> sharded-slab/num-bigint-dig/deadpool,
-#                 flume -> sqlx-sqlite). No advisory, no known vulnerability —
-#                 just withdrawn. owner=@impresspress-maintainers
-#                 expiry=2026-10-15 (re-check whether wasmi has bumped its
-#                 spin dependency).
-#   spin 0.10.0 — yanked by its author. Pulled in transitively via
-#                 aws-sdk-s3's crc-fast -> aws-smithy-checksums chain.
-#                 owner=@impresspress-maintainers expiry=2026-10-15
-#                 (re-check the aws-sdk-s3 upgrade path).
-#
-# Not (yet) tracked here: `anyhow` 1.0.102 currently carries an informational
-# "unsound" advisory (RUSTSEC-2026-0190, `Error::downcast_mut()`). It is a
-# live finding as of this writing but — like the yanked crates above — is a
-# Warning, not a Vulnerability, so it does not block plain `cargo audit` and
-# needs no `ignore` entry to keep CI green. Left un-ignored deliberately so
-# it stays visible in `cargo audit` output rather than being suppressed.
+# Yanked releases: cargo-audit's `ignore` list only takes RUSTSEC IDs, so a
+# yanked-crate warning can't be silenced here, and plain `cargo audit` (as CI
+# runs it, without `-D yanked`) does not fail on one. Fix them in Cargo.lock
+# instead of documenting them: on 2026-10-13 spin 0.9.8 -> 0.9.9 (wasmi,
+# flume), spin 0.10.0 -> 0.10.1 (crc-fast) and der 0.8.0 -> 0.8.2 (ureq) were
+# all non-yanked semver-compatible bumps, and the informational advisories on
+# anyhow (RUSTSEC-2026-0190), event-listener (RUSTSEC-2026-0221) and lru
+# (RUSTSEC-2026-0253, via aws-sdk-s3 1.152) were cleared the same way.
+# After that, the only warning `cargo audit` reports is paste's (above).
