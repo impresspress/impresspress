@@ -123,9 +123,9 @@ a `build-compiler.sh --fast` composition. It:
 2. Builds `impresspress-web` to wasm with `--features browser-devtools` into
    `crates/impresspress-web/pkg-dev` (this is what puts the `/b/dev`
    control-plane code in the binary at all; `[sandbox] mode = "workspace"`
-   must match it — the service worker compares the two before
-   `initialize()`, and a bundle built around any other package stops at
-   stage `build`, erasing nothing).
+   must match it — `impresspress build` refuses to bundle any other package,
+   naming both modes, and the service worker compares the two again before
+   `initialize()`, stopping at stage `build`, erasing nothing).
 3. Builds it again with `--features browser-site-runtime` into
    `crates/impresspress-web/pkg-site`: the sandbox's runtime half alone —
    seed import, generation ledger, dynamic blocks — with no workspace

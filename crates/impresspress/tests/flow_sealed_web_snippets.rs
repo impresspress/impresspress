@@ -16,34 +16,14 @@
 //! integration-test binary keeps `flow_sealed_web.rs`'s own test out of the
 //! same process; this keeps these two out of each other's.
 
+mod support;
+
 use std::fs;
 
 use impresspress::cli::{flows::sealed_web, helpers::wasm::PKG_DIR_ENV};
+use impresspress_bundle::bundle::{sandbox_mode::fixture::runtime_declaring, SandboxShell};
+use support::fake_web_pkg;
 use tempfile::tempdir;
-
-/// A minimal `wasm-pack --target web --out-dir <dir>` output: the manifest
-/// that names the glue, the pair itself, and one inline-JS snippet under the
-/// `<crate>-<hash>` directory wasm-bindgen assigns.
-fn fake_pkg_dir(dir: &std::path::Path) {
-    fs::write(
-        dir.join("package.json"),
-        r#"{"name":"fake-web","type":"module","main":"fake_web.js","types":"fake_web.d.ts"}"#,
-    )
-    .unwrap();
-    fs::write(dir.join("fake_web_bg.wasm"), b"\x00asm\x01\x00\x00\x00").unwrap();
-    // The glue must carry the literal the bundler rewrites when it
-    // content-hashes the wasm — `sealed_web` writes the pair under
-    // impresspress's own names, so that is the literal to spell here.
-    fs::write(
-        dir.join("fake_web.js"),
-        "import { ping } from './snippets/fake-browser-0123456789abcdef/js/bridge.js';\n\
-         const url = new URL('impresspress_web_bg.wasm', import.meta.url);\n",
-    )
-    .unwrap();
-    let snippet_dir = dir.join("snippets/fake-browser-0123456789abcdef/js");
-    fs::create_dir_all(&snippet_dir).unwrap();
-    fs::write(snippet_dir.join("bridge.js"), "export function ping() {}\n").unwrap();
-}
 
 /// Both scenarios, in sequence. See the module docs for why they are one
 /// test: `IMPRESSPRESS_WEB_PKG_DIR` is process-global.
@@ -55,7 +35,7 @@ async fn sealed_web_ships_snippets_from_an_override_and_from_the_bake() {
 
 async fn a_pkg_dir_override_ships_its_snippets_beside_the_wasm_and_glue() {
     let pkg = tempdir().unwrap();
-    fake_pkg_dir(pkg.path());
+    fake_web_pkg(pkg.path(), SandboxShell::None);
     let app = tempdir().unwrap();
 
     // Removed on every path, including the failing one: the next scenario
@@ -110,7 +90,10 @@ async fn a_pkg_dir_override_ships_its_snippets_beside_the_wasm_and_glue() {
         );
         found.remove(0)
     };
-    assert_eq!(fs::read(one("wasm")).unwrap(), b"\x00asm\x01\x00\x00\x00");
+    assert_eq!(
+        fs::read(one("wasm")).unwrap(),
+        runtime_declaring(SandboxShell::None)
+    );
     assert!(
         fs::read_to_string(one("js"))
             .unwrap()

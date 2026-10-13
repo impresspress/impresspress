@@ -54,7 +54,15 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     };
 
     impresspress_bundle::assets::write_to(&dist)?;
-    impresspress_bundle::bundle::run(&dist, repo_root, app)?;
+    // The bundler refuses a runtime compiled for another sandbox mode than
+    // `[sandbox] mode`; it cannot know where this flow's runtime came from,
+    // so the flow says how to get the right one.
+    impresspress_bundle::bundle::run(&dist, repo_root, app).map_err(|e| {
+        match e.downcast::<impresspress_bundle::bundle::sandbox_mode::RuntimeModeRefusal>() {
+            Ok(refusal) => anyhow!("{refusal}\n{}", runtime_hint(refusal.configured)),
+            Err(e) => e,
+        }
+    })?;
 
     // 5. Apply overlays from impresspress.toml if present, then the export
     //    shell a workspace names (`[sandbox] export_shell`) — after the
@@ -67,6 +75,40 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     let profile = if release { "release" } else { "dev" };
     println!("built sealed × web ({profile}) → dist/");
     Ok(())
+}
+
+/// Where the sealed web flow's runtime comes from, and how to give it one
+/// compiled as `mode`: the flow bundles `impresspress-web` — the build baked
+/// into this CLI (`crates/impresspress-web/pkg`, a plain build, when the CLI
+/// was compiled), unless `IMPRESSPRESS_WEB_WASM` or the wasm-pack output
+/// [`wasm::PKG_DIR_ENV`] names another.
+fn runtime_hint(mode: impresspress_bundle::bundle::SandboxShell) -> String {
+    use impresspress_bundle::bundle::SandboxShell;
+    let features = match mode {
+        SandboxShell::None => "",
+        SandboxShell::Site => " --features browser-site-runtime",
+        SandboxShell::Workspace => " --features browser-devtools",
+    };
+    let pkg_dir = wasm::PKG_DIR_ENV;
+    let build = |out_dir: &str| {
+        format!("wasm-pack build --target web --release --out-dir {out_dir} -- --locked{features}")
+    };
+    let baked = match mode {
+        SandboxShell::None => format!(
+            " (or rebuild the baked one: `{}` in crates/impresspress-web, then reinstall the \
+             CLI, whose build bakes that directory)",
+            build("pkg")
+        ),
+        SandboxShell::Site | SandboxShell::Workspace => String::new(),
+    };
+    format!(
+        "This flow bundles impresspress-web's runtime: the build baked into this CLI, unless \
+         IMPRESSPRESS_WEB_WASM or {pkg_dir} (a wasm-pack output) names another. For \
+         '{mode}', build one with `{build}` in crates/impresspress-web and set {pkg_dir} to \
+         that directory{baked}.",
+        mode = mode.as_str(),
+        build = build("<dir>"),
+    )
 }
 
 /// Write `snippets` under `dist/snippets/`, creating the per-crate

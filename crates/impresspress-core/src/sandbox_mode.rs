@@ -35,12 +35,16 @@
 /// Each is a cargo feature of this crate (`site-runtime`, and `block-dev`,
 /// which implies it), so the three configurations are the three modes, and
 /// [`Self::COMPILED`] is the one this binary is. There is no request: a
-/// bundle's `sw.js` states the mode it was built for (`const SANDBOX`,
-/// rendered from `[sandbox] mode`) and compares it with
-/// `compiled_sandbox_mode()` (exported by `impresspress-browser`) before it
-/// calls `initialize()` at all. A mismatch is a bundle assembled from the
-/// wrong runtime — a workspace's `sw.js` over a site build, or the reverse —
-/// and the worker stops there, with stage `build`, which no recovery erases
+/// bundle is built for one mode (`[sandbox] mode`), and the runtime declares
+/// the one it was compiled as. A mismatch is a bundle assembled from the
+/// wrong runtime — a workspace's `sw.js` over a site build, or the reverse.
+/// `impresspress build` refuses to assemble one: it reads the wasm's
+/// `impresspress.sandbox_mode` section (written by `impresspress-browser`)
+/// before it writes the bundle. A bundle put together some other way is
+/// caught by its `sw.js`, which states the mode it was built for
+/// (`const SANDBOX`) and compares it with `compiled_sandbox_mode()`
+/// (exported by `impresspress-browser`) before it calls `initialize()` at
+/// all; the worker stops there, with stage `build`, which no recovery erases
 /// data for: nothing has opened the database yet, and nothing about the
 /// stored data is in question.
 ///

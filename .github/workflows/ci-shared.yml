@@ -1198,6 +1198,27 @@ jobs:
           node --experimental-vm-modules scripts/check-bundle-runtime.mjs "$DEV_DIST" workspace
           node --experimental-vm-modules scripts/check-bundle-runtime.mjs examples/dev-sandbox/export-shell/dist site
 
+      # And `impresspress build` refuses to make a bundle around a runtime of
+      # another mode, on a real runtime: the export shell's configuration
+      # (`[sandbox] mode = "site"`) around the workspace runtime `build.sh`
+      # compiled (`pkg-dev/`). In a copy of the configuration, so the
+      # `export-shell/dist/` the bundle above carries is left alone, and with
+      # an absolute pkg dir, which the CLI resolves from its own working
+      # directory. The exit code alone proves nothing — a missing directory
+      # fails too — so the refusal's own words are what the step requires.
+      - name: Check impresspress build refuses a runtime of another mode
+        run: |
+          probe="$RUNNER_TEMP/mode-probe"
+          mkdir -p "$probe"
+          cp examples/dev-sandbox/export-shell/impresspress.toml "$probe/"
+          if (cd "$probe" && IMPRESSPRESS_WEB_PKG_DIR="$GITHUB_WORKSPACE/crates/impresspress-web/pkg-dev" impresspress build --target web --release) 2> "$probe/stderr"; then
+            echo "impresspress build bundled a workspace runtime as a site" >&2
+            exit 1
+          fi
+          cat "$probe/stderr"
+          grep -qF "was compiled as sandbox mode 'workspace', but this bundle is built for 'site'" "$probe/stderr"
+          test ! -e "$probe/dist/sw.js"
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:

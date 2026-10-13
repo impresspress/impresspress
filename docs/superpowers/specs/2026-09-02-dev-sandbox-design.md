@@ -1298,6 +1298,19 @@ and read together with this list.
     `none`. Amendment 23's "the build is the mode" is unchanged; only where
     the features are read moved.
 
+25. **Amendment 23 — the bundler holds the runtime to the mode (2026-10-13).**
+    `impresspress build --target web` reads the mode the runtime declares
+    before it writes the bundle: `impresspress-bundle`'s `bundle::run`, which
+    both web flows call, walks the wasm's sections and requires exactly one
+    `impresspress.sandbox_mode` section whose payload is exactly one mode's
+    spelling, equal to `[sandbox] mode`. Anything else — another mode, no
+    section, two, an unknown spelling, bytes that are not a module — is
+    refused before the bundle directory is touched, naming both modes and how
+    to get the right runtime. A directory with no wasm (template-only) is
+    still rendered, with its warning. The worker's comparison before
+    `initialize()` stays, for a bundle put together some other way than by
+    the CLI; its stage `build` and its no-erase rule are unchanged.
+
 ## 21. Definition of done
 
 - `browser-devtools` is off by default and absent from a normal bundle; the

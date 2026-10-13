@@ -126,6 +126,11 @@ toml = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# `test-support` for `bundle::sandbox_mode::fixture`: the fake runtimes the
+# web-flow tests bundle declare a sandbox mode, as every real one does.
+impresspress-bundle = { path = "../impresspress-bundle", features = [
+    "test-support",
+] }
 wafer-block-sqlite = { workspace = true }
 wafer-sql-utils = { workspace = true }
 # `block-dev` for the test targets only: `tests/seed_bypass_prefix.rs` asserts
