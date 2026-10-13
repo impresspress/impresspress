@@ -153,7 +153,9 @@ pub struct AppConfig {
     /// Additional exact URL paths the Service Worker's fetch handler should
     /// bypass. Unlike `extra_bypass_prefix` (a prefix rule), each entry is an
     /// exact rule, rendered as `url.pathname === <path>` — needed for `/` and
-    /// `/index.html`, which cannot be expressed as a prefix.
+    /// `/index.html`, which cannot be expressed as a prefix. Listing `/` (or
+    /// any other path the shell would stand at) needs [`Self::shell_path`]
+    /// elsewhere: [`run`] refuses a shell path a bypass rule matches.
     pub extra_bypass_exact: Vec<String>,
     /// Whether loader.js's recovery path should wipe OPFS when the Service
     /// Worker self-destructs. **Default: false** — for production apps that

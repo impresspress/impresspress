@@ -143,7 +143,8 @@ const BOOT_PROBE_TIMEOUT_MS = 60_000;
 // made (`askApp`). While a navigation away from this document is under way,
 // WebKit refuses each one at once, so this is how often it asks then.
 const PROBE_RETRY_MS = 1_000;
-// The boot shell's own URL: the address a first visit starts at. A shell
+// The boot shell's own URL: the address a visit that boots the app starts
+// at, and the one the static host must answer with the shell. A shell
 // standing THERE is the app being opened, and goes on to the boot URL; a
 // shell standing anywhere else is a page of the app that was asked for (a
 // deep link the host answered with the shell, or a navigation sw.js answered

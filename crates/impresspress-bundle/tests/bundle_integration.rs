@@ -1077,12 +1077,14 @@ fn rendered_shell(app: AppConfig) -> tempfile::TempDir {
     tmp
 }
 
-/// `node --test` on one file of `tests/sw/`, against three renderings of
+/// `node --test` on one file of `tests/sw/`, against four renderings of
 /// `rendered` (`sw.js` or `loader.js`): the default, in `{var}`; the
 /// `opfs_wipe_on_recovery` one, in `{var}_WIPE`; and one whose boot shell is
 /// not at `/` — `shell_path = "/chat"`, with `boot_redirect = "/b/home"`
 /// (`NON_ROOT_SHELL` in `loader_harness.mjs`) and `/` on the bypass list, as
-/// an app that keeps a landing page there has it — in `{var}_SHELL`.
+/// an app that keeps a landing page there has it — in `{var}_SHELL`; and the
+/// same with `boot_redirect = "/chat"`, the shell being the boot URL too
+/// (gizza.ai's shape, `SHELL_IS_BOOT`), in `{var}_SHELL_IS_BOOT`.
 fn node_test(test_file: &str, rendered: &str, var: &str) {
     let plain = rendered_shell(AppConfig::default());
     let wipe = rendered_shell(AppConfig {
@@ -1095,16 +1097,24 @@ fn node_test(test_file: &str, rendered: &str, var: &str) {
         extra_bypass_exact: vec!["/".to_string()],
         ..AppConfig::default()
     });
+    let shell_is_boot = rendered_shell(AppConfig {
+        shell_path: chat_shell(),
+        boot_redirect: Some("/chat".to_string()),
+        extra_bypass_exact: vec!["/".to_string()],
+        ..AppConfig::default()
+    });
     let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/sw")
         .join(test_file);
     let (wipe_var, shell_var) = (format!("{var}_WIPE"), format!("{var}_SHELL"));
+    let shell_is_boot_var = format!("{var}_SHELL_IS_BOOT");
     node(
         &["--test".as_ref(), tests.as_os_str()],
         &[
             (var, &plain.path().join(rendered)),
             (&wipe_var, &wipe.path().join(rendered)),
             (&shell_var, &shell.path().join(rendered)),
+            (&shell_is_boot_var, &shell_is_boot.path().join(rendered)),
         ],
     );
 }

@@ -20,8 +20,8 @@ name = "impresspress-site"
 title = "ImpressPress site"
 boot_redirect = "/"
 # No `shell_path`: the boot shell stays at `/`. An export is served by any
-# static file server, which answers only `/` with `index.html`, and the CLI
-# refuses an export shell built with its shell anywhere else.
+# static file server, which answers the root with `index.html` and has no
+# other route to the shell, and the CLI refuses an export shell built with its shell anywhere else.
 
 [assets]
 # The exported site's visitors keep their data on a failed boot, like every

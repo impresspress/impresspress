@@ -48,7 +48,8 @@ pub fn apply_overlays(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Result
 /// than shipping a sandbox whose export has nothing to copy. Its shell must
 /// be at `/` (the manifest's `shellPath`, `[app] shell_path` of the shell's
 /// own configuration): the export is a folder for any static file server,
-/// and those answer only `/` with `index.html` — a shell anywhere else would
+/// and those answer the root with `index.html` and have no other route to
+/// the shell — a shell anywhere else would
 /// be fetched from a path the server answers with a 404 once the exported
 /// runtime is dead, and never recovered from. And no `[[assets.overlay]]`
 /// may write under the root: its files would be mixed into the shell.
@@ -77,8 +78,9 @@ pub fn apply_export_shell(cfg: &Config, repo_root: &Path, dist_dir: &Path) -> Re
     if manifest.shell_path != impresspress_bundle::bundle::ShellPath::default() {
         return Err(anyhow!(
             "[sandbox] export_shell {src:?} was built with [app] shell_path = {:?}, but an \
-             export is served by any static file server, which answers only `/` with the \
-             shell's index.html; rebuild the shell without shell_path",
+             export is served by any static file server, which answers the root with the \
+             shell's index.html and has no other route to the shell; rebuild the shell \
+             without shell_path",
             manifest.shell_path.as_str()
         ));
     }
@@ -314,8 +316,8 @@ mod tests {
         apply_export_shell(&cfg, root, &dist).expect("the shell as it was built");
     }
 
-    /// An export is served by any static file server, which answers only `/`
-    /// with the shell: a shell built to be at another path is refused, naming
+    /// An export is served by any static file server, which answers the root
+    /// with the shell and has no other route to it: a shell built to be at another path is refused, naming
     /// the path, and nothing is laid down.
     #[test]
     fn an_export_shell_not_at_the_root_is_refused() {

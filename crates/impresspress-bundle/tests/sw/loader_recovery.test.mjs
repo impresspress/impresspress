@@ -49,6 +49,7 @@ import {
   MODEL_CACHES,
   NON_ROOT_SHELL,
   ORIGIN,
+  SHELL_IS_BOOT,
   RECOVERED_CACHE,
   RECOVERY_DONE,
   RECOVERY_LOCK,
@@ -533,6 +534,37 @@ test('where the shell is not at `/`, a shell answered at `/` is a page of the ap
   await shell.booted;
 
   assert.equal(shell.probes[0].url, `${ORIGIN}/`);
+  assertEntered(shell);
+});
+
+// gizza.ai's shape: the shell at `/chat` IS the boot URL, with a landing
+// page at `/`. A visit to `/chat` is the app being opened where it was
+// opened — the query and fragment it came with are the app's — and a
+// recovery there comes back to the same address. Neither is sent to `/`.
+test('where the boot URL is the shell at its configured path, the app is opened where it was opened', async () => {
+  const shell = loadShell({
+    shellIsBoot: true,
+    path: SHELL_IS_BOOT.path,
+    search: '?model=small#new',
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes[0].url, `${ORIGIN}/chat?model=small#new`);
+  assertEntered(shell);
+});
+
+test('where the boot URL is the shell at its configured path, a recovery there stays there', async () => {
+  const shell = loadShell({
+    shellIsBoot: true,
+    path: SHELL_IS_BOOT.path,
+    stop: left('request'),
+    now: NOW
+  });
+  await shell.booted;
+
+  assertReplaced(shell, { erased: false });
+  assert.equal(shell.probes[0].url, `${ORIGIN}/chat`);
   assertEntered(shell);
 });
 

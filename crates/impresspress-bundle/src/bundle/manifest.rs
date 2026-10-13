@@ -58,8 +58,8 @@ pub struct AssetManifest {
     /// Written here so a reader that holds only the bundle's files can learn
     /// that contract: the `impresspress` CLI refuses an export shell whose
     /// shell is not at `/`, because a development sandbox's export is
-    /// served by any static file server, and those answer only `/` with
-    /// `index.html`.
+    /// served by any static file server, and those answer the root with
+    /// `index.html` and have no other route to the shell.
     ///
     /// No `#[serde(default)]`, like [`Self::bypass`]: a manifest from a
     /// bundler that predates the field does not parse as this type.

@@ -1337,15 +1337,18 @@ and read together with this list.
     JSON string and records it in `asset-manifest.json` as `shellPath`.
     **The static host must answer the shell path with the shell document**
     (`index.html`, or an overlay of it that loads `/loader.js`), with a
-    `200` and no redirect to another spelling; §15's "serve `index.html`
-    for unknown paths" is the default's case of that contract. The bundler
+    `200` and no redirect to another spelling. §15's "serve `index.html`
+    for unknown paths" is a broader requirement (SPA fallback, so a deep
+    link boots on a first visit); a host that follows it also meets the
+    default's contract, since it answers `/` with the shell. The bundler
     refuses a shell path any bypass rule matches — the worker would leave
     the shell's address to the host, and a boot URL that is the shell's
     would load the shell again — so `extra_bypass_exact = ["/"]` without a
     `shell_path` elsewhere no longer builds. The sandbox and its export
     shell keep the default: the CLI refuses an export shell whose
     `shellPath` is not `/`, because an export is served by any static file
-    server, which answers only `/` with `index.html`.
+    server, which answers the root with `index.html` and has no other route
+    to the shell.
 
 ## 21. Definition of done
 

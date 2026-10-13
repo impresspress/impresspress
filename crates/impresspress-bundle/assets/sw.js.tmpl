@@ -216,8 +216,8 @@ const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';
 const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
 
 // The boot shell's own URL path: the one address the static host itself must
-// answer with the shell document, because a first visit — no worker yet —
-// starts there. It is where this worker gets the shell document it answers a
+// answer with the shell document, because a visit that boots the app with no
+// worker yet starts there. It is where this worker gets the shell document it answers a
 // navigation with once the runtime is dead (`bootShell`). `[app] shell_path`
 // (default `/`), rendered as a JSON string from the bundler's one value,
 // which `loader.js` is rendered with too.

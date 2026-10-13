@@ -16,8 +16,9 @@
 //! The static host must answer a request for this path with the boot shell
 //! document — the bundle's `index.html`, or an overlay of it that loads
 //! `/loader.js` — with a `200` and without a redirect to another path. A
-//! first visit (no worker yet) starts there, and a dead worker fetches it
-//! from there. The default, `/`, is what every static host does with
+//! visit that boots the app with no worker yet starts there (an app with a
+//! landing page at `/` may send its first visitors through that page
+//! first), and a dead worker fetches the shell from there. The default, `/`, is what every static host does with
 //! `index.html`; an app that keeps another document at `/` (a landing page
 //! the worker never intercepts, say) names the path its host serves the
 //! shell at instead, e.g. `shell_path = "/chat"` beside a `chat.html` that a

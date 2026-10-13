@@ -235,8 +235,14 @@ impl TryFrom<RawAppConfig> for AppConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AssetsConfig {
+    /// Path prefixes the service worker leaves to the static host
+    /// (`impresspress_bundle::bundle::AppConfig::extra_bypass_prefix`).
     #[serde(default)]
     pub extra_bypass_prefix: Vec<String>,
+    /// Exact paths the service worker leaves to the static host — e.g. `/`
+    /// for a landing page the worker never intercepts. Listing `/` needs
+    /// `[app] shell_path` elsewhere: `impresspress build` refuses a shell path
+    /// any bypass rule (exact or prefix) matches.
     #[serde(default)]
     pub extra_bypass_exact: Vec<String>,
     #[serde(default)]
