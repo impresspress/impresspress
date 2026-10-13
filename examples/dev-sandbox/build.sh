@@ -15,11 +15,12 @@
 #     `impresspress.toml`), which is what renders
 #     `const SANDBOX = 'workspace';` into `sw.js` and puts `/seed/` on the
 #     service worker's bypass list.
-# Building either half without the other is a bundle whose service worker
-# stops before `initialize()` — it compares `const SANDBOX` with the wasm's
-# `compiled_sandbox_mode()`, and a mismatch is fatal at stage `build`
-# (nothing erased; the cause says to rebuild) — so both are done here rather
-# than left to the caller.
+# Building either half without the other is refused by `impresspress build`,
+# which reads the wasm's `impresspress.sandbox_mode` section and names both
+# modes; a bundle assembled around it some other way has a service worker
+# that stops before `initialize()` (it compares `const SANDBOX` with the
+# wasm's `compiled_sandbox_mode()`, fatal at stage `build`, nothing erased).
+# So both are done here rather than left to the caller.
 #
 # The same holds for the EXPORT SHELL the sandbox carries — the static files
 # for the site its export hands the user, built as a site rather than copied
@@ -454,10 +455,11 @@ IMPRESSPRESS_WEB_PKG_DIR="$PKG_DIR" \
 DIST="$HERE/dist"
 [ -f "$DIST/sw.js" ] || { echo "build.sh: $DIST/sw.js was not produced" >&2; exit 1; }
 # The one build-time constant `sw.js` renders `[sandbox] mode` into
-# (`impresspress-bundle`'s `sw.js.tmpl`): the check that holds the runtime to
-# that mode before `initialize()` (`compiled_sandbox_mode()`) and the
-# isolation-header passthrough both read it, so this single line is the
-# whole of "this bundle is the workspace".
+# (`impresspress-bundle`'s `sw.js.tmpl`): the worker's check that holds the
+# runtime to that mode before `initialize()` (`compiled_sandbox_mode()`; the
+# CLI has already refused a runtime of another mode) and the isolation-header
+# passthrough both read it, so this single line is the whole of "this bundle
+# is the workspace".
 grep -q "const SANDBOX = 'workspace';" "$DIST/sw.js" || {
   echo "build.sh: $DIST/sw.js does not declare \"const SANDBOX = 'workspace';\" — is [sandbox] mode = \"workspace\" set?" >&2
   exit 1

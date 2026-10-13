@@ -305,12 +305,19 @@ tempfile = "3"
 # `config_vars::variable_key_tests` compiles the variable-key HTML `pattern`
 # the way a browser does, to hold it to `check_variable_key`'s verdicts.
 regex = "1"
-# The bundler, for `tests/dev_export.rs` only: the export edits the boot shell
-# the bundler rendered, and the test that says "nothing of the sandbox is in
-# an export" has to say it about that shell, not about a page the test wrote
-# to look like one. Native tooling with no impresspress dependency, so this
-# adds no cycle and nothing to any shipped build.
-impresspress-bundle = { path = "../impresspress-bundle" }
+# The bundler, for two kinds of test. `tests/dev_export.rs`: the export edits
+# the boot shell the bundler rendered, and the test that says "nothing of the
+# sandbox is in an export" has to say it about that shell, not about a page
+# the test wrote to look like one. `sandbox_mode`'s unit tests: the mode
+# spellings the runtime writes are the ones the bundler reads. Native tooling
+# with no impresspress dependency, so this adds no cycle and nothing to any
+# shipped build. `test-support` for `bundle::sandbox_mode::fixture`:
+# `bundle::run` refuses a runtime wasm that does not declare the bundle's
+# sandbox mode, so the fake runtime `dev_export.rs` bundles is a module that
+# does.
+impresspress-bundle = { path = "../impresspress-bundle", features = [
+    "test-support",
+] }
 # Test-fixture setup only: `blocks::vector::legacy_names` builds an index in
 # the shape the pre-lowercase code wrote, which the vector service now refuses
 # to create, straight onto the SQLite file its `SqliteVecService` opens.

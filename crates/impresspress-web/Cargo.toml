@@ -41,10 +41,12 @@ browser-site-runtime = [
 # `runtime_factory.rs` const-asserts that the two agree). A build with this
 # is always the workspace, one with `browser-site-runtime` alone always a
 # site, one with neither has no sandbox. A bundle's `[sandbox] mode` must
-# name the same one — `sw.js` compares the two (`compiled_sandbox_mode()`,
-# exported through `impresspress-browser`) before it calls `initialize()`,
-# and a mismatch stops the worker (stage `build`)
-# rather than boot a workspace as a site or the reverse. (An exported site is
+# name the same one — `impresspress build` reads the wasm's
+# `impresspress.sandbox_mode` section (written through `impresspress-browser`)
+# and refuses a mismatch, and `sw.js` compares the two again
+# (`compiled_sandbox_mode()`) before it calls `initialize()`, stopping the
+# worker (stage `build`) rather than boot a workspace as a site or the
+# reverse. (An exported site is
 # the deployment's export shell, a `browser-site-runtime` build that compiles
 # none of the workspace.)
 # `Clients` + `Client` + `ClientQueryOptions` + `ClientType`: an activation

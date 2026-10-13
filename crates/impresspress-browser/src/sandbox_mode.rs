@@ -11,8 +11,9 @@
 //! * [`compiled_sandbox_mode`], a `#[wasm_bindgen]` export the bundle's
 //!   `sw.js` imports and calls;
 //! * the `impresspress.sandbox_mode` custom section, holding the same
-//!   spelling as raw bytes, for tooling that reads the wasm without running
-//!   it.
+//!   spelling as raw bytes, which `impresspress build` reads without running
+//!   the wasm and refuses to bundle a runtime of another mode than the
+//!   bundle's (`impresspress-bundle`'s `bundle::sandbox_mode`).
 //!
 //! A consumer has nothing to call or re-export. wasm-bindgen emits the
 //! export as an `#[export_name]` symbol of this crate (its JS shim description
@@ -36,10 +37,13 @@ const SPELLING: &str = SandboxMode::COMPILED.as_str();
 /// `sw.js` imports this and calls it after `init()` and before
 /// `initialize()`, and compares it with the mode the bundle was built for
 /// (`const SANDBOX`, rendered from `[sandbox] mode`). A mismatch is a bundle
-/// assembled from the wrong runtime; the worker stops there with stage
-/// `build` — before anything has opened the database, so no recovery erases
-/// data for it — rather than boot a workspace's `sw.js` over a site build,
-/// or a site's over the workspace.
+/// assembled from the wrong runtime. `impresspress build` refuses to
+/// assemble one — it reads the same mode from [`SANDBOX_MODE_SECTION`] — so
+/// this catches one put together some other way (files copied between
+/// deployments, a runtime swapped on the host): the worker stops there with
+/// stage `build` — before anything has opened the database, so no recovery
+/// erases data for it — rather than boot a workspace's `sw.js` over a site
+/// build, or a site's over the workspace.
 ///
 /// The import is static, so a runtime without this export would fail to link
 /// the worker module before any of `sw.js` ran. That is why it lives in this
@@ -66,7 +70,11 @@ pub fn compiled_sandbox_mode() -> String {
 ///
 /// A custom section because it is part of the shipped bytes — it cannot be
 /// separated from the wasm it describes — and any wasm parser reads it
-/// without instantiating the module. Why it survives into the shipped wasm:
+/// without instantiating the module. `impresspress-bundle` reads it at bundle
+/// time (`bundle::sandbox_mode::compiled_sandbox_mode`, whose
+/// `SANDBOX_MODE_SECTION` spells the name again: that crate is native tooling
+/// and cannot depend on this one) and refuses to bundle a runtime of another
+/// mode than `[sandbox] mode`. Why it survives into the shipped wasm:
 ///
 /// * on wasm32, rustc records a `#[link_section]` static's bytes as
 ///   `wasm.custom_sections` metadata, which LLVM writes out as a custom
@@ -87,7 +95,9 @@ pub fn compiled_sandbox_mode() -> String {
 ///   it to strip any.
 ///
 /// CI checks the result on real bundles of all three modes, release and
-/// `--dev` (`scripts/check-bundle-runtime.mjs`).
+/// `--dev` (`scripts/check-bundle-runtime.mjs`), and on the release build
+/// baked into the CLI (`crates/impresspress/tests/wasm_bundling.rs`) — and
+/// every bundle `impresspress build` makes reads it.
 ///
 /// The section is wasm32 only: on a native target the name is not a valid
 /// object-file section (Mach-O wants `segment,section`), and only a wasm has

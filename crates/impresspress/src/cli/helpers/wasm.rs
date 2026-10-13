@@ -95,26 +95,57 @@ fn read(path: &Path, what: &str) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| anyhow!("read {what} {}: {e}", path.display()))
 }
 
+/// Environment variable naming one wasm file to bundle instead of the
+/// baked-in build — ahead of [`PKG_DIR_ENV`] for the wasm.
+pub const WASM_ENV: &str = "IMPRESSPRESS_WEB_WASM";
+
+/// Where [`resolve_impresspress_web_wasm`] took the wasm from — so a caller
+/// that refuses it can name the file the operator supplied, not its own copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmSource {
+    /// The file [`WASM_ENV`] names.
+    WasmEnv(PathBuf),
+    /// `<stem>_bg.wasm` in the directory [`PKG_DIR_ENV`] names.
+    PkgDir(PathBuf),
+    /// The `include_bytes!` bake of `crates/impresspress-web/pkg`.
+    Baked,
+}
+
+/// The resolved wasm and where it came from.
+pub struct ResolvedWasm {
+    pub bytes: Cow<'static, [u8]>,
+    pub source: WasmSource,
+}
+
 /// Resolution order:
-/// 1. `IMPRESSPRESS_WEB_WASM` (must point at an existing file)
+/// 1. [`WASM_ENV`] (must point at an existing file)
 /// 2. [`PKG_DIR_ENV`]`/<stem>_bg.wasm`
 /// 3. the `include_bytes!` bake (always available)
-pub fn resolve_impresspress_web_wasm() -> Result<Cow<'static, [u8]>> {
-    if let Ok(p) = std::env::var("IMPRESSPRESS_WEB_WASM") {
+pub fn resolve_impresspress_web_wasm() -> Result<ResolvedWasm> {
+    if let Ok(p) = std::env::var(WASM_ENV) {
         let path = PathBuf::from(&p);
         if !path.is_file() {
             return Err(anyhow!(
-                "IMPRESSPRESS_WEB_WASM points at {p:?} but the file does not exist"
+                "{WASM_ENV} points at {p:?} but the file does not exist"
             ));
         }
         let bytes = std::fs::read(&path).map_err(|e| anyhow!("read {p:?}: {e}"))?;
-        return Ok(Cow::Owned(bytes));
+        return Ok(ResolvedWasm {
+            bytes: Cow::Owned(bytes),
+            source: WasmSource::WasmEnv(path),
+        });
     }
     if let Some(pkg) = pkg_dir()? {
         let path = pkg.dir.join(format!("{}_bg.wasm", pkg.stem));
-        return Ok(Cow::Owned(read(&path, "the wasm named by")?));
+        return Ok(ResolvedWasm {
+            bytes: Cow::Owned(read(&path, "the wasm named by")?),
+            source: WasmSource::PkgDir(path),
+        });
     }
-    Ok(Cow::Borrowed(crate::IMPRESSPRESS_WEB_WASM))
+    Ok(ResolvedWasm {
+        bytes: Cow::Borrowed(crate::IMPRESSPRESS_WEB_WASM),
+        source: WasmSource::Baked,
+    })
 }
 
 /// Resolution order:

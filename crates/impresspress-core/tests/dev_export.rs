@@ -258,9 +258,13 @@ fn site_shell() -> SiteShell {
     let title = value("title");
 
     let dir = tempfile::tempdir().expect("tempdir");
+    // A runtime compiled as the site this shell is built for: the bundler
+    // refuses one of another mode.
     std::fs::write(
         dir.path().join("impresspress_web_bg.wasm"),
-        b"\0asm\x01\0\0\0 the site runtime",
+        impresspress_bundle::bundle::sandbox_mode::fixture::runtime_declaring(
+            impresspress_bundle::bundle::SandboxShell::Site,
+        ),
     )
     .expect("wasm");
     std::fs::write(
@@ -2539,7 +2543,9 @@ fn the_fake_bypass_rules_are_what_the_bundler_renders() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("impresspress_web_bg.wasm"),
-        b"\0asm\x01\0\0\0",
+        impresspress_bundle::bundle::sandbox_mode::fixture::runtime_declaring(
+            impresspress_bundle::bundle::SandboxShell::Workspace,
+        ),
     )
     .expect("wasm");
     std::fs::write(

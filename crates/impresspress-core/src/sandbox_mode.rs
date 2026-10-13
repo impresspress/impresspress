@@ -35,12 +35,16 @@
 /// Each is a cargo feature of this crate (`site-runtime`, and `block-dev`,
 /// which implies it), so the three configurations are the three modes, and
 /// [`Self::COMPILED`] is the one this binary is. There is no request: a
-/// bundle's `sw.js` states the mode it was built for (`const SANDBOX`,
-/// rendered from `[sandbox] mode`) and compares it with
-/// `compiled_sandbox_mode()` (exported by `impresspress-browser`) before it
-/// calls `initialize()` at all. A mismatch is a bundle assembled from the
-/// wrong runtime — a workspace's `sw.js` over a site build, or the reverse —
-/// and the worker stops there, with stage `build`, which no recovery erases
+/// bundle is built for one mode (`[sandbox] mode`), and the runtime declares
+/// the one it was compiled as. A mismatch is a bundle assembled from the
+/// wrong runtime — a workspace's `sw.js` over a site build, or the reverse.
+/// `impresspress build` refuses to assemble one: it reads the wasm's
+/// `impresspress.sandbox_mode` section (written by `impresspress-browser`)
+/// before it writes the bundle. A bundle put together some other way is
+/// caught by its `sw.js`, which states the mode it was built for
+/// (`const SANDBOX`) and compares it with `compiled_sandbox_mode()`
+/// (exported by `impresspress-browser`) before it calls `initialize()` at
+/// all; the worker stops there, with stage `build`, which no recovery erases
 /// data for: nothing has opened the database yet, and nothing about the
 /// stored data is in question.
 ///
@@ -146,3 +150,28 @@ const _: () = {
     assert!(SandboxMode::Workspace.runtime_present());
     assert!(SandboxMode::Workspace.workspace());
 };
+
+#[cfg(test)]
+mod tests {
+    use impresspress_bundle::bundle::SandboxShell;
+
+    use super::SandboxMode;
+
+    /// The runtime writes [`SandboxMode::as_str`] into its
+    /// `impresspress.sandbox_mode` section, and `impresspress-bundle` reads
+    /// the section back through `SandboxShell::from_spelling` — two crates
+    /// that share no type, each spelling the three modes. The bundler refuses
+    /// any payload that is not one of its own spellings, so a drift here
+    /// would refuse every runtime of that mode at bundle time.
+    #[test]
+    fn the_runtime_spells_each_mode_as_the_bundler_reads_it() {
+        for (mode, shell) in [
+            (SandboxMode::Absent, SandboxShell::None),
+            (SandboxMode::Site, SandboxShell::Site),
+            (SandboxMode::Workspace, SandboxShell::Workspace),
+        ] {
+            assert_eq!(mode.as_str(), shell.as_str());
+            assert_eq!(SandboxShell::from_spelling(mode.as_str()), Some(shell));
+        }
+    }
+}
