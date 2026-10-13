@@ -11,7 +11,8 @@ web flow around its own cdylib rather than `impresspress-web`:
     cd examples/minimal-browser
     impresspress build --target web --release   # → pkg/
 
-CI does exactly that (the `E2E build` job) and then runs
+CI does exactly that (the `E2E build` job), once with `--release` and once
+without (a wasm-pack `--dev` build), and after each runs
 `scripts/check-bundle-runtime.mjs` on `pkg/`, which links the framework's
 `sw.js` against this crate's JS glue and checks the wasm's
 `impresspress.sandbox_mode` section. The worker imports

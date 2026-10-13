@@ -2,8 +2,9 @@
 //!
 //! The mode itself is `impresspress_core::sandbox_mode::SandboxMode::COMPILED`,
 //! decided by `impresspress-core`'s `site-runtime`/`block-dev` features. It
-//! is declared here, in the crate every browser cdylib links, so that every
-//! such cdylib carries it — `impresspress-web`'s three builds and an
+//! is declared here, in the crate every browser cdylib links (each one
+//! stores its Wafer through `store_wafer`), so that every such cdylib
+//! carries it — `impresspress-web`'s three builds and an
 //! application's own cdylib bundled through the embed flow alike — in two
 //! forms:
 //!
@@ -44,29 +45,38 @@ const SPELLING: &str = SandboxMode::COMPILED.as_str();
 /// the worker module before any of `sw.js` ran. That is why it lives in this
 /// crate and not in any one runtime: every browser cdylib links this crate,
 /// and so every one exports it.
+///
+/// It answers with [`SANDBOX_MODE_SECTION`]'s bytes rather than with
+/// [`SPELLING`] directly. That read is what ties the custom section to the
+/// export in every build: the object file that holds the section is the one
+/// that defines the static, and the export refers to the static, so wasm-ld
+/// links that object whenever it links the export. Without the reference, a
+/// build without LTO (a `--dev` build) keeps the section only if some other
+/// symbol of the same codegen unit happens to be needed.
 #[wasm_bindgen]
 pub fn compiled_sandbox_mode() -> String {
-    SPELLING.to_string()
+    // The bytes are a copy of a `&str`, so they are always UTF-8; the lossy
+    // conversion never replaces anything.
+    String::from_utf8_lossy(&SANDBOX_MODE_SECTION).into_owned()
 }
 
-/// The `impresspress.sandbox_mode` custom section: [`SPELLING`]'s bytes, no
-/// length prefix and no terminator.
+/// The mode's spelling as a static: on wasm32, the `impresspress.sandbox_mode`
+/// custom section — [`SPELLING`]'s bytes, no length prefix and no
+/// terminator.
 ///
 /// A custom section because it is part of the shipped bytes — it cannot be
 /// separated from the wasm it describes — and any wasm parser reads it
 /// without instantiating the module. Why it survives into the shipped wasm:
 ///
-/// * on wasm32, rustc does not emit a `#[link_section]` static as data. It
-///   records the static's bytes as `wasm.custom_sections` metadata, which
-///   LLVM writes out as a custom section of the object file. A static is
-///   codegened whether or not anything refers to it, so nothing has to
-///   "use" it (and `#[used]` would only add a copy of the bytes to the data
-///   segment). Fat LTO (`lto = true`, the release profile) merges that
-///   metadata, concatenating entries of the same name;
-/// * without LTO (a `--dev` build), the section sits in the object file of
-///   this module's codegen unit, which wasm-ld links because it defines the
-///   exported [`compiled_sandbox_mode`] — so the static stays in this module,
-///   beside the function;
+/// * on wasm32, rustc records a `#[link_section]` static's bytes as
+///   `wasm.custom_sections` metadata, which LLVM writes out as a custom
+///   section of the object file that defines the static (the static itself
+///   is still an ordinary global, read by [`compiled_sandbox_mode`]). Fat
+///   LTO (`lto = true`, the release profile) merges that metadata,
+///   concatenating entries of the same name;
+/// * without LTO, wasm-ld links that object because
+///   [`compiled_sandbox_mode`], which every cdylib exports, refers to the
+///   static;
 /// * wasm-ld copies every custom section of the objects it links into the
 ///   output, and `strip = true` (`--strip-all`) removes only the `name` and
 ///   debug sections;
@@ -76,21 +86,13 @@ pub fn compiled_sandbox_mode() -> String {
 ///   every runtime here is optimised with (`-Oz --all-features`) do not ask
 ///   it to strip any.
 ///
-/// CI checks the result on real bundles of all three modes
-/// (`scripts/check-bundle-runtime.mjs`).
+/// CI checks the result on real bundles of all three modes, release and
+/// `--dev` (`scripts/check-bundle-runtime.mjs`).
 ///
-/// Gated to wasm32: on a native target the section name is not a valid
+/// The section is wasm32 only: on a native target the name is not a valid
 /// object-file section (Mach-O wants `segment,section`), and only a wasm has
-/// anywhere to carry it.
-///
-/// Nothing in Rust reads it — the wasm file's readers do — so the dead-code
-/// lint, which knows nothing of custom sections, is expected to fire.
-#[cfg(target_arch = "wasm32")]
-#[expect(
-    dead_code,
-    reason = "read out of the wasm file by tooling, never by Rust code"
-)]
-#[link_section = "impresspress.sandbox_mode"]
+/// anywhere to carry it. Natively this is a plain static.
+#[cfg_attr(target_arch = "wasm32", link_section = "impresspress.sandbox_mode")]
 static SANDBOX_MODE_SECTION: [u8; SPELLING.len()] = {
     // `SPELLING`'s bytes as an array of exactly its length: a `static` needs
     // a sized, owned initialiser, and `as_bytes` is a borrowed slice.

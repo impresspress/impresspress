@@ -583,15 +583,16 @@ pub struct SandboxOptions {
 /// Unconditional. Every build that compiles this module has the sandbox's
 /// RUNTIME half (`runtime_factory`'s const assertions pin
 /// [`SandboxMode::runtime_present`] for both such configurations), and an
-/// exported site — a site build — needs every one of these: the control that loads its seeded blocks, the
-/// `DevShared` that owns the activation queue, and the [`install`] below that
-/// imports the `seed/` the archive ships beside the shell. Keying this on
-/// whether the bundle asked for the workspace is what once made an exported
-/// site come up empty. A build with no sandbox at all does not compile this
-/// module, so `RuntimeFactory::with_dev` is never called there and the
-/// runtime is the one that never had a sandbox (design §13). Which of the two
-/// sandbox builds this is decides what the FACTORY registers, not whether
-/// there is a control at all — see [`SandboxMode`].
+/// exported site — a site build — needs every one of these: the control
+/// that loads its seeded blocks, the `DevShared` that owns the activation
+/// queue, and the [`install`] below that imports the `seed/` the archive
+/// ships beside the shell. Keying this on whether the bundle asked for the
+/// workspace is what once made an exported site come up empty. A build with
+/// no sandbox at all does not compile this module, so
+/// `RuntimeFactory::with_dev` is never called there and the runtime is the
+/// one that never had a sandbox (design §13). Which of the two sandbox builds
+/// this is decides what the FACTORY registers, not whether there is a
+/// control at all — see [`SandboxMode`].
 ///
 /// The `DevShared` is the one this build's `impresspress-core` defines: a
 /// site build's takes the control and the bypass rules; a `browser-devtools`
@@ -615,10 +616,10 @@ pub fn attach(factory: RuntimeFactory, options: SandboxOptions) -> (Rc<RuntimeFa
 
 /// Bring the sandbox up on the runtime that was just stored.
 ///
-/// Runs in BOTH sandbox builds ([`Site`] as well as [`Workspace`]). For an exported site this is
-/// the entire reason the folder works at all: step 1 below is what reads the
-/// `seed/` the archive ships beside the shell, and steps 2–3 are what put its
-/// blocks in the runtime.
+/// Runs in BOTH sandbox builds ([`Site`] as well as [`Workspace`]). For an
+/// exported site this is the entire reason the folder works at all: step 1
+/// below is what reads the `seed/` the archive ships beside the shell, and
+/// steps 2–3 are what put its blocks in the runtime.
 ///
 /// Before anything else, [`stored_types::upgrade`] drops the content types an
 /// earlier build stored beside each file and republishes the active site

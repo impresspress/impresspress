@@ -887,6 +887,21 @@ jobs:
       - name: Check the minimal-browser bundle links and declares its mode
         run: node --experimental-vm-modules scripts/check-bundle-runtime.mjs examples/minimal-browser/pkg none
 
+      # The same app as a `--dev` build — what `impresspress build --target
+      # web` makes without `--release`, and the build a developer bundles
+      # most. No LTO there, so the section reaches the wasm by a different
+      # road than in release: wasm-ld links the object that holds it because
+      # the exported `compiled_sandbox_mode()` reads the static
+      # (`impresspress-browser/src/sandbox_mode.rs`). A release-only check
+      # would stay green if that road broke. Overwrites the release `pkg/`
+      # above, which nothing after this step reads.
+      - name: Bundle examples/minimal-browser as a dev build
+        working-directory: examples/minimal-browser
+        run: impresspress build --target web
+
+      - name: Check the minimal-browser dev bundle links and declares its mode
+        run: node --experimental-vm-modules scripts/check-bundle-runtime.mjs examples/minimal-browser/pkg none
+
       - name: Upload bundled web dist
         uses: actions/upload-artifact@v4
         with:
