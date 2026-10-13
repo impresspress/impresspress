@@ -73,8 +73,11 @@
 # checkout silently builds a bundle without the recursive-directory overlay
 # (`cli/helpers/overlays.rs`), so `dist/seed/` never appears and the sanity
 # check below fails with no hint that the CLI is the problem. Build a current
-# one with `cargo install --path crates/impresspress --locked` (add
-# `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
+# one with `scripts/check-cargo-lock.sh crates/impresspress`, then
+# `cargo install --path crates/impresspress --locked` (add `--root ./out` to
+# keep it out of `~/.cargo/bin`), and point this at it. The check comes first
+# because `cargo install --locked` builds against a stale lock without an
+# error.
 #
 # `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
 # and, when the seed has them, its `sandbox.json` (which names the title its
@@ -378,12 +381,17 @@ check_compiler
 #    this script, and vice versa.
 #    `--pkg-dir` names one that already exists, and nothing is compiled.
 #    Both builds go through `scripts/wasm-pack-locked.sh`, which refuses a
-#    `Cargo.lock` that is out of date before wasm-pack can rewrite it.
+#    `Cargo.lock` that is out of date before wasm-pack can rewrite it. The
+#    same check runs here first, unconditionally, so a run handed both
+#    `--pkg-dir` and `--site-pkg-dir` (which compiles nothing) refuses a
+#    stale lock too, and the CLI install this script suggests below is never
+#    reached with one.
+"$REPO/scripts/check-cargo-lock.sh" "$REPO/crates/impresspress-web"
 if [ -n "$PKG_DIR" ]; then
   log "using the wasm-pack output at $PKG_DIR"
 else
   PKG_DIR="$REPO/crates/impresspress-web/pkg-dev"
-  log "wasm-pack build --features browser-devtools -> $PKG_DIR"
+  log "wasm-pack build --features browser-devtools -> $PKG_DIR" # lock-guard: allow (log text; the run below is wrapped)
   "$REPO/scripts/wasm-pack-locked.sh" "$REPO/crates/impresspress-web" build --target web --release --out-dir pkg-dev -- --features browser-devtools
 fi
 
@@ -394,7 +402,7 @@ if [ -n "$SITE_PKG_DIR" ]; then
   log "using the site-runtime wasm-pack output at $SITE_PKG_DIR"
 else
   SITE_PKG_DIR="$REPO/crates/impresspress-web/pkg-site"
-  log "wasm-pack build --features browser-site-runtime -> $SITE_PKG_DIR"
+  log "wasm-pack build --features browser-site-runtime -> $SITE_PKG_DIR" # lock-guard: allow (log text; the run below is wrapped)
   "$REPO/scripts/wasm-pack-locked.sh" "$REPO/crates/impresspress-web" build --target web --release --out-dir pkg-site -- --features browser-site-runtime
 fi
 
@@ -412,6 +420,7 @@ node "$HERE/check-runtime-markers.mjs" "$SITE_PKG_DIR/impresspress_web_bg.wasm" 
 #    impresspress-web itself, and copies the wasm from it unchanged.
 [ -n "$IMPRESSPRESS_BIN" ] || {
   echo "build.sh: no impresspress CLI on PATH (or at \$IMPRESSPRESS='${IMPRESSPRESS:-}')." >&2
+  echo "  '$REPO/scripts/check-cargo-lock.sh' '$REPO/crates/impresspress'" >&2
   echo "  cargo install --path '$REPO/crates/impresspress' --locked --root '$REPO/out'" >&2
   echo "  IMPRESSPRESS='$REPO/out/bin/impresspress' examples/dev-sandbox/build.sh" >&2
   exit 1

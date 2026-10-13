@@ -143,7 +143,7 @@ build_missing() {
   fi
   local out_dir
   out_dir="$(relative_to_crate "$dir")"
-  log "building missing bundle: wasm-pack build --target web --release --out-dir $out_dir -- ${extra_args[*]}"
+  log "building missing bundle: wasm-pack build --target web --release --out-dir $out_dir -- ${extra_args[*]}" # lock-guard: allow (log text; the run below is wrapped)
   "$REPO/scripts/wasm-pack-locked.sh" "$CRATE_DIR" build --target web --release --out-dir "$out_dir" -- "${extra_args[@]}"
 }
 
@@ -195,7 +195,7 @@ fi
 
 echo "## Dev-sandbox size report"
 echo
-echo "wasm-opt: applied by \`wasm-pack build --release\` for every bundle (release profile default; not re-run here)."
+echo "wasm-opt: applied by \`wasm-pack build --release\` for every bundle (release profile default; not re-run here)." # lock-guard: allow (report text)
 echo
 echo "| bundle | raw | gzip -9 |"
 echo "| --- | --- | --- |"

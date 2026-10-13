@@ -74,7 +74,9 @@ jobs:
         run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir pkg
 
       - name: Install impresspress CLI
-        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked
+        run: |
+          scripts/check-cargo-lock.sh crates/impresspress
+          cargo install --path crates/impresspress --locked
 
       # `build.sh` and the verifier both run through node, and
       # `verify-compiler-assets.mjs` is what proves the toolchain this deploy

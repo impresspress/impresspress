@@ -106,6 +106,12 @@ jobs:
       - name: Lint — WRAP-grant coverage on cross-block db::* callsites
         run: bash scripts/audit-wrap-grants.sh
 
+      # `test-build-guards.sh` (below) proves the wrappers refuse a stale
+      # lock; this holds every workflow step, recipe, script and README
+      # command to them, which no behaviour test can reach.
+      - name: Lint — wasm-pack and cargo install --path run the lock check
+        run: bash scripts/grep-guard-locked.sh
+
       - name: Install Rust
         run: rustup toolchain install
 
@@ -856,7 +862,9 @@ jobs:
       # binary's runtime speed is irrelevant — a debug compile is far cheaper.
       # `--root out` lands the binary at out/bin/impresspress for artifact upload.
       - name: Install impresspress CLI (debug)
-        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+        run: |
+          scripts/check-cargo-lock.sh crates/impresspress
+          cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
       - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
@@ -1081,7 +1089,9 @@ jobs:
       # Debug build, as `e2e-build` does: the CLI only assembles static files
       # here, so its runtime speed is irrelevant and a debug compile is cheaper.
       - name: Install impresspress CLI (debug)
-        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+        run: |
+          scripts/check-cargo-lock.sh crates/impresspress
+          cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
       - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
@@ -1386,7 +1396,9 @@ jobs:
       # Debug build, as `e2e-dev-sandbox` does: the CLI only assembles static
       # files here, so its runtime speed is irrelevant.
       - name: Install impresspress CLI (debug)
-        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+        run: |
+          scripts/check-cargo-lock.sh crates/impresspress
+          cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
       - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"

@@ -65,7 +65,9 @@ jobs:
         run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir pkg
 
       - name: Install impresspress CLI
-        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked
+        run: |
+          scripts/check-cargo-lock.sh crates/impresspress
+          cargo install --path crates/impresspress --locked
 
       # Embed × web flow (Cargo.toml + impresspress.toml present): the unified
       # CLI re-runs wasm-pack, then `impresspress_bundle::bundle::run`

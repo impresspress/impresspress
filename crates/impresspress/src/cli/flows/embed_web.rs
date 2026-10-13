@@ -17,7 +17,10 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     // 1. wafer build per block.
     blocks::build_all(repo_root).await?;
 
-    // 2. wasm-pack the user's cdylib.
+    // 2. wasm-pack the user's cdylib. wasm-pack's own plain `cargo metadata`
+    //    rewrites a stale app `Cargo.lock` here, and nothing checks it first:
+    //    whether this flow should enforce the app's lock is undecided
+    //    (impresspress/impresspress#192).
     let mut wp = Command::new("wasm-pack");
     let mut args = vec!["build".to_string(), "--target".into(), "web".into()];
     args.push(if release {

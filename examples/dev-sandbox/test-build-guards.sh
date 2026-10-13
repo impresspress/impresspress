@@ -47,9 +47,17 @@
 # `crates/impresspress-web` raises its version requirement on `lockdep` to
 # one the lock does not have. Each entry point must then exit non-zero,
 # never reach wasm-pack, and leave `Cargo.lock` byte-identical; with a
-# current lock it must reach wasm-pack. Without the check
-# `wasm-pack-locked.sh` runs (or with an entry point calling wasm-pack directly)
-# the fake wasm-pack rewrites the lock and the stale cases go red.
+# current lock it must reach wasm-pack, started from the crate directory.
+# Without the check `wasm-pack-locked.sh` runs (or with an entry point calling
+# wasm-pack directly) the fake wasm-pack rewrites the lock and the stale
+# cases go red. `build.sh` also checks the lock itself before step 1, so a
+# run given both `--pkg-dir` and `--site-pkg-dir`, which reaches no
+# wasm-pack, refuses too; that case's exit code and "no CLI" assertions hold
+# even without the check (the run stops at the markers script the temp tree
+# lacks), so its stderr assertion is the one that carries it. Two last cases
+# run the wrapper directly: a missing lock is named as missing and not
+# created, and a manifest cargo cannot parse is reported as a cargo failure,
+# not as a stale lock.
 #
 # Usage: examples/dev-sandbox/test-build-guards.sh
 set -euo pipefail
@@ -91,13 +99,15 @@ FAKE
   chmod +x "$FAKE_BIN/$tool"
 }
 # What the real wasm-pack does before anything else: read the crate with a
-# plain `cargo metadata`, which rewrites a stale `Cargo.lock`.
-fake_tool wasm-pack 0 'cargo metadata --format-version 1 >/dev/null || exit 101'
+# plain `cargo metadata`, which rewrites a stale `Cargo.lock`. It also
+# records the directory it was started in, because `--out-dir` resolves
+# against it: the wrapper must run it from the crate.
+fake_tool wasm-pack 0 "pwd -P >>\"$CALLS/wasm-pack.cwd\"; cargo metadata --format-version 1 >/dev/null || exit 101"
 fake_tool impresspress 1
 
 # The fixture workspace, with a current lock generated once and copied into
-# every temp tree. `lockdep_version VERSION` (below) moves both the crate's
-# version and `impresspress-web`'s requirement on it.
+# every temp tree. `stale_lock` (below) moves both the crate's version and
+# `impresspress-web`'s requirement on it.
 WORKSPACE="$TMP/workspace"
 mkdir -p "$WORKSPACE/crates/impresspress-web/src" "$WORKSPACE/crates/lockdep/src"
 cat >"$WORKSPACE/Cargo.toml" <<'TOML'
@@ -157,12 +167,12 @@ manifest_json() {
   python3 -c 'import json, sys; print(json.dumps({"version": sys.argv[1], "rubrc": {"sha": sys.argv[2]}}))' "$1" "$2"
 }
 
-# Runs `$1` (a script in the temp tree) with the fakes first on PATH; sets
-# STATUS and leaves stderr in $TMP/stderr.
+# Runs `$1` (a script in the temp tree) with the arguments after it and the
+# fakes first on PATH; sets STATUS and leaves stderr in $TMP/stderr.
 run_script() {
   STATUS=0
   env -u IMPRESSPRESS -u PKG_DIR -u PKG_SITE_DIR -u PKG_DEV_DIR PATH="$FAKE_BIN:$PATH" \
-    "$1" >"$TMP/stdout" 2>"$TMP/stderr" || STATUS=$?
+    "$@" >"$TMP/stdout" 2>"$TMP/stderr" || STATUS=$?
 }
 
 stderr_has() { grep -qF -- "$1" "$TMP/stderr"; }
@@ -227,9 +237,11 @@ stale_lock() {
 }
 
 # The assertions every stale-lock case shares: `$1` names the entry point,
-# STATUS and $TMP/stderr are the run's.
+# STATUS and $TMP/stderr are the run's. `$2` is `wrapper` (the default) when
+# the refusal comes from `wasm-pack-locked.sh`, `check` when the entry point
+# runs `check-cargo-lock.sh` itself.
 lock_refused() {
-  local what="$1" before="$failures"
+  local what="$1" via="${2:-wrapper}" before="$failures"
   if [ "$STATUS" -ne 0 ]; then
     ok "$what: a stale Cargo.lock exits non-zero"
   else
@@ -241,13 +253,13 @@ lock_refused() {
     fail "$what: Cargo.lock was rewritten"
     diff "$TMP/Cargo.lock.before" "$LOCK" | sed 's/^/    | /' >&2 || true
   fi
-  if [ -e "$CALLS/wasm-pack" ]; then
-    fail "$what: wasm-pack ran on a stale Cargo.lock"
+  if [ -e "$CALLS/wasm-pack" ] || [ -e "$CALLS/impresspress" ]; then
+    fail "$what: wasm-pack or the CLI ran on a stale Cargo.lock"
   else
-    ok "$what: wasm-pack not run"
+    ok "$what: neither wasm-pack nor the CLI run"
   fi
   if stderr_has "check-cargo-lock.sh: Cargo.lock is out of date" &&
-    stderr_has "wasm-pack-locked.sh: wasm-pack was not run"; then
+    { [ "$via" = check ] || stderr_has "wasm-pack-locked.sh: wasm-pack was not run"; }; then
     ok "$what: stderr says the lock is out of date"
   else
     fail "$what: stderr does not say the lock is out of date"
@@ -278,6 +290,15 @@ built() {
       fail "$what: no wasm-pack call builds $out"
     fi
   done
+  local crate elsewhere
+  crate="$(cd "$ROOT/crates/impresspress-web" && pwd -P)"
+  elsewhere="$(grep -vxF -- "$crate" "$CALLS/wasm-pack.cwd" 2>/dev/null || true)"
+  if [ -z "$elsewhere" ]; then
+    ok "$what: wasm-pack runs from the crate directory"
+  else
+    fail "$what: wasm-pack ran outside $crate:"
+    printf '    | %s\n' "$elsewhere" >&2
+  fi
 }
 
 fake_tree none
@@ -317,12 +338,26 @@ else
 fi
 built "build.sh" 2 pkg-dev pkg-site
 
-# The same current tree with a stale lock: refused at the first wasm-pack
-# step, and the lock is untouched.
+# The same current tree with a stale lock: refused by build.sh's own check,
+# ahead of its first wasm-pack step, and the lock is untouched.
 fake_tree "$CURRENT"
 stale_lock
 run_script "$SANDBOX/build.sh"
-lock_refused "build.sh"
+lock_refused "build.sh" check
+
+# Handed both pkg dirs, build.sh compiles nothing and runs no wasm-pack, but
+# still refuses a stale lock, before the CLI.
+fake_pkg() {
+  mkdir -p "$1/snippets"
+  : >"$1/impresspress_web.js"
+  : >"$1/impresspress_web_bg.wasm"
+}
+fake_tree "$CURRENT"
+fake_pkg "$TMP/pkg-dev-given"
+fake_pkg "$TMP/pkg-site-given"
+stale_lock
+run_script "$SANDBOX/build.sh" --pkg-dir "$TMP/pkg-dev-given" --site-pkg-dir "$TMP/pkg-site-given"
+lock_refused "build.sh --pkg-dir --site-pkg-dir" check
 
 # measure.sh builds each of its three pkg dirs that is missing — all three
 # in the temp tree — and then stops, finding no wasm the fake produced.
@@ -362,6 +397,33 @@ for line in "${just_lines[@]}"; do
   (cd "$ROOT" && PATH="$FAKE_BIN:$PATH" sh -c "$line") >"$TMP/stdout" 2>"$TMP/stderr" || STATUS=$?
   lock_refused "justfile wasm-pack line $i"
 done
+
+# The wrapper itself, for what the entry points cannot show: a lock that is
+# missing, and a cargo failure that is not about the lock at all. Neither may
+# reach wasm-pack, and only a stale lock may be called out of date.
+fake_tree none
+rm "$LOCK"
+run_script "$ROOT/scripts/wasm-pack-locked.sh" "$ROOT/crates/impresspress-web" build
+if [ "$STATUS" -ne 0 ] && [ ! -e "$CALLS/wasm-pack" ] && [ ! -e "$LOCK" ] &&
+  stderr_has "check-cargo-lock.sh: there is no Cargo.lock"; then
+  ok "wasm-pack-locked.sh: a missing Cargo.lock is refused, named as missing, not created"
+else
+  fail "wasm-pack-locked.sh: a missing Cargo.lock was not refused as missing (exit $STATUS)"
+  sed 's/^/    | /' "$TMP/stderr" >&2
+fi
+
+fake_tree none
+cp "$LOCK" "$TMP/Cargo.lock.before"
+printf 'not toml =\n' >>"$ROOT/crates/impresspress-web/Cargo.toml"
+run_script "$ROOT/scripts/wasm-pack-locked.sh" "$ROOT/crates/impresspress-web" build
+if [ "$STATUS" -ne 0 ] && [ ! -e "$CALLS/wasm-pack" ] && cmp -s "$LOCK" "$TMP/Cargo.lock.before" &&
+  stderr_has "check-cargo-lock.sh: \`cargo metadata --locked\` failed" &&
+  ! stderr_has "out of date"; then
+  ok "wasm-pack-locked.sh: a broken manifest is refused as a cargo failure, not a stale lock"
+else
+  fail "wasm-pack-locked.sh: a broken manifest was not reported as a cargo failure (exit $STATUS)"
+  sed 's/^/    | /' "$TMP/stderr" >&2
+fi
 
 if [ "$failures" -ne 0 ]; then
   printf '\ntest-build-guards.sh: %s failure(s)\n' "$failures" >&2
