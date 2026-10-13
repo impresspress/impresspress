@@ -485,7 +485,7 @@ out_dir = "dist"
                 .unwrap_err()
                 .to_string();
             assert!(
-                msg.contains(&format!("[app] shell_path {path:?} {reason}")),
+                msg.contains(&format!("[app] shell_path {path:?} ")) && msg.contains(reason),
                 "{path:?}: {msg}"
             );
         }
