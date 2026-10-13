@@ -88,17 +88,3 @@ a.pagination__link:focus-visible,
 	outline-offset: -2px;
 	box-shadow: var(--focus-ring);
 }
-
-/* Ported from origin/main (ui/assets/base.css) during the main merge --
-   2026-09-02. Pixel-art images (the built-in brand mark): scale by
-   nearest-neighbour so the art-pixels stay square. Only applied to art we
-   know is pixel art -- never to a white-labelled logo URL. Declared last so
-   `pixelated` wins in browsers that also understand `crisp-edges`. Consumer:
-   `templates::brand_icon`'s `class={ (class) " pixel-art" }`, used by both
-   the sidebar brand icon (`styles/layouts/shell.css`) and the auth-card
-   icon+text lockup (`styles/layouts/auth-split.css`'s `.login-brand__icon`). */
-.pixel-art {
-	image-rendering: -webkit-optimize-contrast;
-	image-rendering: crisp-edges;
-	image-rendering: pixelated;
-}

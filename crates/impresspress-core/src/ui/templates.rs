@@ -266,33 +266,20 @@ pub fn chat_page(
     })
 }
 
-/// The brand icon. The built-in mark is pixel art (32- and 64-art-pixel
-/// renditions) and must only ever be drawn at a whole multiple of its size,
-/// so which file is used is decided here, deterministically:
+/// The brand icon, drawn at `size_px` CSS pixels.
 ///
-/// - `size_px` ≥ 64: the 64-cell file as a plain `<img>` (1:1 on 1x screens,
-///   2:1 nearest-neighbour on 2x).
-/// - smaller: a `<picture>` — the 32-cell file by default, the 64-cell file
-///   from 1.5dppx up via a `min-resolution` media query. Not `srcset` width
-///   descriptors: browsers may pick an already-cached larger candidate for
-///   those, which then gets nearest-neighbour *down*scaled.
-///
-/// `.pixel-art` keeps the art-pixels square. A white-labelled icon URL is a
-/// smooth logo we know nothing about and is left untouched.
+/// The built-in mark ships at 32 and 64 px, both downscaled from one master,
+/// so it gets a `2x` `srcset` candidate: a high-DPI screen draws it from the
+/// 64 file instead of upscaling the 32. A white-labelled icon URL is a logo we
+/// know nothing about and is rendered as given.
 pub fn brand_icon(logo_icon_url: &str, class: &str, size_px: u32) -> Markup {
     let builtin = logo_icon_url == crate::ui::assets::logo_icon_url();
     html! {
-        @if builtin && size_px >= 64 {
-            img class={ (class) " pixel-art" }
-                src=(crate::ui::assets::logo_icon_2x_url())
+        @if builtin {
+            img class=(class)
+                src=(logo_icon_url)
+                srcset={ (crate::ui::assets::logo_icon_2x_url()) " 2x" }
                 width=(size_px) height=(size_px) alt="";
-        } @else if builtin {
-            picture {
-                source media="(min-resolution: 1.5dppx)" srcset=(crate::ui::assets::logo_icon_2x_url());
-                img class={ (class) " pixel-art" }
-                    src=(logo_icon_url)
-                    width=(size_px) height=(size_px) alt="";
-            }
         } @else {
             img class=(class) src=(logo_icon_url) width=(size_px) height=(size_px) alt="";
         }

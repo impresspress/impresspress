@@ -4,10 +4,12 @@ import { resolve } from "node:path";
 import { IMPRESSPRESS_ASSETS, getImpresspressAssetPath } from "../src/assets";
 
 // The SDK ships the Impresspress brand art in `static/` (see package.json
-// "files"). The art is real pixel art generated in the `site` repo
-// (`brand/`): a 64-cell mark and a favicon whose frames are 1:1 renditions.
+// "files"): a 64x64 mark and a favicon whose frames are 1:1 renditions.
 // There is no raster wordmark — brand text is rendered as text.
 const STATIC = resolve(__dirname, "../static");
+// The server's copy of the same art. The SDK ships those exact bytes, so a
+// new mark cannot reach one and not the other.
+const SERVER_ASSETS = resolve(__dirname, "../../../crates/impresspress-core/src/ui/assets");
 
 describe("brand assets", () => {
   it("exposes exactly the square mark and the favicon", () => {
@@ -23,7 +25,7 @@ describe("brand assets", () => {
     }
   });
 
-  it("logo.png is the 64x64 pixel-art mark", () => {
+  it("logo.png is the 64x64 mark", () => {
     const png = readFileSync(resolve(STATIC, "logo.png"));
     expect(png.subarray(1, 4).toString()).toBe("PNG");
     // IHDR: width/height are big-endian u32 at bytes 16 and 20
@@ -37,5 +39,14 @@ describe("brand assets", () => {
     const count = ico.readUInt16LE(4);
     const sizes = Array.from({ length: count }, (_, i) => ico[6 + i * 16]);
     expect(sizes).toEqual([16, 32, 48]);
+  });
+
+  it("ships the same bytes as the server's built-in mark and favicon", () => {
+    expect(readFileSync(resolve(STATIC, "logo.png"))).toEqual(
+      readFileSync(resolve(SERVER_ASSETS, "impresspress-logo-2x.png")),
+    );
+    expect(readFileSync(resolve(STATIC, "favicon.ico"))).toEqual(
+      readFileSync(resolve(SERVER_ASSETS, "favicon.ico")),
+    );
   });
 });

@@ -36,6 +36,39 @@ test('service worker registers and controls the page', async ({ page }) => {
   expect(controllerURL).toMatch(/\/sw\.js$/);
 });
 
+test('every web app manifest icon resolves through the service worker', async ({ page }) => {
+  // The manifest is static, so its icons cannot name the runtime's
+  // content-hashed `/b/static/` files: they are host files on the worker's
+  // bypass list. Until that, the one icon was `/b/system/api/favicon`, a
+  // route nothing serves. Fetched from a controlled page, so the request
+  // takes the same path through the worker a browser's own fetch would.
+  await page.goto('/', { waitUntil: 'commit' });
+  await page.waitForURL(/\/b\/auth\/login/, { timeout: 30_000 });
+  const icons = await page.evaluate(async () => {
+    const manifest = await (await fetch('/manifest.json')).json();
+    return Promise.all(
+      (manifest.icons as { src: string; sizes: string; type: string }[]).map(async (icon) => {
+        const res = await fetch(icon.src);
+        const bitmap = await createImageBitmap(await res.blob());
+        return {
+          ...icon,
+          controlled: navigator.serviceWorker.controller !== null,
+          status: res.status,
+          contentType: res.headers.get('content-type'),
+          drawn: `${bitmap.width}x${bitmap.height}`,
+        };
+      }),
+    );
+  });
+  expect(icons.length).toBeGreaterThan(0);
+  for (const icon of icons) {
+    expect(icon.controlled, icon.src).toBe(true);
+    expect(icon.status, icon.src).toBe(200);
+    expect(icon.contentType, icon.src).toBe(icon.type);
+    expect(icon.drawn, icon.src).toBe(icon.sizes);
+  }
+});
+
 test('boot redirect lands on the auth login page', async ({ page }) => {
   // boot_redirect is "/" (intercepted by SW → wasm router → 302 →
   // /b/auth/login for anonymous visitors). loader.js sets
