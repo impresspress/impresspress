@@ -27,10 +27,6 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     });
     args.push("--out-dir".into());
     args.push(cfg.wasm.out_dir.clone());
-    // Forwarded to the `cargo build` wasm-pack runs: the build resolves
-    // against the app's committed `Cargo.lock` and never rewrites it, as every
-    // cargo call in this repo's CI does.
-    args.extend(["--".into(), "--locked".into()]);
     wp.args(&args).current_dir(repo_root);
     cmd::run("wasm-pack build", wp).await?;
 

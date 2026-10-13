@@ -150,3 +150,28 @@ const _: () = {
     assert!(SandboxMode::Workspace.runtime_present());
     assert!(SandboxMode::Workspace.workspace());
 };
+
+#[cfg(test)]
+mod tests {
+    use impresspress_bundle::bundle::SandboxShell;
+
+    use super::SandboxMode;
+
+    /// The runtime writes [`SandboxMode::as_str`] into its
+    /// `impresspress.sandbox_mode` section, and `impresspress-bundle` reads
+    /// the section back through `SandboxShell::from_spelling` — two crates
+    /// that share no type, each spelling the three modes. The bundler refuses
+    /// any payload that is not one of its own spellings, so a drift here
+    /// would refuse every runtime of that mode at bundle time.
+    #[test]
+    fn the_runtime_spells_each_mode_as_the_bundler_reads_it() {
+        for (mode, shell) in [
+            (SandboxMode::Absent, SandboxShell::None),
+            (SandboxMode::Site, SandboxShell::Site),
+            (SandboxMode::Workspace, SandboxShell::Workspace),
+        ] {
+            assert_eq!(mode.as_str(), shell.as_str());
+            assert_eq!(SandboxShell::from_spelling(mode.as_str()), Some(shell));
+        }
+    }
+}

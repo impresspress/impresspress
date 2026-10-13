@@ -20,9 +20,10 @@ import init, { compiled_sandbox_mode, initialize, handle_request } from '__WASM_
 // build's. `impresspress build` holds the two to the same one before it
 // writes this file — it reads the runtime wasm's `impresspress.sandbox_mode`
 // section and refuses a mismatch — and the check here catches a bundle put
-// together some other way. A shipped `sw.js` states the fact once. Nothing rewrites it after the build: the
-// development sandbox's export ships the export shell (`EXPORT_SHELL` below),
-// a bundle BUILT with `[sandbox] mode = "site"`, byte for byte.
+// together some other way. A shipped `sw.js` states the fact once. Nothing
+// rewrites it after the build: the development sandbox's export ships the
+// export shell (`EXPORT_SHELL` below), a bundle BUILT with
+// `[sandbox] mode = "site"`, byte for byte.
 const SANDBOX = '__SANDBOX__';
 
 // Where this deployment carries its export shell — a complete bundle built

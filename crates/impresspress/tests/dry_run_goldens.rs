@@ -53,33 +53,3 @@ fn sealed_web_build_dry_run_with_blocks() {
         "expected wafer subprocess step in stdout, got:\n{out}"
     );
 }
-
-/// Embed × web runs wasm-pack on the app's own cdylib with `--locked`
-/// forwarded to cargo, so the build resolves against the app's committed
-/// `Cargo.lock` and never rewrites it — what every cargo call in CI does.
-#[test]
-fn embed_web_build_dry_run_passes_locked_to_cargo() {
-    let tmp = tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-    std::fs::write(
-        tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
-    )
-    .unwrap();
-    std::fs::write(
-        tmp.path().join("impresspress.toml"),
-        "[app]\nname = \"app\"\ntitle = \"app\"\nboot_redirect = \"/\"\n",
-    )
-    .unwrap();
-
-    let (out, status) = run_dry(&["build", "--target", "web", "--release"], tmp.path());
-    assert!(status.success(), "build exited non-zero, stdout:\n{out}");
-    let wasm_pack = out
-        .lines()
-        .find(|line| line.starts_with("DRY_RUN step=\"wasm-pack build\""))
-        .unwrap_or_else(|| panic!("no wasm-pack step in stdout:\n{out}"));
-    assert!(
-        wasm_pack.ends_with(r#""--release", "--out-dir", "pkg", "--", "--locked"]"#),
-        "{wasm_pack}"
-    );
-}

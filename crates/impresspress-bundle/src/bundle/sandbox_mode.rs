@@ -15,9 +15,15 @@
 //!
 //! The reader is a section walker, not a wasm parser: it checks the module
 //! header, then steps over every section by its declared size, and looks
-//! inside custom sections only. A module whose sections do not tile its bytes
-//! exactly is refused, so a truncated or padded file is never read as a
-//! runtime that declares something.
+//! inside custom sections only. It validates neither section ids nor their
+//! order. A section whose declared size runs past the end of the bytes is
+//! refused, so a file cut off inside a section, or one with raw bytes
+//! appended after it, is never read as a runtime that declares something.
+//!
+//! The mode spellings are written twice as well: [`SandboxShell::as_str`]
+//! here and `impresspress-core`'s `SandboxMode::as_str`, which the runtime
+//! writes into the section. `impresspress-core`'s `sandbox_mode` tests
+//! compare the two (it dev-depends on this crate).
 
 use std::{
     fmt,
@@ -70,12 +76,22 @@ impl fmt::Display for UnreadableMode {
                 "has {count} `{SANDBOX_MODE_SECTION}` custom sections; a runtime declares \
                  exactly one"
             ),
-            Self::Unknown(payload) => write!(
-                f,
-                "declares sandbox mode {:?} in its `{SANDBOX_MODE_SECTION}` section, which is \
-                 none of 'none', 'site' and 'workspace'",
-                String::from_utf8_lossy(payload)
-            ),
+            Self::Unknown(payload) => {
+                // At most `SHOWN` bytes of it: the payload is the file's to
+                // size, and an error line is not.
+                const SHOWN: usize = 64;
+                let shown = String::from_utf8_lossy(&payload[..payload.len().min(SHOWN)]);
+                let rest = if payload.len() > SHOWN {
+                    format!(" … ({} bytes)", payload.len())
+                } else {
+                    String::new()
+                };
+                write!(
+                    f,
+                    "declares sandbox mode {shown:?}{rest} in its `{SANDBOX_MODE_SECTION}` \
+                     section, which is none of 'none', 'site' and 'workspace'"
+                )
+            }
         }
     }
 }
@@ -197,7 +213,7 @@ fn custom_sections(wasm: &[u8]) -> Result<Vec<CustomSection<'_>>, UnreadableMode
         let start = HEADER.len() + at;
         let id = body[at];
         at += 1;
-        let size = leb128_u32(body, &mut at)
+        let size = leb128_u32(body, &mut at, "size")
             .map_err(|e| UnreadableMode::Malformed(format!("section at byte {start}: {e}")))?;
         let end = at
             .checked_add(size as usize)
@@ -211,8 +227,8 @@ fn custom_sections(wasm: &[u8]) -> Result<Vec<CustomSection<'_>>, UnreadableMode
         if id == 0 {
             let section = &body[at..end];
             let mut name_at = 0;
-            let name_len = leb128_u32(section, &mut name_at).map_err(|e| {
-                UnreadableMode::Malformed(format!("custom section at byte {start}: name {e}"))
+            let name_len = leb128_u32(section, &mut name_at, "name length").map_err(|e| {
+                UnreadableMode::Malformed(format!("custom section at byte {start}: {e}"))
             })?;
             let name_end = name_at
                 .checked_add(name_len as usize)
@@ -235,18 +251,21 @@ fn custom_sections(wasm: &[u8]) -> Result<Vec<CustomSection<'_>>, UnreadableMode
 }
 
 /// An unsigned LEB128 `u32` from `bytes` at `*at`, advancing `*at` past it:
-/// at most five bytes, and nothing above `u32::MAX`.
-fn leb128_u32(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
+/// at most five bytes, and nothing above `u32::MAX`. `what` names the value
+/// in the error.
+fn leb128_u32(bytes: &[u8], at: &mut usize, what: &str) -> Result<u32, String> {
     let mut value: u64 = 0;
     for shift in (0..5).map(|i| 7 * i) {
-        let byte = *bytes.get(*at).ok_or("ends inside its size")?;
+        let byte = *bytes
+            .get(*at)
+            .ok_or_else(|| format!("the bytes end inside its {what}"))?;
         *at += 1;
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
-            return u32::try_from(value).map_err(|_| format!("size {value} overflows a u32"));
+            return u32::try_from(value).map_err(|_| format!("{what} {value} overflows a u32"));
         }
     }
-    Err("size runs past five LEB128 bytes".to_string())
+    Err(format!("{what} runs past five LEB128 bytes"))
 }
 
 /// Well-formed wasm modules, for tests: the one encoder every fixture that
@@ -457,7 +476,20 @@ mod tests {
         let Err(UnreadableMode::Malformed(detail)) = compiled_sandbox_mode(&cut) else {
             panic!("{:?}", compiled_sandbox_mode(&cut));
         };
-        assert!(detail.contains("ends inside"), "{detail}");
+        assert!(detail.contains("end inside its size"), "{detail}");
+    }
+
+    /// However long the payload, the message shows a bounded prefix of it.
+    #[test]
+    fn an_unknown_payload_is_shown_truncated() {
+        let payload = vec![b'w'; 5000];
+        let wasm = module(&[custom_section(SANDBOX_MODE_SECTION, &payload)]);
+        let message = compiled_sandbox_mode(&wasm).unwrap_err().to_string();
+        assert!(
+            message.contains(&format!("\"{}\" … (5000 bytes)", "w".repeat(64))),
+            "{message}"
+        );
+        assert!(message.len() < 300, "{message}");
     }
 
     #[test]

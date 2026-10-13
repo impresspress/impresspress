@@ -1300,13 +1300,17 @@ and read together with this list.
 
 25. **Amendment 23 — the bundler holds the runtime to the mode (2026-10-13).**
     `impresspress build --target web` reads the mode the runtime declares
-    before it writes the bundle: `impresspress-bundle`'s `bundle::run`, which
-    both web flows call, walks the wasm's sections and requires exactly one
-    `impresspress.sandbox_mode` section whose payload is exactly one mode's
-    spelling, equal to `[sandbox] mode`. Anything else — another mode, no
-    section, two, an unknown spelling, bytes that are not a module — is
-    refused before the bundle directory is touched, naming both modes and how
-    to get the right runtime. A directory with no wasm (template-only) is
+    before the bundler writes anything: `impresspress-bundle`'s
+    `bundle::run`, which both web flows call, walks the wasm's sections and
+    requires exactly one `impresspress.sandbox_mode` section whose payload is
+    exactly one mode's spelling, equal to `[sandbox] mode`. Anything else —
+    another mode, no section, two, an unknown spelling, bytes that are not a
+    module — is refused, naming both modes, before `run` renames, renders or
+    removes a file; the sealed flow adds where its runtime came from and how
+    to get the right one. The flow has already prepared the directory by
+    then — the sealed flow has rebuilt `dist/` around the runtime, the embed
+    flow has run wasm-pack into its out dir — so a refused build leaves that
+    preparation, not a bundle. A directory with no wasm (template-only) is
     still rendered, with its warning. The worker's comparison before
     `initialize()` stays, for a bundle put together some other way than by
     the CLI; its stage `build` and its no-erase rule are unchanged.

@@ -16,7 +16,10 @@ mod support;
 
 use std::{fs, path::Path};
 
-use impresspress::cli::{flows::sealed_web, helpers::wasm::PKG_DIR_ENV};
+use impresspress::cli::{
+    flows::sealed_web,
+    helpers::wasm::{PKG_DIR_ENV, WASM_ENV},
+};
 use impresspress_bundle::bundle::SandboxShell;
 use support::fake_web_pkg;
 use tempfile::tempdir;
@@ -47,6 +50,8 @@ async fn sealed_web_builds_each_sandbox_mode_only_around_its_own_runtime() {
     .await;
     a_site_is_not_built_around_a_runtime_with_no_sandbox(none_pkg.path()).await;
     a_site_is_not_built_around_the_baked_runtime().await;
+    the_refusal_names_the_wasm_override_that_took_precedence(none_pkg.path(), site_pkg.path())
+        .await;
 }
 
 /// The export shell's own configuration (`[sandbox] mode = "site"`) around
@@ -67,9 +72,14 @@ async fn a_site_is_not_built_around_a_runtime_with_no_sandbox(none_pkg: &Path) {
             .contains("was compiled as sandbox mode 'none', but this bundle is built for 'site'"),
         "{message}"
     );
+    // The file the operator supplied, not the flow's copy in `dist/`, and
+    // how this flow gets a site runtime.
+    let supplied = none_pkg.join("fake_web_bg.wasm");
     assert!(
-        message.contains(PKG_DIR_ENV) && message.contains("--features browser-site-runtime"),
-        "the sealed flow says how to get a site runtime: {message}"
+        message.contains(&format!("The runtime is {}", supplied.display()))
+            && message.contains(PKG_DIR_ENV)
+            && message.contains("--features browser-site-runtime"),
+        "{message}"
     );
     assert!(!app.path().join("dist/sw.js").exists());
 }
@@ -88,7 +98,38 @@ async fn a_site_is_not_built_around_the_baked_runtime() {
     );
     assert!(
         message
-            .contains("was compiled as sandbox mode 'none', but this bundle is built for 'site'"),
+            .contains("was compiled as sandbox mode 'none', but this bundle is built for 'site'")
+            && message.contains("The runtime is the build baked into this CLI"),
+        "{message}"
+    );
+}
+
+/// `IMPRESSPRESS_WEB_WASM` takes precedence over `IMPRESSPRESS_WEB_PKG_DIR`
+/// for the wasm, so with both set a site pkg dir does not help: the refusal
+/// names the file the override supplied and says to point it elsewhere or
+/// unset it — not merely to set the pkg dir, which is already set.
+async fn the_refusal_names_the_wasm_override_that_took_precedence(
+    none_pkg: &Path,
+    site_pkg: &Path,
+) {
+    let app = site_app();
+    let wasm = none_pkg.join("fake_web_bg.wasm");
+    std::env::set_var(PKG_DIR_ENV, site_pkg);
+    std::env::set_var(WASM_ENV, &wasm);
+    let built = sealed_web::build(app.path(), false).await;
+    std::env::remove_var(WASM_ENV);
+    std::env::remove_var(PKG_DIR_ENV);
+    let message = format!(
+        "{:#}",
+        built.expect_err("the override's runtime of no sandbox must be refused")
+    );
+    let named = format!("The runtime is {}, named by {WASM_ENV}", wasm.display());
+    assert!(
+        message
+            .contains("was compiled as sandbox mode 'none', but this bundle is built for 'site'")
+            && message.contains(&named)
+            && message.contains("takes precedence over")
+            && message.contains("unset it"),
         "{message}"
     );
 }
