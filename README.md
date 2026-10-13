@@ -46,7 +46,7 @@ git config core.hooksPath .githooks
 cargo test --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 cargo test -p impresspress-cloudflare --target wasm32-unknown-unknown --lib   # needs wasm-bindgen-test-runner
 cargo test -p impresspress-password --features durable-object --target wasm32-unknown-unknown --lib
-NODE_OPTIONS=--import\ ./js/test/node-hooks.mjs wasm-pack test --node crates/impresspress-browser
+NODE_OPTIONS=--import\ ./js/test/node-hooks.mjs scripts/wasm-pack-locked.sh crates/impresspress-browser test --node
 ```
 
 The browser suite needs that `NODE_OPTIONS` import, which CI sets as a job

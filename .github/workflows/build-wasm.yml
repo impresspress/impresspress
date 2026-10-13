@@ -58,16 +58,24 @@ jobs:
           # pin (PR #75).
           version: 'v0.15.0'
 
-      # `-- --locked` forwards to the `cargo build` wasm-pack runs. Every
-      # cargo invocation in these workflows that resolves against a committed
-      # lockfile now passes it; this one did not, so the wasm blob that
-      # `crates/impresspress/build.rs` bakes into the binary was the one place
-      # a release resolved dependencies afresh instead of using the set CI
-      # tested. All the deploy workflows carry the same flag now for the same
-      # reason. (The cargo-audit install in `audit.yml` is not in that set: it
-      # fetches a pinned release binary, not this repository's lockfile.)
+      # Every cargo invocation in these workflows that resolves against the
+      # committed lockfile passes `--locked`. wasm-pack has no such flag, and
+      # `wasm-pack build … -- --locked` is not one: wasm-pack's own plain
+      # `cargo metadata` rewrites a stale lock before the `cargo build` ever
+      # sees the flag. `scripts/wasm-pack-locked.sh` checks the lock with
+      # `cargo metadata --locked` first (`scripts/check-cargo-lock.sh`), so
+      # the wasm blob that `crates/impresspress/build.rs` bakes into the
+      # binary is built from the dependency set CI tested, not one resolved
+      # afresh. Every wasm-pack step in these workflows goes through it, and
+      # every `cargo install --path` step runs the same check first, since
+      # `cargo install --locked` does not refuse a stale lock either. (The
+      # CLI's `impresspress build --target web` also runs wasm-pack; where a
+      # job runs it, a `cargo install` step earlier in the job has already
+      # checked the lock. The cargo-audit install in `audit.yml` is not in
+      # this set: it fetches a pinned release binary, not this repository's
+      # lockfile.)
       - name: Build WASM
-        run: cd crates/impresspress-web && wasm-pack build --target web --release --out-dir pkg -- --locked
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir pkg
 
       - name: Upload pkg/ artifact
         uses: actions/upload-artifact@v4

@@ -85,6 +85,7 @@ together.
 ## Build
 
 ```sh
+scripts/check-cargo-lock.sh crates/impresspress                 # cargo install --locked alone takes a stale lock
 cargo install --path crates/impresspress --locked --root ./out   # a current CLI
 examples/dev-sandbox/compiler/fetch-dist.sh                      # the compiler tree PIN.json pins
 IMPRESSPRESS=./out/bin/impresspress examples/dev-sandbox/build.sh
@@ -120,7 +121,11 @@ a `build-compiler.sh --fast` composition. It:
    below. Runs first so a stale
    manifest fails fast rather than paying for a wasm build before finding out
    the bundle cannot seed itself.
-2. Builds `impresspress-web` to wasm with `--features browser-devtools` into
+2. Refuses a `Cargo.lock` that is out of date (`scripts/check-cargo-lock.sh`),
+   even when `--pkg-dir` and `--site-pkg-dir` mean nothing is compiled; each
+   wasm-pack build below runs through `scripts/wasm-pack-locked.sh`, which
+   checks again before wasm-pack can rewrite the lock. Then it builds
+   `impresspress-web` to wasm with `--features browser-devtools` into
    `crates/impresspress-web/pkg-dev` (this is what puts the `/b/dev`
    control-plane code in the binary at all; `[sandbox] mode = "workspace"`
    must match it — `impresspress build` refuses to bundle any other package,

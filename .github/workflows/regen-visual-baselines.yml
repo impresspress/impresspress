@@ -90,11 +90,12 @@ jobs:
           node-version: 20
 
       - name: Pre-build impresspress-web wasm (build.rs prereq)
-        working-directory: crates/impresspress-web
-        run: wasm-pack build --target web --release --out-dir pkg -- --locked
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir pkg
 
       - name: Install impresspress CLI
-        run: cargo install --path crates/impresspress --locked
+        run: |
+          scripts/check-cargo-lock.sh crates/impresspress
+          cargo install --path crates/impresspress --locked
 
       - name: Build impresspress-web (framework assets + hashed pkg/)
         working-directory: crates/impresspress-web
