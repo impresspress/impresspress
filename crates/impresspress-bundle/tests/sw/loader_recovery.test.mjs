@@ -399,9 +399,9 @@ const ERASE_FAILED =
 const ERASE_NOT_DONE =
   "The data stored locally in this browser could not be erased, and restarting didn't help.";
 const OFFER_KEEPS =
-  'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.';
+  'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page. Any AI models already downloaded are kept.';
 const OFFER_ERASES =
-  "You can erase the data stored locally in this browser and try again, or reset, which also clears the app's other settings in this browser. Both start the app from its first page; downloaded AI models are kept.";
+  "You can erase the data stored locally in this browser and try again, or reset, which also clears the app's other settings in this browser. Both start the app from its first page. Any AI models already downloaded are kept.";
 
 // Every combination of what was spent and what the retry would do. The first
 // sentence is about what was actually done; the second and the button's label
@@ -645,7 +645,7 @@ test('a worker that never takes the page is waited for and asked about, not navi
 // worker on its own: that would kill the very start it is waiting for. It
 // waits once more by itself, then asks.
 const WAITING_NEXT =
-  'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then.';
+  'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then. Any AI models already downloaded are kept.';
 
 for (const [branch, search, destination] of [
   ['reload', '', null],

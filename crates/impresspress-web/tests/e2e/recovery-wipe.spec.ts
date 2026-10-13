@@ -669,6 +669,9 @@ test('"Restart it" on a reset that cannot activate yet reaches the app, erasing 
     await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
     await expect(page.locator('input#email')).toBeVisible();
     expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
+    expect(await modelWeights(page), 'the model weights survived the restart').toEqual(
+      MODEL_WEIGHTS.map(({ url }) => url),
+    );
   });
 });
 

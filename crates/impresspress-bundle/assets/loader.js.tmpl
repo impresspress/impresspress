@@ -759,10 +759,9 @@ async function updateUnderway(registration, failure, status, { alreadyIn = true,
 // Replace the worker in place (WORKER_URL says how and why): drop the
 // app's own caches (`dropCaches`), note that a recovery ran, register the
 // replacement over the live registration, and record the death as
-// recovered. Called holding
-// RECOVERY_LOCK. `failure` is what is being recovered from, or `null` when
-// nothing was reported. Answers the registration, whose newest version is
-// the replacement.
+// recovered. Called holding RECOVERY_LOCK. `failure` is what is being
+// recovered from, or `null` when nothing was reported. Answers the
+// registration, whose newest version is the replacement.
 //
 // Nothing is erased here. Whoever erases holds ERASE_LOCK from before this
 // registers until its erase is done, and erases only once the replacement
@@ -935,6 +934,10 @@ function renderChoices({ title, said, next, buttons }) {
     });
 }
 
+// What every screen that offers an erase says it keeps: the model weights
+// (`dropCaches` says why). Worded for an app that has none as well.
+const MODELS_KEPT = 'Any AI models already downloaded are kept.';
+
 // "Reset local data and reload", on both screens below: erase the app's
 // local data — OPFS, whatever the build and whatever the failure — and its
 // own caches (`dropCaches`), clear `localStorage` and `sessionStorage`, and
@@ -974,8 +977,8 @@ function renderStoppedUI(failure, spent, status) {
         tried = "The data stored locally in this browser could not be erased, and restarting didn't help.";
     }
     const offered = erases
-        ? "You can erase the data stored locally in this browser and try again, or reset, which also clears the app's other settings in this browser. Both start the app from its first page; downloaded AI models are kept."
-        : 'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.';
+        ? `You can erase the data stored locally in this browser and try again, or reset, which also clears the app's other settings in this browser. Both start the app from its first page. ${MODELS_KEPT}`
+        : `You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page. ${MODELS_KEPT}`;
     renderChoices({
         title: `${name} couldn't start`,
         said: stoppedText(failure.cause),
@@ -1003,7 +1006,7 @@ function renderEraseFailedUI(request, worker, status) {
     renderChoices({
         title: `${name}'s local data could not be erased`,
         said: 'The data stored locally in this browser could not be erased.',
-        next: 'Something still has it open — most likely another tab of this app. You can close the other tabs and try again, or continue with the data as it is.',
+        next: `Something still has it open — most likely another tab of this app. You can close the other tabs and try again, or continue with the data as it is. ${MODELS_KEPT}`,
         buttons: [
             {
                 id: 'impresspress-retry',
@@ -1044,7 +1047,7 @@ function renderWaitingUI(target, worker, status, waitedMs) {
     renderChoices({
         title: `${name} is taking a long time to start`,
         said: `The app has not answered for ${waitedMs / 1000} seconds.`,
-        next: 'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then.',
+        next: `It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then. ${MODELS_KEPT}`,
         buttons: [
             {
                 id: 'impresspress-wait',
@@ -1085,7 +1088,7 @@ function renderNotStartedUI(status, waitedMs, notStarting, resume, leave) {
     renderChoices({
         title: `${name} is taking a long time to start`,
         said: `The new version has not started yet, after ${waitedMs / 1000} seconds.`,
-        next: 'The browser is still putting it in place. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page.',
+        next: `The browser is still putting it in place. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page. ${MODELS_KEPT}`,
         buttons: [
             {
                 id: 'impresspress-wait',
