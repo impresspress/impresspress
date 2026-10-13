@@ -106,6 +106,16 @@ jobs:
       - name: Lint — WRAP-grant coverage on cross-block db::* callsites
         run: bash scripts/audit-wrap-grants.sh
 
+      # Both run against fake trees in well under a second and compile
+      # nothing: `build.sh` refusing a missing or stale `compiler/dist/` (and
+      # the wasm-pack builds of `build.sh`, `measure.sh` and the justfile
+      # passing `--locked`), and the compose decision that keeps
+      # `dist/manifest.json`'s `build` field honest.
+      - name: Test build.sh refuses a stale compiler
+        run: |
+          examples/dev-sandbox/test-build-compiler-refusal.sh
+          examples/dev-sandbox/compiler/scripts/test-build-kind.sh
+
       - name: Install Rust
         run: rustup toolchain install
 
@@ -1049,10 +1059,11 @@ jobs:
 
       # This job needs the packaged compiler even though nothing in it compiles
       # Rust in the browser: `impresspress.toml` overlays `compiler/dist/` into
-      # every dev-sandbox bundle, so `build.sh` builds it when it is missing —
-      # which is the ~55 minute, 12.6 GB composition that would OOM this runner.
+      # every dev-sandbox bundle, so `build.sh` refuses to build without it —
+      # it never runs the ~55 minute, 12.6 GB composition that would OOM this
+      # runner; the steps below put the tree in place first.
       # `dev-compiler.spec.ts` and `dev-compile-tool.spec.ts` both read the
-      # manifest it produces, too. Same key as `e2e-dev-compile`, which `needs`
+      # manifest in `compiler/dist/`, too. Same key as `e2e-dev-compile`, which `needs`
       # this job so the two never compose in parallel and race to upload one
       # entry; see that job for why there are no `restore-keys` and what
       # `--fast` costs. Skipped entirely when the release asset was fetched:
@@ -1383,9 +1394,10 @@ jobs:
       - name: Check the seed manifest and the compiler tree
         run: examples/dev-sandbox/build.sh --check
 
-      # `compiler_is_current` matches PIN.json against the tree above, so this
-      # does not rebuild the compiler; it builds the wasm and assembles the
-      # bundle, with `compiler/dist/` overlaid at `/__impresspress_dev/compiler/`.
+      # `compiler_is_current` matches PIN.json against the tree above — a
+      # mismatch would make `build.sh` refuse, never rebuild the compiler; it
+      # builds the wasm and assembles the bundle, with `compiler/dist/`
+      # overlaid at `/__impresspress_dev/compiler/`.
       - name: Build the dev-sandbox bundle
         run: |
           set -o pipefail

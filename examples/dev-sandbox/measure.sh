@@ -34,9 +34,9 @@
 # `PKG_DIR` / `PKG_SITE_DIR` / `PKG_DEV_DIR` override where the three
 # bundles live (default `crates/impresspress-web/pkg`, `…/pkg-site` and
 # `…/pkg-dev`, the same directories build.sh writes). A missing one is built
-# with `wasm-pack build --target web --release` (`pkg-site` additionally gets
-# `-- --features browser-site-runtime`, `pkg-dev`
-# `-- --features browser-devtools`); an existing one is measured as-is and
+# with `wasm-pack build --target web --release -- --locked` (`pkg-site`
+# additionally gets `--features browser-site-runtime`, `pkg-dev`
+# `--features browser-devtools`); an existing one is measured as-is and
 # NOT rebuilt — wasm-pack's release profile already runs wasm-opt, so
 # re-running this script never re-optimizes, it only re-measures.
 #
@@ -142,13 +142,16 @@ build_missing() {
   fi
   local out_dir
   out_dir="$(relative_to_crate "$dir")"
-  log "building missing bundle: wasm-pack build --target web --release --out-dir $out_dir ${extra_args[*]}"
-  (cd "$CRATE_DIR" && wasm-pack build --target web --release --out-dir "$out_dir" "${extra_args[@]}")
+  log "building missing bundle: wasm-pack build --target web --release --out-dir $out_dir -- --locked ${extra_args[*]}"
+  (cd "$CRATE_DIR" && wasm-pack build --target web --release --out-dir "$out_dir" -- --locked "${extra_args[@]}")
 }
 
+# The arguments after the directory are cargo's: `build_missing` owns the
+# `--` and `--locked`, so every bundle it builds resolves the committed
+# `Cargo.lock` exactly like CI's wasm-pack builds.
 build_missing "$PKG_DIR"
-build_missing "$PKG_SITE_DIR" -- --features browser-site-runtime
-build_missing "$PKG_DEV_DIR" -- --features browser-devtools
+build_missing "$PKG_SITE_DIR" --features browser-site-runtime
+build_missing "$PKG_DEV_DIR" --features browser-devtools
 
 DEFAULT_WASM="$PKG_DIR/impresspress_web_bg.wasm"
 SITE_WASM="$PKG_SITE_DIR/impresspress_web_bg.wasm"
