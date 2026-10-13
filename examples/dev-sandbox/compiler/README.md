@@ -58,7 +58,7 @@ manifest names.
 ## Building
 
 ```bash
-compiler/build-compiler.sh          # or: examples/dev-sandbox/build.sh, which calls it when stale
+compiler/build-compiler.sh          # examples/dev-sandbox/build.sh never calls it: it refuses a missing or stale dist/ and names fetch-dist.sh
 compiler/build-compiler.sh --fast   # local iteration only; see below
 ```
 

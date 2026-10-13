@@ -102,7 +102,8 @@ jobs:
         run: examples/dev-sandbox/compiler/fetch-dist.sh
 
       # `compiler_is_current` matches `compiler/PIN.json` against the tree the
-      # step above put in place, so this builds the wasms and assembles the
+      # step above put in place (and `build.sh` refuses, rather than composes,
+      # a tree that does not match), so this builds the wasms and assembles the
       # bundle for THIS seed without touching the compiler. Each matrix job
       # fetches the same published release asset — no cache, nothing to race.
       # Each job compiles TWO wasms — the sandbox's (`browser-devtools`) and

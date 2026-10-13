@@ -41,6 +41,12 @@
 #   examples/dev-sandbox/build.sh --site-pkg-dir DIR  # the export shell's wasm from DIR, likewise
 #   examples/dev-sandbox/build.sh --check           # verify every seed and the compiler tree
 #
+# A build needs `compiler/dist/` in place for `compiler/PIN.json`, and this
+# script never builds it: it refuses, naming the command that does. Put it in
+# place with `compiler/fetch-dist.sh` (the published tree for the pin), or —
+# for a pin with no published tree yet — `compiler/build-compiler.sh`. See
+# step 0 below.
+#
 # A relative `--out` is relative to the directory the script is run from; it
 # must be outside `examples/dev-sandbox/` and either not exist, be empty, or be
 # a bundle this script made.
@@ -177,25 +183,37 @@ STAGESANDBOX
 # ~55 minutes to build from cold — and its `wasm-opt` pass peaked at 12.6 GB
 # RSS when it was measured, so it CANNOT run on a 7 GB CI runner: cache
 # `compiler/dist/` on `compiler/PIN.json` (which fully determines it) or use a
-# large runner. It is therefore built only when it is missing or when
-# `PIN.json` has moved since the tree in `compiler/dist/` was produced.
+# large runner. It is therefore never built here: when it is missing, or
+# `PIN.json` has moved since the tree in `compiler/dist/` was produced, the
+# build refuses and names `compiler/fetch-dist.sh` (step 0 below).
 # Everything about that tree — the rubrc commit, the sysroot, the tools —
 # comes from that one file, so comparing it against the built manifest is the
 # whole staleness test.
+#
+# Exits 0 when the tree is current; otherwise prints the one reason it is not
+# to stdout and exits 1.
 compiler_is_current() {
   python3 - "$HERE" <<'COMPILERPIN'
 import json, pathlib, sys
 
+def stale(reason):
+    print(reason)
+    raise SystemExit(1)
+
 compiler = pathlib.Path(sys.argv[1], "compiler")
 manifest = compiler / "dist" / "manifest.json"
 if not manifest.is_file():
-    raise SystemExit(1)
+    stale("dist/manifest.json is missing")
 pin = json.loads((compiler / "PIN.json").read_text())
-built = json.loads(manifest.read_text())
+try:
+    built = json.loads(manifest.read_text())
+except ValueError as e:
+    stale(f"dist/manifest.json is not JSON ({e})")
 if built.get("version") != pin["version"]:
-    raise SystemExit(1)
-if built.get("rubrc", {}).get("sha") != pin["rubrc"]["sha"]:
-    raise SystemExit(1)
+    stale(f"built for compiler {built.get('version')}; PIN.json pins {pin['version']}")
+built_sha = built.get("rubrc", {}).get("sha")
+if built_sha != pin["rubrc"]["sha"]:
+    stale(f"built from rubrc {str(built_sha)[:8]}; PIN.json pins {pin['rubrc']['sha'][:8]}")
 COMPILERPIN
 }
 
@@ -318,12 +336,26 @@ check_seed
 stage_seed
 
 # 0. The browser toolchain, overlaid onto the bundle at
-#    `/__impresspress_dev/compiler/` (see `impresspress.toml`).
-if compiler_is_current; then
+#    `/__impresspress_dev/compiler/` (see `impresspress.toml`). It must already
+#    be in place for `compiler/PIN.json`: this script never builds it, because
+#    building it is the ~55 minute, 12.6 GB composition described above. The
+#    refusal comes before `check_compiler`, before any wasm-pack run and
+#    before the CLI runs. It comes after `check_seed` and `stage_seed` on
+#    purpose: a stale seed manifest is the cheaper failure to report first,
+#    and staging only writes `seed/` and `boot-title.txt` in this directory,
+#    which every build rewrites.
+if reason="$(compiler_is_current)"; then
   log "compiler/dist is current for compiler/PIN.json"
 else
-  log "compiler/build-compiler.sh (dist is missing or built from another pin)"
-  "$HERE/compiler/build-compiler.sh"
+  {
+    echo "build.sh: compiler/dist is not the toolchain compiler/PIN.json pins — $reason."
+    echo "  Fetch the published, verified tree for this pin (what the deploy runs):"
+    echo "    $HERE/compiler/fetch-dist.sh"
+    echo "  A pin with no published tree yet (a pin bump) has to be built — ~55 min, 12.6 GB RSS:"
+    echo "    $HERE/compiler/build-compiler.sh   (then pack-dist.sh; compiler/README.md \"Publishing the compiler\")"
+    echo "  then re-run this script. build.sh never builds the compiler itself."
+  } >&2
+  exit 1
 fi
 # `compiler_is_current` answers one question — was this tree built from the
 # pin in the file? — off two manifest fields, and never looks at the bytes
@@ -347,7 +379,7 @@ if [ -n "$PKG_DIR" ]; then
 else
   PKG_DIR="$REPO/crates/impresspress-web/pkg-dev"
   log "wasm-pack build --features browser-devtools -> $PKG_DIR"
-  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-dev -- --features browser-devtools)
+  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-dev -- --features browser-devtools --locked)
 fi
 
 # 1b. The site runtime — the sandbox's runtime half alone, with no workspace
@@ -358,7 +390,7 @@ if [ -n "$SITE_PKG_DIR" ]; then
 else
   SITE_PKG_DIR="$REPO/crates/impresspress-web/pkg-site"
   log "wasm-pack build --features browser-site-runtime -> $SITE_PKG_DIR"
-  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-site -- --features browser-site-runtime)
+  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-site -- --features browser-site-runtime --locked)
 fi
 
 # 1c. The guarantee the feature split is for, checked on the two artifacts:
