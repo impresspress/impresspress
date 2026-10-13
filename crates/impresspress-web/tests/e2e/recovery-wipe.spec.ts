@@ -38,6 +38,9 @@ import {
  *  5. "Reset" while the worker is still starting → the data is really gone
  *     afterwards; and an erase the browser refuses is said, not assumed.
  *
+ * Neither the erase in 1 nor the reset in 5 touches the model weights the
+ * page engines keep in Cache Storage (`MODEL_WEIGHTS`).
+ *
  * `impresspress-bundle`'s `tests/sw/loader_recovery.test.mjs` drives every
  * road through the rendered loader against stubs. This is the real worker,
  * the real wasm and a real OPFS, on a static host with no fallback for the
@@ -74,6 +77,40 @@ async function plantWitness(page: Page) {
   expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
 }
 
+/**
+ * Model weights the page engines' libraries keep in Cache Storage, under the
+ * cache names they use: WebLLM's (`webllm-engine.js`) and transformers.js's
+ * (`embed-engine.js`, `t2i-engine.js`). Hundreds of MB to several GB in real
+ * use, and not the app's state: no recovery and no reset may drop them —
+ * only the app's own caches (`dropCaches` in `loader.js`).
+ */
+const MODEL_WEIGHTS = [
+  { cache: 'webllm/model', url: '/e2e-model-witness/webllm-params_shard_0.bin' },
+  { cache: 'transformers-cache', url: '/e2e-model-witness/onnx/model_quantized.onnx' },
+];
+
+/** Put an entry in each model cache. */
+async function plantModelWeights(page: Page) {
+  await page.evaluate(async (weights) => {
+    for (const { cache, url } of weights) {
+      await (await caches.open(cache)).put(url, new Response('model weights'));
+    }
+  }, MODEL_WEIGHTS);
+  expect(await modelWeights(page)).toEqual(MODEL_WEIGHTS.map(({ url }) => url));
+}
+
+/** The planted model-weight entries still in Cache Storage. */
+async function modelWeights(page: Page): Promise<string[]> {
+  return page.evaluate(async (weights) => {
+    const left: string[] = [];
+    for (const { cache, url } of weights) {
+      if (!(await caches.has(cache))) continue;
+      if (await (await caches.open(cache)).match(url)) left.push(url);
+    }
+    return left;
+  }, MODEL_WEIGHTS);
+}
+
 /** The names in the origin's OPFS root. */
 async function stored(page: Page): Promise<string[]> {
   return page.evaluate(async () => {
@@ -103,6 +140,7 @@ async function corruptDatabase(page: Page) {
 test('an initialize() failure erases the local data and the app starts clean', async ({ page }) => {
   await boot(page);
   await plantWitness(page);
+  await plantModelWeights(page);
 
   await corruptDatabase(page);
 
@@ -134,6 +172,10 @@ test('an initialize() failure erases the local data and the app starts clean', a
   expect(after).toContain(DATABASE);
   expect(after).not.toContain(WITNESS);
   expect(eraseFailures, 'every entry was removed').toEqual([]);
+  // The erase took the app's data, and none of the model weights.
+  expect(await modelWeights(page), 'the model weights survived the recovery').toEqual(
+    MODEL_WEIGHTS.map(({ url }) => url),
+  );
   // The worker serving it is the replacement, registered in place.
   expect(
     await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL),
@@ -418,6 +460,7 @@ test('a reset while the worker is still starting ends with the local data really
   browser,
 }) => {
   await withSlowStart(browser, async ({ page, server }) => {
+    await plantModelWeights(page);
     await page.getByRole('button', { name: 'Reset local data and reload' }).click();
     // The replacement is registered at once, and waits: a browser does not
     // activate a new version while the old one is still in the middle of
@@ -444,6 +487,11 @@ test('a reset while the worker is still starting ends with the local data really
     const after = await stored(page);
     expect(after).toContain(DATABASE);
     expect(after).not.toContain(WITNESS);
+    // A reset erases the app's data and keeps the model weights, as the
+    // stopped screen says.
+    expect(await modelWeights(page), 'the model weights survived the reset').toEqual(
+      MODEL_WEIGHTS.map(({ url }) => url),
+    );
   });
 });
 
@@ -606,6 +654,7 @@ test('a reset whose replacement may not activate always leaves a way into the ap
 // the data as it was.
 test('"Restart it" on a reset that cannot activate yet reaches the app, erasing nothing', async ({ browser }) => {
   await withSlowStart(browser, async ({ page, server }) => {
+    await plantModelWeights(page);
     await page.getByRole('button', { name: 'Reset local data and reload' }).click();
     // Held: the old worker's start, and the replacement's install.
     await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(2);
@@ -620,6 +669,9 @@ test('"Restart it" on a reset that cannot activate yet reaches the app, erasing 
     await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
     await expect(page.locator('input#email')).toBeVisible();
     expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
+    expect(await modelWeights(page), 'the model weights survived the restart').toEqual(
+      MODEL_WEIGHTS.map(({ url }) => url),
+    );
   });
 });
 

@@ -11,6 +11,9 @@ const SW_RECOVER_KEY = '__impresspress_sw_recover';
 // why it is Cache Storage).
 const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';
 const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
+// The cache the worker keeps its runtime binary in (`RUNTIME_CACHE` in sw.js
+// says why; the same name). A recovery drops it (`dropCaches`).
+const RUNTIME_CACHE = '__impresspress_runtime';
 // A cause older than this was left for a navigation that never reached a
 // boot shell (the tab was closed first, or the static host could not be
 // reached for the shell). It is not about THIS load, and acting on it would
@@ -209,19 +212,27 @@ function goOn(status, navigate) {
     status.textContent = 'Opening the page you asked for… If this page stays, reload it.';
 }
 
-// Drop Cache Storage. RECOVERED_CACHE is not dropped: it is this script's
-// own record, not the app's state. The runtime binary the worker keeps
-// (`RUNTIME_CACHE` in sw.js) goes with the rest, so the replacement fetches
-// its own afresh at install. No worker is unregistered — `replaceWorker`
-// says how a dead one is replaced.
+// Drop the Cache Storage caches the app keeps, BY NAME: the runtime binary
+// the worker keeps (RUNTIME_CACHE, so the replacement fetches its own afresh
+// at install) and any stop cause still left (STOP_CAUSE_CACHE, about the
+// death being recovered from). RECOVERED_CACHE is not dropped: it is this
+// script's own record, not the app's state. No worker is unregistered —
+// `replaceWorker` says how a dead one is replaced.
+//
+// Only these. Every other cache of this origin belongs to someone else —
+// most of all the model weights the page engines download, hundreds of MB
+// to several GB, which their libraries keep in Cache Storage (WebLLM's
+// `webllm/*` caches, transformers.js's `transformers-cache`). A recovery
+// that took them would cost every person a re-download for a failure that
+// is not theirs: they are not the runtime's state, so no runtime failure is
+// fixed by dropping them. The same holds for "Reset" (`resetButton`).
 async function dropCaches() {
-    try {
-        const keys = await caches.keys();
-        for (const k of keys) {
-            if (k !== RECOVERED_CACHE) await caches.delete(k);
+    for (const name of [RUNTIME_CACHE, STOP_CAUSE_CACHE]) {
+        try {
+            await caches.delete(name);
+        } catch (e) {
+            console.error('[__APP_NAME__] cache wipe failed:', e);
         }
-    } catch (e) {
-        console.error('[__APP_NAME__] cache wipe failed:', e);
     }
 }
 
@@ -746,11 +757,11 @@ async function updateUnderway(registration, failure, status, { alreadyIn = true,
 }
 
 // Replace the worker in place (WORKER_URL says how and why): drop the
-// caches, note that a recovery ran, register the replacement over the live
-// registration, and record the death as recovered. Called holding
-// RECOVERY_LOCK. `failure` is what is being recovered from, or `null` when
-// nothing was reported. Answers the registration, whose newest version is
-// the replacement.
+// app's own caches (`dropCaches`), note that a recovery ran, register the
+// replacement over the live registration, and record the death as
+// recovered. Called holding RECOVERY_LOCK. `failure` is what is being
+// recovered from, or `null` when nothing was reported. Answers the
+// registration, whose newest version is the replacement.
 //
 // Nothing is erased here. Whoever erases holds ERASE_LOCK from before this
 // registers until its erase is done, and erases only once the replacement
@@ -923,10 +934,17 @@ function renderChoices({ title, said, next, buttons }) {
     });
 }
 
-// "Reset local data and reload", on both screens below: erase everything
-// this origin stores for the app — OPFS whatever the build and whatever the
-// failure, and the browser's other storage for it — and start the app from
-// its boot URL on a new worker. The person has explicitly opted in by
+// What every screen that offers an erase says it keeps: the model weights
+// (`dropCaches` says why). Worded for an app that has none as well.
+const MODELS_KEPT = 'Any AI models already downloaded are kept.';
+
+// "Reset local data and reload", on both screens below: erase the app's
+// local data — OPFS, whatever the build and whatever the failure — and its
+// own caches (`dropCaches`), clear `localStorage` and `sessionStorage`, and
+// start the app from its boot URL on a new worker. IndexedDB is not
+// touched, and neither are the model weights the page engines downloaded:
+// they are not the app's state (`dropCaches` says why), and the stopped
+// screen says they are kept. The person has explicitly opted in by
 // clicking.
 function resetButton(failure, status, busy = 'Resetting…') {
     return {
@@ -959,8 +977,8 @@ function renderStoppedUI(failure, spent, status) {
         tried = "The data stored locally in this browser could not be erased, and restarting didn't help.";
     }
     const offered = erases
-        ? 'You can erase the data stored locally in this browser and try again, or reset, which also clears everything else this browser keeps for the app. Both start the app from its first page.'
-        : 'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.';
+        ? `You can erase the data stored locally in this browser and try again, or reset, which also clears the app's other settings in this browser. Both start the app from its first page. ${MODELS_KEPT}`
+        : `You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page. ${MODELS_KEPT}`;
     renderChoices({
         title: `${name} couldn't start`,
         said: stoppedText(failure.cause),
@@ -988,7 +1006,7 @@ function renderEraseFailedUI(request, worker, status) {
     renderChoices({
         title: `${name}'s local data could not be erased`,
         said: 'The data stored locally in this browser could not be erased.',
-        next: 'Something still has it open — most likely another tab of this app. You can close the other tabs and try again, or continue with the data as it is.',
+        next: `Something still has it open — most likely another tab of this app. You can close the other tabs and try again, or continue with the data as it is. ${MODELS_KEPT}`,
         buttons: [
             {
                 id: 'impresspress-retry',
@@ -1029,7 +1047,7 @@ function renderWaitingUI(target, worker, status, waitedMs) {
     renderChoices({
         title: `${name} is taking a long time to start`,
         said: `The app has not answered for ${waitedMs / 1000} seconds.`,
-        next: 'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then.',
+        next: `It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then. ${MODELS_KEPT}`,
         buttons: [
             {
                 id: 'impresspress-wait',
@@ -1070,7 +1088,7 @@ function renderNotStartedUI(status, waitedMs, notStarting, resume, leave) {
     renderChoices({
         title: `${name} is taking a long time to start`,
         said: `The new version has not started yet, after ${waitedMs / 1000} seconds.`,
-        next: 'The browser is still putting it in place. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page.',
+        next: `The browser is still putting it in place. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page. ${MODELS_KEPT}`,
         buttons: [
             {
                 id: 'impresspress-wait',
@@ -1370,8 +1388,8 @@ async function boot() {
     try {
         // Recovery path: a SW self-destructed and left its cause, for this
         // page (the breaker) or for whichever boot shell loaded next (the
-        // cache entry). Replace the worker in place and drop all cache
-        // state — and OPFS too, where `erasesFor` allows it.
+        // cache entry). Replace the worker in place and drop the app's own
+        // caches (`dropCaches`) — and OPFS too, where `erasesFor` allows it.
         //
         // The OPFS wipe is for the schema-drift class of bug: if the OPFS DB
         // was written by a prior build with an incompatible schema, a fresh

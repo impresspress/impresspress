@@ -157,7 +157,7 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
 
   // First failure in this tab. The worker answers the navigation with the
   // boot shell, which reads the cause the worker left and recovers by
-  // itself — once: drop the worker and the caches, register afresh.
+  // itself — once: replace the worker in place and drop its own caches.
   const statusLines = await recordShellStatus(page);
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });
@@ -206,7 +206,7 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
   const stopped = page.locator('#impresspress-stopped-cause');
   await expect(stopped).toHaveText(`The app's runtime stopped: ${cause}`, { timeout: 60_000 });
   await expect(page.locator('#impresspress-stopped-next')).toHaveText(
-    "Restarting it didn't help. You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.",
+    "Restarting it didn't help. You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page. Any AI models already downloaded are kept.",
   );
   const retry = page.getByRole('button', { name: 'Try again' });
   await expect(retry).toBeVisible();

@@ -1116,7 +1116,9 @@ fn the_rendered_worker_parses() {
 /// `loader.js` reads it there. Two files, two declarations of the same two
 /// names — a rename in one is a cause written where nothing looks. The boot
 /// shell's address is the third: the worker fetches the shell from it and
-/// the loader's recovery returns to it.
+/// the loader's recovery returns to it. The same holds for the other names
+/// both declare — among them the worker's runtime cache, which the
+/// recovery drops by name and so must name exactly.
 #[test]
 fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
     let tmp = production_pkg_copy();
@@ -1131,6 +1133,9 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
     for declaration in [
         "const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';",
         "const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';",
+        // The cache the worker keeps its runtime binary in, which the
+        // loader's recovery drops by name.
+        "const RUNTIME_CACHE = '__impresspress_runtime';",
         // Rendered into both from the bundler's one `SHELL_URL`.
         shell_url.as_str(),
         // The stage only an `initialize()` failure carries: the worker

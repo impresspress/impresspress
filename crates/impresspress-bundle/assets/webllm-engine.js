@@ -193,9 +193,12 @@ async function createEngine(modelId, onProgress) {
     _engineModel = modelId;
 }
 
-// Page-direct unload — releases GPU memory but leaves IndexedDB-cached
-// weights intact. Used by the picker's "Download" action: load → unload
-// caches the model without keeping it as the active engine.
+// Page-direct unload — releases GPU memory but leaves the downloaded weights
+// in place: WebLLM keeps them in its own Cache Storage caches (`webllm/*`, its
+// default store), which a recovery does not drop (`dropCaches` in loader.js
+// erases only the app's own caches, by name). Used by the picker's "Download"
+// action: load → unload caches the model without keeping it as the active
+// engine.
 export async function unloadEngine() {
     await settledLoad();
     if (!_engine) return;

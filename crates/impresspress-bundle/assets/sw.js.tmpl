@@ -87,9 +87,10 @@ const RUNTIME_URL = '__WASM_BIN__';
 // the install: the version keeps nothing and loads its runtime from the
 // host, as every version did before this cache.
 //
-// `loader.js`'s recovery drops this cache with every other one, so the
-// replacement it registers fetches its runtime afresh; `runtimeBinary`
-// falls back to the host for a worker whose entry has gone.
+// `loader.js`'s recovery drops this cache by name (the same name is declared
+// there; `dropCaches`), so the replacement it registers fetches its runtime
+// afresh; `runtimeBinary` falls back to the host for a worker whose entry
+// has gone.
 const RUNTIME_CACHE = '__impresspress_runtime';
 
 // The Web Lock `loader.js` holds from before it registers a replacement
