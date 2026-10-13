@@ -86,8 +86,16 @@ together.
 
 ```sh
 cargo install --path crates/impresspress --locked --root ./out   # a current CLI
+examples/dev-sandbox/compiler/fetch-dist.sh                      # the compiler tree PIN.json pins
 IMPRESSPRESS=./out/bin/impresspress examples/dev-sandbox/build.sh
 ```
+
+`fetch-dist.sh` downloads and verifies the compiler tree published for
+`compiler/PIN.json`, and does nothing when `compiler/dist/` already is that tree.
+A pin with no published tree yet (a pin bump) has to be composed with
+`compiler/build-compiler.sh` instead — ~55 minutes and 12.6 GB of RSS; see
+`compiler/README.md`. `build.sh` never composes it: it refuses a missing or
+stale tree and names these two commands.
 
 `build.sh` assembles the bundle with whatever `impresspress` is on `PATH`
 unless `IMPRESSPRESS` names one. Install first: a stale binary from an older
@@ -96,10 +104,16 @@ without the recursive-directory overlay `[[assets.overlay]]` needs, so
 `dist/seed/` never appears — the script's own sanity check catches that and
 says so, but the fix is a fresh CLI, not a change to this directory.
 
-This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
-(`crates/impresspress-web/tests/e2e/dev-foundations.spec.ts` and
-`dev-workspace.spec.ts`). It:
+`build.sh` is the one bundle recipe CI's `e2e-dev-sandbox` job and local e2e
+runs both use (`crates/impresspress-web/tests/e2e/dev-foundations.spec.ts` and
+`dev-workspace.spec.ts`); CI puts `compiler/dist/` in place before it, with
+`fetch-dist.sh` or, when nothing is published for the pin, from its cache or
+a `build-compiler.sh --fast` composition. It:
 
+0. Checks `compiler/dist/manifest.json` against `compiler/PIN.json` (the
+   compiler version and the rubrc commit) and refuses, naming
+   `compiler/fetch-dist.sh`, when the tree is missing or was built for
+   another pin. It never builds the compiler.
 1. Verifies every `seeds/*/manifest.json` against its `site/**`,
    `sandbox.json`, `guide.md` and generated `llms.txt`
    (`seeds/check-seeds.py`) — see `--check`

@@ -209,6 +209,8 @@ try:
     built = json.loads(manifest.read_text())
 except ValueError as e:
     stale(f"dist/manifest.json is not JSON ({e})")
+if not isinstance(built, dict) or not isinstance(built.get("rubrc", {}), dict):
+    stale("dist/manifest.json is not a manifest object (no {..., \"rubrc\": {...}})")
 if built.get("version") != pin["version"]:
     stale(f"built for compiler {built.get('version')}; PIN.json pins {pin['version']}")
 built_sha = built.get("rubrc", {}).get("sha")

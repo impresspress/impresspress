@@ -108,8 +108,9 @@ jobs:
 
       # Both run against fake trees in well under a second and compile
       # nothing: `build.sh` refusing a missing or stale `compiler/dist/` (and
-      # its wasm-pack builds passing `--locked`), and the compose decision that
-      # keeps `dist/manifest.json`'s `build` field honest.
+      # the wasm-pack builds of `build.sh`, `measure.sh` and the justfile
+      # passing `--locked`), and the compose decision that keeps
+      # `dist/manifest.json`'s `build` field honest.
       - name: Test build.sh refuses a stale compiler
         run: |
           examples/dev-sandbox/test-build-compiler-refusal.sh
@@ -1062,7 +1063,7 @@ jobs:
       # it never runs the ~55 minute, 12.6 GB composition that would OOM this
       # runner; the steps below put the tree in place first.
       # `dev-compiler.spec.ts` and `dev-compile-tool.spec.ts` both read the
-      # manifest it produces, too. Same key as `e2e-dev-compile`, which `needs`
+      # manifest in `compiler/dist/`, too. Same key as `e2e-dev-compile`, which `needs`
       # this job so the two never compose in parallel and race to upload one
       # entry; see that job for why there are no `restore-keys` and what
       # `--fast` costs. Skipped entirely when the release asset was fetched:
