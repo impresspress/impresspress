@@ -157,7 +157,7 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
 
   // First failure in this tab. The worker answers the navigation with the
   // boot shell, which reads the cause the worker left and recovers by
-  // itself — once: drop the worker and its own caches, register afresh.
+  // itself — once: replace the worker in place and drop its own caches.
   const statusLines = await recordShellStatus(page);
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });

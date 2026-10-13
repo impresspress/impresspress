@@ -160,8 +160,11 @@ test('an initialize() failure is recovered from by erasing, in a build rendered 
 // A recovery drops the caches that are the app's — the runtime binary the
 // worker kept, any stop cause still left — BY NAME, and nothing else: the
 // model weights the page engines' libraries keep in Cache Storage (WebLLM,
-// transformers.js) are a gigabyte or more each, and no runtime failure is
-// fixed by downloading them again. Checked on the recovery that erases most.
+// transformers.js) are hundreds of MB to several GB, and no runtime failure
+// is fixed by downloading them again. Checked on the recovery that erases
+// most. (The cause this load acted on is gone before `dropCaches` runs —
+// `takeStopCause` deletes it as it reads it — so the stop-cause drop is
+// checked by the next test.)
 test('a recovery that erases drops the app’s own caches by name and keeps the model weights', async () => {
   const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
   await shell.booted;
@@ -171,7 +174,31 @@ test('a recovery that erases drops the app’s own caches by name and keeps the 
     assert.ok(shell.cacheNames().includes(name), `${name} survived the recovery`);
   }
   assert.ok(!shell.cacheNames().includes(RUNTIME_CACHE), 'the kept runtime binary was dropped');
-  assert.ok(!shell.cacheNames().includes(STOP_CACHE), 'the stop cause was dropped');
+});
+
+// A cause the dead worker leaves AFTER this load read its own — another of
+// its navigations failed while the stopped screen was up — is about the
+// death this recovery replaces the worker for. `dropCaches` drops it under
+// RECOVERY_LOCK; left in place, the next tab's shell would read it once the
+// lock is let go and replace the replacement.
+test('a recovery drops a stop cause the dead worker left after this load read its own', async () => {
+  const shell = loadShell({
+    path: '/b/auth/login',
+    stop: left('request', NOW),
+    now: NOW,
+    session: { [RECOVERY_DONE]: 'restarted' }
+  });
+  await shell.booted;
+  assert.ok(shell.stuck('impresspress-retry'), 'the stopped screen is up');
+  assert.ok(!shell.cacheNames().includes(STOP_CACHE), 'the cause this load acted on was consumed');
+
+  shell.leaveCause(left('request', NOW));
+  await shell.stuck('impresspress-retry').click();
+
+  assert.ok(!shell.cacheNames().includes(STOP_CACHE), 'the cause left since was dropped');
+  for (const name of MODEL_CACHES) {
+    assert.ok(shell.cacheNames().includes(name), `${name} survived the recovery`);
+  }
 });
 
 test('the same failure in a default build restarts and keeps the data', async () => {
@@ -374,7 +401,7 @@ const ERASE_NOT_DONE =
 const OFFER_KEEPS =
   'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.';
 const OFFER_ERASES =
-  'You can erase the data stored locally in this browser and try again, or reset, which also clears everything else this browser keeps for the app. Both start the app from its first page.';
+  "You can erase the data stored locally in this browser and try again, or reset, which also clears the app's other settings in this browser. Both start the app from its first page; downloaded AI models are kept.";
 
 // Every combination of what was spent and what the retry would do. The first
 // sentence is about what was actually done; the second and the button's label

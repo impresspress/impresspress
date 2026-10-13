@@ -97,8 +97,8 @@ export const RECOVERED_KEY = '/__impresspress_recovered';
 export const RUNTIME_CACHE = '__impresspress_runtime';
 /// Caches that are not the app's: the ones the page engines' libraries keep
 /// downloaded model weights in — WebLLM's (`webllm-engine.js`) and
-/// transformers.js's (`embed-engine.js`, `t2i-engine.js`). A gigabyte or
-/// more each in a real browser; nothing of impresspress's ever erases them.
+/// transformers.js's (`embed-engine.js`, `t2i-engine.js`): hundreds of MB to
+/// several GB in a real browser. Nothing of impresspress's ever erases them.
 export const MODEL_CACHES = ['webllm/model', 'webllm/config', 'webllm/wasm', 'transformers-cache'];
 /// Every cache a shell starts with, unless a test seeds more.
 export const SEEDED_CACHES = [RUNTIME_CACHE, ...MODEL_CACHES];
@@ -642,6 +642,9 @@ export function loadShell({
     registered: () => registered,
     unregistered: () => unregistered,
     cacheNames: () => [...cacheStore.keys()],
+    /// The dead worker leaving a cause in Cache Storage AFTER this load read
+    /// its own (`takeStopCause`): another navigation of it failed.
+    leaveCause: (entry) => cacheStore.set(STOP_CACHE, new Map([[STOP_KEY, entry]])),
     /// The ids of the deaths recorded as recovered from.
     recovered: () =>
       (cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? []).map((d) => d.id),
