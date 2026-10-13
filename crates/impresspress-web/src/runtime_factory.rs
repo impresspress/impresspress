@@ -314,10 +314,10 @@ impl RuntimeFactory {
 
         let builder = builder.block_config("wafer-run/security-headers", security_headers);
 
-        // Nothing of this app's goes into the build→boot gap: everything it
-        // adds is the builder's.
-        let (mut wafer, hooks) = self.services.build(builder)?;
-        impresspress_browser::boot::boot(&mut wafer, &hooks.with_app_seed(crate::config::WebSeeds))
+        // Build and boot through the funnel, with this app's own seeds.
+        let wafer = self
+            .services
+            .boot(builder, Some(&crate::config::WebSeeds))
             .await?;
 
         Ok(wafer)

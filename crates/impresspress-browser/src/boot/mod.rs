@@ -11,11 +11,10 @@
 //! db_init()                              sql.js + OPFS
 //! BrowserServices::new(page_engines)     the services every runtime shares
 //! ┌ services.builder().await?            pre-configured ImpresspressBuilder
-//! │   … consumer: extra_block, add_route, block_config (its CSP) …
-//! │ services.build(builder)?             -> (Wafer, BrowserBootHooks)
-//! │   … consumer: the gap — the built Wafer before it is sealed,
-//! │       e.g. wafer.add_block_config("wafer-run/router", …) …
-//! └ boot(&mut wafer, &hooks.with_app_seed(seed)).await?
+//! │   … consumer: extra_block, add_route, block_config (its CSP),
+//! │       final_block_config (e.g. its outer `wafer-run/router` table) …
+//! └ services.boot(builder, seed).await?  build → grants → seal → admin Init
+//!                                        → seeds → every other Init
 //! store_wafer(wafer)
 //! ```
 //!
@@ -24,10 +23,15 @@
 //! [`BrowserServices`], so the rebuilt runtime keeps the seeded JWT secret and
 //! the loaded config.
 //!
-//! What stays the consumer's: its own blocks, routes and security headers
+//! What stays the consumer's is everything it DECLARES on the builder — its
+//! own blocks (`extra_block`), routes, security headers
 //! (`wafer-run/security-headers` takes one `block_config`, the last one
-//! wins), anything it changes in the gap, and its app-specific seeds — an
-//! [`AppSeed`], which is optional.
+//! wins) and final overrides (`final_block_config`, which is applied after
+//! the shipped flows and is visible to prepared-plan export and parity
+//! checks) — plus its app-specific seeds, an [`AppSeed`], which is optional.
+//! No built-but-unsealed `Wafer` is handed out: a change made to one after
+//! `build()` would be invisible to everything that reads the builder's
+//! declarations.
 
 mod hooks;
 #[cfg(test)]
@@ -35,7 +39,8 @@ mod tests;
 
 use std::sync::Arc;
 
-pub use hooks::{AppSeed, BrowserBootHooks};
+pub use hooks::AppSeed;
+use hooks::BrowserBootHooks;
 use impresspress_core::builder::{self, ImpresspressBuilder};
 use wafer_core::interfaces::{
     config::service::ConfigService,
@@ -195,7 +200,7 @@ impl BrowserServices {
     /// short-cutting that chicken-and-egg with `CREATE TABLE IF NOT EXISTS`
     /// pre-creates that duplicated admin's migration schema by hand. Admin's
     /// migration is the single source of schema truth; seeding waits for
-    /// [`BrowserBootHooks`], after `init_block(admin)`.
+    /// the boot hook, after `init_block(admin)`.
     ///
     /// READING what an earlier boot created is another matter, and it has to
     /// happen here, as Cloudflare's builds do: every block's Init — admin's
@@ -262,19 +267,27 @@ impl BrowserServices {
             .config_source(cfg_source))
     }
 
-    /// Build the runtime `builder` describes and install the service worker's
-    /// asset loader, returning it unsealed together with the hooks [`boot`]
-    /// runs it under.
+    /// Build the runtime `builder` describes, install the service worker's
+    /// asset loader, and run the shared boot funnel over it: grants → seal →
+    /// `init_block(admin)` → the seeds → the remaining blocks
+    /// (`impresspress_core::builder::boot`). `builder` is the one
+    /// [`Self::builder`] returned, with the consumer's declarations added.
     ///
-    /// The gap between this and [`boot`] is the consumer's: the returned
-    /// `Wafer` is built but not sealed, so whatever it changes there — a
-    /// block registered with `register_block`, the outer
-    /// `wafer-run/router`'s route table replaced with `add_block_config` —
-    /// is what `boot` seals and initializes.
-    pub fn build(
+    /// admin's `lifecycle(Init)` runs FIRST so its migrations create the
+    /// canonical `impresspress__admin__variables` + `block_settings` tables
+    /// before the seed step reads them — admin's migration is the single
+    /// source of schema truth (the #210/#211 schema-drift lesson). The seed
+    /// step then runs `app_seed`, if any, seeds and loads the shared
+    /// variables, and publishes them into the services the wafer already
+    /// holds, all over `BrowserDatabaseService`.
+    ///
+    /// On success the runtime is ready for the consumer to `store_wafer` (or
+    /// `replace_wafer`).
+    pub async fn boot(
         &self,
         builder: ImpresspressBuilder,
-    ) -> Result<(wafer_run::Wafer, BrowserBootHooks), JsValue> {
+        app_seed: Option<&dyn AppSeed>,
+    ) -> Result<wafer_run::Wafer, JsValue> {
         let block_settings_handle = builder.block_settings_handle();
         // The router verifies JWTs against this secret. It's empty at build
         // time (the variables table doesn't exist yet), so grab the handle and
@@ -295,41 +308,24 @@ impl BrowserServices {
             jwt_secret_handle,
             crypto: self.crypto.clone(),
             page_engine_scripts: self.page_engine_scripts.clone(),
-            app_seed: None,
+            app_seed,
         };
-        Ok((wafer, hooks))
+        builder::boot(
+            &mut wafer,
+            &hooks,
+            // The admin permissions page is served in the browser too, so the
+            // rows it writes are this runtime's deployment-owned grants. On a
+            // fresh profile the table does not exist yet and `load` degrades
+            // to no grants.
+            builder::GrantSource::Database(&hooks.db),
+            // A browser runtime is long-lived and inspectable (and rebuilt on
+            // demand), so one broken block must not wedge the whole page.
+            builder::InitPolicy::Tolerant,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&format!("boot: {e}")))?;
+        Ok(wafer)
     }
-}
-
-/// Run the shared boot funnel over a runtime [`BrowserServices::build`] built:
-/// grants → seal → `init_block(admin)` → the seed hook → the remaining blocks
-/// (`impresspress_core::builder::boot`).
-///
-/// admin's `lifecycle(Init)` runs FIRST so its migrations create the canonical
-/// `impresspress__admin__variables` + `block_settings` tables before
-/// [`BrowserBootHooks`] reads them — admin's migration is the single source
-/// of schema truth (the #210/#211 schema-drift lesson). The hook then seeds
-/// and publishes into the services the wafer already holds, all over
-/// `BrowserDatabaseService`.
-///
-/// On success the runtime is ready for the consumer to `store_wafer` (or
-/// `replace_wafer`).
-pub async fn boot(wafer: &mut wafer_run::Wafer, hooks: &BrowserBootHooks) -> Result<(), JsValue> {
-    builder::boot(
-        wafer,
-        hooks,
-        // The admin permissions page is served in the browser too, so the
-        // rows it writes are this runtime's deployment-owned grants. On a
-        // fresh profile the table does not exist yet and `load` degrades to
-        // no grants.
-        builder::GrantSource::Database(&hooks.db),
-        // A browser runtime is long-lived and inspectable (and rebuilt on
-        // demand), so one broken block must not wedge the whole page.
-        builder::InitPolicy::Tolerant,
-    )
-    .await
-    .map_err(|e| JsValue::from_str(&format!("boot: {e}")))?;
-    Ok(())
 }
 
 /// The config both surfaces start every browser build from: the block settings

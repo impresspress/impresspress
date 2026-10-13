@@ -169,7 +169,7 @@ fn console_emit(level: Level, line: String) {
 /// Install the console subscriber as the process-wide `tracing` default.
 ///
 /// Call once, as early as possible in the wasm entry point —
-/// `impresspress-web`'s `initialize` does — and before any code that logs.
+/// `boot::prepare_worker` does — and before any code that logs.
 /// Without it every `tracing` event from `impresspress-core`, `wafer-run` and
 /// this crate is dropped by `tracing`'s no-op default dispatcher, which is
 /// what made "the malformed chunk is logged and skipped" mean "silently

@@ -12,11 +12,11 @@ use wafer_core::interfaces::{config::service::ConfigService, database::service::
 ///
 /// It runs after `init_block(admin)` — so the `impresspress__admin__variables`
 /// table exists — and before the variables are auto-generated and loaded
-/// back, so whatever it writes is in the map [`BrowserBootHooks`] publishes
+/// back, so whatever it writes is in the map the boot hook publishes
 /// to the config source and to the blocks still to initialize.
 ///
-/// Optional ([`BrowserBootHooks::with_app_seed`]): a runtime with nothing of
-/// its own to seed boots without one. Use
+/// Optional (`app_seed` of [`super::BrowserServices::boot`]): a runtime with
+/// nothing of its own to seed boots without one. Use
 /// `impresspress_core::platform_state::variables::{seed_if_absent, set}` —
 /// `seed_if_absent` leaves a value a previous boot or an admin edit wrote,
 /// `set` overrides it. An `Err` aborts the boot.
@@ -25,8 +25,8 @@ pub trait AppSeed {
     async fn seed(&self, db: &Arc<dyn DatabaseService>) -> Result<(), String>;
 }
 
-/// [`BootHooks`] for a browser runtime, made by
-/// [`super::BrowserServices::build`] and run by [`super::boot`].
+/// [`BootHooks`] for a browser runtime, made and run by
+/// [`super::BrowserServices::boot`].
 ///
 /// After `init_block(admin)` has created the variables / block_settings
 /// tables, this runs the consumer's [`AppSeed`] (if any), auto-generates the
@@ -46,7 +46,7 @@ pub trait AppSeed {
 /// `db` is a fresh `BrowserDatabaseService` handle; the service is a stateless
 /// unit struct over global OPFS, so it points at the same database the wafer
 /// uses.
-pub struct BrowserBootHooks {
+pub(super) struct BrowserBootHooks<'a> {
     pub(super) db: Arc<dyn DatabaseService>,
     pub(super) config_svc: Arc<dyn ConfigService>,
     pub(super) config_source: Arc<impresspress_core::config_source::SharedConfigSource>,
@@ -57,22 +57,16 @@ pub struct BrowserBootHooks {
     /// Comma-joined, published as
     /// `impresspress_core::ui::PAGE_ENGINE_SCRIPTS_CONFIG_KEY`.
     pub(super) page_engine_scripts: String,
-    pub(super) app_seed: Option<Box<dyn AppSeed>>,
+    pub(super) app_seed: Option<&'a dyn AppSeed>,
 }
 
-impl BrowserBootHooks {
-    /// Run `seed` as this app's [`AppSeed`].
-    pub fn with_app_seed(mut self, seed: impl AppSeed + 'static) -> Self {
-        self.app_seed = Some(Box::new(seed));
-        self
-    }
-
+impl BrowserBootHooks<'_> {
     /// The app's seeds, then the shared ones: auto-generate the declared
     /// secrets (incl. the auth JWT secret) and load the full set back — the
     /// core path every target runs, over `BrowserDatabaseService`. There are
     /// no process env vars in the browser, hence `&[]`.
     async fn seed_and_load_variables(&self) -> Result<HashMap<String, String>, String> {
-        if let Some(seed) = &self.app_seed {
+        if let Some(seed) = self.app_seed {
             seed.seed(&self.db).await?;
         }
         impresspress_core::platform_state::variables::seed_and_load(&self.db, &[]).await
@@ -98,7 +92,7 @@ impl BrowserBootHooks {
 }
 
 #[wafer_block::wafer_async_trait]
-impl BootHooks for BrowserBootHooks {
+impl BootHooks for BrowserBootHooks<'_> {
     async fn seed_after_admin_init(&self, wafer: &mut wafer_run::Wafer) -> Result<(), String> {
         let vars = self.seed_and_load_variables().await?;
         web_sys::console::log_1(

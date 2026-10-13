@@ -31,7 +31,7 @@ use crate::config_vars::{
 /// list of module-script URLs, rendered into every page drawn with
 /// [`SiteConfig::load`], before `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS`.
 ///
-/// The browser adapter (`impresspress-web`) publishes it, from the engines the
+/// The browser boot funnel (`impresspress_browser::boot`) publishes it, from the engines the
 /// bundle shipped (`initialize({ pageEngines })`): its LLM, image and
 /// embedding services run their models in a window, so the pages the runtime
 /// renders carry the engine scripts that answer them. That is a fact of

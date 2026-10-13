@@ -2,27 +2,30 @@
 //! `wasm-pack test --node` (the in-memory OPFS of
 //! `database::test_support`): what [`super::BrowserServices::builder`]
 //! configures, that an [`AppSeed`] reaches the blocks still to initialize,
-//! and that what a consumer changes between `build` and `boot` is the
-//! runtime `boot` seals.
+//! that both holders of the JWT secret agree after a boot, and that a final
+//! override the consumer declares on the funnel's builder is the runtime
+//! [`super::BrowserServices::boot`] serves.
 
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use wafer_block::{
     core_types::{LifecycleEvent, WaferError},
     http_codec,
 };
-use wafer_core::interfaces::database::service::DatabaseService;
+use wafer_core::interfaces::{crypto::service::CryptoService, database::service::DatabaseService};
 use wafer_run::{Block, BlockInfo, ConfigSource, Context, InputStream, Message, OutputStream};
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use super::{boot, infrastructure_config, AppSeed, BrowserServices};
+use super::{infrastructure_config, AppSeed, BrowserServices};
 
 /// Browser builds log server errors only, on both config surfaces — the
 /// pipeline reads the policy off the synchronous snapshot.
@@ -85,12 +88,14 @@ async fn an_app_seed_reaches_the_blocks_still_to_initialize() {
     let services = BrowserServices::new(Vec::new()).expect("the browser services construct");
     let calls = Rc::new(Cell::new(0));
 
-    let builder = services.builder().await.expect("a builder");
-    let (mut wafer, hooks) = services.build(builder).expect("the runtime builds");
-    let hooks = hooks.with_app_seed(MarkerSeed {
+    let seed = MarkerSeed {
         calls: Rc::clone(&calls),
-    });
-    boot(&mut wafer, &hooks).await.expect("the runtime boots");
+    };
+    let builder = services.builder().await.expect("a builder");
+    services
+        .boot(builder, Some(&seed))
+        .await
+        .expect("the runtime boots");
 
     assert_eq!(calls.get(), 1, "the funnel runs the app seed exactly once");
     // Through the config source rather than the table: a seed that ran
@@ -110,31 +115,49 @@ async fn an_app_seed_reaches_the_blocks_still_to_initialize() {
 }
 
 /// **The seed is optional.** A runtime with nothing of its own to seed boots,
-/// and still gets the shared seeding — the auto-generated JWT secret, on both
-/// holders of it.
+/// and still gets the shared seeding — the auto-generated JWT secret, rotated
+/// onto BOTH of its holders: the crypto service that signs tokens and the
+/// router's handle the pipeline verifies against. A token the first signs
+/// must verify under the second's secret; when only one of them was rotated,
+/// every authenticated request 403'd after a successful login.
 #[wasm_bindgen_test]
 async fn a_runtime_without_an_app_seed_boots_with_the_shared_seeds() {
     crate::database::test_support::fresh_db().await;
     let services = BrowserServices::new(Vec::new()).expect("the browser services construct");
 
     let builder = services.builder().await.expect("a builder");
-    let (mut wafer, hooks) = services.build(builder).expect("the runtime builds");
-    let jwt_secret = Arc::clone(&hooks.jwt_secret_handle);
-    boot(&mut wafer, &hooks).await.expect("the runtime boots");
+    let router_secret = builder.jwt_secret_handle();
+    services
+        .boot(builder, None)
+        .await
+        .expect("the runtime boots");
 
     assert_eq!(resolved_for_a_declaring_block(&services).await, None);
+    let router_secret = router_secret.read().expect("jwt lock").clone();
     assert!(
-        !jwt_secret.read().expect("jwt lock").is_empty(),
+        !router_secret.is_empty(),
         "the shared seeding generated the JWT secret and rotated the router's copy",
     );
+    let mut claims = BTreeMap::new();
+    claims.insert("sub".to_string(), serde_json::json!("someone"));
+    let token = services
+        .crypto
+        .sign_for("wafer-run/auth", claims, Duration::from_secs(60))
+        .await
+        .expect("the crypto service signs");
+    let verified = crate::crypto::BrowserCryptoService::new(router_secret)
+        .verify_for("wafer-run/auth", &token)
+        .await
+        .expect("a token the crypto service signed verifies under the router's secret");
+    assert_eq!(verified.get("sub"), Some(&serde_json::json!("someone")));
 }
 
-/// The route the consumer adds between `build` and `boot`.
+/// The route the consumer declares ahead of the shipped table.
 const WRAPPED_PATH: &str = "/wrapped-by-the-consumer";
 const WRAPPED_BODY: &[u8] = b"answered-by-the-consumer-block";
 
-/// A consumer block, reached only through the route the consumer added to
-/// the outer router in the gap.
+/// A consumer block, reached only through the route the consumer declared on
+/// the outer router.
 struct ConsumerBlock {
     reached: Arc<AtomicUsize>,
 }
@@ -158,27 +181,21 @@ impl Block for ConsumerBlock {
     }
 }
 
-/// **The build→boot gap is the consumer's.** A consumer that replaces the
-/// outer `wafer-run/router`'s route table on the built runtime — as
-/// gizza-site does to serve its own pages outside `/b/**` — gets that table
-/// in the runtime `boot` seals: the request reaches the consumer's block,
-/// not `wafer-run/web`, which `site_main::default_routes` sends every
-/// unclaimed path to.
+/// **A final router override declared on the funnel's builder takes
+/// effect.** A consumer that replaces the outer `wafer-run/router`'s route
+/// table with `final_block_config` — as gizza-site does to serve its own
+/// pages outside `/b/**` — gets that table in the runtime the funnel boots:
+/// the request reaches the consumer's block, not `wafer-run/web`, which
+/// `site_main::default_routes` sends every unclaimed path to. Declared, not
+/// patched onto a built runtime, so prepared-plan export and parity checks
+/// see it too.
 #[wasm_bindgen_test]
-async fn a_router_wrapped_between_build_and_boot_takes_effect() {
+async fn a_final_router_override_declared_on_the_builder_takes_effect() {
     crate::database::test_support::fresh_db().await;
     let services = BrowserServices::new(Vec::new()).expect("the browser services construct");
     let reached = Arc::new(AtomicUsize::new(0));
 
-    let builder = services.builder().await.expect("a builder").extra_block(
-        "test/consumer",
-        Arc::new(ConsumerBlock {
-            reached: Arc::clone(&reached),
-        }),
-    );
-    let (mut wafer, hooks) = services.build(builder).expect("the runtime builds");
-
-    // The gap: the consumer's route ahead of the shipped table.
+    // The consumer's route ahead of the shipped table.
     let mut routes = vec![serde_json::json!({ "path": WRAPPED_PATH, "block": "test/consumer" })];
     routes.extend(
         impresspress_core::flows::site_main::default_routes()
@@ -187,9 +204,21 @@ async fn a_router_wrapped_between_build_and_boot_takes_effect() {
             .iter()
             .cloned(),
     );
-    wafer.add_block_config("wafer-run/router", serde_json::json!({ "routes": routes }));
-
-    boot(&mut wafer, &hooks).await.expect("the runtime boots");
+    let builder = services
+        .builder()
+        .await
+        .expect("a builder")
+        .extra_block(
+            "test/consumer",
+            Arc::new(ConsumerBlock {
+                reached: Arc::clone(&reached),
+            }),
+        )
+        .final_block_config("wafer-run/router", serde_json::json!({ "routes": routes }));
+    let wafer = services
+        .boot(builder, None)
+        .await
+        .expect("the runtime boots");
 
     let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "retrieve");

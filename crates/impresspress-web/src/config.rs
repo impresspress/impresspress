@@ -125,3 +125,52 @@ impl AppSeed for WebSeeds {
         Ok(())
     }
 }
+
+/// [`WebSeeds`] through the real boot: the runtime factory booted on a fresh
+/// database leaves the bootstrap admin and the `HAS_LANDING_PAGE` value this
+/// build promises. CI runs it in the plain configuration (no sandbox, so `/`
+/// redirects to the login page) and with `browser-site-runtime` (`/` serves
+/// the site) — the two directions of the force-set.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use std::sync::Arc;
+
+    use impresspress_browser::{boot::BrowserServices, database::test_support::fresh_db};
+    use wafer_core::interfaces::database::service::DatabaseService;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+    use crate::RuntimeFactory;
+
+    #[wasm_bindgen_test]
+    async fn a_booted_runtime_carries_the_web_seeds() {
+        let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
+        let factory = RuntimeFactory::new(
+            BrowserServices::new(Vec::new()).expect("the browser services construct"),
+        );
+        factory.build(&[]).await.expect("the runtime boots");
+
+        let vars = impresspress_core::platform_state::variables::load_all(&db)
+            .await
+            .expect("the variables load");
+        assert_eq!(
+            vars.get(BOOTSTRAP_ADMIN_EMAIL_KEY).map(String::as_str),
+            Some("admin@example.com"),
+        );
+        assert_eq!(
+            vars.get(BOOTSTRAP_ADMIN_PASSWORD_KEY).map(String::as_str),
+            Some("admin123"),
+        );
+        // Stated from the cargo feature rather than from
+        // `SandboxMode::COMPILED`, which the seed itself reads.
+        let expected = if cfg!(feature = "browser-site-runtime") {
+            "true"
+        } else {
+            "false"
+        };
+        assert_eq!(
+            vars.get(HAS_LANDING_PAGE_KEY).map(String::as_str),
+            Some(expected),
+        );
+    }
+}

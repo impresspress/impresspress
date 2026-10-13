@@ -23,7 +23,7 @@
 //! native server installs one in `impresspress-native::log_init` (from
 //! `impresspress_server::build_native_runtime`), and the browser installs one in
 //! `impresspress-browser::logger::init_console_tracing` (from
-//! `impresspress-web::initialize`). The Cloudflare Worker installs **no**
+//! `impresspress_browser::boot::prepare_worker`). The Cloudflare Worker installs **no**
 //! `tracing` subscriber — it has a `LoggerService` (`ConsoleLoggerService`),
 //! which is a different channel — so a `tracing` event is dropped there.
 //! `block-vector` is not in that target's default feature set, so nothing
