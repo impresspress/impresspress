@@ -101,6 +101,8 @@ mod runtime_build;
 mod runtime_cache;
 mod services;
 pub mod storage;
+#[cfg(test)]
+mod test_fakes;
 
 // The `make_*` constructors are the crate's public service-construction API
 // (`impresspress-cloud`'s worker and the `impresspress build --target
@@ -137,17 +139,27 @@ thread_local! {
 /// One-time isolate initialization: selects [`DeferMode::Queued`] (work a
 /// handler defers until after its response drains into `ctx.wait_until` — see
 /// `dispatch`; spawned any other way it would be cancelled with the
-/// response). Audit rows need no isolate setting: `dispatch` queues each
-/// request's rows in that request's own queue. Consumers should call this
-/// from their worker's `#[event(start)]` handler; `run()` also invokes it
-/// behind a once-per-isolate guard, so isolates stay correct either way and
-/// repeat calls are no-ops.
+/// response), and installs the spawn wrapper that runs a producer spawned
+/// during a request inside that request's service scope
+/// (`request_services::wrap_spawned`). Audit rows need no isolate setting:
+/// `dispatch` queues each request's rows in that request's own queue.
+///
+/// [`run_with_config`] (and so [`run`]) calls it first, before any request
+/// is routed — the `/_deploy/*` endpoints included, which boot a runtime and
+/// run every block's Init on a cold isolate — and [`run_scheduled_with_config`]
+/// calls it before its sweep. So every request an isolate serves sees both
+/// settings, whatever it served first. A consumer's `#[event(start)]` handler
+/// may call it too; repeat calls are no-ops.
 ///
 /// [`DeferMode::Queued`]: impresspress_core::deferred::DeferMode::Queued
 pub fn init_isolate() {
     ISOLATE_INITIALIZED.with(|done| {
         if !done.get() {
             impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Queued);
+            // A producer spawned during a request runs in that request's
+            // service scope; see `request_services::wrap_spawned`.
+            #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+            wafer_block::spawn::set_spawn_wrapper(Some(request_services::wrap_spawned));
             done.set(true);
         }
     });
@@ -287,6 +299,13 @@ where
     // `database`'s module docs.
     let queries = database::D1QueryCount::new();
 
+    // Isolate-scoped init — no-op after the first call. First, before any
+    // path is routed: the `/_deploy/*` endpoints below boot a runtime and run
+    // every block's Init, and on a cold isolate they are often the first
+    // request it serves, so they need the spawn wrapper and the defer mode
+    // as much as a routed request does.
+    init_isolate();
+
     // `std::env` is stubbed to always-empty on `wasm32-unknown-unknown`, so
     // `impresspress_core::ui::assets::base_url()` can never observe
     // `IMPRESSPRESS_ASSET_BASE_URL` through it here. `worker::Env::var` is
@@ -353,9 +372,6 @@ where
         return serve_static_asset_from_r2(&env, key, content_type).await;
     }
 
-    // Isolate-scoped init — no-op after the first call; consumers with an
-    // #[event(start)] handler have already run it.
-    init_isolate();
     // The request's own services leave the statements its audit row needs
     // unused (none when the policy writes no rows); the row is written below
     // with a handle that may use them, and then they go to the request's
@@ -1201,6 +1217,333 @@ mod deferred_drain_tests {
             *seen.lock().unwrap(),
             [7, 8],
             "b's task ran under b's services"
+        );
+    }
+}
+
+/// A producer a block spawns during a request runs in that request's
+/// service scope, through the real `dispatch` and a real `Wafer` whose
+/// service blocks hold the request-scoped proxies, as `runtime_build` wires
+/// them. The proxies are only reachable inside a poll of the dispatch
+/// future; a producer runs on a task of its own and, for a streamed body,
+/// after `dispatch` has returned. `init_isolate` installs the spawn wrapper
+/// that carries the scope (`request_services::wrap_spawned`); without it
+/// every call below is refused.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod spawned_producer_scope_tests {
+    use std::sync::Arc;
+
+    use wafer_run::{Block, BlockInfo, InputStream, Message, OutputStream};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+    use crate::test_fakes::{CreateRecordingDb, FixedCrypto, FoldersOnly};
+
+    /// Streams SSE whose producer calls `wafer-run/crypto` after its first
+    /// chunk — the shape of a chat stream storing its reply once the last
+    /// token is out — and reports the outcome in the next frame.
+    struct SseCallsCrypto;
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for SseCallsCrypto {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/sse-calls-crypto",
+                "0.0.1",
+                "http-handler@v1",
+                "streams SSE and calls a service after its first chunk",
+            )
+        }
+
+        async fn handle(
+            &self,
+            ctx: &dyn wafer_run::context::Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let ctx = ctx.clone_arc();
+            OutputStream::from_producer(move |sink, _cancel| async move {
+                let _ = sink
+                    .send_meta(wafer_block::MetaEntry {
+                        key: wafer_block::meta::META_RESP_CONTENT_TYPE.to_string(),
+                        value: "text/event-stream".to_string(),
+                    })
+                    .await;
+                let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                let frame = match wafer_core::clients::crypto::random_bytes(ctx.as_ref(), 1).await {
+                    Ok(_) => "data: in scope\n\n".to_string(),
+                    Err(error) => format!("data: {}\n\n", error.message),
+                };
+                let _ = sink.send_chunk(frame.into_bytes()).await;
+                let _ = sink.complete(Vec::new()).await;
+            })
+        }
+    }
+
+    /// Creates a folder in its own storage namespace through
+    /// `wafer-run/storage`, the block every storage op on a deployment goes
+    /// through, and answers 200.
+    struct CreatesFolder;
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for CreatesFolder {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/creates-folder",
+                "0.0.1",
+                "http-handler@v1",
+                "creates a storage folder",
+            )
+        }
+
+        async fn handle(
+            &self,
+            ctx: &dyn wafer_run::context::Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            match wafer_core::clients::storage::create_folder(ctx, "uploads", false).await {
+                Ok(()) => impresspress_core::http::ok_json(&serde_json::json!({ "ok": true })),
+                Err(error) => OutputStream::error(error),
+            }
+        }
+    }
+
+    /// The admin block's stand-in, under its id: it issues the two grants a
+    /// deployment's admin block issues for what these tests reach — every
+    /// block may use crypto and write the storage access log. It answers
+    /// nothing.
+    struct IssuesGrants;
+
+    const ADMIN: &str = impresspress_core::blocks::admin::ADMIN_BLOCK_ID;
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for IssuesGrants {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(ADMIN, "0.0.1", "http-handler@v1", "issues grants").grants(vec![
+                wafer_run::ResourceGrant::read_write("*", "*")
+                    .typed(wafer_run::ResourceType::Crypto),
+                wafer_run::ResourceGrant::read_write(
+                    "*",
+                    "impresspress__admin__storage_access_logs",
+                ),
+            ])
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::error(wafer_run::WaferError::new(
+                wafer_run::ErrorCode::Unimplemented,
+                "grants only",
+            ))
+        }
+    }
+
+    /// A `Wafer` with the grants block as its admin block.
+    fn wafer_with_grants() -> wafer_run::Wafer {
+        let mut wafer = wafer_run::Wafer::new(Arc::new(wafer_run::StaticConfigSource::default()))
+            .expect("Wafer::new");
+        wafer.set_admin_block(ADMIN);
+        wafer
+            .register_block(ADMIN, Arc::new(IssuesGrants))
+            .expect("register the grants block");
+        wafer
+    }
+
+    fn site_main_with(block: &str) -> String {
+        format!(
+            r#"{{"id":"site-main","name":"t","version":"0.1.0","description":"t",
+                "steps":[{{"id":"only","block":"{block}"}}],
+                "config":{{"on_error":"stop"}}}}"#
+        )
+    }
+
+    async fn dispatch_get(
+        wafer: &wafer_run::Wafer,
+        services: std::rc::Rc<request_services::RequestServices>,
+    ) -> worker::Response {
+        let req = worker::Request::new("https://example.test/anything", worker::Method::Get)
+            .expect("request");
+        dispatch(wafer, req, services, &AfterResponse::new(), &|_| {})
+            .await
+            .expect("dispatch")
+    }
+
+    /// **The production-shaped finding-3 test.** The flow forwards the
+    /// step's streamed head (wafer-run #442), `dispatch` returns the
+    /// streaming `Response`, and the body is read after it has: the
+    /// producer's call to `wafer-run/crypto` must still reach this request's
+    /// crypto service. Fails without the wrapper `init_isolate` installs,
+    /// with "Cloudflare crypto service used outside request poll scope".
+    #[wasm_bindgen_test]
+    async fn a_streamed_producer_calls_services_through_dispatch() {
+        init_isolate();
+        let mut wafer = wafer_with_grants();
+        wafer_core::service_blocks::crypto::register_with(
+            &mut wafer,
+            request_services::crypto_proxy(),
+        )
+        .expect("register crypto");
+        wafer
+            .register_block("test/sse-calls-crypto", Arc::new(SseCallsCrypto))
+            .expect("register");
+        wafer
+            .add_flow_json(&site_main_with("test/sse-calls-crypto"))
+            .expect("flow");
+        wafer.seal().await.expect("seal");
+
+        let mut response = dispatch_get(
+            &wafer,
+            request_services::RequestServices::marker_with_crypto(7, Arc::new(FixedCrypto)),
+        )
+        .await;
+
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .expect("headers")
+                .as_deref(),
+            Some("text/event-stream"),
+            "the flow forwards the stream and the response streams"
+        );
+        assert_eq!(
+            response.text().await.expect("read body"),
+            "data: one\n\ndata: in scope\n\n",
+            "the producer's service call reached its request's services"
+        );
+    }
+
+    /// **The live bug.** `wafer-run/storage` (impresspress's storage block)
+    /// writes its access-log row from the producer that forwards the
+    /// backend's answer, for every op and every outcome. Before the wrapper,
+    /// that write reached no database on Cloudflare and the block discarded
+    /// the error, so no storage access served by R2 left an audit row.
+    #[wasm_bindgen_test]
+    async fn a_storage_op_through_dispatch_writes_its_access_log_row() {
+        init_isolate();
+        let db = CreateRecordingDb::default();
+        let created = std::rc::Rc::clone(&db.created);
+        let mut wafer = wafer_with_grants();
+        wafer_core::service_blocks::database::register_with(
+            &mut wafer,
+            request_services::database_proxy(),
+        )
+        .expect("register database");
+        wafer
+            .register_block(
+                "wafer-run/storage",
+                impresspress_core::blocks::storage::create(Arc::new(FoldersOnly)),
+            )
+            .expect("register storage");
+        wafer
+            .register_block("test/creates-folder", Arc::new(CreatesFolder))
+            .expect("register");
+        wafer
+            .add_flow_json(&site_main_with("test/creates-folder"))
+            .expect("flow");
+        wafer.seal().await.expect("seal");
+
+        let mut response = dispatch_get(
+            &wafer,
+            request_services::RequestServices::marker_with_database(7, Arc::new(db)),
+        )
+        .await;
+
+        assert_eq!(response.status_code(), 200, "{:?}", response.text().await);
+        assert_eq!(
+            *created.borrow(),
+            // `impresspress_core::blocks::admin::logs::STORAGE_ACCESS_LOGS_TABLE`,
+            // which is crate-private there.
+            vec![format!(
+                "impresspress__admin__storage_access_logs {}",
+                wafer_block::ServiceOp::STORAGE_CREATE_FOLDER
+            )],
+            "the storage block's access-log row reached this request's database"
+        );
+    }
+}
+
+/// The isolate settings are in place before any request is routed. On a cold
+/// isolate the first request is often a `/_deploy/*` call, which boots a
+/// runtime and runs every block's Init and so can spawn producers; before
+/// `init_isolate` moved to the top of `run_with_config`, those paths
+/// returned before it ran, and the isolate served them with no spawn
+/// wrapper and the wrong defer mode.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod cold_isolate_tests {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    /// Puts this thread back in the state of an isolate that has served
+    /// nothing, and restores what it found on drop, so the rest of the test
+    /// binary keeps the settings an earlier `init_isolate` installed.
+    struct ColdIsolate {
+        was_initialized: bool,
+        wrapper: Option<wafer_block::spawn::SpawnWrapper>,
+    }
+
+    impl ColdIsolate {
+        fn enter() -> Self {
+            Self {
+                was_initialized: ISOLATE_INITIALIZED.with(|done| done.replace(false)),
+                wrapper: wafer_block::spawn::set_spawn_wrapper(None),
+            }
+        }
+    }
+
+    impl Drop for ColdIsolate {
+        fn drop(&mut self) {
+            ISOLATE_INITIALIZED.with(|done| done.set(self.was_initialized));
+            wafer_block::spawn::set_spawn_wrapper(self.wrapper.take());
+        }
+    }
+
+    /// An unauthorized `/_deploy/prepared` call — answered 404 before any
+    /// binding is touched — on a cold isolate leaves the isolate initialized,
+    /// spawn wrapper installed. Fails while `init_isolate` runs after the
+    /// `/_deploy/*` branches.
+    #[wasm_bindgen_test]
+    async fn a_deploy_request_on_a_cold_isolate_runs_after_the_isolate_init() {
+        let _cold = ColdIsolate::enter();
+        let req =
+            worker::Request::new("https://example.test/_deploy/prepared", worker::Method::Get)
+                .expect("request");
+        let env = JsValue::from(js_sys::Object::new()).unchecked_into::<worker::Env>();
+        let ctx = worker::Context::new(
+            JsValue::from(js_sys::Object::new()).unchecked_into::<worker::worker_sys::Context>(),
+        );
+
+        let response = run_with_config(
+            req,
+            env,
+            ctx,
+            HashMap::new(),
+            Ok::<ImpresspressBuilder, Box<dyn std::error::Error>>,
+            |_, _| Ok(()),
+        )
+        .await
+        .expect("a response");
+
+        assert_eq!(
+            response.status_code(),
+            404,
+            "the deploy endpoint answered, without a deploy token"
+        );
+        assert!(
+            ISOLATE_INITIALIZED.with(std::cell::Cell::get),
+            "the isolate was initialized"
+        );
+        assert!(
+            wafer_block::spawn::set_spawn_wrapper(None).is_some(),
+            "the spawn wrapper was installed before the deploy endpoint ran"
         );
     }
 }

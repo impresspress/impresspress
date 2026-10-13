@@ -562,6 +562,71 @@ mod tests {
         assert!(current().is_none(), "no scope is left current");
     }
 
+    /// **Review finding 3 (SSE plan), the browser half.** A streamed
+    /// response's producer runs on a task of its own and keeps writing after
+    /// the request's scope has ended at time-to-headers — the chat stream
+    /// stores its reply once the last token is out. Such a write must still
+    /// reach OPFS by the time the body ends. Today it does because the write
+    /// is outside every scope and so flushes itself; a producer joined to a
+    /// scope that has already ended would mark a flag nobody flushes, and
+    /// the row would be lost on the next reload. The producer waits on a
+    /// gate the test opens only once the scope has returned, so the write
+    /// cannot slip in before the scope's own end-of-request flush.
+    #[wasm_bindgen_test]
+    async fn a_write_a_streamed_producer_makes_after_its_scope_ended_is_exported() {
+        use wafer_block::{meta::META_RESP_CONTENT_TYPE, MetaEntry};
+        use wafer_run::OutputStream;
+        use wasm_bindgen::JsCast;
+
+        let db = fresh().await;
+        let (open_gate, gate) = futures::channel::oneshot::channel::<()>();
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(MetaEntry {
+                    key: META_RESP_CONTENT_TYPE.to_string(),
+                    value: "text/event-stream".to_string(),
+                })
+                .await;
+            let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+            gate.await.expect("the test opens the gate");
+            let frame = match BrowserDatabaseService.create(TABLE, row("late")).await {
+                Ok(_) => "data: stored\n\n".to_string(),
+                Err(error) => format!("data: {error}\n\n"),
+            };
+            let _ = sink.send_chunk(frame.into_bytes()).await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let (response, flush) = run(crate::convert::output_to_response(stream)).await;
+        flush.expect("the request's flush");
+        let response = response.expect("build response");
+        assert_eq!(
+            response.headers().get("content-type").expect("headers"),
+            Some("text/event-stream".to_string()),
+            "the response streams"
+        );
+        assert_eq!(row_count(&db).await, 0, "the producer has not written yet");
+        let at_scope_end = opfs_writes();
+
+        open_gate.send(()).expect("the producer is waiting");
+        let body = wasm_bindgen_futures::JsFuture::from(response.text().expect("text()"))
+            .await
+            .expect("read body");
+        assert_eq!(
+            body.dyn_into::<js_sys::JsString>()
+                .map(String::from)
+                .expect("a string body"),
+            "data: one\n\ndata: stored\n\n"
+        );
+
+        assert!(
+            opfs_writes() > at_scope_end,
+            "the producer's write was exported by the time its body ended"
+        );
+        crate::db_init().await.expect("reopen from OPFS");
+        assert_eq!(row_count(&db).await, 1, "the row survives a reload");
+    }
+
     /// Outside any scope the old contract holds: one flush per mutation.
     #[wasm_bindgen_test]
     async fn without_a_scope_every_mutation_flushes() {

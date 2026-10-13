@@ -67,6 +67,14 @@ pub fn set_mode(mode: DeferMode) {
 
 /// Run `task` after the current response, as this thread's [`DeferMode`]
 /// says.
+///
+/// Call it from a handler, not from a stream producer. Under
+/// [`DeferMode::Queued`] a producer (a task `OutputStream::from_producer`
+/// spawned) runs outside its request's after-response scope on every
+/// platform, so its task is refused and dropped with an error line: whether
+/// the request's queue would still be drained when the producer reaches the
+/// call is a race the producer cannot see. A producer does its work before
+/// its terminal instead.
 pub fn defer<F>(task: F)
 where
     F: Future<Output = ()> + MaybeSend + 'static,

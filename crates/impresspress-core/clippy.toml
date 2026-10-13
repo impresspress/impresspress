@@ -1,0 +1,15 @@
+# Core's producers (storage, llm, streaming) run inside the Cloudflare
+# Worker, where a task spawned outside `wafer_block::spawn_producer` is
+# polled outside every request's service scope and each proxy call it makes
+# is refused. `spawn_producer` (and `OutputStream::from_producer`) passes the
+# task through the isolate's spawn wrapper, which carries the scope; these do
+# not. Same list as `crates/impresspress-cloudflare/clippy.toml`. The paths
+# are js-sys's definitions, which every re-export (`wasm_bindgen_futures`,
+# `worker::wasm_bindgen_futures`) points at. js-sys is a wasm32-only
+# dependency here, so on a native build the paths resolve to nothing, which
+# `allow-invalid` keeps from being a configuration error.
+disallowed-methods = [
+    { path = "js_sys::futures::spawn_local", allow-invalid = true, reason = "spawn through wafer_block::spawn_producer so the Cloudflare spawn wrapper gives the task its request's service scope" },
+    { path = "js_sys::futures::future_to_promise", allow-invalid = true, reason = "a future driven by a promise is polled outside every request's service scope; spawn it through wafer_block::spawn_producer" },
+    { path = "js_sys::futures::future_to_promise_typed", allow-invalid = true, reason = "a future driven by a promise is polled outside every request's service scope; spawn it through wafer_block::spawn_producer" },
+]

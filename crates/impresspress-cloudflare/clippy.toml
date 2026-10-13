@@ -1,0 +1,14 @@
+# A task spawned outside `wafer_block::spawn_producer` is polled from the JS
+# microtask queue outside every request's service scope, so each Cloudflare
+# proxy call it makes is refused. `spawn_producer` (and
+# `OutputStream::from_producer`, which uses it) passes the task through the
+# isolate's spawn wrapper, `request_services::wrap_spawned`, which carries
+# the scope; these do not. The paths are js-sys's definitions, which
+# `wasm_bindgen_futures` and `worker::wasm_bindgen_futures` re-export, so
+# every import route is covered. `impresspress-core`, whose producers run
+# here too, has the same list in its own `clippy.toml`.
+disallowed-methods = [
+    { path = "js_sys::futures::spawn_local", reason = "spawn through wafer_block::spawn_producer so request_services::wrap_spawned gives the task its request's service scope" },
+    { path = "js_sys::futures::future_to_promise", reason = "a future driven by a promise is polled outside every request's service scope; spawn it through wafer_block::spawn_producer" },
+    { path = "js_sys::futures::future_to_promise_typed", reason = "a future driven by a promise is polled outside every request's service scope; spawn it through wafer_block::spawn_producer" },
+]
