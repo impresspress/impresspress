@@ -628,10 +628,13 @@ mod request_scope_tests {
         );
     }
 
-    /// The wrapper captures the scope when the task is spawned, not when it
-    /// is polled: a producer spawned outside any request stays bare even
-    /// when its stream is later read inside one, and its calls are refused
-    /// loudly rather than reaching a request it does not belong to.
+    /// A producer spawned outside any request stays bare even when its
+    /// stream is later read inside one: the wrapper has nothing to capture
+    /// and must not fall back to some other request's services, so the
+    /// producer's calls are refused loudly rather than reaching a request it
+    /// does not belong to. (That the scope is captured at spawn time, not at
+    /// poll time, is pinned by the positive test above: a poll-time lookup
+    /// would also leave this producer bare.)
     #[wasm_bindgen_test]
     async fn a_producer_spawned_outside_any_request_stays_bare_and_is_refused() {
         let _wrapper = SpawnWrapperGuard::install(Some(wrap_spawned));

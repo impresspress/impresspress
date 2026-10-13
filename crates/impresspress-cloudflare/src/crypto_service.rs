@@ -268,6 +268,11 @@ pub(crate) mod test_support {
 
     impl FakeHasher {
         /// A binding whose instances answer with `answer`.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the fake Durable Object answers its JS `fetch` with a promise, as the \
+                      real binding does; it runs outside any request and calls no proxy"
+        )]
         pub(crate) fn new(answer: Answer) -> Self {
             let shards = Rc::new(RefCell::new(Vec::new()));
             let seen = shards.clone();

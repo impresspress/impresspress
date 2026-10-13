@@ -141,11 +141,15 @@ thread_local! {
 /// `dispatch`; spawned any other way it would be cancelled with the
 /// response), and installs the spawn wrapper that runs a producer spawned
 /// during a request inside that request's service scope
-/// (`request_services::wrap_spawned`). Audit rows need no isolate setting: `dispatch` queues each
-/// request's rows in that request's own queue. Consumers should call this
-/// from their worker's `#[event(start)]` handler; `run()` also invokes it
-/// behind a once-per-isolate guard, so isolates stay correct either way and
-/// repeat calls are no-ops.
+/// (`request_services::wrap_spawned`). Audit rows need no isolate setting:
+/// `dispatch` queues each request's rows in that request's own queue.
+///
+/// [`run_with_config`] (and so [`run`]) calls it first, before any request
+/// is routed — the `/_deploy/*` endpoints included, which boot a runtime and
+/// run every block's Init on a cold isolate — and [`run_scheduled_with_config`]
+/// calls it before its sweep. So every request an isolate serves sees both
+/// settings, whatever it served first. A consumer's `#[event(start)]` handler
+/// may call it too; repeat calls are no-ops.
 ///
 /// [`DeferMode::Queued`]: impresspress_core::deferred::DeferMode::Queued
 pub fn init_isolate() {
@@ -295,6 +299,13 @@ where
     // `database`'s module docs.
     let queries = database::D1QueryCount::new();
 
+    // Isolate-scoped init — no-op after the first call. First, before any
+    // path is routed: the `/_deploy/*` endpoints below boot a runtime and run
+    // every block's Init, and on a cold isolate they are often the first
+    // request it serves, so they need the spawn wrapper and the defer mode
+    // as much as a routed request does.
+    init_isolate();
+
     // `std::env` is stubbed to always-empty on `wasm32-unknown-unknown`, so
     // `impresspress_core::ui::assets::base_url()` can never observe
     // `IMPRESSPRESS_ASSET_BASE_URL` through it here. `worker::Env::var` is
@@ -361,9 +372,6 @@ where
         return serve_static_asset_from_r2(&env, key, content_type).await;
     }
 
-    // Isolate-scoped init — no-op after the first call; consumers with an
-    // #[event(start)] handler have already run it.
-    init_isolate();
     // The request's own services leave the statements its audit row needs
     // unused (none when the policy writes no rows); the row is written below
     // with a handle that may use them, and then they go to the request's
@@ -1457,6 +1465,85 @@ mod spawned_producer_scope_tests {
                 wafer_block::ServiceOp::STORAGE_CREATE_FOLDER
             )],
             "the storage block's access-log row reached this request's database"
+        );
+    }
+}
+
+/// The isolate settings are in place before any request is routed. On a cold
+/// isolate the first request is often a `/_deploy/*` call, which boots a
+/// runtime and runs every block's Init and so can spawn producers; before
+/// `init_isolate` moved to the top of `run_with_config`, those paths
+/// returned before it ran, and the isolate served them with no spawn
+/// wrapper and the wrong defer mode.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod cold_isolate_tests {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    /// Puts this thread back in the state of an isolate that has served
+    /// nothing, and restores what it found on drop, so the rest of the test
+    /// binary keeps the settings an earlier `init_isolate` installed.
+    struct ColdIsolate {
+        was_initialized: bool,
+        wrapper: Option<wafer_block::spawn::SpawnWrapper>,
+    }
+
+    impl ColdIsolate {
+        fn enter() -> Self {
+            Self {
+                was_initialized: ISOLATE_INITIALIZED.with(|done| done.replace(false)),
+                wrapper: wafer_block::spawn::set_spawn_wrapper(None),
+            }
+        }
+    }
+
+    impl Drop for ColdIsolate {
+        fn drop(&mut self) {
+            ISOLATE_INITIALIZED.with(|done| done.set(self.was_initialized));
+            wafer_block::spawn::set_spawn_wrapper(self.wrapper.take());
+        }
+    }
+
+    /// An unauthorized `/_deploy/prepared` call — answered 404 before any
+    /// binding is touched — on a cold isolate leaves the isolate initialized,
+    /// spawn wrapper installed. Fails while `init_isolate` runs after the
+    /// `/_deploy/*` branches.
+    #[wasm_bindgen_test]
+    async fn a_deploy_request_on_a_cold_isolate_runs_after_the_isolate_init() {
+        let _cold = ColdIsolate::enter();
+        let req =
+            worker::Request::new("https://example.test/_deploy/prepared", worker::Method::Get)
+                .expect("request");
+        let env = JsValue::from(js_sys::Object::new()).unchecked_into::<worker::Env>();
+        let ctx = worker::Context::new(
+            JsValue::from(js_sys::Object::new()).unchecked_into::<worker::worker_sys::Context>(),
+        );
+
+        let response = run_with_config(
+            req,
+            env,
+            ctx,
+            HashMap::new(),
+            Ok::<ImpresspressBuilder, Box<dyn std::error::Error>>,
+            |_, _| Ok(()),
+        )
+        .await
+        .expect("a response");
+
+        assert_eq!(
+            response.status_code(),
+            404,
+            "the deploy endpoint answered, without a deploy token"
+        );
+        assert!(
+            ISOLATE_INITIALIZED.with(std::cell::Cell::get),
+            "the isolate was initialized"
+        );
+        assert!(
+            wafer_block::spawn::set_spawn_wrapper(None).is_some(),
+            "the spawn wrapper was installed before the deploy endpoint ran"
         );
     }
 }
