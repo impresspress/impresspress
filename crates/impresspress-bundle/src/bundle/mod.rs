@@ -3,6 +3,7 @@ pub mod bypass;
 pub mod hash;
 pub mod manifest;
 pub mod rename;
+pub mod sandbox_mode;
 pub mod template;
 
 use std::{collections::BTreeMap, path::Path};
@@ -65,11 +66,17 @@ pub const EXPORT_SHELL_ROOT: &str = "/__impresspress_dev/export-shell/";
 /// [`Self::Workspace`]; `impresspress-web`'s `browser-site-runtime` and
 /// `browser-devtools` forward to them) and answered by
 /// `compiled_sandbox_mode()`, which every runtime exports because
-/// `impresspress-browser`, the crate every browser cdylib links, defines it.
-/// The worker compares the two after loading the
-/// module and before `initialize()`; a mismatch — a bundle assembled from
-/// the wrong runtime — stops it there with stage `build`, which erases
-/// nothing.
+/// `impresspress-browser`, the crate every browser cdylib links, defines it;
+/// the same crate writes the spelling into the wasm's
+/// [`sandbox_mode::SANDBOX_MODE_SECTION`] custom section.
+///
+/// The two are compared twice. [`run`] reads the section of the wasm it is
+/// bundling and refuses a mismatch before it touches the directory, so the
+/// CLI never produces a bundle assembled from the wrong runtime. The worker
+/// compares them again after loading the module and before `initialize()`,
+/// for a bundle that did not come out of [`run`] whole — files hand-copied
+/// between deployments, or a runtime swapped on the host afterwards: a
+/// mismatch stops it there with stage `build`, which erases nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxShell {
@@ -98,6 +105,14 @@ impl SandboxShell {
             Self::Site => "site",
             Self::Workspace => "workspace",
         }
+    }
+
+    /// The mode `spelling` names — exactly one of [`Self::as_str`]'s words,
+    /// nothing else.
+    pub fn from_spelling(spelling: &str) -> Option<Self> {
+        [Self::None, Self::Site, Self::Workspace]
+            .into_iter()
+            .find(|mode| mode.as_str() == spelling)
     }
 
     /// Whether this bundle ships the sandbox's runtime half, which imports
@@ -231,7 +246,8 @@ fn base_to_title(base: &str) -> String {
 
 pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     // Before anything in `pkg_dir` is touched: a configuration the bundle
-    // cannot be built with leaves the directory as it was.
+    // cannot be built with, or a runtime it cannot be built around, leaves
+    // the directory as it was.
     if app.export_shell && app.sandbox != SandboxShell::Workspace {
         anyhow::bail!(
             "an export shell is for a development sandbox's export to ship, but this \
@@ -239,6 +255,30 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
             app.sandbox.as_str()
         );
     }
+
+    // --- Discovery -----------------------------------------------------------
+    // Ahead of the cleanup below, which cannot remove what this finds: a
+    // previous build's hashed copies are `{base}_bg-<hash>.wasm`, and this
+    // looks for `_bg.wasm`.
+    let pair = discover_wasm_pair(pkg_dir)?;
+    match &pair {
+        // The runtime must have been compiled as the mode `sw.js` is about to
+        // be rendered for — see `SandboxShell`. A refusal is typed
+        // (`RuntimeModeRefusal`), so a caller can add where its runtime came
+        // from.
+        Some((_, _, wasm)) => {
+            let path = pkg_dir.join(wasm);
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            sandbox_mode::check(&path, &bytes, app.sandbox)?;
+        }
+        // Template-only: no runtime here to disagree with the mode.
+        None => eprintln!(
+            "warning: no *_bg.wasm found in {}; skipping asset hashing",
+            pkg_dir.display()
+        ),
+    }
+
     // --- Cleanup -------------------------------------------------------------
     // Dev rebuilds re-run wasm-pack, which writes the un-hashed pair (e.g.
     // `gizza_ai.js`, `gizza_ai_bg.wasm`) and then hits the same hashing path
@@ -249,15 +289,6 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     // bytes long after the user thought it was gone. Sweep them up so each
     // build leaves a clean directory.
     remove_previously_hashed(pkg_dir)?;
-
-    // --- Discovery -----------------------------------------------------------
-    let pair = discover_wasm_pair(pkg_dir)?;
-    if pair.is_none() {
-        eprintln!(
-            "warning: no *_bg.wasm found in {}; skipping asset hashing",
-            pkg_dir.display()
-        );
-    }
 
     let mut hashes: BTreeMap<String, String> = BTreeMap::new();
     let mut renamed: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();

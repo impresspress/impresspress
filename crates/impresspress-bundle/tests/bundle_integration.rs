@@ -1,7 +1,9 @@
 use std::{fs, path::PathBuf};
 
 use impresspress_bundle::bundle::{
-    run, AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, EXPORT_SHELL_ROOT,
+    run,
+    sandbox_mode::fixture::{custom_section, runtime_declaring},
+    AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, EXPORT_SHELL_ROOT,
 };
 
 /// Every mode a bundle can be built in, in `[sandbox] mode`'s order.
@@ -15,11 +17,22 @@ fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/bundle_fixtures/pkg-in")
 }
 
-/// Copy the fixture pkg into a fresh temp dir.
+/// Copy the fixture pkg into a fresh temp dir, with its runtime: a wasm
+/// module that declares sandbox mode `none`, as a runtime built with no
+/// sandbox feature does. Written here rather than kept as a file beside the
+/// others so that every fixture runtime comes from the one encoder
+/// (`sandbox_mode::fixture`), and none is bytes that only look like a module.
 fn pkg_copy() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     copy_dir(&fixture_path(), tmp.path());
+    declare_runtime(tmp.path(), SandboxShell::None);
     tmp
+}
+
+/// Replace the runtime in the pkg at `dir` with one compiled as `mode`:
+/// `run` refuses to bundle a runtime for another mode than the bundle's.
+fn declare_runtime(dir: &std::path::Path, mode: SandboxShell) {
+    fs::write(dir.join("app_bg.wasm"), runtime_declaring(mode)).unwrap();
 }
 
 /// [`pkg_copy`] with the fixture's three-line `sw.js.tmpl` stub swapped for the
@@ -178,8 +191,13 @@ fn a_build_that_differs_only_in_the_wasm_ships_another_glue_name_and_another_sw_
     };
     let first = build(None);
     let again = build(None);
-    let mut other_bytes = fs::read(fixture_path().join("app_bg.wasm")).unwrap();
-    other_bytes.extend_from_slice(b"\0a later build");
+    // The same declaration, and one more custom section after it: a module
+    // still, with other bytes.
+    let mut other_bytes = runtime_declaring(SandboxShell::None);
+    other_bytes.extend(custom_section(
+        "impresspress-test.later-build",
+        b"a later build",
+    ));
     let next = build(Some(&other_bytes));
 
     let sw = |pkg: &tempfile::TempDir| fs::read_to_string(pkg.path().join("sw.js")).unwrap();
@@ -376,6 +394,7 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
 /// with `app`'s other settings.
 fn rendered_sw(sandbox: SandboxShell, app: AppConfig) -> String {
     let tmp = production_pkg_copy();
+    declare_runtime(tmp.path(), sandbox);
     run(tmp.path(), tmp.path(), AppConfig { sandbox, ..app }).expect("bundler ok");
     fs::read_to_string(tmp.path().join("sw.js")).unwrap()
 }
@@ -477,6 +496,127 @@ fn only_a_workspace_bundle_may_carry_an_export_shell() {
             "{sandbox:?}: {err}"
         );
         assert!(!tmp.path().join("sw.js").exists(), "{sandbox:?}");
+    }
+}
+
+/// Every file under `dir`, with its bytes, for comparing a directory before
+/// and after something that must not have touched it.
+fn snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        for entry in fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = fs::read(&path).unwrap();
+                files.insert(path.strip_prefix(dir).unwrap().to_path_buf(), bytes);
+            }
+        }
+    }
+    files
+}
+
+/// The bundler reads the mode the runtime was compiled as (its
+/// `impresspress.sandbox_mode` section) and builds only around a runtime of
+/// the bundle's own mode: every other pairing would ship a service worker
+/// that stops before `initialize()`. Each of the nine pairings, from a fresh
+/// copy — the off-diagonal six are refused, naming both modes, and leave the
+/// directory exactly as it was: no `sw.js`, no hashed copy, the un-hashed
+/// pair and the templates in place.
+#[test]
+fn the_bundle_is_built_only_around_a_runtime_of_its_own_mode() {
+    for configured in SANDBOX_MODES {
+        for compiled in SANDBOX_MODES {
+            let tmp = production_pkg_copy();
+            declare_runtime(tmp.path(), compiled);
+            let before = snapshot(tmp.path());
+            let app = AppConfig {
+                sandbox: configured,
+                export_shell: configured == SandboxShell::Workspace,
+                ..AppConfig::default()
+            };
+            let built = run(tmp.path(), tmp.path(), app);
+            if configured == compiled {
+                built.unwrap_or_else(|e| panic!("{configured:?} around {compiled:?}: {e:#}"));
+                assert!(tmp.path().join("sw.js").is_file());
+                continue;
+            }
+            let err = built.expect_err("a runtime of another mode must be refused");
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!(
+                    "was compiled as sandbox mode '{}', but this bundle is built for '{}'",
+                    compiled.as_str(),
+                    configured.as_str()
+                )),
+                "{configured:?} around {compiled:?}: {message}"
+            );
+            assert!(message.contains("app_bg.wasm"), "{message}");
+            assert!(
+                err.downcast_ref::<impresspress_bundle::bundle::sandbox_mode::RuntimeModeRefusal>()
+                    .is_some(),
+                "the refusal is typed: {err:?}"
+            );
+            assert_eq!(
+                snapshot(tmp.path()),
+                before,
+                "{configured:?} around {compiled:?} changed the directory"
+            );
+        }
+    }
+}
+
+/// A runtime whose mode cannot be read is refused like one of the wrong
+/// mode, and before anything is touched: one that declares none, one that
+/// declares it twice, and one that is not a module at all.
+#[test]
+fn a_runtime_with_no_readable_mode_is_refused() {
+    use impresspress_bundle::bundle::sandbox_mode::{fixture::module, SANDBOX_MODE_SECTION};
+    let declaration = || custom_section(SANDBOX_MODE_SECTION, b"none");
+    for (wasm, expected) in [
+        (
+            module(&[custom_section("name", b"app")]),
+            "declares no sandbox mode",
+        ),
+        (
+            module(&[declaration(), declaration()]),
+            "has 2 `impresspress.sandbox_mode` custom sections",
+        ),
+        (vec![0xde, 0xad, 0xbe, 0xef], "is not a wasm module"),
+    ] {
+        let tmp = production_pkg_copy();
+        fs::write(tmp.path().join("app_bg.wasm"), &wasm).unwrap();
+        let before = snapshot(tmp.path());
+        let message = run(tmp.path(), tmp.path(), AppConfig::default())
+            .expect_err("a runtime with no readable mode must be refused")
+            .to_string();
+        assert!(
+            message.contains(expected) && message.contains("'none'"),
+            "{message}"
+        );
+        assert_eq!(snapshot(tmp.path()), before, "{expected}");
+    }
+}
+
+/// With no runtime in the directory there is nothing to hold the mode to: a
+/// template-only build renders as before, in any mode.
+#[test]
+fn a_directory_with_no_runtime_still_renders_its_templates() {
+    for sandbox in SANDBOX_MODES {
+        let tmp = production_pkg_copy();
+        fs::remove_file(tmp.path().join("app_bg.wasm")).unwrap();
+        let app = AppConfig {
+            sandbox,
+            ..AppConfig::default()
+        };
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+        assert!(
+            sw.contains(&format!("const SANDBOX = '{}';", sandbox.as_str())),
+            "{sw}"
+        );
     }
 }
 
@@ -638,6 +778,7 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
     for app in configs {
         let sandbox = app.sandbox;
         let tmp = production_pkg_copy();
+        declare_runtime(tmp.path(), app.sandbox);
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
         let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
         let handed = sw_initialize_rules(&sw);
@@ -713,6 +854,7 @@ fn a_site_file_under_vendor_is_not_bypassed() {
         sandbox: SandboxShell::Workspace,
         ..AppConfig::default()
     };
+    declare_runtime(tmp.path(), app.sandbox);
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
 
@@ -761,6 +903,7 @@ fn a_site_page_named_sql_something_is_not_bypassed() {
         sandbox: SandboxShell::Workspace,
         ..AppConfig::default()
     };
+    declare_runtime(tmp.path(), app.sandbox);
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
 
@@ -890,6 +1033,7 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
         extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
         ..AppConfig::default()
     };
+    declare_runtime(tmp.path(), app.sandbox);
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
@@ -955,6 +1099,7 @@ fn the_rendered_worker_parses() {
             sandbox,
             ..AppConfig::default()
         };
+        declare_runtime(tmp.path(), app.sandbox);
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
         // `.mjs`: the worker is registered as a module (it `import`s the wasm
         // glue), and that is how it has to be parsed.
@@ -1073,6 +1218,7 @@ fn the_rendered_worker_behaves_per_sandbox_mode() {
             export_shell,
             ..AppConfig::default()
         };
+        declare_runtime(tmp.path(), app.sandbox);
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
         (variable, tmp)
     })
@@ -1349,6 +1495,7 @@ fn no_bundle_emits_lists_or_bypasses_llms_txt() {
             ..AppConfig::default()
         };
         let rules = BypassRules::for_bundle("/app", &app);
+        declare_runtime(tmp.path(), app.sandbox);
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
 
         assert!(!tmp.path().join("llms.txt").exists(), "{sandbox:?}");

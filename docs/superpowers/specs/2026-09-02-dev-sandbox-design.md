@@ -1298,6 +1298,28 @@ and read together with this list.
     `none`. Amendment 23's "the build is the mode" is unchanged; only where
     the features are read moved.
 
+25. **Amendment 23 — the bundler holds the runtime to the mode (2026-10-13).**
+    `impresspress build --target web` reads the mode the runtime declares
+    before the bundler writes anything: `impresspress-bundle`'s
+    `bundle::run`, which both web flows call, walks the wasm's sections and
+    requires exactly one `impresspress.sandbox_mode` section whose payload is
+    exactly one mode's spelling, equal to `[sandbox] mode`. Anything else —
+    another mode, no section, two, an unknown spelling, bytes that are not a
+    module — is refused, naming both modes, before `run` renames, renders or
+    removes a file; the sealed flow adds where its runtime came from and how
+    to get the right one. A refused build exits non-zero, and the flow has
+    already prepared the directory by then. The sealed flow has rebuilt
+    `dist/` around the runtime, so `dist/` holds no bundle. The embed flow
+    has run wasm-pack into its out dir and written the templates there, but
+    wasm-pack does not clear that directory and `run` cleans up an earlier
+    build's hashed files only after the check, so an earlier successful
+    build's `sw.js`, `loader.js`, `index.html`, `asset-manifest.json` and
+    hashed wasm and glue are still there. A deploy must check the exit code,
+    not the directory. A directory with no wasm (template-only) is
+    still rendered, with its warning. The worker's comparison before
+    `initialize()` stays, for a bundle put together some other way than by
+    the CLI; its stage `build` and its no-erase rule are unchanged.
+
 ## 21. Definition of done
 
 - `browser-devtools` is off by default and absent from a normal bundle; the

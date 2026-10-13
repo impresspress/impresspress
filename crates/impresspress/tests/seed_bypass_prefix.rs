@@ -35,7 +35,15 @@ fn the_bundler_bypasses_exactly_the_prefix_the_seed_importer_fetches_from() {
 #[test]
 fn the_sandbox_reads_back_exactly_the_bypass_rules_the_worker_hands_it() {
     let dist = tempfile::tempdir().unwrap();
-    std::fs::write(dist.path().join("app_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    // A runtime compiled as the workspace this bundle is built for: the
+    // bundler refuses one of another mode.
+    std::fs::write(
+        dist.path().join("app_bg.wasm"),
+        impresspress_bundle::bundle::sandbox_mode::fixture::runtime_declaring(
+            impresspress_bundle::bundle::SandboxShell::Workspace,
+        ),
+    )
+    .unwrap();
     std::fs::write(dist.path().join("app.js"), b"fetch('app_bg.wasm');").unwrap();
     std::fs::write(
         dist.path().join("sw.js.tmpl"),

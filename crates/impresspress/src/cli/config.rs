@@ -44,12 +44,14 @@ pub struct Config {
 /// (neither for `"none"`, `site-runtime` for `"site"`, `block-dev` for
 /// `"workspace"` — `impresspress-web`'s `browser-site-runtime` and
 /// `browser-devtools` forward to them, and an application's own cdylib that
-/// enables neither is `"none"`), and the service worker compares the two
-/// (`compiled_sandbox_mode()`, which every runtime exports through
-/// `impresspress-browser`) before it calls `initialize()`. A mismatch is
-/// a bundle assembled from the wrong runtime: the worker stops there with
-/// stage `build` — before anything has opened the database, so the recovery
-/// erases nothing — and its cause says to rebuild the bundle.
+/// enables neither is `"none"`). `impresspress build` reads the runtime's mode
+/// from its wasm (the `impresspress.sandbox_mode` section every runtime
+/// carries through `impresspress-browser`) and refuses a mismatch before it
+/// writes the bundle, naming both modes. The service worker compares the two
+/// again (`compiled_sandbox_mode()`) before it calls `initialize()`, for a
+/// bundle assembled some other way: it stops there with stage `build` —
+/// before anything has opened the database, so the recovery erases nothing
+/// — and its cause says to rebuild the bundle.
 ///
 /// `export_shell = "<dir>"` (a workspace only) names a finished bundle built
 /// as a site — `[sandbox] mode = "site"`, around a `browser-site-runtime`

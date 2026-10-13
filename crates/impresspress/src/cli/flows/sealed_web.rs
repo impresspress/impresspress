@@ -26,9 +26,9 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     std::fs::create_dir_all(&dist).map_err(|e| anyhow!("create dist/: {e}"))?;
 
     // 3. Resolve and write the impresspress-web wasm and JS glue.
-    let wasm_bytes = wasm::resolve_impresspress_web_wasm()?;
+    let runtime = wasm::resolve_impresspress_web_wasm()?;
     let wasm_path = dist.join("impresspress_web_bg.wasm");
-    std::fs::write(&wasm_path, &*wasm_bytes).map_err(|e| anyhow!("write {wasm_path:?}: {e}"))?;
+    std::fs::write(&wasm_path, &*runtime.bytes).map_err(|e| anyhow!("write {wasm_path:?}: {e}"))?;
 
     let js_bytes = wasm::resolve_impresspress_web_js()?;
     let js_path = dist.join("impresspress_web.js");
@@ -54,7 +54,18 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     };
 
     impresspress_bundle::assets::write_to(&dist)?;
-    impresspress_bundle::bundle::run(&dist, repo_root, app)?;
+    // The bundler refuses a runtime compiled for another sandbox mode than
+    // `[sandbox] mode`; it cannot know where this flow's runtime came from,
+    // so the flow says how to get the right one.
+    impresspress_bundle::bundle::run(&dist, repo_root, app).map_err(|e| {
+        match e.downcast::<impresspress_bundle::bundle::sandbox_mode::RuntimeModeRefusal>() {
+            Ok(refusal) => anyhow!(
+                "{refusal}\n{}",
+                runtime_hint(refusal.configured, &runtime.source)
+            ),
+            Err(e) => e,
+        }
+    })?;
 
     // 5. Apply overlays from impresspress.toml if present, then the export
     //    shell a workspace names (`[sandbox] export_shell`) — after the
@@ -67,6 +78,61 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     let profile = if release { "release" } else { "dev" };
     println!("built sealed × web ({profile}) → dist/");
     Ok(())
+}
+
+/// Where this build's runtime came from (`source`: the wasm the refusal
+/// names is the flow's own copy in `dist/`), and how to give the flow one
+/// compiled as `mode`. The flow bundles `impresspress-web`: the file
+/// [`wasm::WASM_ENV`] names, else the wasm-pack output [`wasm::PKG_DIR_ENV`]
+/// names, else the build baked into this CLI (`crates/impresspress-web/pkg`,
+/// a plain build, when the CLI was compiled).
+fn runtime_hint(
+    mode: impresspress_bundle::bundle::SandboxShell,
+    source: &wasm::WasmSource,
+) -> String {
+    use impresspress_bundle::bundle::SandboxShell;
+    let features = match mode {
+        SandboxShell::None => "",
+        SandboxShell::Site => " --features browser-site-runtime",
+        SandboxShell::Workspace => " --features browser-devtools",
+    };
+    let (wasm_env, pkg_dir) = (wasm::WASM_ENV, wasm::PKG_DIR_ENV);
+    let mode = mode.as_str();
+    let build = |out_dir: &str| {
+        format!(
+            "`wasm-pack build --target web --release --out-dir {out_dir} -- --locked{features}` \
+             in crates/impresspress-web"
+        )
+    };
+    match source {
+        wasm::WasmSource::WasmEnv(path) => format!(
+            "The runtime is {}, named by {wasm_env}, which takes precedence over {pkg_dir} and \
+             the build baked into this CLI. For '{mode}', point {wasm_env} at the `_bg.wasm` of \
+             {}, or unset it and set {pkg_dir} to that directory.",
+            path.display(),
+            build("<dir>"),
+        ),
+        wasm::WasmSource::PkgDir(path) => format!(
+            "The runtime is {}, from the wasm-pack output {pkg_dir} names. For '{mode}', build \
+             one with {} and set {pkg_dir} to that directory.",
+            path.display(),
+            build("<dir>"),
+        ),
+        wasm::WasmSource::Baked => format!(
+            "The runtime is the build baked into this CLI (neither {wasm_env} nor {pkg_dir} is \
+             set). For '{mode}', build one with {} and set {pkg_dir} to that directory{}.",
+            build("<dir>"),
+            if mode == SandboxShell::None.as_str() {
+                format!(
+                    ", or rebuild the baked one with {} and reinstall the CLI, whose build bakes \
+                     that directory",
+                    build("pkg")
+                )
+            } else {
+                String::new()
+            },
+        ),
+    }
 }
 
 /// Write `snippets` under `dist/snippets/`, creating the per-crate

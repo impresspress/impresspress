@@ -7,10 +7,12 @@
 # half that imports `/seed/manifest.json` as generation 0 on a fresh origin
 # (`impresspress-core::blocks::dev::seed`) — is in the wasm only because it is
 # built with `impresspress-web/browser-devtools` (see `build.sh`): the build
-# decides the mode, and the runtime is told nothing. The two must match: the
-# service worker compares `const SANDBOX` with the runtime's
-# `compiled_sandbox_mode()` before `initialize()`, and a mismatch stops it at
-# stage `build` (nothing erased; the cause says to rebuild the bundle).
+# decides the mode, and the runtime is told nothing. The two must match:
+# `impresspress build` refuses to bundle a wasm whose
+# `impresspress.sandbox_mode` section declares another mode, and the service
+# worker compares `const SANDBOX` with the runtime's `compiled_sandbox_mode()`
+# again before `initialize()`, stopping at stage `build` (nothing erased; the
+# cause says to rebuild the bundle).
 [app]
 name = "dev-sandbox"
 # The boot page's title is the seed's: each seed names itself in its
