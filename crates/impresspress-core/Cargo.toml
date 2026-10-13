@@ -133,6 +133,10 @@ block-signal = []
 # Deliberately OFF in `default`, like `block-dev`: only the browser runtime
 # (`impresspress-web`) registers the block, and native and Cloudflare builds
 # never compile it.
+#
+# This feature and `block-dev` are the sandbox mode a browser runtime
+# declares (`sandbox_mode::SandboxMode::COMPILED`, the one place either is
+# read for it): neither is `none`, this alone `site`, `block-dev` `workspace`.
 site-runtime = []
 # Browser development sandbox control plane (`impresspress/dev`) — the
 # workspace: the `/b/dev` page and its JSON API (files, scaffolding,

@@ -40,7 +40,7 @@
 //! feature (which its `browser-devtools` implies) — the block is registered
 //! wherever that is compiled in, and only its `/b/dev` ROUTE is keyed on the
 //! build being a workspace (`browser-devtools`, which compiles `block-dev`)
-//! rather than an exported site (`impresspress-web`'s `SandboxMode`, spec
+//! rather than an exported site (`crate::sandbox_mode::SandboxMode`, spec
 //! amendment 23) — never on a stored variable. `feature_block_manifest!` only
 //! enumerates blocks whose constructors take no arguments, and — more to the
 //! point — the sandbox's

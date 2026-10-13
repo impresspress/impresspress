@@ -2,10 +2,13 @@
 //! no impresspress-core. Builds a bare Wafer with browser platform services
 //! and no registered blocks.
 //!
-//! Its purpose is to fail-loud at compile time if `impresspress-browser`
-//! accidentally grows a dependency on `impresspress` or `impresspress-core`, or if
-//! the framework contract requires app-level types that non-impresspress
-//! consumers won't have.
+//! Its purpose is to fail loud at compile time if the framework contract
+//! requires app-level types that non-impresspress consumers won't have, and
+//! — bundled through the embed × web flow in CI (see `README.md`) — at
+//! module link time if the framework's `sw.js` imports an entrypoint that an
+//! application's own cdylib does not export. The two it must define are
+//! below; the third, `compiled_sandbox_mode`, comes from
+//! `impresspress-browser`, and this crate deliberately does not mention it.
 //!
 //! The wasm-bindgen entrypoints are gated behind `#[cfg(target_arch =
 //! "wasm32")]` because they use `impresspress_browser::{db_init, store_wafer,

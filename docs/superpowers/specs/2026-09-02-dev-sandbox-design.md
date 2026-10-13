@@ -1281,6 +1281,23 @@ and read together with this list.
     the site runtime: about 6 % smaller than the devtools one, which was
     never the reason — the security property is.
 
+24. **Amendment 23 — every runtime declares its mode (2026-10-13).**
+    `sw.js` imports `compiled_sandbox_mode` statically from whichever
+    cdylib a bundle is built around, and the embed flow builds around an
+    application's own cdylib, not only `impresspress-web`. So the
+    declaration lives in the crate every browser cdylib links:
+    `impresspress-browser` exports `compiled_sandbox_mode()` and writes the
+    same spelling into the wasm's `impresspress.sandbox_mode` custom
+    section, which tooling reads without running the module. The mode is a
+    fact of `impresspress-core`'s features — `SandboxMode` and its one
+    reading of them, `COMPILED`, live there (`sandbox_mode.rs`):
+    `site-runtime` is `Site`, `block-dev` is `Workspace`, neither is
+    `Absent`. `impresspress-web`'s `browser-site-runtime` and
+    `browser-devtools` forward to those, and its const assertions hold the
+    two to each other; an application cdylib that enables neither declares
+    `none`. Amendment 23's "the build is the mode" is unchanged; only where
+    the features are read moved.
+
 ## 21. Definition of done
 
 - `browser-devtools` is off by default and absent from a normal bundle; the

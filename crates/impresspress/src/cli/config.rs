@@ -40,10 +40,13 @@ pub struct Config {
 ///
 /// No `[sandbox]` table is a plain bundle (`"none"`, the default). The mode
 /// must match the wasm package the bundle is built around: the runtime's mode
-/// is decided by its `impresspress-web` features (none for `"none"`,
-/// `browser-site-runtime` for `"site"`, `browser-devtools` for
-/// `"workspace"`), and the service worker compares the two
-/// (`compiled_sandbox_mode()`) before it calls `initialize()`. A mismatch is
+/// is decided by the `impresspress-core` features its cdylib compiles
+/// (neither for `"none"`, `site-runtime` for `"site"`, `block-dev` for
+/// `"workspace"` — `impresspress-web`'s `browser-site-runtime` and
+/// `browser-devtools` forward to them, and an application's own cdylib that
+/// enables neither is `"none"`), and the service worker compares the two
+/// (`compiled_sandbox_mode()`, which every runtime exports through
+/// `impresspress-browser`) before it calls `initialize()`. A mismatch is
 /// a bundle assembled from the wrong runtime: the worker stops there with
 /// stage `build` — before anything has opened the database, so the recovery
 /// erases nothing — and its cause says to rebuild the bundle.

@@ -1,5 +1,10 @@
 // @generated build: __BUILD_ID__ — Service Worker that runs Impresspress via WASM
 import init, { compiled_sandbox_mode, initialize, handle_request } from '__WASM_JS__';
+// `__WASM_JS__` is the glue of whichever cdylib the bundle was built around —
+// `impresspress-web`, or an application's own. `initialize` and
+// `handle_request` are that cdylib's to define; `compiled_sandbox_mode` is
+// `impresspress-browser`'s, which every browser cdylib links, so every glue
+// exports it.
 
 // Which half of the browser sandbox this bundle boots — 'none', 'site' (the
 // sandbox's runtime half: an exported site that imports the `seed/` it ships)

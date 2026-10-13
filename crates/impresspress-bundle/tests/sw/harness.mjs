@@ -16,6 +16,13 @@
 // below it runs as shipped, against a stub `self` and a stub `fetch`.
 import fs from 'node:fs';
 
+// The stubs stand in for the runtime's glue, so nothing here can see a glue
+// that lacks one of these exports — the failure a browser reports at module
+// link time, before any of `sw.js` runs. That is checked on real bundles
+// instead: `scripts/check-bundle-runtime.mjs` links a built `sw.js` against
+// its real glue, in CI's `E2E build` job (impresspress-web, and
+// `examples/minimal-browser`, a cdylib that is not impresspress-web) and its
+// dev-sandbox job (the workspace and its export shell).
 const GLUE_IMPORT =
   /^import init, \{ compiled_sandbox_mode, initialize, handle_request \} from '[^']+';$/m;
 

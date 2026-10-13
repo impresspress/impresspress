@@ -1,0 +1,15 @@
+# The smallest app bundled through the embed × web flow: this crate's own
+# cdylib (not `impresspress-web`) wrapped in the framework's `sw.js`,
+# `loader.js` and boot shell by `impresspress build --target web`.
+#
+# CI bundles it (`E2E build` job, "Bundle examples/minimal-browser") and
+# checks that the worker's imports resolve against this crate's glue —
+# `compiled_sandbox_mode` among them, which this crate never names: it
+# reaches the glue from `impresspress-browser`, the crate every browser
+# cdylib links. No `[sandbox]` table: nothing here enables
+# `impresspress-core`'s `site-runtime`, so the runtime is `'none'`, the mode
+# a bundle without the table is built for.
+[app]
+name = "minimal-browser"
+title = "minimal-browser"
+boot_redirect = "/"

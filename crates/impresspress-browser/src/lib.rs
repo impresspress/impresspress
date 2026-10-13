@@ -8,6 +8,12 @@
 //! (`store_wafer`/`dispatch_request`/`is_initialized`). Consumers compose these
 //! in their own `#[wasm_bindgen]` entrypoints using any app-level builder.
 //!
+//! One entrypoint of the framework's `sw.js` is this crate's rather than the
+//! consumer's: [`sandbox_mode::compiled_sandbox_mode`], which the worker
+//! imports beside the consumer's `initialize` and `handle_request`. Linking
+//! this crate is what exports it from every browser cdylib; a consumer
+//! neither defines nor re-exports it (see [`sandbox_mode`]).
+//!
 //! Native web-bundle tooling (the `sw.js`/`loader.js`/`index.html` templates
 //! and the wasm-pack output bundler) lives in the sibling `impresspress-bundle`
 //! crate, so this crate stays a pure wasm32 cdylib that the native `impresspress`
@@ -17,6 +23,7 @@
 // wasm32-only halves are cfg-gated inside each module.
 pub mod image;
 pub mod llm;
+pub mod sandbox_mode;
 pub mod vector;
 
 // Pure param/row codec for the sql.js bridge edge — split out of the
