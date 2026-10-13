@@ -530,3 +530,124 @@ mod response_tests {
         );
     }
 }
+
+/// Request-scope tests: a streamed body's producer and the request's
+/// services.
+///
+/// On Cloudflare every service a block reaches is a proxy that looks up the
+/// request being polled ([`crate::request_services`]); outside a poll of
+/// that request's dispatch future it refuses the call. A producer handed to
+/// `OutputStream::from_producer` runs on a task of its own, polled from the
+/// JS microtask queue, and a streamed body is read after `dispatch` has
+/// returned the `Response`. The isolate's spawn wrapper
+/// (`request_services::wrap_spawned`) gives such a task the scope current
+/// when it was spawned. These install it, spawn the producer the way a
+/// block does — inside the scoped future — or outside any request, run the
+/// real `output_to_response`, and read the body after the scope has
+/// finished, the way the Workers runtime does.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod request_scope_tests {
+    use std::sync::Arc;
+
+    use wafer_block::{meta::META_RESP_CONTENT_TYPE, MetaEntry};
+    use wafer_core::interfaces::crypto::service::CryptoService;
+    use wafer_run::OutputStream;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::output_to_response;
+    use crate::{
+        request_services::{
+            self, wrap_spawned, RequestServices, ScopedCryptoService, SpawnWrapperGuard,
+        },
+        test_fakes::FixedCrypto,
+    };
+
+    /// One SSE frame saying whether a scoped service call reached the
+    /// request's services.
+    async fn scoped_call_frame(when: &str) -> Vec<u8> {
+        match ScopedCryptoService.random_bytes(1).await {
+            Ok(_) => format!("data: {when}: in scope\n\n").into_bytes(),
+            Err(error) => format!("data: {when}: {error}\n\n").into_bytes(),
+        }
+    }
+
+    /// An SSE producer that calls a scoped service before and after its
+    /// first chunk — the second the shape of a chat stream storing its reply
+    /// once the last token is out — and reports each call in a frame.
+    fn sse_calling_a_service() -> OutputStream {
+        OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(MetaEntry {
+                    key: META_RESP_CONTENT_TYPE.to_string(),
+                    value: "text/event-stream".to_string(),
+                })
+                .await;
+            let before_head = scoped_call_frame("before the first chunk").await;
+            let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+            let after_head = scoped_call_frame("after the first chunk").await;
+            let _ = sink.send_chunk(before_head).await;
+            let _ = sink.send_chunk(after_head).await;
+            let _ = sink.complete(Vec::new()).await;
+        })
+    }
+
+    async fn read_streamed(mut resp: worker::Response) -> String {
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .expect("headers")
+                .as_deref(),
+            Some("text/event-stream"),
+            "the response streams"
+        );
+        resp.text().await.expect("read body")
+    }
+
+    /// **Review finding 3 (SSE plan).** A producer spawned inside a request
+    /// — as a block's `handle` spawns it — reaches that request's services
+    /// on every poll, before its first chunk and after the scope has handed
+    /// the `Response` back. Fails without the spawn wrapper: both calls are
+    /// "used outside request poll scope".
+    #[wasm_bindgen_test]
+    async fn a_producer_spawned_in_its_request_reaches_its_services_after_its_first_chunk() {
+        let _wrapper = SpawnWrapperGuard::install(Some(wrap_spawned));
+        let resp = request_services::scope(
+            RequestServices::marker_with_crypto(1, Arc::new(FixedCrypto)),
+            async { output_to_response(sse_calling_a_service()).await },
+        )
+        .await
+        .expect("build response");
+
+        assert_eq!(
+            read_streamed(resp).await,
+            "data: one\n\n\
+             data: before the first chunk: in scope\n\n\
+             data: after the first chunk: in scope\n\n",
+            "every service call the producer makes reaches its request's services"
+        );
+    }
+
+    /// The wrapper captures the scope when the task is spawned, not when it
+    /// is polled: a producer spawned outside any request stays bare even
+    /// when its stream is later read inside one, and its calls are refused
+    /// loudly rather than reaching a request it does not belong to.
+    #[wasm_bindgen_test]
+    async fn a_producer_spawned_outside_any_request_stays_bare_and_is_refused() {
+        let _wrapper = SpawnWrapperGuard::install(Some(wrap_spawned));
+        let stream = sse_calling_a_service();
+        let resp = request_services::scope(
+            RequestServices::marker_with_crypto(1, Arc::new(FixedCrypto)),
+            output_to_response(stream),
+        )
+        .await
+        .expect("build response");
+
+        assert_eq!(
+            read_streamed(resp).await,
+            "data: one\n\n\
+             data: before the first chunk: Cloudflare crypto service used outside request poll scope\n\n\
+             data: after the first chunk: Cloudflare crypto service used outside request poll scope\n\n",
+        );
+    }
+}

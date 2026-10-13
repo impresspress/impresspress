@@ -281,6 +281,43 @@ impl RequestServices {
         })
     }
 
+    /// A marker bundle whose crypto service is `crypto`, so a test can tell a
+    /// call that reached its request's services from one refused for running
+    /// outside every request scope.
+    #[cfg(test)]
+    pub(crate) fn marker_with_crypto(marker: usize, crypto: Arc<dyn CryptoService>) -> Rc<Self> {
+        Rc::new(Self {
+            database: None,
+            storage: None,
+            config: None,
+            crypto: Some(crypto),
+            network: None,
+            logger: None,
+            config_source: None,
+            release_assets: Ok(None),
+            marker,
+        })
+    }
+
+    /// A marker bundle whose database service is `database`.
+    #[cfg(test)]
+    pub(crate) fn marker_with_database(
+        marker: usize,
+        database: Arc<dyn DatabaseService>,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            database: Some(database),
+            storage: None,
+            config: None,
+            crypto: None,
+            network: None,
+            logger: None,
+            config_source: None,
+            release_assets: Ok(None),
+            marker,
+        })
+    }
+
     /// `storage` backs the lazy R2 `keys.json` fetch that `ScopedStorageService`
     /// now performs before it can answer any membership question — tests that
     /// exercise the release guards must supply a fake serving the fixed
@@ -368,12 +405,15 @@ pub(crate) fn scope_sync<T>(services: Rc<RequestServices>, f: impl FnOnce() -> T
 }
 
 /// A future that re-enters its request service scope on every poll.
-pub(crate) struct ScopedFuture<F> {
+///
+/// `F` may be unsized so a task that is already boxed — a
+/// [`wafer_block::spawn::SpawnedTask`] — is scoped without a second box.
+pub(crate) struct ScopedFuture<F: ?Sized> {
     services: Rc<RequestServices>,
     inner: Pin<Box<F>>,
 }
 
-impl<F: Future> Future for ScopedFuture<F> {
+impl<F: Future + ?Sized> Future for ScopedFuture<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
@@ -386,6 +426,38 @@ pub(crate) fn scope<F: Future>(services: Rc<RequestServices>, future: F) -> Scop
     ScopedFuture {
         services,
         inner: Box::pin(future),
+    }
+}
+
+/// The isolate's spawn wrapper (`wafer_block::spawn::set_spawn_wrapper`,
+/// installed by [`crate::init_isolate`]): a task spawned while a request's
+/// scope is current — a producer a block hands to
+/// `OutputStream::from_producer` inside `handle`, or one a service call
+/// spawns — runs every poll inside that request's scope, as the dispatch
+/// future does.
+///
+/// Without it such a task is polled from the JS microtask queue, outside
+/// every scope, and each proxy call it makes is refused: the storage block's
+/// access-log row (written from its forwarding producer), a streamed reply's
+/// final database write, a producer's log lines. A task spawned outside any
+/// request (nothing current) is passed through bare, so a proxy call from it
+/// is still refused loudly.
+///
+/// Only the services scope is carried. A producer's
+/// `impresspress_core::deferred::defer` stays refused: when a producer runs
+/// relative to the request's after-response drain is a race it cannot see.
+/// A producer finishes its work before its terminal; after it, nothing keeps
+/// the invocation alive for it.
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+pub(crate) fn wrap_spawned(
+    task: wafer_block::spawn::SpawnedTask,
+) -> wafer_block::spawn::SpawnedTask {
+    match current() {
+        Some(services) => Box::pin(ScopedFuture {
+            services,
+            inner: task,
+        }),
+        None => task,
     }
 }
 
@@ -936,6 +1008,26 @@ pub(crate) fn logger_proxy() -> Arc<dyn LoggerService> {
 
 pub(crate) fn config_source_proxy() -> Arc<dyn ConfigSource> {
     Arc::new(ScopedConfigSource)
+}
+
+/// Installs a spawn wrapper for one test and puts the previous one back on
+/// drop, so a test that changes it cannot leave every later test in the same
+/// wasm binary running with the wrong one (`init_isolate` installs only once).
+#[cfg(all(test, target_arch = "wasm32", not(target_os = "wasi")))]
+pub(crate) struct SpawnWrapperGuard(Option<wafer_block::spawn::SpawnWrapper>);
+
+#[cfg(all(test, target_arch = "wasm32", not(target_os = "wasi")))]
+impl SpawnWrapperGuard {
+    pub(crate) fn install(wrapper: Option<wafer_block::spawn::SpawnWrapper>) -> Self {
+        Self(wafer_block::spawn::set_spawn_wrapper(wrapper))
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32", not(target_os = "wasi")))]
+impl Drop for SpawnWrapperGuard {
+    fn drop(&mut self) {
+        wafer_block::spawn::set_spawn_wrapper(self.0.take());
+    }
 }
 
 #[cfg(test)]

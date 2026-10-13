@@ -1,0 +1,8 @@
+# A task spawned with a raw `spawn_local` is polled outside every request's
+# service scope, so each Cloudflare proxy call it makes is refused.
+# `wafer_block::spawn_producer` (and `OutputStream::from_producer`, which uses
+# it) passes the task through the isolate's spawn wrapper,
+# `request_services::wrap_spawned`, which carries the scope.
+disallowed-methods = [
+    { path = "wasm_bindgen_futures::spawn_local", reason = "spawn through wafer_block::spawn_producer so request_services::wrap_spawned gives the task its request's service scope" },
+]
