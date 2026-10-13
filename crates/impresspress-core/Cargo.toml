@@ -265,7 +265,7 @@ percent-encoding = "2"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"], optional = true }
 
 # SSR templating
-maud = "0.26"
+maud = { workspace = true }
 
 # Logging
 tracing = "0.1"
