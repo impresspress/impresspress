@@ -68,7 +68,7 @@ pub mod runtime_factory;
 #[cfg(feature = "browser-site-runtime")]
 pub mod site_runtime;
 
-pub use runtime_factory::{RuntimeFactory, RuntimeOptions, SandboxMode};
+pub use runtime_factory::{RuntimeFactory, RuntimeOptions};
 
 /// The operator-level `csp` the browser runtime hands `wafer-run/security-headers`,
 /// which merges it directive by directive over its own baseline and refuses
@@ -87,22 +87,6 @@ const IMPRESSPRESS_CSP: &str = concat!(
     "form-action 'self'",
 );
 
-/// Which sandbox this runtime was compiled with — `'none'`, `'site'` or
-/// `'workspace'` ([`SandboxMode::COMPILED`], spelled by
-/// [`SandboxMode::as_str`]).
-///
-/// `sw.js` calls this after `init()` and before [`initialize`], and compares
-/// it with the mode the bundle was built for (`const SANDBOX`, rendered from
-/// `[sandbox] mode`). A mismatch is a bundle assembled from the wrong
-/// runtime; the worker stops there with stage `build` — before anything has
-/// opened the database, so no recovery erases data for it — rather than
-/// boot a workspace's `sw.js` over a site build, or a site's over the
-/// workspace.
-#[wasm_bindgen]
-pub fn compiled_sandbox_mode() -> String {
-    SandboxMode::COMPILED.as_str().to_string()
-}
-
 /// Boot the runtime inside the Service Worker.
 ///
 /// `options` is the object `sw.js` passes:
@@ -113,15 +97,20 @@ pub fn compiled_sandbox_mode() -> String {
 /// paths this worker leaves to the static host (see `bypass_rules_option`).
 ///
 /// There is no mode option: what the sandbox contributes is
-/// [`SandboxMode::COMPILED`], decided by the cargo features, and `sw.js` has
-/// already checked that it is the mode the bundle was built for
-/// ([`compiled_sandbox_mode`]). A build with `browser-site-runtime` compiled
+/// [`SandboxMode::COMPILED`], decided by the cargo features (this crate's
+/// forward to `impresspress-core`'s, which the constant reads), and `sw.js`
+/// has already checked that it is the mode the bundle was built for
+/// ([`compiled_sandbox_mode`], which this cdylib exports by linking
+/// `impresspress-browser`). A build with `browser-site-runtime` compiled
 /// in — a site build, or a `browser-devtools` build, which implies it —
 /// always runs the sandbox's RUNTIME half: the seed import, the generation
 /// ledger, journal convergence, the dynamic-block rebuild. That is what makes
 /// an ImpressPress folder serve the site it ships. An EXPORTED bundle is the
 /// deployment's export shell: a site build, with no `/b/dev` compiled in at
 /// all. A `browser-devtools` build is always the workspace.
+///
+/// [`SandboxMode::COMPILED`]: impresspress_core::sandbox_mode::SandboxMode::COMPILED
+/// [`compiled_sandbox_mode`]: impresspress_browser::sandbox_mode::compiled_sandbox_mode
 #[wasm_bindgen]
 pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // Before anything that can log. `tracing`'s default dispatcher discards
@@ -198,7 +187,8 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     //
     // This runs for an EXPORTED bundle too — the export shell, a site build.
     // It is the whole reason the export works: the archive ships a `seed/`
-    // beside the shell, and this is what reads it. See `SandboxMode`.
+    // beside the shell, and this is what reads it. See
+    // `impresspress_core::sandbox_mode::SandboxMode`.
     #[cfg(feature = "browser-site-runtime")]
     site_runtime::install(&sandbox).await;
 

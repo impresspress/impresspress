@@ -60,10 +60,13 @@ pub const EXPORT_SHELL_ROOT: &str = "/__impresspress_dev/export-shell/";
 /// enum, and `const SANDBOX = 'site';` in the shipped `sw.js`.
 ///
 /// The service worker states what it was BUILT for; the runtime wasm states
-/// what it was COMPILED as — `impresspress-web`'s `SandboxMode`, decided by
-/// its features (none, `browser-site-runtime` for [`Self::Site`],
-/// `browser-devtools` for [`Self::Workspace`]) and answered by its
-/// `compiled_sandbox_mode()`. The worker compares the two after loading the
+/// what it was COMPILED as — `impresspress-core`'s `SandboxMode`, decided by
+/// its features (neither, `site-runtime` for [`Self::Site`], `block-dev` for
+/// [`Self::Workspace`]; `impresspress-web`'s `browser-site-runtime` and
+/// `browser-devtools` forward to them) and answered by
+/// `compiled_sandbox_mode()`, which every runtime exports because
+/// `impresspress-browser`, the crate every browser cdylib links, defines it.
+/// The worker compares the two after loading the
 /// module and before `initialize()`; a mismatch — a bundle assembled from
 /// the wrong runtime — stops it there with stage `build`, which erases
 /// nothing.

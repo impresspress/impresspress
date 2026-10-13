@@ -866,6 +866,42 @@ jobs:
         working-directory: crates/impresspress-web
         run: impresspress build --target web --release
 
+      # The framework `sw.js` statically imports `compiled_sandbox_mode` from
+      # the runtime's glue, beside `initialize` and `handle_request`; a glue
+      # without it fails at module link time, before any of `sw.js` runs, and
+      # no test that stubs the glue (`impresspress-bundle`'s sw harness) can
+      # see that. This links the built `sw.js` against its real glue with
+      # V8's linker (evaluating nothing) and checks the wasm's
+      # `impresspress.sandbox_mode` section — on this bundle, and on
+      # `examples/minimal-browser`, an application's own cdylib bundled the
+      # same way (the embed flow) that never names the export: it reaches
+      # every glue from `impresspress-browser`, the crate every browser
+      # cdylib links. Neither declares a `[sandbox]`, so both are `none`.
+      - name: Check the impresspress-web bundle links and declares its mode
+        run: node --experimental-vm-modules scripts/check-bundle-runtime.mjs crates/impresspress-web/pkg none
+
+      - name: Bundle examples/minimal-browser (embed × web, not impresspress-web)
+        working-directory: examples/minimal-browser
+        run: impresspress build --target web --release
+
+      - name: Check the minimal-browser bundle links and declares its mode
+        run: node --experimental-vm-modules scripts/check-bundle-runtime.mjs examples/minimal-browser/pkg none
+
+      # The same app as a `--dev` build — what `impresspress build --target
+      # web` makes without `--release`, and the build a developer bundles
+      # most. No LTO there, so the section reaches the wasm by a different
+      # road than in release: wasm-ld links the object that holds it because
+      # the exported `compiled_sandbox_mode()` reads the static
+      # (`impresspress-browser/src/sandbox_mode.rs`). A release-only check
+      # would stay green if that road broke. Overwrites the release `pkg/`
+      # above, which nothing after this step reads.
+      - name: Bundle examples/minimal-browser as a dev build
+        working-directory: examples/minimal-browser
+        run: impresspress build --target web
+
+      - name: Check the minimal-browser dev bundle links and declares its mode
+        run: node --experimental-vm-modules scripts/check-bundle-runtime.mjs examples/minimal-browser/pkg none
+
       - name: Upload bundled web dist
         uses: actions/upload-artifact@v4
         with:
@@ -1024,9 +1060,10 @@ jobs:
         run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
 
       # The other two configurations `impresspress-web` has. Each compiles its
-      # own block of `runtime_factory.rs`'s const assertions — the sandbox mode
-      # the features compile (`SandboxMode::COMPILED`) and, for a site build,
-      # that the factory routes no `/b/dev` path — so these
+      # own block of `runtime_factory.rs`'s const assertions — that its
+      # features agree with the sandbox mode `impresspress-core` compiled
+      # (`SandboxMode::COMPILED`) and, for a site build, that the factory
+      # routes no `/b/dev` path — so these
       # steps are what check that wiring, and they are where a site build's
       # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
       # are linted at all. Nothing else compiles a site build; `build-wasm`
@@ -1150,6 +1187,16 @@ jobs:
           set -o pipefail
           DIST="$(examples/dev-sandbox/build.sh | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
+
+      # The other two modes' runtimes, as `E2E build` checks `none`: each
+      # bundle's `sw.js` links against its real glue, and each wasm declares
+      # the mode its features compile in its `impresspress.sandbox_mode`
+      # section — the workspace (`browser-devtools`) and the export shell it
+      # carries (`browser-site-runtime`).
+      - name: Check the workspace and export-shell bundles link and declare their modes
+        run: |
+          node --experimental-vm-modules scripts/check-bundle-runtime.mjs "$DEV_DIST" workspace
+          node --experimental-vm-modules scripts/check-bundle-runtime.mjs examples/dev-sandbox/export-shell/dist site
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4

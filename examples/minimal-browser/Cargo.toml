@@ -18,3 +18,13 @@ wafer-run = { workspace = true }
 
 [lints]
 workspace = true
+
+# The same wasm-opt arguments as every other browser runtime here
+# (`impresspress-web`, `impresspress-browser`): rustc's wasm32 target emits
+# bulk-memory and other post-MVP instructions, which wasm-opt refuses to
+# validate unless the features are enabled.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--all-features"]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false

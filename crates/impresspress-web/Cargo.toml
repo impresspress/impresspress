@@ -35,11 +35,15 @@ browser-site-runtime = [
 # The browser development sandbox: the site runtime above plus the WORKSPACE
 # half (`dev_runtime`) — `/b/dev`, the probe, the export and the rest of the
 # `impresspress/dev` control plane (`impresspress-core/block-dev`). Off by
-# default. The features ARE the sandbox mode (`SandboxMode::COMPILED`): a
-# build with this is always the workspace, one with `browser-site-runtime`
-# alone always a site, one with neither has no sandbox. A bundle's
-# `[sandbox] mode` must name the same one — `sw.js` compares the two before
-# it calls `initialize()`, and a mismatch stops the worker (stage `build`)
+# default. The features ARE the sandbox mode: they forward to
+# `impresspress-core`'s `block-dev` / `site-runtime`, which
+# `impresspress_core::sandbox_mode::SandboxMode::COMPILED` reads (and
+# `runtime_factory.rs` const-asserts that the two agree). A build with this
+# is always the workspace, one with `browser-site-runtime` alone always a
+# site, one with neither has no sandbox. A bundle's `[sandbox] mode` must
+# name the same one — `sw.js` compares the two (`compiled_sandbox_mode()`,
+# exported through `impresspress-browser`) before it calls `initialize()`,
+# and a mismatch stops the worker (stage `build`)
 # rather than boot a workspace as a site or the reverse. (An exported site is
 # the deployment's export shell, a `browser-site-runtime` build that compiles
 # none of the workspace.)

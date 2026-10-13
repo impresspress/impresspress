@@ -18,10 +18,9 @@ use std::{collections::HashMap, sync::Arc};
 use impresspress_core::{
     blocks::auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
     config_vars::HAS_LANDING_PAGE_KEY,
+    sandbox_mode::SandboxMode,
 };
 use wafer_core::interfaces::database::service::DatabaseService;
-
-use crate::SandboxMode;
 
 /// Seed the browser-only default variables, auto-generate declared secrets,
 /// and return the full variable map. Browser-equivalent of the native

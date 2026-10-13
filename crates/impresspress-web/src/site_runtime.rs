@@ -582,17 +582,17 @@ pub struct SandboxOptions {
 ///
 /// Unconditional. Every build that compiles this module has the sandbox's
 /// RUNTIME half (`runtime_factory`'s const assertions pin
-/// [`SandboxMode::runtime_present`](crate::SandboxMode::runtime_present) for
-/// both such configurations), and an exported site — a site build — needs
-/// every one of these: the control that loads its seeded blocks, the
-/// `DevShared` that owns the activation queue, and the [`install`] below that
-/// imports the `seed/` the archive ships beside the shell. Keying this on
-/// whether the bundle asked for the workspace is what once made an exported
-/// site come up empty. A build with no sandbox at all does not compile this
-/// module, so `RuntimeFactory::with_dev` is never called there and the
-/// runtime is the one that never had a sandbox (design §13). Which of the two
-/// sandbox builds this is decides what the FACTORY registers, not whether
-/// there is a control at all — see [`SandboxMode`](crate::SandboxMode).
+/// [`SandboxMode::runtime_present`] for both such configurations), and an
+/// exported site — a site build — needs every one of these: the control
+/// that loads its seeded blocks, the `DevShared` that owns the activation
+/// queue, and the [`install`] below that imports the `seed/` the archive
+/// ships beside the shell. Keying this on whether the bundle asked for the
+/// workspace is what once made an exported site come up empty. A build with
+/// no sandbox at all does not compile this module, so
+/// `RuntimeFactory::with_dev` is never called there and the runtime is the
+/// one that never had a sandbox (design §13). Which of the two sandbox builds
+/// this is decides what the FACTORY registers, not whether there is a
+/// control at all — see [`SandboxMode`].
 ///
 /// The `DevShared` is the one this build's `impresspress-core` defines: a
 /// site build's takes the control and the bypass rules; a `browser-devtools`
@@ -600,6 +600,9 @@ pub struct SandboxOptions {
 /// (the `WorkspaceControl`, and the export shell the export copies). That
 /// call is this function's one reference to the workspace, and it is gated
 /// with it.
+///
+/// [`SandboxMode`]: impresspress_core::sandbox_mode::SandboxMode
+/// [`SandboxMode::runtime_present`]: impresspress_core::sandbox_mode::SandboxMode::runtime_present
 pub fn attach(factory: RuntimeFactory, options: SandboxOptions) -> (Rc<RuntimeFactory>, Sandbox) {
     let control = BrowserRuntimeControl::new();
     #[cfg(not(feature = "browser-devtools"))]
@@ -613,11 +616,10 @@ pub fn attach(factory: RuntimeFactory, options: SandboxOptions) -> (Rc<RuntimeFa
 
 /// Bring the sandbox up on the runtime that was just stored.
 ///
-/// Runs in BOTH sandbox builds ([`Site`](crate::SandboxMode::Site) as well as
-/// [`Workspace`](crate::SandboxMode::Workspace)). For an exported site this is
-/// the entire reason the folder works at all: step 1 below is what reads the
-/// `seed/` the archive ships beside the shell, and steps 2–3 are what put its
-/// blocks in the runtime.
+/// Runs in BOTH sandbox builds ([`Site`] as well as [`Workspace`]). For an
+/// exported site this is the entire reason the folder works at all: step 1
+/// below is what reads the `seed/` the archive ships beside the shell, and
+/// steps 2–3 are what put its blocks in the runtime.
 ///
 /// Before anything else, [`stored_types::upgrade`] drops the content types an
 /// earlier build stored beside each file and republishes the active site
@@ -663,6 +665,9 @@ pub fn attach(factory: RuntimeFactory, options: SandboxOptions) -> (Rc<RuntimeFa
 /// show its visitors nothing and its admin nothing either; one that boots
 /// still serves its admin, where a refused seed is recorded as
 /// `IMPRESSPRESS__DEV__SEED_ERROR` on `/b/admin/settings/variables`.
+///
+/// [`Site`]: impresspress_core::sandbox_mode::SandboxMode::Site
+/// [`Workspace`]: impresspress_core::sandbox_mode::SandboxMode::Workspace
 pub async fn install(sandbox: &Sandbox) {
     let Some(wafer) = impresspress_browser::current_wafer() else {
         web_sys::console::error_1(
