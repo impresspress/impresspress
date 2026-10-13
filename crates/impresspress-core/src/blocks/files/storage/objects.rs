@@ -631,14 +631,20 @@ mod integration_tests {
             })
             .collect();
         assert_eq!(
-            MetaGet::get(&leading, crate::streaming::META_RESP_STREAM),
-            Some(crate::streaming::STREAM_MARKER_VALUE),
+            MetaGet::get(&leading, wafer_block::http_codec::META_RESP_STREAM),
+            Some(wafer_block::http_codec::STREAM_MARKER_VALUE),
             "download must emit the streaming opt-in marker as leading meta"
         );
         assert_eq!(
             MetaGet::get(&leading, META_RESP_CONTENT_TYPE),
             Some("image/png"),
             "download must emit the object's real content-type as leading meta"
+        );
+        assert_eq!(
+            MetaGet::get(&leading, wafer_block::http_codec::META_RESP_CONTENT_LENGTH),
+            Some("7"),
+            "download must declare the object's size, so every transport sends \
+             Content-Length and the codec's body enforces it"
         );
 
         let body: Vec<u8> = events

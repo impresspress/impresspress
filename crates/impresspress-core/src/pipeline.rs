@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 
-use wafer_block::http_codec;
+use wafer_block::{http_codec, stream::StreamEvent};
 use wafer_core::clients::config as config_client;
 use wafer_run::{
     context::Context, streams::output::TerminalNotResponse, AuthLevel, BlockEndpoint, BlockInfo,
@@ -503,7 +503,11 @@ pub async fn handle_request(
     };
 
     // 3a. A response that declares streaming intent up front (its headers in a
-    //     leading-meta frame) is forwarded without draining the body. Two
+    //     leading-meta frame, `http_codec::declares_streaming`) is forwarded
+    //     without draining the body: the stream itself is returned, with its
+    //     leading meta put back in front of it, so the transport opens it
+    //     (`http_codec::open_response`) and the producer's backpressure and
+    //     drop→cancel reach it directly — no relay task in between. Two
     //     sub-cases, split by whether it carries the `resp.stream` marker:
     //
     //     - A DEFINITE streamed response — a file download / share access —
@@ -511,44 +515,42 @@ pub async fn handle_request(
     //       STILL gets its `request_logs` row (status resolved from the leading
     //       meta, duration = time-to-headers) before the body streams. These
     //       are short, audit-worthy request/responses; the audit row must not
-    //       be lost just because the body streams — and on platforms whose
-    //       adapter buffers the body anyway (the native axum listener), losing
-    //       it would be pure regression with no offsetting streaming benefit.
+    //       be lost just because the body streams.
     //
     //     - A genuinely OPEN-ENDED stream — SSE / chat: a streaming
     //       content-type with no marker, no definite status or completion —
     //       skips the row. Buffering it just to grab a status would defeat
     //       streaming, and these long-lived progress feeds aren't the short
     //       request/responses request_logs is built for.
-    let (leading_meta, next_event) = crate::streaming::drain_leading_meta(&mut stream).await;
-    if crate::streaming::wants_streaming(&leading_meta) {
-        if crate::streaming::has_stream_marker(&leading_meta) {
-            let status_code = i64::from(http_codec::resolve_status(&leading_meta, 200));
-            let duration_ms = i64::try_from(crate::util::now_millis().saturating_sub(start_ms))
-                .unwrap_or(i64::MAX);
-            write_request_log(
-                ctx,
-                NewRequestLog {
-                    method: &method,
-                    path: &path,
-                    status_code,
-                    error_message: "",
-                    duration_ms,
-                    client_ip: &client_ip,
-                    user_id: &user_id,
-                },
-                block_infos,
-                extra_routes,
-            )
-            .await;
-        }
-        return crate::streaming::rebuild_streaming(leading_meta, next_event, stream);
+    let leading_meta = stream.take_leading_meta().await;
+    let streams = http_codec::declares_streaming(&leading_meta);
+    if streams && http_codec::has_stream_marker(&leading_meta) {
+        let status_code = i64::from(http_codec::resolve_status(&leading_meta, 200));
+        let duration_ms =
+            i64::try_from(crate::util::now_millis().saturating_sub(start_ms)).unwrap_or(i64::MAX);
+        write_request_log(
+            ctx,
+            NewRequestLog {
+                method: &method,
+                path: &path,
+                status_code,
+                error_message: "",
+                duration_ms,
+                client_ip: &client_ip,
+                user_id: &user_id,
+            },
+            block_infos,
+            extra_routes,
+        )
+        .await;
+    }
+    stream.prepend(leading_meta.into_iter().map(StreamEvent::Meta));
+    if streams {
+        return stream;
     }
 
     let (status_code, error_message, reply): (i64, String, OutputStream) =
-        match crate::streaming::collect_buffered_with_prelude(stream, leading_meta, next_event)
-            .await
-        {
+        match stream.collect_buffered().await {
             Ok(buf) => {
                 let code = i64::from(http_codec::resolve_status(&buf.meta, 200));
                 (code, String::new(), replay_buffered(buf.body, buf.meta))
@@ -3041,6 +3043,7 @@ mod streaming_audit_tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use wafer_block::http_codec::{META_RESP_STREAM, STREAM_MARKER_VALUE};
     use wafer_run::{
         Block as RunBlock, BlockCategory, LifecycleEvent, MetaEntry, WaferError,
         META_RESP_CONTENT_TYPE,
@@ -3050,7 +3053,6 @@ mod streaming_audit_tests {
     use crate::{
         features::AllEnabled,
         routing::{ExtraRoute, RouteAccess},
-        streaming::{META_RESP_STREAM, STREAM_MARKER_VALUE},
         test_support::{anon_msg, TestContext},
     };
 
@@ -3188,6 +3190,92 @@ mod streaming_audit_tests {
             0,
             "an open-ended SSE stream must skip the request_logs row"
         );
+    }
+
+    /// An SSE stream that sends one event, then waits for its consumer to go
+    /// away and reports that it saw the cancellation.
+    struct SseUntilCancelled(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    #[async_trait]
+    impl RunBlock for SseUntilCancelled {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/sse-hang", "0.0.1", "echo@v1", "sse until cancelled")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let cancelled = self.0.lock().unwrap().take().expect("one request");
+            OutputStream::from_producer(move |sink, cancel| async move {
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: META_RESP_CONTENT_TYPE.into(),
+                        value: "text/event-stream".into(),
+                    })
+                    .await;
+                let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                cancel.cancelled().await;
+                let _ = cancelled.send(());
+            })
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// **Fails on the pre-D1b pipeline**, which relayed a streamed response
+    /// through a task of its own (`rebuild_streaming`) that ignored its
+    /// cancellation: a consumer that went away was noticed only when the
+    /// relay next tried to send, so a producer idle between events — an LLM
+    /// still thinking — kept running. The pipeline now returns the stream
+    /// itself, so dropping it cancels the producer at once.
+    #[tokio::test]
+    async fn dropping_a_streamed_response_cancels_its_producer() {
+        use futures::StreamExt;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        ctx.register_block(
+            "test/sse-hang",
+            Arc::new(SseUntilCancelled(std::sync::Mutex::new(Some(cancelled_tx)))),
+        );
+        let routes = route("/x/sse", "test/sse-hang");
+        let mut out = handle_request(
+            &ctx,
+            anon_msg("retrieve", "/x/sse"),
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &[],
+            &routes,
+        )
+        .await;
+
+        let leading = out.take_leading_meta().await;
+        assert_eq!(
+            wafer_run::MetaGet::get(&leading, META_RESP_CONTENT_TYPE),
+            Some("text/event-stream"),
+            "the pipeline forwards the stream with its leading meta"
+        );
+        assert!(
+            matches!(out.next().await, Some(StreamEvent::Chunk(ref b)) if b == b"data: one\n\n"),
+            "the first event arrives while the producer is still running"
+        );
+        drop(out);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+            .await
+            .expect("the producer saw its cancellation within 2 s")
+            .expect("the producer reported it");
     }
 
     /// Answers after yielding once, so two requests driven together

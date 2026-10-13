@@ -1,22 +1,17 @@
 //! HTTP ↔ Message conversion for Cloudflare Workers.
 //!
 //! Thin platform glue: the protocol mapping (method→action table, request
-//! meta layout, response-meta classification, terminal-event mapping) lives
-//! in `wafer_block::http_codec`, and the response-streaming decision + framing
-//! live in `impresspress_core::streaming` — the same implementations the
-//! request pipeline and the browser adapter use. Only worker-type I/O lives
-//! here: reading the request body/headers and building the Worker `Response`
-//! (buffered or `ReadableStream`-backed).
+//! meta layout, the streaming decision, how a response's head and body are
+//! rendered) lives in `wafer_block::http_codec` — the same implementation the
+//! native listener, the request pipeline and the browser adapter use. Only
+//! worker-type I/O lives here: reading the request body/headers and building
+//! the Worker `Response` (buffered, or `ReadableStream`-backed).
 
 use futures::StreamExt;
 use impresspress_core::streaming::{self, CappedCollect};
-use wafer_block::{
-    http_codec::{self, HttpResponseParts, ResponseMetaPart},
-    stream::StreamEvent,
-    MetaEntry,
-};
+use wafer_block::http_codec::{self, HttpResponseParts, OpenedResponse, StreamedHttpResponse};
 use wafer_run::{InputStream, Message, OutputStream};
-use worker::{Headers, Request, Response, ResponseBuilder, Result};
+use worker::{FixedLengthStream, Headers, Request, Response, ResponseBuilder, Result};
 
 // ---------------------------------------------------------------------------
 // Request conversion
@@ -98,143 +93,83 @@ pub async fn worker_request_to_message(req: &Request) -> Result<(Message, InputS
 
 /// Convert a WAFER `OutputStream` into a Cloudflare Worker `Response`.
 ///
-/// Two paths, chosen by the shared [`streaming::wants_streaming`] decision so
-/// the adapter can never disagree with the pipeline:
+/// `http_codec::open_response` decides, as it does for every transport:
 ///
-/// 1. **Streaming** — the producer declared streaming intent up front via
-///    leading `Meta` (the `resp.stream` marker or a streaming content-type,
-///    e.g. a large file download or an SSE response). Status + headers are
-///    applied from the leading meta, then the body chunks are piped straight
-///    into the Worker `Response`'s native `ReadableStream`
-///    (`ResponseBuilder::from_stream`) — the object never sits in the isolate
-///    whole. This path must NOT route through `collect_http_response` (which
-///    buffers).
-/// 2. **Buffered** (default) — small SSR pages / JSON / buffered replays. The
-///    body is drained under [`streaming::MAX_BUFFERED_RESPONSE_BYTES`]; an
-///    over-limit body becomes **HTTP 413** (not a generic 500 / an isolate
-///    OOM), and everything within the cap is mapped through the canonical
-///    `http_codec::collect_http_response` terminal→status logic (reusing
-///    [`streaming::terminal_to_stream`] so the `ErrorCode`→status table is
-///    never re-implemented here).
-pub async fn output_to_response(mut output: OutputStream) -> Result<Response> {
-    let (leading_meta, next_event) = streaming::drain_leading_meta(&mut output).await;
-
-    if streaming::wants_streaming(&leading_meta) {
-        return match next_event {
-            // Declared streaming AND a body chunk to forward — stream it.
-            Some(StreamEvent::Chunk(first)) => {
-                build_streaming_response(leading_meta, first, output)
+/// 1. **Streamed** — the producer declared streaming up front in leading
+///    `Meta` (the `resp.stream` marker or a streaming content type: a file
+///    download, an SSE response) and has its first bytes. The codec has
+///    rendered the head; the body is piped chunk by chunk into the Worker
+///    `Response`'s native `ReadableStream`, so the object never sits in the
+///    isolate whole. See [`streamed_response`].
+/// 2. **Buffered** (everything else: SSR pages, JSON, an empty stream, a
+///    streaming declaration the codec refused at its head). The body is
+///    drained under [`streaming::MAX_BUFFERED_RESPONSE_BYTES`]; an over-limit
+///    body becomes **HTTP 413** (not a generic 500 / an isolate OOM), and
+///    everything within the cap is rendered by
+///    `http_codec::terminal_to_http_response`, the native listener's
+///    renderer.
+pub async fn output_to_response(output: OutputStream) -> Result<Response> {
+    match http_codec::open_response(output).await {
+        OpenedResponse::Streamed(streamed) => streamed_response(streamed),
+        OpenedResponse::Buffered(output) => {
+            match streaming::collect_capped(output, streaming::MAX_BUFFERED_RESPONSE_BYTES).await {
+                // The body would have exceeded the isolate buffering cap — a
+                // clean 413 instead of assembling it whole (which the CF
+                // runtime would reject as an opaque error).
+                CappedCollect::OverLimit => over_limit_response(),
+                CappedCollect::Terminal(terminal) => {
+                    parts_to_response(http_codec::terminal_to_http_response(terminal))
+                }
             }
-            // Declared streaming but the terminal arrived before any body
-            // (empty SSE / empty download) — render the (short) buffered form.
-            other => {
-                finalise_buffered(
-                    streaming::collect_capped_with_prelude(
-                        output,
-                        leading_meta,
-                        other,
-                        streaming::MAX_BUFFERED_RESPONSE_BYTES,
-                    )
-                    .await,
-                )
-                .await
-            }
-        };
-    }
-
-    finalise_buffered(
-        streaming::collect_capped_with_prelude(
-            output,
-            leading_meta,
-            next_event,
-            streaming::MAX_BUFFERED_RESPONSE_BYTES,
-        )
-        .await,
-    )
-    .await
-}
-
-/// Apply classified response-meta parts to a Worker `Headers`. Status parts
-/// are resolved separately (`http_codec::resolve_status`) and skipped here.
-/// Only the canonical `resp.*` meta keys are honored (the `resp.stream`
-/// streaming marker is not a header and is ignored by `classify_response_meta`).
-fn apply_parts_to_headers(headers: &Headers, parts: &[ResponseMetaPart<'_>]) -> Result<()> {
-    for part in parts {
-        match part {
-            ResponseMetaPart::Status(_) => {}
-            ResponseMetaPart::Header { name, value } => headers.set(name, value)?,
-            ResponseMetaPart::SetCookie(v) => headers.append("Set-Cookie", v)?,
-            ResponseMetaPart::ContentType(v) => headers.set("Content-Type", v)?,
         }
     }
-    Ok(())
 }
 
-/// Build a streaming Worker `Response`: status + headers from the leading meta
-/// (applied *before* the body finishes), body piped chunk-by-chunk into the
-/// Worker's native `ReadableStream`. Every ending
-/// [`streaming::download_body_stream`] frames as an `Err` — an `Error`
-/// terminal (a body-read failure, or a producer that stopped without a
-/// terminal), no terminal at all, a `Halt` after the body started — surfaces
-/// as a stream error (aborting the response body) rather than a silent
-/// truncation: the HTTP status is already committed, so it cannot be
-/// downgraded to 413 or 500.
+/// A streaming Worker `Response`: the status and headers the codec rendered
+/// from the leading meta, committed before the body finishes, and the body
+/// piped into the Worker's native `ReadableStream`.
 ///
-/// For the same reason, leading meta no transport can send is answered with
-/// the codec's `unsendable_response` here, before a status or a byte is
-/// committed. Handed the whole leading meta, the codec's 500 keeps the
-/// terminal's sendable security and CORS headers (`Content-Security-Policy`,
-/// `X-Frame-Options`, …) and drops the ones describing the body it replaces
-/// (`Content-Disposition`, `Content-Encoding`, cache headers), adding
-/// `Cache-Control: no-store`.
-fn build_streaming_response(
-    leading_meta: Vec<MetaEntry>,
-    first_chunk: Vec<u8>,
-    rest: OutputStream,
-) -> Result<Response> {
-    let parts = match http_codec::response_meta_parts(&leading_meta) {
-        Ok(parts) => parts,
-        Err(invalid) => {
-            return parts_to_response(http_codec::unsendable_response(&leading_meta, &invalid))
-        }
-    };
-    let status = http_codec::resolve_status(&leading_meta, 200);
-    let headers = Headers::new();
-    apply_parts_to_headers(&headers, &parts)?;
-    if !parts
-        .iter()
-        .any(|part| matches!(part, ResponseMetaPart::ContentType(_)))
-    {
-        // Streaming bodies without an explicit content-type fall back to
-        // octet-stream (not the JSON default the buffered path uses).
-        headers.set("Content-Type", "application/octet-stream")?;
-    }
-
-    let body = streaming::download_body_stream(first_chunk, rest)
-        .map(|chunk| chunk.map_err(|e| worker::Error::RustError(e.message)));
-
-    ResponseBuilder::new()
+/// Every ending the codec's `StreamedBody` frames as an `Err` — an `Error`
+/// terminal (a body-read failure, or a producer that stopped without one),
+/// no terminal at all, a `Halt`/`Drop`/`Continue` after the body started, a
+/// body that breaks its declared length — surfaces as a stream error that
+/// aborts the response body rather than a silent truncation: the status is
+/// already committed, so it cannot be downgraded to 413 or 500.
+///
+/// A declared length (`resp.content_length`, a stored object's size) goes
+/// through a `FixedLengthStream`, which is how Workers sends `Content-Length`
+/// on a streamed body: a `Content-Length` header set by hand on a
+/// `ReadableStream` response is not what Workers frames the body by.
+fn streamed_response(streamed: StreamedHttpResponse) -> Result<Response> {
+    let StreamedHttpResponse {
+        status,
+        headers,
+        content_length,
+        body,
+    } = streamed;
+    let builder = ResponseBuilder::new()
         .with_status(status)
-        .with_headers(headers)
-        .from_stream(body)
-}
-
-/// Render a capped buffered collection to a Worker `Response`.
-async fn finalise_buffered(collected: CappedCollect) -> Result<Response> {
-    match collected {
-        // The body would have exceeded the isolate buffering cap — return a
-        // clean 413 instead of assembling it whole (which the CF runtime would
-        // reject as an opaque error, i.e. the "generic 500" this replaces).
-        CappedCollect::OverLimit => over_limit_response(),
-        // Within the cap: reuse the canonical terminal→status mapping by
-        // reconstructing a single-terminal stream and running it back through
-        // `collect_http_response` (no duplicated ErrorCode→status table).
-        CappedCollect::Terminal(result) => {
-            let parts =
-                http_codec::collect_http_response(streaming::terminal_to_stream(result)).await;
-            parts_to_response(parts)
+        .with_headers(headers_from(&headers)?);
+    let body = body.map(|chunk| chunk.map_err(|e| worker::Error::RustError(e.message)));
+    match content_length {
+        None => builder.from_stream(body),
+        Some(length) => {
+            let fixed =
+                worker::worker_sys::FixedLengthStream::from(FixedLengthStream::wrap(body, length));
+            Ok(builder.stream(fixed.readable()))
         }
     }
+}
+
+/// Header pairs, as the codec renders them, in a Worker `Headers`. Appended
+/// in application order: a rendering may legitimately repeat a name
+/// (`Set-Cookie`).
+fn headers_from(pairs: &[(String, String)]) -> Result<Headers> {
+    let headers = Headers::new();
+    for (name, value) in pairs {
+        headers.append(name, value)?;
+    }
+    Ok(headers)
 }
 
 /// A 413 Payload Too Large response for an over-limit buffered body.
@@ -251,13 +186,9 @@ fn over_limit_response() -> Result<Response> {
 /// are appended in application order (`headers` may legitimately repeat a name,
 /// e.g. `Set-Cookie`).
 fn parts_to_response(parts: HttpResponseParts) -> Result<Response> {
-    let headers = Headers::new();
-    for (name, value) in &parts.headers {
-        headers.append(name, value)?;
-    }
     Ok(Response::from_bytes(parts.body)?
         .with_status(parts.status)
-        .with_headers(headers))
+        .with_headers(headers_from(&parts.headers)?))
 }
 
 /// Request-conversion tests: the transport body cap and the path pass-through.
@@ -371,11 +302,12 @@ mod request_tests {
 /// `parts_to_response` glue together.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod response_tests {
-    use impresspress_core::{
-        blocks::errors::{error_response, ErrorCode},
-        streaming::{META_RESP_STREAM, STREAM_MARKER_VALUE},
+    use impresspress_core::blocks::errors::{error_response, ErrorCode};
+    use wafer_block::{
+        http_codec::{META_RESP_CONTENT_LENGTH, META_RESP_STREAM, STREAM_MARKER_VALUE},
+        meta::META_RESP_CONTENT_TYPE,
+        MetaEntry,
     };
-    use wafer_block::{meta::META_RESP_CONTENT_TYPE, MetaEntry};
     use wafer_run::{ErrorCode as WaferErrorCode, OutputStream, WaferError};
     use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -502,6 +434,121 @@ mod response_tests {
         let mut resp = output_to_response(stream).await.expect("build response");
 
         assert_eq!(resp.text().await.expect("read body"), "one two");
+    }
+
+    /// Node has no Workers `FixedLengthStream`. This stands one in — a
+    /// `TransformStream` that counts its constructions and keeps the length
+    /// it was made with — so the adapter's wiring can be read back. What
+    /// Workers itself does with the length (the `Content-Length` it sends)
+    /// is the runtime's, and not observable here.
+    fn install_fixed_length_stream_stand_in() {
+        js_sys::Function::new_no_args(
+            "if (!globalThis.__fixedLengths) { \
+                 globalThis.__fixedLengths = []; \
+                 globalThis.FixedLengthStream = class extends TransformStream { \
+                     constructor(length) { super(); globalThis.__fixedLengths.push(Number(length)); } \
+                 }; \
+             }",
+        )
+        .call0(&wasm_bindgen::JsValue::UNDEFINED)
+        .expect("install the stand-in");
+    }
+
+    /// The lengths every `FixedLengthStream` so far was constructed with.
+    fn fixed_lengths() -> Vec<f64> {
+        let lengths = js_sys::Reflect::get(&js_sys::global(), &"__fixedLengths".into())
+            .expect("the stand-in is installed");
+        js_sys::Array::from(&lengths)
+            .iter()
+            .map(|v| v.as_f64().expect("a number"))
+            .collect()
+    }
+
+    /// A download that declares its length (`resp.content_length`, the
+    /// stored object's size) is framed by a `FixedLengthStream` of exactly
+    /// that length — how Workers sends `Content-Length` on a streamed body —
+    /// and delivers every byte. One that declares none streams without it.
+    #[wasm_bindgen_test]
+    async fn a_declared_length_frames_the_streamed_body_with_a_fixed_length_stream() {
+        install_fixed_length_stream_stand_in();
+        let download = |length: Option<&'static str>| {
+            OutputStream::from_producer(move |sink, _cancel| async move {
+                let mut leading = vec![
+                    (META_RESP_STREAM, STREAM_MARKER_VALUE),
+                    (META_RESP_CONTENT_TYPE, "application/pdf"),
+                ];
+                if let Some(length) = length {
+                    leading.push((META_RESP_CONTENT_LENGTH, length));
+                }
+                for (key, value) in leading {
+                    let _ = sink
+                        .send_meta(MetaEntry {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                        })
+                        .await;
+                }
+                let _ = sink.send_chunk(b"abc".to_vec()).await;
+                let _ = sink.send_chunk(b"def".to_vec()).await;
+                let _ = sink.complete(Vec::new()).await;
+            })
+        };
+
+        let before = fixed_lengths().len();
+        let mut resp = output_to_response(download(Some("6")))
+            .await
+            .expect("build response");
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(
+            fixed_lengths()[before..],
+            [6.0],
+            "the body is framed by a FixedLengthStream of the declared length"
+        );
+        assert_eq!(resp.text().await.expect("read body"), "abcdef");
+
+        let before = fixed_lengths().len();
+        let mut resp = output_to_response(download(None))
+            .await
+            .expect("build response");
+        assert_eq!(
+            fixed_lengths().len(),
+            before,
+            "no declared length, no FixedLengthStream"
+        );
+        assert_eq!(resp.text().await.expect("read body"), "abcdef");
+    }
+
+    /// A body that runs past its declared length is aborted, not ended: the
+    /// codec's body yields an `Err` in place of the chunk that would overrun
+    /// it, and the response body errors.
+    #[wasm_bindgen_test]
+    async fn a_body_overrunning_its_declared_length_is_aborted() {
+        install_fixed_length_stream_stand_in();
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            for (key, value) in [
+                (META_RESP_STREAM, STREAM_MARKER_VALUE),
+                (META_RESP_CONTENT_TYPE, "application/pdf"),
+                (META_RESP_CONTENT_LENGTH, "5"),
+            ] {
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    })
+                    .await;
+            }
+            let _ = sink.send_chunk(b"ab".to_vec()).await;
+            let _ = sink.send_chunk(b"cdef".to_vec()).await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let mut resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status_code(), 200);
+        assert!(
+            resp.bytes().await.is_err(),
+            "a body longer than it declared must not read back as complete"
+        );
     }
 
     /// **Fails before wafer-run 9a080676**, whose codec rendered an error as
