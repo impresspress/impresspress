@@ -377,12 +377,14 @@ check_compiler
 #    tree that has just built the ordinary bundle must not be disturbed by
 #    this script, and vice versa.
 #    `--pkg-dir` names one that already exists, and nothing is compiled.
+#    Both builds go through `scripts/wasm-pack-locked.sh`, which refuses a
+#    `Cargo.lock` that is out of date before wasm-pack can rewrite it.
 if [ -n "$PKG_DIR" ]; then
   log "using the wasm-pack output at $PKG_DIR"
 else
   PKG_DIR="$REPO/crates/impresspress-web/pkg-dev"
   log "wasm-pack build --features browser-devtools -> $PKG_DIR"
-  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-dev -- --features browser-devtools --locked)
+  "$REPO/scripts/wasm-pack-locked.sh" "$REPO/crates/impresspress-web" build --target web --release --out-dir pkg-dev -- --features browser-devtools
 fi
 
 # 1b. The site runtime — the sandbox's runtime half alone, with no workspace
@@ -393,7 +395,7 @@ if [ -n "$SITE_PKG_DIR" ]; then
 else
   SITE_PKG_DIR="$REPO/crates/impresspress-web/pkg-site"
   log "wasm-pack build --features browser-site-runtime -> $SITE_PKG_DIR"
-  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-site -- --features browser-site-runtime --locked)
+  "$REPO/scripts/wasm-pack-locked.sh" "$REPO/crates/impresspress-web" build --target web --release --out-dir pkg-site -- --features browser-site-runtime
 fi
 
 # 1c. The guarantee the feature split is for, checked on the two artifacts:

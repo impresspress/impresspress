@@ -30,6 +30,11 @@ on:
       # compiles to without touching one of their paths.
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # The lock check the wasm-pack and `cargo install` steps run first, and
+      # the wasm-pack wrapper: they refuse a stale `Cargo.lock` that neither
+      # tool's own `--locked` would.
+      - 'scripts/check-cargo-lock.sh'
+      - 'scripts/wasm-pack-locked.sh'
       - '.github/workflows/deploy-dev-sandbox.yml'
   workflow_dispatch:
 
@@ -66,11 +71,10 @@ jobs:
       # (feature-off) pkg/ the CLI itself needs to compile — the dev-sandbox's
       # own feature-on wasm goes into pkg-dev/, built separately by build.sh below.
       - name: Pre-build impresspress-web wasm (build.rs prereq)
-        working-directory: crates/impresspress-web
-        run: wasm-pack build --target web --release --out-dir pkg -- --locked
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir pkg
 
       - name: Install impresspress CLI
-        run: cargo install --path crates/impresspress --locked
+        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked
 
       # `build.sh` and the verifier both run through node, and
       # `verify-compiler-assets.mjs` is what proves the toolchain this deploy

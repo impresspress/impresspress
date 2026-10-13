@@ -93,15 +93,17 @@ fn runtime_hint(
     use impresspress_bundle::bundle::SandboxShell;
     let features = match mode {
         SandboxShell::None => "",
-        SandboxShell::Site => " --features browser-site-runtime",
-        SandboxShell::Workspace => " --features browser-devtools",
+        SandboxShell::Site => " -- --features browser-site-runtime",
+        SandboxShell::Workspace => " -- --features browser-devtools",
     };
     let (wasm_env, pkg_dir) = (wasm::WASM_ENV, wasm::PKG_DIR_ENV);
     let mode = mode.as_str();
     let build = |out_dir: &str| {
         format!(
-            "`wasm-pack build --target web --release --out-dir {out_dir} -- --locked{features}` \
-             in crates/impresspress-web"
+            "`scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release \
+             --out-dir {out_dir}{features}` from the repository root (wasm-pack runs in, and \
+             resolves `--out-dir` against, crates/impresspress-web; the script refuses an \
+             out-of-date Cargo.lock first)"
         )
     };
     match source {

@@ -32,6 +32,11 @@ on:
       # compiles to without touching one of their paths.
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # The lock check the wasm-pack and `cargo install` steps run first, and
+      # the wasm-pack wrapper: they refuse a stale `Cargo.lock` that neither
+      # tool's own `--locked` would.
+      - 'scripts/check-cargo-lock.sh'
+      - 'scripts/wasm-pack-locked.sh'
       - '.github/workflows/deploy-demo.yml'
   workflow_dispatch:
 
@@ -57,11 +62,10 @@ jobs:
       # which `include_bytes!`s the impresspress-web wasm. Build it first so
       # build.rs finds it in the canonical pkg/ location.
       - name: Pre-build impresspress-web wasm (build.rs prereq)
-        working-directory: crates/impresspress-web
-        run: wasm-pack build --target web --release --out-dir pkg -- --locked
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir pkg
 
       - name: Install impresspress CLI
-        run: cargo install --path crates/impresspress --locked
+        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked
 
       # Embed × web flow (Cargo.toml + impresspress.toml present): the unified
       # CLI re-runs wasm-pack, then `impresspress_bundle::bundle::run`

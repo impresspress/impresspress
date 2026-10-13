@@ -106,18 +106,21 @@ jobs:
       - name: Lint — WRAP-grant coverage on cross-block db::* callsites
         run: bash scripts/audit-wrap-grants.sh
 
-      # Both run against fake trees in well under a second and compile
-      # nothing: `build.sh` refusing a missing or stale `compiler/dist/` (and
-      # the wasm-pack builds of `build.sh`, `measure.sh` and the justfile
-      # passing `--locked`), and the compose decision that keeps
-      # `dist/manifest.json`'s `build` field honest.
-      - name: Test build.sh refuses a stale compiler
-        run: |
-          examples/dev-sandbox/test-build-compiler-refusal.sh
-          examples/dev-sandbox/compiler/scripts/test-build-kind.sh
-
       - name: Install Rust
         run: rustup toolchain install
+
+      # Both run against fake trees in a second or two and compile nothing:
+      # `build.sh` refusing a missing or stale `compiler/dist/` (and
+      # `build.sh`, `measure.sh`, the justfile and
+      # `scripts/wasm-pack-locked.sh` refusing an out-of-date `Cargo.lock`
+      # without rewriting it), and the compose decision that keeps
+      # `dist/manifest.json`'s `build` field honest. The lock cases run the
+      # real `cargo metadata` against a two-crate fixture workspace, so this
+      # step comes after Install Rust.
+      - name: Test build.sh refuses a stale compiler or a stale Cargo.lock
+        run: |
+          examples/dev-sandbox/test-build-guards.sh
+          examples/dev-sandbox/compiler/scripts/test-build-kind.sh
 
       - name: Install nightly rustfmt
         run: rustup toolchain install nightly --component rustfmt
@@ -731,7 +734,7 @@ jobs:
         # unconditional behaviour the merge gate has always had.
         if: inputs.pull-request
         run: |
-          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-browser/ crates/impresspress-core/ crates/impresspress-web/ crates/impresspress-bundle/assets/vendor/ Cargo.toml Cargo.lock)
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-browser/ crates/impresspress-core/ crates/impresspress-web/ crates/impresspress-bundle/assets/vendor/ Cargo.toml Cargo.lock scripts/check-cargo-lock.sh scripts/wasm-pack-locked.sh)
           if [ -z "$CHANGED" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -793,7 +796,7 @@ jobs:
         if: steps.browser-changes.outputs.skip != 'true'
         env:
           NODE_OPTIONS: --import ./js/test/node-hooks.mjs
-        run: wasm-pack test --node crates/impresspress-browser
+        run: scripts/wasm-pack-locked.sh crates/impresspress-browser test --node
 
       # impresspress-web's own wasm tests (the browser runtime factory's
       # infrastructure config). The crate links impresspress-browser, so its
@@ -804,7 +807,7 @@ jobs:
         if: steps.browser-changes.outputs.skip != 'true'
         env:
           NODE_OPTIONS: --import ../impresspress-browser/js/test/node-hooks.mjs
-        run: wasm-pack test --node crates/impresspress-web
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web test --node
 
   # E2E is split into a single build stage plus two independent test stages so
   # the browser-WASM smoke tests (port 8080) and the native-server visual
@@ -853,7 +856,7 @@ jobs:
       # binary's runtime speed is irrelevant — a debug compile is far cheaper.
       # `--root out` lands the binary at out/bin/impresspress for artifact upload.
       - name: Install impresspress CLI (debug)
-        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
       - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
@@ -1078,7 +1081,7 @@ jobs:
       # Debug build, as `e2e-build` does: the CLI only assembles static files
       # here, so its runtime speed is irrelevant and a debug compile is cheaper.
       - name: Install impresspress CLI (debug)
-        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
       - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
@@ -1383,7 +1386,7 @@ jobs:
       # Debug build, as `e2e-dev-sandbox` does: the CLI only assembles static
       # files here, so its runtime speed is irrelevant.
       - name: Install impresspress CLI (debug)
-        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+        run: scripts/check-cargo-lock.sh crates/impresspress && cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
       - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
