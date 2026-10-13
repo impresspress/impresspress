@@ -226,7 +226,7 @@ mod tests {
         vars.insert("APP_NAME".into(), "demo-app".into());
         vars.insert("BOOT_REDIRECT".into(), "/".into());
         vars.insert("OPFS_WIPE_ON_RECOVERY".into(), "false".into());
-        vars.insert("SHELL_URL".into(), crate::bundle::SHELL_URL.into());
+        vars.insert("SHELL_URL".into(), "\"/\"".into());
 
         template::render_to_file(&src, &out, &vars).unwrap();
         let body = std::fs::read_to_string(&out).unwrap();
@@ -241,7 +241,7 @@ mod tests {
             "missing manual reset button label"
         );
         assert!(body.contains("const OPFS_WIPE_ON_RECOVERY = false;"));
-        assert!(body.contains("const SHELL_URL = '/';"));
+        assert!(body.contains("const SHELL_URL = \"/\";"));
         assert!(
             body.contains("const BOOT_PROBE_TIMEOUT_MS = 60_000;"),
             "missing readiness-probe timeout"

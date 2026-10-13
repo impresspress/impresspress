@@ -76,6 +76,18 @@ export const ORIGIN = 'https://app.example';
 export const CLIENT_URL = `${ORIGIN}/b/auth/login`;
 /// What the static host serves at the boot shell's URL.
 export const SHELL_HTML = '<!DOCTYPE html><title>the boot shell</title>';
+/// What the static host serves at `/` when the shell is elsewhere: a landing
+/// page of the app's own that loads no loader (as an app that lists `/` in
+/// `extra_bypass_exact` and sets `shell_path` keeps there).
+export const LANDING_HTML = '<!DOCTYPE html><title>a landing page</title>';
+
+/// The boot shell's URL path a rendering was built with: its `const
+/// SHELL_URL`, rendered from `[app] shell_path` as a JSON string.
+function shellUrlOf(rendered) {
+  const declared = rendered.match(/^const SHELL_URL = ("[^"]*");$/m);
+  if (!declared) throw new Error('the rendered sw.js no longer declares SHELL_URL');
+  return JSON.parse(declared[1]);
+}
 
 let instances = 0;
 
@@ -93,8 +105,10 @@ function sandboxOf(rendered) {
 /// for, as a runtime from the same build does; `runtime.compiledSandboxMode`
 /// is another answer, a runtime from another build. `runtime.host(url)` is the static host's
 /// answer to a request the worker makes; by default it has the boot shell at
-/// `/` and nothing else — a plain file server, with no fallback for the paths
-/// only the runtime serves, and the runtime binary at RUNTIME_URL. `wipe`
+/// the rendering's shell path (`/` but where `shell_path` says otherwise,
+/// and then LANDING_HTML at `/`) and nothing else — a plain file server,
+/// with no fallback for the paths only the runtime serves, and the runtime
+/// binary at RUNTIME_URL. `wipe`
 /// picks the `opfs_wipe_on_recovery` rendering; `variable` names any other
 /// rendering by the environment variable it was passed in.
 ///
@@ -106,6 +120,7 @@ function sandboxOf(rendered) {
 /// every put into the runtime cache fail as a full quota does.
 export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) {
   const source = rendering(variable ?? (wipe ? 'SW_JS_WIPE' : 'SW_JS'));
+  const shellUrl = shellUrlOf(source);
   const listeners = {};
   const network = [];
   // The options each of those requests was made with, in the same order.
@@ -263,8 +278,11 @@ export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) 
     network.push(request);
     networkInits.push(init);
     if (runtime.host) return runtime.host(request);
-    if (request === '/') {
+    if (request === shellUrl) {
       return new Response(SHELL_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } });
+    }
+    if (request === '/') {
+      return new Response(LANDING_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } });
     }
     if (request === RUNTIME_URL) {
       return new Response(RUNTIME_BYTES, { status: 200, headers: { 'Content-Type': 'application/wasm' } });
@@ -313,6 +331,8 @@ export async function loadWorker(runtime = {}, { wipe = false, variable } = {}) 
   }
 
   return {
+    /// The boot shell's URL path this rendering was built with.
+    shellUrl,
     request,
     message,
     lifecycle,

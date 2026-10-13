@@ -47,6 +47,7 @@ import {
   NEW_RUNTIME,
   OLD_RUNTIME,
   MODEL_CACHES,
+  NON_ROOT_SHELL,
   ORIGIN,
   RECOVERED_CACHE,
   RECOVERY_DONE,
@@ -493,6 +494,45 @@ test('a first visit keeps the query and the fragment it came with', async () => 
   await shell.booted;
 
   assert.equal(shell.probes[0].url, `${ORIGIN}/?invite=abc#welcome`);
+  assertEntered(shell);
+});
+
+// The shell's own address is `[app] shell_path`, not always `/`: an app may
+// keep another document at `/` (a landing page the worker never intercepts)
+// and have its host serve the shell at `/chat`. A shell standing at THAT
+// path is the app being opened, and goes on to the boot URL…
+test('a shell at its configured path is the app being opened, and goes on to the boot URL', async () => {
+  const boot = `${ORIGIN}${NON_ROOT_SHELL.bootUrl}`;
+  const shell = loadShell({ nonRootShell: true, path: NON_ROOT_SHELL.path, now: NOW });
+  await shell.booted;
+
+  assert.equal(shell.probes[0].url, boot);
+  assertEntered(shell, boot);
+});
+
+// …and so does one a dead runtime's navigation to it was answered with,
+// once the recovery has brought a runtime back.
+test('a recovery on a shell at its configured path goes on to the boot URL', async () => {
+  const boot = `${ORIGIN}${NON_ROOT_SHELL.bootUrl}`;
+  const shell = loadShell({
+    nonRootShell: true,
+    path: NON_ROOT_SHELL.path,
+    stop: left('request'),
+    now: NOW
+  });
+  await shell.booted;
+
+  assertReplaced(shell, { erased: false });
+  assertEntered(shell, boot);
+});
+
+// …while `/` is then just another page of the app — the shell standing
+// there was asked for, and stays.
+test('where the shell is not at `/`, a shell answered at `/` is a page of the app', async () => {
+  const shell = loadShell({ nonRootShell: true, path: '/', now: NOW });
+  await shell.booted;
+
+  assert.equal(shell.probes[0].url, `${ORIGIN}/`);
   assertEntered(shell);
 });
 

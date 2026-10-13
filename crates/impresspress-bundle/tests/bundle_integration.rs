@@ -3,8 +3,16 @@ use std::{fs, path::PathBuf};
 use impresspress_bundle::bundle::{
     run,
     sandbox_mode::fixture::{custom_section, runtime_declaring},
-    AppConfig, BypassRules, SandboxShell, APP_TITLE_CLOSE, APP_TITLE_OPEN, EXPORT_SHELL_ROOT,
+    AppConfig, BypassRules, SandboxShell, ShellPath, APP_TITLE_CLOSE, APP_TITLE_OPEN,
+    EXPORT_SHELL_ROOT,
 };
+
+/// The shell path the tests of a non-root shell render with: an app that
+/// keeps a landing page of its own at `/` and has its host serve the boot
+/// shell at `/chat`.
+fn chat_shell() -> ShellPath {
+    ShellPath::parse("/chat").unwrap()
+}
 
 /// Every mode a bundle can be built in, in `[sandbox] mode`'s order.
 const SANDBOX_MODES: [SandboxShell; 3] = [
@@ -55,8 +63,11 @@ fn production_pkg_copy() -> tempfile::TempDir {
 fn exact_bypass_renders_into_sw() {
     let tmp = pkg_copy();
 
+    // `/` on the bypass list is a landing page the worker never intercepts,
+    // so the boot shell is served at a path of its own.
     let app = AppConfig {
         extra_bypass_exact: vec!["/".to_string(), "/index.html".to_string()],
+        shell_path: chat_shell(),
         ..AppConfig::default()
     };
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
@@ -772,6 +783,7 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
                 "/index.html".to_string(),
                 "/back\\slash's.js".to_string(),
             ],
+            shell_path: chat_shell(),
             ..AppConfig::default()
         },
     ];
@@ -1058,32 +1070,41 @@ fn node(args: &[&std::ffi::OsStr], env: &[(&str, &std::path::Path)]) {
     );
 }
 
-/// The shipped templates rendered into a fresh directory, with
-/// `opfs_wipe_on_recovery` as given.
-fn rendered_shell(opfs_wipe_on_recovery: bool) -> tempfile::TempDir {
+/// The shipped templates rendered into a fresh directory, for `app`.
+fn rendered_shell(app: AppConfig) -> tempfile::TempDir {
     let tmp = production_pkg_copy();
-    let app = AppConfig {
-        opfs_wipe_on_recovery,
-        ..AppConfig::default()
-    };
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
     tmp
 }
 
-/// `node --test` on one file of `tests/sw/`, against both renderings of
-/// `rendered` (`sw.js` or `loader.js`): the default, in `plain_var`, and the
-/// `opfs_wipe_on_recovery` one, in `wipe_var`.
-fn node_test(test_file: &str, rendered: &str, plain_var: &str, wipe_var: &str) {
-    let plain = rendered_shell(false);
-    let wipe = rendered_shell(true);
+/// `node --test` on one file of `tests/sw/`, against three renderings of
+/// `rendered` (`sw.js` or `loader.js`): the default, in `{var}`; the
+/// `opfs_wipe_on_recovery` one, in `{var}_WIPE`; and one whose boot shell is
+/// not at `/` — `shell_path = "/chat"`, with `boot_redirect = "/b/home"`
+/// (`NON_ROOT_SHELL` in `loader_harness.mjs`) and `/` on the bypass list, as
+/// an app that keeps a landing page there has it — in `{var}_SHELL`.
+fn node_test(test_file: &str, rendered: &str, var: &str) {
+    let plain = rendered_shell(AppConfig::default());
+    let wipe = rendered_shell(AppConfig {
+        opfs_wipe_on_recovery: true,
+        ..AppConfig::default()
+    });
+    let shell = rendered_shell(AppConfig {
+        shell_path: chat_shell(),
+        boot_redirect: Some("/b/home".to_string()),
+        extra_bypass_exact: vec!["/".to_string()],
+        ..AppConfig::default()
+    });
     let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/sw")
         .join(test_file);
+    let (wipe_var, shell_var) = (format!("{var}_WIPE"), format!("{var}_SHELL"));
     node(
         &["--test".as_ref(), tests.as_os_str()],
         &[
-            (plain_var, &plain.path().join(rendered)),
-            (wipe_var, &wipe.path().join(rendered)),
+            (var, &plain.path().join(rendered)),
+            (&wipe_var, &wipe.path().join(rendered)),
+            (&shell_var, &shell.path().join(rendered)),
         ],
     );
 }
@@ -1126,18 +1147,15 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
     let loader = fs::read_to_string(tmp.path().join("loader.js")).unwrap();
 
-    let shell_url = format!(
-        "const SHELL_URL = '{}';",
-        impresspress_bundle::bundle::SHELL_URL
-    );
     for declaration in [
         "const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';",
         "const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';",
         // The cache the worker keeps its runtime binary in, which the
         // loader's recovery drops by name.
         "const RUNTIME_CACHE = '__impresspress_runtime';",
-        // Rendered into both from the bundler's one `SHELL_URL`.
-        shell_url.as_str(),
+        // Rendered into both from the bundler's one `shell_path` (see
+        // `a_shell_path_is_rendered_into_both_scripts_from_one_value`).
+        "const SHELL_URL = \"/\";",
         // The stage only an `initialize()` failure carries: the worker
         // states it, the loader's wipe gate asks for it.
         "const STAGE_INITIALIZE = 'initialize';",
@@ -1168,6 +1186,145 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
     );
 }
 
+/// `[app] shell_path` reaches both scripts from the one value: `sw.js`
+/// fetches the shell from it and `loader.js` keys `destination` on it, so the
+/// two must say the same path. Rendered as a JSON string, so a quote a valid
+/// path may carry (`'`) cannot end the literal: both scripts still parse. The
+/// manifest records the same path, for a reader holding only the files.
+#[test]
+fn a_shell_path_is_rendered_into_both_scripts_from_one_value() {
+    for (path, declaration) in [
+        ("/", r#"const SHELL_URL = "/";"#),
+        ("/chat", r#"const SHELL_URL = "/chat";"#),
+        ("/chat/", r#"const SHELL_URL = "/chat/";"#),
+        ("/it's", r#"const SHELL_URL = "/it's";"#),
+    ] {
+        let tmp = production_pkg_copy();
+        let app = AppConfig {
+            shell_path: ShellPath::parse(path).unwrap(),
+            ..AppConfig::default()
+        };
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+        let loader = fs::read_to_string(tmp.path().join("loader.js")).unwrap();
+        assert_eq!(sw.matches(declaration).count(), 1, "{path}: sw.js = {sw}");
+        assert_eq!(
+            loader.matches(declaration).count(),
+            1,
+            "{path}: loader.js = {loader}"
+        );
+        // One declaration each, and no other.
+        assert_eq!(sw.matches("const SHELL_URL = ").count(), 1, "{path}");
+        assert_eq!(loader.matches("const SHELL_URL = ").count(), 1, "{path}");
+
+        let module = tmp.path().join("sw-check.mjs");
+        fs::copy(tmp.path().join("sw.js"), &module).unwrap();
+        node(&["--check".as_ref(), module.as_os_str()], &[]);
+        node(
+            &["--check".as_ref(), tmp.path().join("loader.js").as_os_str()],
+            &[],
+        );
+
+        let manifest: impresspress_bundle::bundle::manifest::AssetManifest = serde_json::from_str(
+            &fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.shell_path.as_str(), path);
+    }
+}
+
+/// A shell path the worker bypasses is a contradiction: the worker would
+/// hand the shell's own address to the static host, so the runtime could
+/// never answer it, and a boot whose URL is the shell's would load the shell
+/// again. `run` refuses it by any rule — the app's exact and prefix rules,
+/// the bundle's own and the glue's prefix — naming the path and the rule, and
+/// leaves the directory as it was. `/` on the bypass list with the default
+/// shell path is the case of an app with a landing page at `/` that has not
+/// said where its shell is.
+#[test]
+fn a_shell_path_the_worker_bypasses_is_refused() {
+    let cases = [
+        (
+            "/",
+            AppConfig {
+                extra_bypass_exact: vec!["/".to_string(), "/index.html".to_string()],
+                ..AppConfig::default()
+            },
+            r#"exact rule "/""#,
+        ),
+        (
+            "/chat",
+            AppConfig {
+                extra_bypass_exact: vec!["/chat".to_string()],
+                shell_path: chat_shell(),
+                ..AppConfig::default()
+            },
+            r#"exact rule "/chat""#,
+        ),
+        (
+            "/tools/chat",
+            AppConfig {
+                extra_bypass_prefix: vec!["/tools/".to_string()],
+                shell_path: ShellPath::parse("/tools/chat").unwrap(),
+                ..AppConfig::default()
+            },
+            r#"prefix rule "/tools/""#,
+        ),
+        (
+            "/sw.js",
+            AppConfig {
+                shell_path: ShellPath::parse("/sw.js").unwrap(),
+                ..AppConfig::default()
+            },
+            r#"exact rule "/sw.js""#,
+        ),
+        (
+            "/app/",
+            AppConfig {
+                shell_path: ShellPath::parse("/app/").unwrap(),
+                ..AppConfig::default()
+            },
+            // The fixture's glue is `app.js`: its prefix covers the hashed pair.
+            r#"prefix rule "/app""#,
+        ),
+        (
+            "/seed/index.html",
+            AppConfig {
+                sandbox: SandboxShell::Site,
+                shell_path: ShellPath::parse("/seed/index.html").unwrap(),
+                ..AppConfig::default()
+            },
+            r#"prefix rule "/seed/""#,
+        ),
+    ];
+    for (path, app, rule) in cases {
+        let tmp = production_pkg_copy();
+        declare_runtime(tmp.path(), app.sandbox);
+        let before = snapshot(tmp.path());
+        let error = run(tmp.path(), tmp.path(), app).expect_err(path);
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!(
+                "shell_path {path:?} is on this bundle's service-worker bypass list ({rule})"
+            )),
+            "{path}: {message}"
+        );
+        assert_eq!(
+            snapshot(tmp.path()),
+            before,
+            "{path}: the directory was touched"
+        );
+    }
+    // The same `/` exact rule beside a shell elsewhere builds.
+    let tmp = production_pkg_copy();
+    let app = AppConfig {
+        extra_bypass_exact: vec!["/".to_string()],
+        shell_path: chat_shell(),
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("a shell off the bypass list builds");
+}
+
 /// Once the wasm runtime is dead, a request only it could have answered gets
 /// a 503 that names the cause and says what a reload will do, and a
 /// navigation is answered with the boot shell. The behaviour is driven in Node
@@ -1175,12 +1332,7 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
 /// what and why.
 #[test]
 fn the_rendered_worker_answers_for_a_stopped_runtime() {
-    node_test(
-        "sw_runtime_stopped.test.mjs",
-        "sw.js",
-        "SW_JS",
-        "SW_JS_WIPE",
-    );
+    node_test("sw_runtime_stopped.test.mjs", "sw.js", "SW_JS");
 }
 
 /// A worker keeps its own runtime binary at install — only a WebAssembly
@@ -1190,7 +1342,7 @@ fn the_rendered_worker_answers_for_a_stopped_runtime() {
 /// `tests/sw/sw_runtime_kept.test.mjs`.
 #[test]
 fn the_rendered_worker_keeps_its_own_runtime() {
-    node_test("sw_runtime_kept.test.mjs", "sw.js", "SW_JS", "SW_JS_WIPE");
+    node_test("sw_runtime_kept.test.mjs", "sw.js", "SW_JS");
 }
 
 /// What each sandbox mode's rendered worker does, driven in Node rather than
@@ -1271,12 +1423,7 @@ fn the_worker_keeps_the_runtime_its_glue_loads() {
 /// boot that worked — `tests/sw/loader_recovery.test.mjs`.
 #[test]
 fn the_rendered_loader_recovers_once_and_keeps_the_cause() {
-    node_test(
-        "loader_recovery.test.mjs",
-        "loader.js",
-        "LOADER_JS",
-        "LOADER_JS_WIPE",
-    );
+    node_test("loader_recovery.test.mjs", "loader.js", "LOADER_JS");
 }
 
 /// Each shipped engine script answers the worker's `engine-probe` for one
@@ -1344,7 +1491,10 @@ fn the_shell_and_the_worker_name_the_page_engines_from_their_one_list() {
 #[test]
 fn the_worker_and_the_loader_are_rendered_with_the_same_wipe_flag() {
     for wipe in [false, true] {
-        let tmp = rendered_shell(wipe);
+        let tmp = rendered_shell(AppConfig {
+            opfs_wipe_on_recovery: wipe,
+            ..AppConfig::default()
+        });
         let declaration = format!("const OPFS_WIPE_ON_RECOVERY = {wipe};");
         for file in ["sw.js", "loader.js"] {
             let body = fs::read_to_string(tmp.path().join(file)).unwrap();

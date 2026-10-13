@@ -148,9 +148,9 @@ const PROBE_RETRY_MS = 1_000;
 // shell standing anywhere else is a page of the app that was asked for (a
 // deep link the host answered with the shell, or a navigation sw.js answered
 // with it because its runtime is dead), and goes on to that page
-// (`destination`). Rendered from the bundler's one `SHELL_URL`, which sw.js
-// is rendered with too.
-const SHELL_URL = '__SHELL_URL__';
+// (`destination`). `[app] shell_path` (default `/`), rendered as a JSON
+// string from the bundler's one value, which sw.js is rendered with too.
+const SHELL_URL = __SHELL_URL__;
 
 // Whether a navigation away from this document has begun. Every boot ends
 // with the shell navigating itself on to the app (`enterApp`), and that is

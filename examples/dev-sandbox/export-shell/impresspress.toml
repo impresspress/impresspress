@@ -19,6 +19,9 @@ name = "impresspress-site"
 # `APP_NAME`) between the bundler's `APP_TITLE_*` markers.
 title = "ImpressPress site"
 boot_redirect = "/"
+# No `shell_path`: the boot shell stays at `/`. An export is served by any
+# static file server, which answers only `/` with `index.html`, and the CLI
+# refuses an export shell built with its shell anywhere else.
 
 [assets]
 # The exported site's visitors keep their data on a failed boot, like every

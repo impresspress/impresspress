@@ -72,7 +72,10 @@ const BASE_PREFIXES: &[&str] = &["/snippets/", "/cdn-cgi/"];
 /// `url.pathname.startsWith(prefix)`. Everything else same-origin goes to the
 /// wasm runtime. `/` and `/index.html` are deliberately NOT here by default:
 /// they are intercepted so the consumer's router can render a UI block at
-/// root (an app may still list them in [`AppConfig::extra_bypass_exact`]).
+/// root (an app may still list them in [`AppConfig::extra_bypass_exact`],
+/// and then serves its boot shell at an [`AppConfig::shell_path`] of its own:
+/// [`super::run`] refuses a shell path any rule here matches —
+/// [`Self::rule_matching`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BypassRules {
     pub exact: Vec<String>,
@@ -127,6 +130,20 @@ impl BypassRules {
             push_unique(&mut rules.prefixes, prefix);
         }
         rules
+    }
+
+    /// The first rule that sends `pathname` to the network, described for an
+    /// error (`exact rule "/"`, `prefix rule "/tools/"`), or `None` when the
+    /// worker routes it to the runtime. The same test the rendered condition
+    /// applies: `===` for an exact rule, `startsWith` for a prefix.
+    pub fn rule_matching(&self, pathname: &str) -> Option<String> {
+        if let Some(path) = self.exact.iter().find(|path| *path == pathname) {
+            return Some(format!("exact rule {path:?}"));
+        }
+        self.prefixes
+            .iter()
+            .find(|prefix| pathname.starts_with(prefix.as_str()))
+            .map(|prefix| format!("prefix rule {prefix:?}"))
     }
 
     /// The JavaScript condition `sw.js.tmpl`'s `__BYPASS_CONDITION__` renders
@@ -257,5 +274,31 @@ mod tests {
                 "        url.pathname.startsWith('/p/')",
             )
         );
+    }
+
+    #[test]
+    fn a_rule_matches_a_path_as_the_rendered_condition_does() {
+        let rules = BypassRules {
+            exact: vec!["/".to_string(), "/index.html".to_string()],
+            prefixes: vec!["/app".to_string(), "/tools/".to_string()],
+        };
+        assert_eq!(
+            rules.rule_matching("/").as_deref(),
+            Some("exact rule \"/\"")
+        );
+        assert_eq!(
+            rules.rule_matching("/tools/x").as_deref(),
+            Some("prefix rule \"/tools/\"")
+        );
+        // A prefix is a prefix of the string, not of a segment, as
+        // `startsWith` is.
+        assert_eq!(
+            rules.rule_matching("/application").as_deref(),
+            Some("prefix rule \"/app\"")
+        );
+        // An exact rule matches only itself.
+        assert_eq!(rules.rule_matching("/index"), None);
+        assert_eq!(rules.rule_matching("/chat"), None);
+        assert_eq!(rules.rule_matching("/tools"), None);
     }
 }

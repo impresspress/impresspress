@@ -215,12 +215,13 @@ const CAUSE_MAX_CHARS = 300;
 const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';
 const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
 
-// The boot shell's own URL: the one address the static host itself must
-// answer, because a first visit — no worker yet — starts there. It is where
-// this worker gets the shell document it answers a navigation with once the
-// runtime is dead (`bootShell`). Rendered from the bundler's one `SHELL_URL`,
+// The boot shell's own URL path: the one address the static host itself must
+// answer with the shell document, because a first visit — no worker yet —
+// starts there. It is where this worker gets the shell document it answers a
+// navigation with once the runtime is dead (`bootShell`). `[app] shell_path`
+// (default `/`), rendered as a JSON string from the bundler's one value,
 // which `loader.js` is rendered with too.
-const SHELL_URL = '__SHELL_URL__';
+const SHELL_URL = __SHELL_URL__;
 
 /**
  * The runtime is dead for the rest of this worker's life. Poison the worker
@@ -585,6 +586,9 @@ self.addEventListener('fetch', (event) => {
     // `--extra-bypass-exact`; `/seed/` in a 'site' or 'workspace' bundle).
     // `/` and `/index.html` are intentionally INTERCEPTED unless the app
     // lists them, so the consumer's router can render a UI block at root.
+    // An app that lists `/` keeps a document of its own there and serves the
+    // boot shell at its `shell_path` (`SHELL_URL`), which the bundler refuses
+    // to see on this list.
     //
     // The condition is rendered whole from `impresspress-bundle`'s
     // `BypassRules` (`bundle/bypass.rs`, which says why each rule is there),
