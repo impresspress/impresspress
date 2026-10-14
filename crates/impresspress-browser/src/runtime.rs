@@ -140,7 +140,10 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// `event.waitUntil`: nothing else keeps the worker alive until it settles,
 /// and a worker stopped before then loses the audit row, the deferred tasks
 /// and the final writes — never the request's own changes, which were
-/// written above.
+/// written above. An `Err` hands back no promise, so none of that work is
+/// waited for: the service worker answers an `Err` by treating the runtime
+/// as stopped (`selfDestruct` in `sw.js`), and a stopped runtime's work is
+/// not kept alive.
 ///
 /// Both scopes are re-entered on every poll, so requests interleaved on the
 /// service worker's one thread each flush their own mutations at their own

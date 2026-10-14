@@ -444,9 +444,9 @@ pub(crate) fn scope<F: Future>(services: Rc<RequestServices>, future: F) -> Scop
 /// is still refused loudly.
 ///
 /// Only the services scope is carried. A producer's
-/// `impresspress_core::deferred::defer` stays refused, and so is a final-write
-/// guard it takes (`impresspress_core::after_response::final_write` is a
-/// no-op there): when a producer runs relative to the request's head and its
+/// `impresspress_core::deferred::defer` stays refused, and a final-write
+/// guard it takes (`impresspress_core::after_response::final_write`) is a
+/// silent no-op: when a producer runs relative to the request's head and its
 /// after-response drain is a race it cannot see. A producer finishes its
 /// work before its terminal; after it, nothing keeps the invocation alive for
 /// it, unless its block took a final-write guard in `handle`, while the

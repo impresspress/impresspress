@@ -711,7 +711,9 @@ async function handleFetch(event) {
     try {
         await ensureInitialized();
         // `after` is the work the request left to run once its response is
-        // out: its request-log row and whatever its handlers deferred. The
+        // out: its request-log row, whatever its handlers deferred, and the
+        // one write a streamed reply's producer may still owe after its
+        // reader left (a final write, `after_response::final_write`). The
         // response does not wait for it, and nothing but `waitUntil` keeps
         // this worker alive until it has run — the browser may stop an idle
         // worker as soon as the response is delivered. Registered while the

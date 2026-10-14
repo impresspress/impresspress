@@ -745,3 +745,10 @@ pub(crate) async fn bounded<F: std::future::Future + Unpin>(fut: F, what: &str) 
         futures::future::Either::Right(_) => panic!("{what}: nothing within 5 s"),
     }
 }
+
+/// A `worker::Env` with no bindings and no vars: enough for the code paths
+/// that capture the environment and never reach a binding.
+pub(crate) fn empty_env() -> worker::Env {
+    use wasm_bindgen::JsCast as _;
+    wasm_bindgen::JsValue::from(js_sys::Object::new()).unchecked_into::<worker::Env>()
+}

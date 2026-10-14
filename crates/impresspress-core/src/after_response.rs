@@ -155,8 +155,16 @@ impl AfterResponse {
 
     /// Take the final writes the request's producers still owe. See
     /// [`final_write`].
+    ///
+    /// A guard already released is left out: a buffered response's producer
+    /// writes its row and drops its guard before the dispatch returns, so
+    /// the host has nothing to wait on and registers nothing for it.
     pub fn take_final_writes(&self) -> FinalWrites {
-        FinalWrites(self.final_writes.take().unwrap_or_default())
+        let mut writes = self.final_writes.take().unwrap_or_default();
+        // `Ok(None)`: still held. `Err(Canceled)`: dropped. A guard is never
+        // sent on, so `Ok(Some(()))` cannot occur.
+        writes.retain_mut(|released| matches!(released.try_recv(), Ok(None)));
+        FinalWrites(writes)
     }
 }
 
@@ -167,15 +175,20 @@ impl AfterResponse {
 #[must_use = "dropping the guard releases it at once; hold it until the write is done"]
 #[derive(Debug)]
 pub struct FinalWrite {
-    /// `None` outside any request scope: nothing waits on this guard.
-    _done: Option<oneshot::Sender<()>>,
+    /// `None` outside any request scope: nothing waits on this guard. Held
+    /// for its `Drop`, which is the release: it is never sent on.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "held for its Drop, which releases the host")
+    )]
+    done: Option<oneshot::Sender<()>>,
 }
 
 #[cfg(test)]
 impl FinalWrite {
     /// Whether a request's host waits for this guard.
     pub(crate) fn is_held(&self) -> bool {
-        self._done.is_some()
+        self.done.is_some()
     }
 }
 
@@ -184,13 +197,13 @@ impl FinalWrite {
 /// producer's own poll. See the module doc's section on final writes.
 pub fn final_write() -> FinalWrite {
     let Some(after) = current() else {
-        return FinalWrite { _done: None };
+        return FinalWrite { done: None };
     };
     let (done, released) = oneshot::channel();
     let mut final_writes = after.final_writes.take().unwrap_or_default();
     final_writes.push(released);
     after.final_writes.set(final_writes);
-    FinalWrite { _done: Some(done) }
+    FinalWrite { done: Some(done) }
 }
 
 /// The final writes one request's producers still owe, taken from its
@@ -289,7 +302,8 @@ impl<F: Future> Future for Scoped<F> {
 }
 
 /// Run `future` with the audit row and deferred tasks it produces queued
-/// into `after` rather than inserted or spawned.
+/// into `after` rather than inserted or spawned, and the [`final_write`]
+/// guards it takes registered on `after` for the host to wait on.
 pub fn scope<F: Future>(after: Rc<AfterResponse>, future: F) -> Scoped<F> {
     Scoped {
         after,
@@ -456,6 +470,29 @@ mod tests {
         assert!(
             after.take_final_writes().is_empty(),
             "the host takes the writes once"
+        );
+    }
+
+    /// A guard released before the host takes the writes — a buffered
+    /// response's, whose row was written inside the dispatch — leaves
+    /// nothing to wait on, so the host registers nothing for it; one still
+    /// held is kept.
+    #[tokio::test]
+    async fn a_guard_released_before_the_host_takes_the_writes_is_left_out() {
+        let after = AfterResponse::new();
+        let (released, held) =
+            scope(Rc::clone(&after), async { (final_write(), final_write()) }).await;
+        drop(released);
+        let writes = after.take_final_writes();
+        assert_eq!(writes.len(), 1, "only the guard still held is waited on");
+        drop(held);
+        writes.released().await;
+
+        let after = AfterResponse::new();
+        drop(scope(Rc::clone(&after), async { final_write() }).await);
+        assert!(
+            after.take_final_writes().is_empty(),
+            "a request whose every guard is released has no final write"
         );
     }
 
