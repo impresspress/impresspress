@@ -110,10 +110,11 @@ const SHELL_SCROLLERS = '.shell__body, .sidebar__groups';
 //
 // Chromium's compositor caps a surface at 16,384px (its maximum texture
 // size), so a capture near or past that is not one to trust. The cap below
-// keeps a margin under it. The tallest capture today is
-// admin-variables at about 12,700px. A page that outgrows the cap fails here
-// by name, so the fix is a deliberate one — split the capture, or capture a
-// filtered view — rather than a baseline that silently stopped at the cap.
+// keeps a margin under it. The tallest capture today is the phone
+// admin-variables one, at about 6,500px (the desktop one is about 3,400px).
+// A page that outgrows the cap fails here by name, so the fix is a
+// deliberate one — split the capture, or capture a filtered view — rather
+// than a baseline that silently stopped at the cap.
 const MAX_CAPTURE_HEIGHT = 16_000;
 
 async function growViewportToContent(page: Page) {
