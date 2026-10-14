@@ -3340,8 +3340,10 @@ mod tests {
 
     /// The page header had two renderers. `templates::render_header` emitted
     /// `header.page-header > div.page-header__text > h2.page-header__title`;
-    /// `components::page_header` emits `div.flex > div > h2.page-title`. The
-    /// first one is gone, and it went for free rather than by a cutover:
+    /// `components::page_header` emitted `div.flex > div > h2.page-title`.
+    /// Both are gone: the topbar is the page's header, and a heading in the
+    /// body is a `components::Card` title or a `components::section_header`.
+    /// The first one went for free rather than by a cutover:
     /// every one of its 15 production call sites passed
     /// `PageHeader { title: "", subtitle: None, primary_action: None }`, which
     /// `render_header` answered with empty markup, so the `.page-header*`
@@ -3392,7 +3394,8 @@ mod tests {
         assert!(
             in_markup.is_empty(),
             "the first-generation page header is being rendered again; \
-             use components::page_header:\n{}",
+             the topbar is the page header; a section heading is a components::Card \
+             title or a components::section_header:\n{}",
             in_markup.join("\n")
         );
 

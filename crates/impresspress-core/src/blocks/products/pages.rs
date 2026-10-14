@@ -2891,8 +2891,8 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         details .products-advanced {
             summary { "Advanced: webhook delivery history" }
-            section #stripe-webhook-operations .card .card--flat {
-            header .card__head .card__head--end {
+            section #stripe-webhook-operations .card {
+            header .card__head {
                 div {
                     h2 .card__title { "Webhook delivery health" }
                     p .text-muted .text-sm .text-subtitle {
@@ -2923,8 +2923,8 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         details .products-advanced {
             summary { "Advanced: Stripe recovery tools" }
-            section #stripe-provider-operations .card .card--flat {
-            header .card__head .card__head--end {
+            section #stripe-provider-operations .card {
+            header .card__head {
                 div {
                     h2 .card__title { "Provider reconciliation" }
                     p .text-muted .text-sm .text-subtitle {

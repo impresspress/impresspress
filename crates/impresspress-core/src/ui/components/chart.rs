@@ -10,6 +10,8 @@
 
 use maud::{html, Markup};
 
+use super::Card;
+
 /// How a [`chart_card`] draws its series.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Plot {
@@ -159,104 +161,97 @@ fn chart_card(
         .map(|(i, (_, v))| format!("{:.2},{:.2}", i as f64 * step, from_top(*v) * 0.6))
         .collect::<Vec<_>>()
         .join(" ");
-    html! {
-        section .card {
-            header .card__head {
-                div {
-                    h2 .card__title { (title) }
-                    p .card__subtitle { (subtitle) }
+    let body = html! {
+        @if let Some(note) = &note {
+            p .chart__note { (note) }
+        }
+        // The drawing. Decorative: the table below carries the values.
+        div .chart aria-hidden="true" {
+            // Every label is stacked in the axis's one grid cell and
+            // moved down to its gridline by `--tick-y`, so the column
+            // is as wide as the widest label and each label is centred
+            // on its line (see `.chart__ytick` in chart.css).
+            div .chart__yaxis {
+                @for tick in &ticks {
+                    span .chart__ytick style=(format!("--tick-y: {:.2}%", from_top(*tick))) { (tick) }
                 }
-                a .btn .btn--ghost .btn--sm .card__actions href=(view_href) { "View" }
             }
-            div .card__body {
-                @if let Some(note) = &note {
-                    p .chart__note { (note) }
-                }
-                // The drawing. Decorative: the table below carries the values.
-                div .chart aria-hidden="true" {
-                    // Every label is stacked in the axis's one grid cell and
-                    // moved down to its gridline by `--tick-y`, so the column
-                    // is as wide as the widest label and each label is centred
-                    // on its line (see `.chart__ytick` in chart.css).
-                    div .chart__yaxis {
-                        @for tick in &ticks {
-                            span .chart__ytick style=(format!("--tick-y: {:.2}%", from_top(*tick))) { (tick) }
-                        }
+            // `--chart-color` is declared on this wrapper (not the <svg>
+            // itself) so it's visible to the plot, the bars and the
+            // `.chart__dot` — a CSS custom property only inherits to
+            // descendants of the element it's set on.
+            div .chart__plot-wrap style=(format!("--chart-color: {color_var}")) {
+                svg .chart__plot viewBox="0 0 100 60" preserveAspectRatio="none" {
+                    // maud's `;` void-element syntax emits `<tag attrs>` with no
+                    // closing tag for *any* element name — it isn't restricted to
+                    // real HTML5 void elements. Browsers require SVG shape elements
+                    // (line/polygon/polyline/circle) to be explicitly closed; without
+                    // that, each of these becomes a nested *child* of the previous
+                    // one instead of a sibling, and browsers refuse to paint shape
+                    // elements nested inside another shape element — only the first
+                    // gridline would render. `{}` (an empty block body) generates a
+                    // matched `<tag></tag>` pair, keeping them proper siblings.
+                    @for tick in &ticks {
+                        @let y = format!("{:.2}", from_top(*tick) * 0.6);
+                        line .chart__gridline x1="0" x2="100" y1=(y) y2=(y) {}
                     }
-                    // `--chart-color` is declared on this wrapper (not the <svg>
-                    // itself) so it's visible to the plot, the bars and the
-                    // `.chart__dot` — a CSS custom property only inherits to
-                    // descendants of the element it's set on.
-                    div .chart__plot-wrap style=(format!("--chart-color: {color_var}")) {
-                        svg .chart__plot viewBox="0 0 100 60" preserveAspectRatio="none" {
-                            // maud's `;` void-element syntax emits `<tag attrs>` with no
-                            // closing tag for *any* element name — it isn't restricted to
-                            // real HTML5 void elements. Browsers require SVG shape elements
-                            // (line/polygon/polyline/circle) to be explicitly closed; without
-                            // that, each of these becomes a nested *child* of the previous
-                            // one instead of a sibling, and browsers refuse to paint shape
-                            // elements nested inside another shape element — only the first
-                            // gridline would render. `{}` (an empty block body) generates a
-                            // matched `<tag></tag>` pair, keeping them proper siblings.
-                            @for tick in &ticks {
-                                @let y = format!("{:.2}", from_top(*tick) * 0.6);
-                                line .chart__gridline x1="0" x2="100" y1=(y) y2=(y) {}
-                            }
-                            @if plot == Plot::Line {
-                                polygon .chart__area points=(format!("0,60 {line} 100,60")) {}
-                                polyline .chart__line points=(line) fill="none" {}
-                            }
-                        }
-                        // The endpoint dot is an HTML div positioned with CSS, not an
-                        // SVG <circle>. `viewBox="0 0 100 60"` with
-                        // preserveAspectRatio="none" scales x and y by different
-                        // factors depending on the rendered box size, which distorts a
-                        // circle's *fill geometry* into an ellipse — vector-effect only
-                        // preserves stroke width, it does not help here. A circular div
-                        // positioned by percentage over the plot stays circular at any
-                        // width. `--dot-y`, like the labels' `--tick-y`, is a dynamic
-                        // runtime value passed as a custom property — the only thing
-                        // these inline styles carry.
-                        @if plot == Plot::Line {
-                            @if let Some((_, last)) = data.last() {
-                                div .chart__dot style=(format!("--dot-y: {:.2}%", from_top(*last))) {}
-                            }
-                        }
-                        // One column per day: the bar (for a bar chart) and the
-                        // hover/tap target for that day's tooltip. Columns in the
-                        // outer fifths anchor their tooltip to their own edge so
-                        // it stays inside the card.
-                        div .chart__cols {
-                            @for (i, (day, val)) in data.iter().enumerate() {
-                                @let edge = if i * 5 < n { " chart__col--start" } else if (i + 1) * 5 > n * 4 { " chart__col--end" } else { "" };
-                                div class={ "chart__col" (edge) } tabindex="-1" data-tooltip=(format!("{}: {val}", short_day(day))) {
-                                    @if plot == Plot::Bars {
-                                        div .chart__bar style=(format!("--size: {:.4}", axis.fraction(*val))) {}
-                                    }
-                                }
-                            }
-                        }
+                    @if plot == Plot::Line {
+                        polygon .chart__area points=(format!("0,60 {line} 100,60")) {}
+                        polyline .chart__line points=(line) fill="none" {}
                     }
                 }
-                (date_range(data))
-                details .chart__values {
-                    summary { "Show values" }
-                    table .chart__table {
-                        caption { (title) ", " (subtitle.to_lowercase()) }
-                        thead { tr { th scope="col" { "Day" } th scope="col" { "Count" } } }
-                        tbody {
-                            @for (day, val) in data {
-                                tr {
-                                    th scope="row" { time datetime=(day) { (short_day(day)) } }
-                                    td { (val) }
-                                }
+                // The endpoint dot is an HTML div positioned with CSS, not an
+                // SVG <circle>. `viewBox="0 0 100 60"` with
+                // preserveAspectRatio="none" scales x and y by different
+                // factors depending on the rendered box size, which distorts a
+                // circle's *fill geometry* into an ellipse — vector-effect only
+                // preserves stroke width, it does not help here. A circular div
+                // positioned by percentage over the plot stays circular at any
+                // width. `--dot-y`, like the labels' `--tick-y`, is a dynamic
+                // runtime value passed as a custom property — the only thing
+                // these inline styles carry.
+                @if plot == Plot::Line {
+                    @if let Some((_, last)) = data.last() {
+                        div .chart__dot style=(format!("--dot-y: {:.2}%", from_top(*last))) {}
+                    }
+                }
+                // One column per day: the bar (for a bar chart) and the
+                // hover/tap target for that day's tooltip. Columns in the
+                // outer fifths anchor their tooltip to their own edge so
+                // it stays inside the card.
+                div .chart__cols {
+                    @for (i, (day, val)) in data.iter().enumerate() {
+                        @let edge = if i * 5 < n { " chart__col--start" } else if (i + 1) * 5 > n * 4 { " chart__col--end" } else { "" };
+                        div class={ "chart__col" (edge) } tabindex="-1" data-tooltip=(format!("{}: {val}", short_day(day))) {
+                            @if plot == Plot::Bars {
+                                div .chart__bar style=(format!("--size: {:.4}", axis.fraction(*val))) {}
                             }
                         }
                     }
                 }
             }
         }
-    }
+        (date_range(data))
+        details .chart__values {
+            summary { "Show values" }
+            table .chart__table {
+                caption { (title) ", " (subtitle.to_lowercase()) }
+                thead { tr { th scope="col" { "Day" } th scope="col" { "Count" } } }
+                tbody {
+                    @for (day, val) in data {
+                        tr {
+                            th scope="row" { time datetime=(day) { (short_day(day)) } }
+                            td { (val) }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Card::titled(title, body)
+        .subtitle(subtitle)
+        .link("View", view_href)
+        .render()
 }
 
 /// The first / last date labels under a 30-day chart.
@@ -524,6 +519,55 @@ mod tests {
 
     /// The drawing is decorative; the values are a real table with a
     /// caption, inside a disclosure keyboard and touch users can open.
+    /// Both chart kinds are a titled `Card`: the h2 is the series, the
+    /// subtitle is the window, and "View" is the card's head link, not a
+    /// button. Nothing card-level sits inside it (the values table is a
+    /// `.chart__table`, not a framed data table).
+    #[test]
+    fn a_chart_card_is_a_titled_card_with_a_head_link() {
+        for card in [
+            super::line_chart_card(
+                "New users",
+                "Last 30 days",
+                &days(&[1, 3]),
+                super::ChartHistory::Unknown,
+                "var(--x)",
+                "/b/admin/users",
+            ),
+            super::bar_chart_card(
+                "New users",
+                "Last 30 days",
+                &days(&[1, 3]),
+                super::ChartHistory::Unknown,
+                "var(--x)",
+                "/b/admin/users",
+            ),
+        ] {
+            let m = card.into_string();
+            assert!(
+                m.starts_with(r#"<section class="card"><header class="card__head">"#),
+                "{m}"
+            );
+            assert!(
+                m.contains(r#"<p class="card__subtitle">Last 30 days</p>"#),
+                "{m}"
+            );
+            assert!(
+                m.contains(r#"<a class="card__link" href="/b/admin/users">View<svg"#),
+                "{m}"
+            );
+            assert!(!m.contains("btn"), "{m}");
+            assert_eq!(
+                crate::test_support::dom::heading_outline(&m),
+                vec![(2, "New users".to_string())]
+            );
+            assert!(
+                crate::test_support::dom::card_level_inside_card(&m).is_empty(),
+                "{m}"
+            );
+        }
+    }
+
     #[test]
     fn chart_values_are_an_accessible_table_and_the_drawing_is_hidden() {
         for card in [
