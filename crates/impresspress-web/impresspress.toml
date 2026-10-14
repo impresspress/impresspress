@@ -32,7 +32,8 @@ to = "manifest.json"
 
 # The manifest's install icons: the built-in mark (`impresspress-core`'s
 # `ui/assets/impresspress-logo*.png`) at 192 and 512 px, the sizes Chrome's
-# install criteria ask for, downscaled from the same master.
+# install criteria ask for, made from the same master by
+# `scripts/brand/make-clay-mark.py`.
 [[assets.overlay]]
 from = "js/icon-192.png"
 to = "icon-192.png"

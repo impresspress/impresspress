@@ -140,7 +140,9 @@ fn shared_bytes(logical: &str) -> Option<&'static [u8]> {
         // previous default pointed at `https://impresspress.org/images/logo.png`
         // which 404s offline). The clay character impresspress.org shows,
         // Lanczos-downscaled to 32x32 from the 1254px master,
-        // `brand/clay/logo-mark.png` in the `impresspress/site` repo. It is
+        // `brand/clay/logo-mark.png` in the `impresspress/site` repo, by
+        // `scripts/brand/make-clay-mark.py` (which makes every file of the
+        // mark: these two, `favicon.ico`, and the web manifest's icons). It is
         // painted, anti-aliased art, so it scales smoothly like any image;
         // the 32/64 pair exists for sharpness on 1x and 2x screens, not for a
         // whole-factor scaling contract.

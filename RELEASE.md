@@ -24,8 +24,9 @@ what it did happens on every native boot.
 The square mark and favicon are now the clay character impresspress.org
 uses, replacing the pixel-art crab: `impresspress-logo.png` (32px),
 `impresspress-logo-2x.png` (64px) and `favicon.ico` (16/32/48), all
-downscaled from one master. Brand text stays text; there is still no raster
-wordmark (see "the built-in raster wordmark is gone" below).
+downscaled from one master by `scripts/brand/make-clay-mark.py`. Brand text
+stays text; there is still no raster wordmark (see "the built-in raster
+wordmark is gone" below).
 
 **Stored URLs repair themselves.** The built-in URLs carry a content hash,
 and a deployment holds the old ones in `WAFER_RUN_SHARED__LOGO_ICON_URL` and
@@ -40,7 +41,7 @@ icon renders as one `<img>` with the 64px file as its `2x` `srcset`
 candidate rather than a `<picture>`. The sign-in panel's icon gets that
 candidate too. A white-labelled `LOGO_ICON_URL` renders as before.
 
-**SDK (`@impresspress/js`):** `static/logo.png` and `static/favicon.ico` carry
+**SDK (`@impresspress/sdk`):** `static/logo.png` and `static/favicon.ico` carry
 the new art, byte-identical to the server's.
 
 **`impresspress-web`:** its web app manifest's icon pointed at
@@ -1637,7 +1638,7 @@ is never touched.
 **If you want a wordmark back,** set `WAFER_RUN_SHARED__LOGO_URL` to your own
 image in Admin → Settings → Variables. It renders exactly as before.
 
-**SDK (`@impresspress/js`):** `IMPRESSPRESS_ASSETS.logoLong` and
+**SDK (`@impresspress/sdk`):** `IMPRESSPRESS_ASSETS.logoLong` and
 `static/logo_long.png` are removed — a breaking change for any consumer that
 referenced them. `IMPRESSPRESS_ASSETS.logo` (the square mark) and
 `favicon.ico` are unchanged in name and now carry the new art.
