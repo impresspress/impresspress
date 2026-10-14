@@ -19,6 +19,34 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Migrations: an older version still serving no longer re-applies its migrations (admin migration 009)
+
+**What changes.** Admin migration 009 empties `blessed_hash` on every row of
+`impresspress__admin__block_settings`, adding the column first on a database
+created since it was retired. Nothing in this build reads it. A version built
+before the native auto-migration release (2026-10-07) gated each block's
+migrations on that column: on Cloudflare, while it kept serving during a
+deploy — or for good, after a failed one — each of its cold builds re-applied
+its whole migration list for every block it had blessed. That overwrote the
+new version's records of what is applied, bumped the KV config stamp (so the
+candidate's prepared plan went stale before promotion) and re-ran old data
+repairs; had auth's list changed, it would have signed every user out again
+on every cold build. With the column empty, such a version logs `schema drift`
+and serves on the schema it finds.
+
+**When it takes effect.** Once a build carrying it has applied admin's list:
+on Cloudflare at that deploy's `/_deploy/prepare`, natively at the next boot.
+An older version serving before then still re-applies. Adding 009 changes
+admin's list, so that deploy or boot re-runs admin's whole list (001-009);
+every file in it is re-runnable. Rolling back to an older version with its
+migrations applied blesses its rows again; the next deploy of this build
+re-runs admin's list, because the older one re-recorded it, and empties them
+again.
+
+**Who has to act.** Nobody. The guarantee that a still-serving older version
+cannot change the schema holds only between versions on the same migration
+protocol: keep traffic off an older version during a deploy where you can.
+
 ### Branding: the built-in mark is the clay character — no action required
 
 The square mark and favicon are now the clay character impresspress.org

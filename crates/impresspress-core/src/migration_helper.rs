@@ -242,6 +242,14 @@ pub async fn apply_pending(
             tracing::warn!(error = %failed, "migration failed");
             failed.to_string()
         })?;
+    // Record only after every file has run, and keep it the next write.
+    // Besides stamping the list, this typed write to `block_settings` is what
+    // drops Cloudflare's KV row cache of that table (`cache_key::invalidate_keys`
+    // emits the all-rows key `cfg:v1:block_settings:__all__` for it); the files
+    // above went through `db::ddl`, whose `exec_raw` invalidates nothing. Admin's
+    // 009, which rewrites `blessed_hash` on every row by a raw `UPDATE`, reaches
+    // an old version's cached reads only through this write — see the 009 note
+    // in `blocks/admin/migrations/mod.rs`.
     record_applied(ctx, block_name, &code_hash).await
 }
 

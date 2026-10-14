@@ -126,7 +126,7 @@ async fn boot_first_run_ok_and_second_run_idempotent() {
         report.blocks
     );
 
-    // --- Stamp format: block_settings rows carry a 64-hex current_hash, and no blessed_hash. ---
+    // --- Stamp format: block_settings rows carry a 64-hex current_hash, and an empty blessed_hash. ---
     let opts = wafer_block::db::ListOptions {
         limit: Some(10_000),
         skip_count: true,
@@ -155,9 +155,15 @@ async fn boot_first_run_ok_and_second_run_idempotent() {
         cur.chars().all(|c| c.is_ascii_hexdigit()),
         "current_hash must be hex: {cur}"
     );
-    assert!(
-        !admin_row.data.contains_key("blessed_hash"),
-        "the schema has no blessed_hash column: {:?}",
+    // Nothing in this build reads or writes `blessed_hash`; admin's 009 adds
+    // the column where it is missing and empties it, so a build from before
+    // the column was retired that is still serving reports drift instead of
+    // re-applying its migrations (see the 009 note in admin's
+    // `migrations/mod.rs`).
+    assert_eq!(
+        admin_row.data.get("blessed_hash"),
+        Some(&serde_json::json!("")),
+        "every database has an empty blessed_hash column: {:?}",
         admin_row.data
     );
 
