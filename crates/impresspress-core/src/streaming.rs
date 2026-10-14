@@ -25,10 +25,13 @@
 //!   ([`download_leading_meta`], [`stream_download`]) and the upload part
 //!   buffer the R2 adapter splits a body with ([`UploadPartBuffer`]).
 //!
-//! All of it runs natively under tokio, so the caps, the download framing and
-//! the part splitting are covered by unit tests in this module. Only the
-//! Worker/`web_sys` glue that turns an opened response into a platform
-//! `Response` lives in the adapters.
+//! All of it runs natively under tokio. The capped collector, the download
+//! leading meta and the part splitting are unit-tested in this module;
+//! [`stream_download`] needs a real storage read, so it is tested through
+//! the files block's download handler
+//! (`blocks::files::storage::objects`'s integration tests), declared length
+//! included. Only the Worker/`web_sys` glue that turns an opened response
+//! into a platform `Response` lives in the adapters.
 
 use futures::StreamExt;
 use wafer_block::{

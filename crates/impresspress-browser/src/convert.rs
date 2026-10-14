@@ -353,18 +353,15 @@ fn origin_of(url: &str) -> &str {
 
 /// Header pairs, as the codec renders them, in a `web_sys::Headers`.
 ///
-/// `Set-Cookie` is appended, since a rendering may carry several; every other
-/// header is set, so a name repeated in a different case (a
-/// `resp.header.content-type` beside the codec's own `Content-Type`) ends as
-/// one header, the later value winning.
+/// Appended in order, as `http_codec::HttpResponseParts` tells a transport
+/// to and as the Cloudflare adapter does: the codec already keeps one pair
+/// per header name (case-insensitively, the last write winning), so the
+/// only name a rendering repeats is `Set-Cookie`, and each cookie must
+/// reach the client.
 fn headers_from(pairs: &[(String, String)]) -> Result<Headers, JsValue> {
     let headers = Headers::new()?;
     for (name, value) in pairs {
-        if name.eq_ignore_ascii_case("set-cookie") {
-            headers.append(name, value)?;
-        } else {
-            headers.set(name, value)?;
-        }
+        headers.append(name, value)?;
     }
     Ok(headers)
 }
