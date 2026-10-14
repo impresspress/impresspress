@@ -471,6 +471,11 @@ const CLEARED_COLUMNS: &[(&str, &str, &str)] = &[
         "digest of the seed defaults already applied",
     ),
     (
+        "impresspress__admin__block_settings",
+        "blessed_hash",
+        "retired migration-set digest, emptied by admin migration 009",
+    ),
+    (
         "impresspress__products__checkout_presets",
         "configuration_hash",
         "digest of a saved checkout configuration",
