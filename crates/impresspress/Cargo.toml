@@ -126,6 +126,11 @@ toml = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# `tests/native_sse_streams.rs`: the LLM backend it registers implements
+# `LlmService`, whose streams are `futures` `BoxStream`s and whose
+# cancellation is a `tokio-util` `CancellationToken`.
+futures = "0.3"
+tokio-util = "0.7"
 # `test-support` for `bundle::sandbox_mode::fixture`: the fake runtimes the
 # web-flow tests bundle declare a sandbox mode, as every real one does.
 impresspress-bundle = { path = "../impresspress-bundle", features = [

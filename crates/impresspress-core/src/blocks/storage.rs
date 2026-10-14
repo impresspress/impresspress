@@ -179,6 +179,13 @@ impl Block for ImpresspressStorageBlock {
 /// has partly received), so the request was not served. The refusal is
 /// decided here, before the terminal is sent, so the log row is written first
 /// and the caller gets the same explicit `Error` as the no-terminal path.
+///
+/// A caller that drops the response before it ended — a client that left a
+/// download part-way — cancels the backend: the read of `inner` is raced
+/// against the response's cancellation, `inner` is dropped (which cancels
+/// the backend's producer) and the access is logged as [`STATUS_CANCELLED`].
+/// Forwarding into a closed sink instead read the rest of the object from
+/// the backend, chunk by chunk, for nobody, and logged it as served.
 fn forward_logged(
     inner: impl Stream<Item = StreamEvent> + Send + Unpin + 'static,
     ctx: Arc<dyn Context>,
@@ -187,7 +194,7 @@ fn forward_logged(
     path: String,
     start: u64,
 ) -> OutputStream {
-    OutputStream::from_producer(move |sink, _cancel| async move {
+    OutputStream::from_producer(move |sink, cancel| async move {
         let mut inner = inner;
         // Every outcome after the backend was reached carries how long it
         // took, in its own column: the status says what happened, the
@@ -198,7 +205,15 @@ fn forward_logged(
         };
         let ok = || STATUS_OK.to_string();
         let mut body_forwarded = false;
-        while let Some(ev) = inner.next().await {
+        loop {
+            let Some(next) = cancel.run_until_cancelled(inner.next()).await else {
+                // The caller is gone. Stop the backend before the log write,
+                // not after it.
+                drop(inner);
+                let _ = log(STATUS_CANCELLED.to_string()).await;
+                return;
+            };
+            let Some(ev) = next else { break };
             match ev {
                 StreamEvent::Chunk(bytes) => {
                     body_forwarded = true;
@@ -257,6 +272,10 @@ fn forward_logged(
 
 /// The `status` of an access the backend served.
 const STATUS_OK: &str = "OK";
+
+/// The `status` of an access whose caller dropped the response before it
+/// ended: the backend was stopped, and what it had sent may be a prefix.
+const STATUS_CANCELLED: &str = "CANCELLED";
 
 /// Log a storage access event (best-effort). `duration_ms` is how long the
 /// backend took, or `None` for a request refused before it reached one.
@@ -937,5 +956,68 @@ mod tests {
                 "{name}: a refused terminal must be logged as an error: {rows:?}"
             );
         }
+    }
+
+    /// A caller that drops a download part-way stops the backend's read, and
+    /// the access is logged as cancelled rather than as served.
+    ///
+    /// The producer forwarded into the closed sink and kept reading `inner`
+    /// to its terminal: the rest of the object was read from the backend for
+    /// nobody, and the access was logged `OK`. A backend whose next chunk
+    /// waits on its reader — this one, or a slow upstream — kept the
+    /// producer for good.
+    #[tokio::test]
+    async fn a_caller_that_drops_a_download_part_way_stops_the_backend() {
+        use std::time::Duration;
+
+        let caller = "impresspress/files";
+        let ctx = ctx_as(caller, Vec::new()).await;
+        let (stopped, backend_stopped) = tokio::sync::oneshot::channel();
+        let inner = OutputStream::from_producer(move |sink, cancel| async move {
+            let _ = sink.send_chunk(b"first part".to_vec()).await;
+            // The rest of the object is read only for a reader.
+            cancel.cancelled().await;
+            let _ = stopped.send(());
+        });
+        let mut out = super::forward_logged(
+            inner,
+            ctx.clone_arc(),
+            caller.to_string(),
+            ServiceOp::STORAGE_GET.to_string(),
+            "impresspress/files/uploads/big.bin".to_string(),
+            crate::util::now_millis(),
+        );
+        let first = tokio::time::timeout(Duration::from_secs(5), out.next())
+            .await
+            .expect("the first part is forwarded");
+        assert!(
+            matches!(first, Some(wafer_block::stream::StreamEvent::Chunk(ref c)) if c == b"first part"),
+            "{first:?}"
+        );
+
+        drop(out);
+
+        tokio::time::timeout(Duration::from_secs(5), backend_stopped)
+            .await
+            .expect("the backend's read is cancelled once the caller goes away")
+            .expect("the backend reports it stopped");
+        let rows = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let rows = audit_rows(&ctx).await;
+                if !rows.is_empty() {
+                    return rows;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled access is logged");
+        assert_eq!(
+            rows,
+            [(
+                "impresspress/files/uploads/big.bin".to_string(),
+                super::STATUS_CANCELLED.to_string()
+            )]
+        );
     }
 }

@@ -1150,3 +1150,94 @@ mod response_tests {
         assert_eq!(text.as_string().as_deref(), Some("hello world"));
     }
 }
+
+/// An event stream (`impresspress_core::sse`, what every SSE route produces)
+/// through the real `output_to_response`, read back the way the page reads
+/// the Service Worker's `Response`.
+///
+/// The producer waits on an upstream that never answers — a model thinking,
+/// a model load before its first progress — so every assertion holds while
+/// the producer cannot have finished. Each wait is bounded by a JS timer,
+/// which only turns a hang into a failure.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod event_stream_tests {
+    use std::future::Future;
+
+    use futures::{channel::oneshot, StreamExt};
+    use impresspress_core::sse::{event_stream, Pulled, OPEN_FRAME};
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::output_to_response;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_name = setTimeout)]
+        fn set_timeout(callback: &js_sys::Function, delay_ms: i32) -> JsValue;
+    }
+
+    /// `fut`'s output, or a failure naming `what` after five seconds.
+    async fn bounded<F: Future + Unpin>(fut: F, what: &str) -> F::Output {
+        let timer =
+            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+                set_timeout(&resolve, 5_000);
+            }));
+        match futures::future::select(fut, timer).await {
+            futures::future::Either::Left((output, _)) => output,
+            futures::future::Either::Right(_) => panic!("{what}: nothing within 5 s"),
+        }
+    }
+
+    /// The `Response` carries the SSE head and the open frame while the
+    /// producer still waits on its upstream, and a page that cancels the body
+    /// ends the producer's read of that upstream: the body's `ReadableStream`
+    /// drops the Rust stream it pulls, which cancels the producer.
+    ///
+    /// Fails without the head's cache and proxy headers, without the open
+    /// frame (the response never resolves: the head waits for a first chunk
+    /// that only the upstream could send), and with a read of the upstream
+    /// that does not race the consumer (the producer never learns the page
+    /// left).
+    #[wasm_bindgen_test]
+    async fn an_event_stream_opens_at_once_and_its_producer_stops_when_the_body_is_cancelled() {
+        let (pulled_tx, pulled_rx) = oneshot::channel();
+        let stream = event_stream(move |events| async move {
+            let mut upstream = futures::stream::pending::<()>();
+            let _ = pulled_tx.send(events.pull(&mut upstream).await);
+        });
+
+        let resp = bounded(Box::pin(output_to_response(stream)), "the response head")
+            .await
+            .expect("build response");
+        assert_eq!(resp.status(), 200);
+        for (name, value) in [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+            ("x-accel-buffering", "no"),
+        ] {
+            assert_eq!(
+                resp.headers().get(name).expect("headers").as_deref(),
+                Some(value),
+                "the SSE head carries {name}"
+            );
+        }
+
+        let mut body = wasm_streams::ReadableStream::from_raw(
+            resp.body().expect("a streamed body").unchecked_into(),
+        )
+        .into_stream();
+        let first = bounded(body.next(), "the open frame")
+            .await
+            .expect("a first chunk")
+            .expect("a readable chunk");
+        assert_eq!(js_sys::Uint8Array::new(&first).to_vec(), OPEN_FRAME);
+
+        drop(body);
+        assert_eq!(
+            bounded(pulled_rx, "the producer's read of its upstream")
+                .await
+                .expect("the producer reports its read"),
+            Pulled::ConsumerGone
+        );
+    }
+}

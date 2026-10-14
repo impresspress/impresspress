@@ -460,7 +460,7 @@ mod tests {
         Ok(String::from_utf8(buf.body).expect("SSE body is utf8"))
     }
 
-    /// A load that finishes is a whole SSE response: `[DONE]`, then a
+    /// A load that finishes is a whole SSE response: the open frame, `[DONE]`, then a
     /// completed stream. The producer has to end it itself; a stream it lets
     /// go of without a terminal is an error to every consumer, which a
     /// buffering transport answers with a 500.
@@ -469,7 +469,7 @@ mod tests {
         let body = load_body(StubLlmServiceBlock::default())
             .await
             .expect("a finished load completes");
-        assert_eq!(body, "data: [DONE]\n\n");
+        assert_eq!(body, ": open\n\ndata: [DONE]\n\n");
     }
 
     /// A load the service refuses ends in the in-band error frame, and the
@@ -483,7 +483,7 @@ mod tests {
         })
         .await
         .expect("an SSE body ending in the error frame completes");
-        assert_eq!(body, "event: error\ndata: {}\n\n");
+        assert_eq!(body, ": open\n\nevent: error\ndata: {}\n\n");
     }
 
     #[tokio::test]

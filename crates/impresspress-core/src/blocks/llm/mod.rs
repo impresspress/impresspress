@@ -80,8 +80,9 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         .summary("Send a chat message")
         .input(request_schema_of::<contracts::ChatRequest>)
         .output(response_schema_of::<contracts::ChatResponse>),
-    // Same request as `/api/chat`; the response is `text/event-stream`, one
-    // `data:` frame per `ChatChunk`, then `data: [DONE]` (or `event: error`).
+    // Same request as `/api/chat`; the response is `text/event-stream`
+    // (`crate::sse`): the `: open` comment frame, one `data:` frame per
+    // `ChatChunk`, then `data: [DONE]` (or `event: error`).
     // A chat that fails before its first frame is answered with a status
     // instead, the one `/api/chat` answers it with.
     // No `.output(..)`: it would publish an `application/json` schema for a
@@ -144,9 +145,10 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Model status (ready / loading / unloaded)")
     .path_params(model_path_schema)
     .output(response_schema_of::<contracts::ModelStatusResponse>),
-    // Takes no body; answers `text/event-stream`, one `data:` frame per
-    // `LoadProgress`, then `data: [DONE]`. No `.output(..)` for the same
-    // reason as `/api/chat/stream`.
+    // Takes no body; answers `text/event-stream` (`crate::sse`): the `: open`
+    // comment frame, one `data:` frame per `LoadProgress`, then
+    // `data: [DONE]`. No `.output(..)` for the same reason as
+    // `/api/chat/stream`.
     EndpointRoute::admin(
         HttpMethod::Post,
         "/b/llm/api/models/{backend_id}/{model_id}/load",
