@@ -53,9 +53,19 @@ use crate::{
 /// `handle_chat_stream` reads that item before the response starts and
 /// answers it with a status, as `handle_chat` does.
 ///
-/// A client that goes away mid-answer stops the model and stores nothing:
-/// the answer was neither finished nor delivered, so there is no turn to
-/// keep, as for a model that failed part-way.
+/// A client that goes away mid-answer stops the model, and today no
+/// assistant turn is stored. That is not because nothing was delivered: the
+/// client holds every frame sent before it left, and the thread is left
+/// ending in the user's turn, so the next request rebuilds a history without
+/// the reply the user saw. It is because keeping it is a write issued after
+/// the consumer is gone, which on Cloudflare nothing keeps the invocation
+/// alive for (the producer-lifetime rule in `wafer_block::spawn`). The
+/// decision is to keep the delivered text, marked as cut off; how that one
+/// final write survives on every target is follow-up work (SSE D3), shared
+/// with the storage access log's `CANCELLED` row
+/// (`blocks::storage::forward_logged`).
+/// A client that leaves after the last token but before the model reports
+/// its end can land on either side: whichever the pull sees first decides.
 ///
 /// Generic over the chunk stream (rather than taking
 /// [`NativeTypedFrameStream`]`<ChatChunk>` directly, whose constructor is
@@ -471,7 +481,7 @@ mod tests {
             .expect("the drop is reported");
         assert!(
             ctx.calls().is_empty(),
-            "an answer the client left part-way is not stored"
+            "an answer the client left part-way is not stored (until SSE D3)"
         );
     }
 }

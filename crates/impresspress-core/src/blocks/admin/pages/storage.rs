@@ -4,7 +4,7 @@ use wafer_core::clients::database as db;
 use wafer_run::{context::Context, Message};
 
 use crate::{
-    blocks::admin::STORAGE_ACCESS_LOGS_TABLE as STORAGE_ACCESS_LOGS,
+    blocks::{admin::STORAGE_ACCESS_LOGS_TABLE as STORAGE_ACCESS_LOGS, storage::STATUS_CANCELLED},
     ui::components::{self, badge, BadgeVariant},
     util::RecordExt,
 };
@@ -105,15 +105,7 @@ pub(super) async fn storage_logs_tab(
                         { "Copy" }
                     }
                 },
-                html! {
-                    @if status.starts_with("BLOCKED") {
-                        (badge(BadgeVariant::Danger, status))
-                    } @else if status.starts_with("ERROR") {
-                        (badge(BadgeVariant::Warning, status))
-                    } @else {
-                        span .text-muted { (status) }
-                    }
-                },
+                status_cell(status),
                 html! {
                     @if let Some(ms) = log.data.get("duration_ms").and_then(serde_json::Value::as_i64) {
                         span .text-muted .tabular-nums { (ms) "ms" }
@@ -140,6 +132,24 @@ pub(super) async fn storage_logs_tab(
     })
 }
 
+/// An access's status: a refusal stands out as danger, a failure as a
+/// warning, an access the caller abandoned (`CANCELLED`) as a neutral badge —
+/// so a download cut off part-way does not read like one served whole — and
+/// a served access (`OK`) as plain text.
+fn status_cell(status: &str) -> Markup {
+    html! {
+        @if status.starts_with("BLOCKED") {
+            (badge(BadgeVariant::Danger, status))
+        } @else if status.starts_with("ERROR") {
+            (badge(BadgeVariant::Warning, status))
+        } @else if status == STATUS_CANCELLED {
+            (badge(BadgeVariant::Secondary, status))
+        } @else {
+            span .text-muted { (status) }
+        }
+    }
+}
+
 /// The access-log table's columns. Declared once so the `<td data-label>` the
 /// component stamps on every cell names the same column the header does.
 const STORAGE_LOG_COLUMNS: [components::TableCol<'static>; 6] = [
@@ -153,7 +163,20 @@ const STORAGE_LOG_COLUMNS: [components::TableCol<'static>; 6] = [
 
 #[cfg(test)]
 mod tests {
-    use super::display_path;
+    use super::{display_path, status_cell};
+
+    /// An abandoned access is a neutral badge, not the plain text a served
+    /// one is: an aborted download must stand out from a whole one.
+    #[test]
+    fn a_cancelled_access_reads_differently_from_a_served_one() {
+        let cancelled = status_cell(crate::blocks::storage::STATUS_CANCELLED).into_string();
+        assert!(
+            cancelled.contains("badge-secondary") && cancelled.contains(">CANCELLED<"),
+            "{cancelled}"
+        );
+        let served = status_cell("OK").into_string();
+        assert!(!served.contains("badge"), "{served}");
+    }
 
     /// A files blob key reads as the object it stores.
     #[cfg(feature = "block-files")]

@@ -105,7 +105,10 @@ pub async fn get(ctx: &dyn Context, sha: &str) -> Result<Vec<u8>, WaferError> {
 /// whole blob, which the buffered `storage::get` would transfer to answer a yes
 /// or no (up to [`super::paths::MAX_FILE_BYTES`] per call, on the write path).
 /// Dropping the stream is how the body is declined: the OPFS backend the
-/// sandbox runs on releases its reader when the consumer goes away.
+/// sandbox runs on releases its reader when the consumer goes away, and the
+/// storage block's access log (`blocks::storage::forward_logged`) stops its
+/// read too. That log records the probe as `CANCELLED`, or as `OK` for a blob
+/// small enough to have been read whole before the drop.
 pub async fn exists(ctx: &dyn Context, sha: &str) -> Result<bool, WaferError> {
     match storage::get_stream(ctx, FOLDER, sha).await {
         Ok(_unread) => Ok(true),

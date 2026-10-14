@@ -1174,15 +1174,21 @@ mod event_stream_tests {
     extern "C" {
         #[wasm_bindgen(js_name = setTimeout)]
         fn set_timeout(callback: &js_sys::Function, delay_ms: i32) -> JsValue;
+        #[wasm_bindgen(js_name = clearTimeout)]
+        fn clear_timeout(id: &JsValue);
     }
 
-    /// `fut`'s output, or a failure naming `what` after five seconds.
+    /// `fut`'s output, or a failure naming `what` after five seconds. The
+    /// timer only turns a hang into a failure, and is cleared either way.
     async fn bounded<F: Future + Unpin>(fut: F, what: &str) -> F::Output {
+        let mut timer_id = JsValue::UNDEFINED;
         let timer =
             wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
-                set_timeout(&resolve, 5_000);
+                timer_id = set_timeout(&resolve, 5_000);
             }));
-        match futures::future::select(fut, timer).await {
+        let outcome = futures::future::select(fut, timer).await;
+        clear_timeout(&timer_id);
+        match outcome {
             futures::future::Either::Left((output, _)) => output,
             futures::future::Either::Right(_) => panic!("{what}: nothing within 5 s"),
         }

@@ -182,10 +182,18 @@ impl Block for ImpresspressStorageBlock {
 ///
 /// A caller that drops the response before it ended — a client that left a
 /// download part-way — cancels the backend: the read of `inner` is raced
-/// against the response's cancellation, `inner` is dropped (which cancels
-/// the backend's producer) and the access is logged as [`STATUS_CANCELLED`].
-/// Forwarding into a closed sink instead read the rest of the object from
-/// the backend, chunk by chunk, for nobody, and logged it as served.
+/// against the response's cancellation and `inner` is dropped, which cancels
+/// the backend's producer. Forwarding into a closed sink instead read the
+/// rest of the object from the backend, chunk by chunk, for nobody, and
+/// logged it as served.
+///
+/// The access is then logged as [`STATUS_CANCELLED`] — a write issued after
+/// the consumer is gone. Natively the producer task runs it to the end. On
+/// Cloudflare nothing keeps the invocation alive for it once the response is
+/// torn down (the producer-lifetime rule in `wafer_block::spawn`), so the row
+/// may never land. Making that one final write survive is follow-up work
+/// (SSE D3), shared with the chat route's cut-off reply
+/// (`blocks::llm::routes::streaming::sse_chat_response`).
 fn forward_logged(
     inner: impl Stream<Item = StreamEvent> + Send + Unpin + 'static,
     ctx: Arc<dyn Context>,
@@ -275,7 +283,15 @@ const STATUS_OK: &str = "OK";
 
 /// The `status` of an access whose caller dropped the response before it
 /// ended: the backend was stopped, and what it had sent may be a prefix.
-const STATUS_CANCELLED: &str = "CANCELLED";
+///
+/// "Before it ended" is literal, so it also covers reads the caller ends on
+/// purpose: an existence probe that opens a read and drops it unread
+/// (`dev::blobs::exists`), and a `HEAD` on a download, whose body the
+/// transport never pulls. Whether such a read logs `OK` or `CANCELLED`
+/// depends on whether the backend had queued its terminal before the drop,
+/// i.e. on the object's size. On Cloudflare the row is best effort; see
+/// [`forward_logged`].
+pub(crate) const STATUS_CANCELLED: &str = "CANCELLED";
 
 /// Log a storage access event (best-effort). `duration_ms` is how long the
 /// backend took, or `None` for a request refused before it reached one.

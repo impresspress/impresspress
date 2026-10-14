@@ -167,12 +167,14 @@ fn infra_for(db_path: &Path, storage_root: &Path, port: u16) -> InfraConfig {
 }
 
 async fn serve(backend: Gated) -> Server {
+    watch_listening();
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("sse.sqlite3");
     let storage_root = tmp.path().join("storage");
     std::fs::create_dir_all(&storage_root).expect("create storage root");
-    // The listener binds the address it is configured with, so the port is
-    // reserved here and handed to it.
+    // The listener binds the address it is configured with and cannot
+    // report the port of a `:0` bind, so a free port is picked here and handed
+    // to it ([`listening`] says what happens if it is taken meanwhile).
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .expect("reserve a loopback port")
@@ -230,21 +232,106 @@ async fn serve(backend: Gated) -> Server {
     server
 }
 
-/// Wait for the listener to accept connections.
+/// The addresses the HTTP listener has reported binding, from its
+/// `listening` event — `target = "wafer.runtime"`, `event = "listening"`,
+/// `addr`, emitted right after the bind and kept stable as a contract
+/// (`wafer-block-http-listener`, consumed by `wafer dev`).
+struct Bound {
+    addrs: std::sync::Mutex<std::collections::HashSet<String>>,
+    reported: Notify,
+}
+
+fn bound() -> &'static Bound {
+    static BOUND: std::sync::OnceLock<Bound> = std::sync::OnceLock::new();
+    BOUND.get_or_init(|| Bound {
+        addrs: std::sync::Mutex::new(std::collections::HashSet::new()),
+        reported: Notify::new(),
+    })
+}
+
+/// A tracing layer that records each `listening` event's `addr` in [`bound`].
+struct ListeningLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ListeningLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        #[derive(Default)]
+        struct Fields {
+            event: Option<String>,
+            addr: Option<String>,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.record(field.name(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.record(field.name(), format!("{value:?}"));
+            }
+        }
+        impl Fields {
+            fn record(&mut self, name: &str, value: String) {
+                match name {
+                    "event" => self.event = Some(value),
+                    "addr" => self.addr = Some(value),
+                    _ => {}
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if let (Some("listening"), Some(addr)) = (fields.event.as_deref(), fields.addr) {
+            bound().addrs.lock().expect("bound addresses").insert(addr);
+            bound().reported.notify_waiters();
+        }
+    }
+}
+
+/// Install [`ListeningLayer`] as the process's subscriber, once. A global
+/// subscriber, because the event is emitted on the listener's own task, on
+/// whichever runtime thread runs it.
+fn watch_listening() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        let only_the_runtime =
+            tracing_subscriber::filter::filter_fn(|meta| meta.target() == "wafer.runtime");
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(ListeningLayer.with_filter(only_the_runtime)),
+        )
+        .expect("no other subscriber in this test binary");
+    });
+}
+
+/// Wait for the listener to report that it bound `127.0.0.1:{port}`.
 ///
 /// `start_native` returns once the listener's server task is spawned; the
-/// task binds the socket as its first step, so a connection can be refused
-/// for that long. Nothing reports the bind, so the probe connects until one
-/// is accepted. It is a readiness check on the socket, not a retry of
-/// anything under test.
+/// task binds as its first step and then emits its `listening` event. So
+/// this waits on that event, not on the socket: a port another process took
+/// in the meantime fails the bind, no event comes, and the test fails here
+/// rather than talking to that process.
 async fn listening(port: u16) {
+    let addr = format!("127.0.0.1:{port}");
     tokio::time::timeout(STEP, async {
-        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-            tokio::task::yield_now().await;
+        loop {
+            let reported = bound().reported.notified();
+            tokio::pin!(reported);
+            reported.as_mut().enable();
+            if bound()
+                .addrs
+                .lock()
+                .expect("bound addresses")
+                .contains(&addr)
+            {
+                return;
+            }
+            reported.await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("the listener never bound 127.0.0.1:{port}"));
+    .unwrap_or_else(|_| panic!("the listener never reported binding {addr}"));
 }
 
 impl Server {
