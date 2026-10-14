@@ -95,7 +95,7 @@ impl SiteConfig {
         Ok(Self {
             app_name: config::get_default(ctx, APP_NAME_KEY, DEFAULT_APP_NAME).await?,
             // Blank = no wordmark image: templates render the app name as
-            // text next to the (pixel-art) icon. Set to white-label with a
+            // text next to the square icon. Set to white-label with a
             // wordmark of your own.
             logo_url: config::get_default(ctx, crate::config_vars::LOGO_URL_KEY, "").await?,
             logo_icon_url: config::get_default(ctx, LOGO_ICON_URL_KEY, &assets::logo_icon_url())

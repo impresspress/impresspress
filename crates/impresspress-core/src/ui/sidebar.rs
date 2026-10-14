@@ -117,8 +117,7 @@ pub fn active_item<'a>(groups: &'a [NavGroup], path: &str) -> Option<&'a NavItem
 /// origin/main's equivalent does for its own wordmark-image branch): this
 /// branch never has a second, wordmark-image code path for the CSS modifier
 /// to switch away from, so applying it unconditionally is the same outcome
-/// with one fewer state. `logo_icon_2x_url`/`brand_icon` (the retina pixel-art
-/// icon) are ported from origin/main during the main merge — 2026-09-02.
+/// with one fewer state. The icon itself is `templates::brand_icon`'s.
 pub fn sidebar_grouped(
     kind: super::NavKind,
     groups: &[NavGroup],
@@ -309,13 +308,9 @@ mod tests {
     }
 
     /// Default branding: no wordmark image, so the brand row is the built-in
-    /// pixel-art icon next to the app name. The icon is a `<picture>`: the
-    /// 32-cell file by default and the 64-cell file from 1.5dppx up, chosen
-    /// by a media query (deterministic — `srcset` width descriptors let the
-    /// browser pick an already-cached larger candidate, which then gets
-    /// nearest-neighbour *down*scaled). `.pixel-art` keeps art-pixels square.
+    /// icon next to the app name, with the 64px file as its `2x` candidate.
     #[test]
-    fn brand_without_wordmark_renders_pixel_art_icon_and_app_name() {
+    fn brand_without_wordmark_renders_icon_and_app_name() {
         let s = sidebar_grouped(
             crate::ui::NavKind::Admin,
             &[],
@@ -329,9 +324,9 @@ mod tests {
         assert!(s.contains("sidebar__brand--text"), "{s}");
         assert!(
             s.contains(&format!(
-                r#"<picture><source media="(min-resolution: 1.5dppx)" srcset="{}"><img class="sidebar__brand-icon pixel-art" src="{}" width="32" height="32" alt=""></picture>"#,
-                crate::ui::assets::logo_icon_2x_url(),
-                crate::ui::assets::logo_icon_url()
+                r#"<img class="sidebar__brand-icon" src="{}" srcset="{} 2x" width="32" height="32" alt="">"#,
+                crate::ui::assets::logo_icon_url(),
+                crate::ui::assets::logo_icon_2x_url()
             )),
             "{s}"
         );
@@ -342,10 +337,10 @@ mod tests {
         );
     }
 
-    /// A white-labelled icon URL is a smooth logo we know nothing about:
-    /// no nearest-neighbour class, no built-in srcset.
+    /// A white-labelled icon URL is a logo we know nothing about: it renders
+    /// as given, without the built-in mark's `2x` candidate.
     #[test]
-    fn custom_icon_url_gets_no_pixel_art_treatment() {
+    fn custom_icon_url_gets_no_builtin_srcset() {
         let s = sidebar_grouped(
             crate::ui::NavKind::Admin,
             &[],
@@ -357,8 +352,7 @@ mod tests {
         )
         .into_string();
         assert!(s.contains(r#"src="https://acme.test/mark.png""#), "{s}");
-        assert!(!s.contains("pixel-art"), "{s}");
-        assert!(!s.contains("<picture>"), "{s}");
+        assert!(!s.contains("srcset="), "{s}");
     }
 
     // Ported from origin/main's `wordmark_replaces_the_text_lockup` during the

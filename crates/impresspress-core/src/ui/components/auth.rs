@@ -4,7 +4,10 @@
 
 use maud::{html, Markup};
 
-use crate::ui::{templates::BrandPanel, SiteConfig};
+use crate::ui::{
+    templates::{brand_icon, BrandPanel},
+    SiteConfig,
+};
 
 /// Shared brand panel used by `auth_ui::pages::*` (login / signup / reset /
 /// OAuth / change-password / bootstrap).
@@ -38,7 +41,7 @@ use crate::ui::{templates::BrandPanel, SiteConfig};
 pub fn auth_panel<'a>(config: &'a SiteConfig, tagline: Option<&'a str>) -> BrandPanel<'a> {
     let logo_html = Some(html! {
         @if !config.logo_icon_url.is_empty() {
-            img .auth-split__logo-img src=(config.logo_icon_url) alt="";
+            (brand_icon(&config.logo_icon_url, "auth-split__logo-img", 32))
         }
         span .auth-split__logo-name { (config.app_name) }
     });
@@ -243,7 +246,7 @@ mod tests {
     /// Same bug, the other entry point: both URLs configured (the common
     /// case -- `SiteConfig::load`'s defaults populate both). The icon must
     /// render, the long wordmark must not, and the app name must still
-    /// show as text beside the icon (crab + "Impresspress", per the
+    /// show as text beside the icon (mark + "Impresspress", per the
     /// reference design), not icon-only.
     #[test]
     fn brand_panel_with_both_logos_configured_shows_icon_plus_app_name_text_never_wordmark() {
@@ -267,6 +270,27 @@ mod tests {
         assert!(
             html.contains(">Acme<"),
             "the app name must render as text beside the icon: {html}"
+        );
+    }
+
+    /// The built-in mark renders through `templates::brand_icon`, as in the
+    /// sidebar, so a 2x screen draws it from the 64px file rather than
+    /// upscaling the 32.
+    #[test]
+    fn brand_panel_builtin_icon_carries_its_2x_candidate() {
+        let mut config = config_with("Headline", "Tagline");
+        config.logo_icon_url = crate::ui::assets::logo_icon_url();
+        let html = auth_panel(&config, None)
+            .logo_html
+            .expect("brand row must always render")
+            .into_string();
+        assert!(
+            html.contains(&format!(
+                r#"<img class="auth-split__logo-img" src="{}" srcset="{} 2x" width="32" height="32" alt="">"#,
+                crate::ui::assets::logo_icon_url(),
+                crate::ui::assets::logo_icon_2x_url()
+            )),
+            "{html}"
         );
     }
 

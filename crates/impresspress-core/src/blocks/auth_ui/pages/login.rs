@@ -238,24 +238,6 @@ mod tests {
         msg
     }
 
-    // Default branding on the sign-in card: the built-in pixel-art icon at
-    // 64px — the 64-cell rendition at 1:1, served as a plain `<img>` (no
-    // `srcset`, nothing for the browser to second-guess) — above the app
-    // name as text. No raster wordmark.
-    //
-    // Plain comments, not doc comments: the test they described was dropped,
-    // so a `///` block here is an outer attribute with no item to document.
-    // Ported from origin/main's `default_branding_is_pixel_art_icon_plus_app_
-    // name` during the main merge -- 2026-09-02 -- and dropped rather than
-    // adapted: main's test asserted the login page's *form* panel renders
-    // `.login-brand__icon`/`.login-app-name` (main's `brand_lockup`, re-added
-    // to `.login-container`). This branch deliberately retired that per-page
-    // logo header (see `styles/layouts/auth-split.css`'s comment) -- the
-    // navy `.auth-split__brand` aside is the only place branding renders on
-    // this page now, already covered below by
-    // `brand_panel_shows_default_headline_and_tagline_without_duplicating_
-    // subtitle` (see the coordinator's ruling in the merge report).
-
     /// Explicit, safe `?redirect=` params must still be honored — rendered
     /// into the hidden `#redirect` field the login script reads first,
     /// ahead of the role-aware `default_redirect` the JSON API returns.

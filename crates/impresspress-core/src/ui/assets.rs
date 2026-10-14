@@ -138,17 +138,18 @@ fn shared_bytes(logical: &str) -> Option<&'static [u8]> {
         // Square Impresspress mark used as the sidebar/login icon. Bundled
         // locally so the admin renders correctly without internet (the
         // previous default pointed at `https://impresspress.org/images/logo.png`
-        // which 404s offline). Real pixel art -- 32x32 art-pixels, 11 colours,
-        // taken pixel-for-pixel from the published mark at
-        // `https://impresspress.org/images/logo-32.webp`. Templates only ever
-        // scale it by whole factors (`.pixel-art`), so its native size is part
-        // of the contract (see the tests below).
+        // which 404s offline). The clay character impresspress.org shows,
+        // Lanczos-downscaled to 32x32 from the 1254px master,
+        // `brand/clay/logo-mark.png` in the `impresspress/site` repo, by
+        // `scripts/brand/make-clay-mark.py` (which makes every file of the
+        // mark: these two, `favicon.ico`, and the web manifest's icons). It is
+        // painted, anti-aliased art, so it scales smoothly like any image;
+        // the 32/64 pair exists for sharpness on 1x and 2x screens, not for a
+        // whole-factor scaling contract.
         "impresspress-logo.png" => include_bytes!("assets/impresspress-logo.png"),
-        // The same mark at 64x64 (`https://impresspress.org/images/favicon.webp`,
-        // an exact 2x of the 32) -- served as the `2x` `srcset` candidate so a
-        // high-DPI screen maps one source pixel to one device pixel. The art
-        // grid stays 32 cells either way, so this carries no detail the 32
-        // lacks; it spares the browser the scale step, nothing more.
+        // The same mark at 64x64, downscaled from the same master rather than
+        // upscaled from the 32 -- served as the `2x` `srcset` candidate so a
+        // high-DPI screen gets real detail.
         // There is no raster wordmark: brand text is rendered
         // as text next to the mark (the sidebar and `components::auth_panel`) -- the
         // old `impresspress-logo-long.png` wordmark was dark-ink artwork
@@ -183,9 +184,8 @@ pub fn logo_icon_url() -> String {
 }
 
 /// 2x square logo URL with content hash, e.g. `/b/static/impresspress-logo-2x-a1b2c3d4.png`.
-/// Retina candidate for [`templates::brand_icon`]'s `<picture>` `srcset` —
-/// one device pixel per art-pixel instead of a nearest-neighbour blow-up of
-/// the 32-cell mark.
+/// Retina candidate for [`templates::brand_icon`]'s `srcset`, so a 2x screen
+/// draws the 32px icon from 64 real pixels instead of upscaling the 32.
 pub fn logo_icon_2x_url() -> String {
     url("impresspress-logo-2x.png")
 }
@@ -410,16 +410,12 @@ mod tests {
         (be(16), be(20))
     }
 
-    // The brand art is real pixel art (generated in the `site` repo's
-    // `brand/` kit) and the templates scale it only by whole factors, so
-    // the native sizes are part of the contract. Ported from origin/main
-    // during the main merge -- 2026-09-02 -- adapted to call `bytes()`
-    // (the manifest's single embed point) rather than main's dedicated
-    // per-asset accessors, which this branch's detachable-assets refactor
-    // superseded.
+    // `templates::brand_icon` draws the mark at 32px from the 32 file on a
+    // 1x screen and the 64 file on a 2x one, so each file must be exactly
+    // the size its `srcset` descriptor claims.
     #[cfg(feature = "embed-assets")]
     #[test]
-    fn logo_icon_png_is_the_32_cell_mark() {
+    fn logo_icon_png_is_32px() {
         assert_eq!(
             png_size(super::bytes("impresspress-logo.png").unwrap()),
             (32, 32)
@@ -428,7 +424,7 @@ mod tests {
 
     #[cfg(feature = "embed-assets")]
     #[test]
-    fn logo_icon_2x_png_is_the_64_cell_mark() {
+    fn logo_icon_2x_png_is_64px() {
         assert_eq!(
             png_size(super::bytes("impresspress-logo-2x.png").unwrap()),
             (64, 64)
