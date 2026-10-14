@@ -331,13 +331,17 @@ mod tests {
 
     #[test]
     fn a_table_whose_closest_card_is_flush_is_allowed() {
-        let html = r#"<div class="card card--flush"><table class="data-table"></table></div>"#;
+        // The shape `Card::flush()` renders: the table inside `.card__body`,
+        // so the flush card is the table's closest card, not its parent.
+        let html = r#"<div class="card card--flush"><div class="card__body">
+            <table class="data-table"></table></div></div>"#;
         assert!(card_level_inside_card(html).is_empty());
     }
 
     #[test]
     fn the_flush_exception_covers_only_a_table() {
-        let html = r#"<div class="card card--flush"><div class="empty">e</div></div>"#;
+        let html = r#"<div class="card card--flush"><div class="card__body">
+            <div class="empty">e</div></div></div>"#;
         assert_eq!(card_level_inside_card(html), vec![r#"div.empty "e""#]);
     }
 
@@ -345,16 +349,16 @@ mod tests {
     fn the_flush_exception_is_judged_by_the_closest_card() {
         // A table in a plain card inside a flush card: the plain card is the
         // closest, so the table is reported (and so is the plain card).
-        let html = r#"<div class="card card--flush"><div class="card">
-            <table class="data-table"><tr><td>t</td></tr></table></div></div>"#;
+        let html = r#"<div class="card card--flush"><div class="card__body"><div class="card">
+            <table class="data-table"><tr><td>t</td></tr></table></div></div></div>"#;
         assert_eq!(
             card_level_inside_card(html),
             vec![r#"div.card "t""#, r#"table.data-table "t""#]
         );
         // A table in a flush card inside a plain card: the table is allowed,
         // the flush card itself is not.
-        let html = r#"<div class="card"><div class="card card--flush">
-            <table class="data-table"></table></div></div>"#;
+        let html = r#"<div class="card"><div class="card__body"><div class="card card--flush">
+            <div class="card__body"><table class="data-table"></table></div></div></div></div>"#;
         assert_eq!(card_level_inside_card(html), vec!["div.card.card--flush"]);
     }
 

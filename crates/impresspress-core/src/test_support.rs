@@ -23,8 +23,9 @@
 //! the crate's source gates are built on, so a gate states its root and its
 //! exemptions instead of hand-rolling a fourth `read_dir` recursion.
 //!
-//! [`dom`] reads a rendered page as the element tree a browser builds, for
-//! the guards whose rules are about ancestry and visibility.
+//! `dom` (unit tests only: it parses with a dev-dependency) reads a rendered
+//! page as the element tree a browser builds, for the guards whose rules are
+//! about ancestry and visibility.
 
 mod dispatch;
 // Test-only: `dom` parses with `scraper`, a dev-dependency, which the
