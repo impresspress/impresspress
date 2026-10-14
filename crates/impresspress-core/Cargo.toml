@@ -363,6 +363,12 @@ toml = "1"
 # comments.
 syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
 proc-macro2 = { version = "1", default-features = false }
+# `test_support::dom` parses a rendered page into a tree for the guards that
+# ask about ancestry and visibility (a primary button outside every
+# `<dialog>`, a card under a card, headings outside `[hidden]`). Same choice
+# as `toml` and `syn` above: a tag scanner over the page text cannot tell
+# which element encloses which, and html5ever builds the tree a browser does.
+scraper = { version = "0.27", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

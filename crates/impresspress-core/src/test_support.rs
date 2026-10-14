@@ -22,8 +22,15 @@
 //! [`source_scan`] is the other half: the shared walk and comment strippers
 //! the crate's source gates are built on, so a gate states its root and its
 //! exemptions instead of hand-rolling a fourth `read_dir` recursion.
+//!
+//! [`dom`] reads a rendered page as the element tree a browser builds, for
+//! the guards whose rules are about ancestry and visibility.
 
 mod dispatch;
+// Test-only: `dom` parses with `scraper`, a dev-dependency, which the
+// `test-support` feature build of the lib cannot reach.
+#[cfg(test)]
+pub mod dom;
 #[cfg(test)]
 pub mod htmx;
 #[cfg(test)]
