@@ -272,12 +272,19 @@ const MOBILE_ANON_ROUTES = [
 ];
 
 const MOBILE_ADMIN_ROUTES = [
-  // Portal pages — primary mobile audience. Admin is desktop-first per
-  // master spec; the hint banner inside is the explicit accommodation.
-  // Admin pages aren't mobile-snapshotted because the dashboard's
-  // "Recent server errors" table is fed by the request_log accumulated during
-  // the rest of the baseline run, so its content + width drift between
-  // local and CI.
+  // The admin core pages at phone width, under the same masks as their
+  // desktop captures (`volatileMasks`: the database page's two log-table
+  // rows, every date cell). The admin dashboard is the one core page left
+  // out: its "Recent server errors" card is fed by the request_log the rest
+  // of the baseline run accumulates, so its content and width drift between
+  // local and CI. Logs and the storage-access tab are left out for the same
+  // reason on desktop too (see ADMIN_ROUTES).
+  { path: '/b/admin/users', name: 'admin-users' },
+  { path: '/b/admin/blocks', name: 'admin-blocks' },
+  { path: '/b/admin/database', name: 'admin-database' },
+  { path: '/b/admin/email', name: 'admin-email' },
+  { path: '/b/admin/variables', name: 'admin-variables' },
+  // Portal pages — primary mobile audience.
   { path: '/b/userportal/', name: 'portal-dashboard' },
   { path: '/b/auth/orgs', name: 'portal-orgs' },
   { path: '/b/userportal/profile', name: 'portal-profile' },
