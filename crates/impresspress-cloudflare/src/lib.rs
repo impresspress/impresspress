@@ -1483,11 +1483,13 @@ mod cold_isolate_tests {
     use super::*;
 
     /// Puts this thread back in the state of an isolate that has served
-    /// nothing, and restores what it found on drop, so the rest of the test
-    /// binary keeps the settings an earlier `init_isolate` installed.
+    /// nothing — not initialized, no spawn wrapper, the default defer mode —
+    /// and restores all three as it found them on drop, so the rest of the
+    /// test binary keeps the settings an earlier `init_isolate` installed.
     struct ColdIsolate {
         was_initialized: bool,
         wrapper: Option<wafer_block::spawn::SpawnWrapper>,
+        defer_mode: impresspress_core::deferred::DeferMode,
     }
 
     impl ColdIsolate {
@@ -1495,6 +1497,9 @@ mod cold_isolate_tests {
             Self {
                 was_initialized: ISOLATE_INITIALIZED.with(|done| done.replace(false)),
                 wrapper: wafer_block::spawn::set_spawn_wrapper(None),
+                defer_mode: impresspress_core::deferred::set_mode(
+                    impresspress_core::deferred::DeferMode::Spawn,
+                ),
             }
         }
     }
@@ -1503,13 +1508,15 @@ mod cold_isolate_tests {
         fn drop(&mut self) {
             ISOLATE_INITIALIZED.with(|done| done.set(self.was_initialized));
             wafer_block::spawn::set_spawn_wrapper(self.wrapper.take());
+            impresspress_core::deferred::set_mode(self.defer_mode);
         }
     }
 
     /// An unauthorized `/_deploy/prepared` call — answered 404 before any
-    /// binding is touched — on a cold isolate leaves the isolate initialized,
-    /// spawn wrapper installed. Fails while `init_isolate` runs after the
-    /// `/_deploy/*` branches.
+    /// binding is touched — on a cold isolate leaves the isolate initialized:
+    /// spawn wrapper installed, defer mode queued. The test sees only the
+    /// state after the call; it fails while `init_isolate` runs after the
+    /// `/_deploy/*` branches because those return before reaching it.
     #[wasm_bindgen_test]
     async fn a_deploy_request_on_a_cold_isolate_runs_after_the_isolate_init() {
         let _cold = ColdIsolate::enter();
@@ -1543,7 +1550,12 @@ mod cold_isolate_tests {
         );
         assert!(
             wafer_block::spawn::set_spawn_wrapper(None).is_some(),
-            "the spawn wrapper was installed before the deploy endpoint ran"
+            "serving the deploy request installed the spawn wrapper"
+        );
+        assert_eq!(
+            impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Spawn),
+            impresspress_core::deferred::DeferMode::Queued,
+            "serving the deploy request selected the queued defer mode"
         );
     }
 }

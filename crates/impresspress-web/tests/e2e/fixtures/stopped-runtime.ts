@@ -20,10 +20,16 @@ export async function stopWorkers(page: Page) {
  * Kill the runtime of the worker now serving `page`, so that the next request
  * it handles throws an `Error` whose message is `cause` — in the one way a
  * test can reach: `sw.js` is a module, so `handle_request` and `poisoned` are not
- * on the worker's global, but the wasm glue calls `Headers.prototype.set`
- * through it. Every response the runtime builds sets a `Content-Type`, so the
- * next request it handles throws out of `handle_request` — the catch path
- * under test.
+ * on the worker's global, but the wasm glue writes a response's headers
+ * through `Headers.prototype`. Every response the runtime builds has a
+ * `Content-Type`, so the next request it handles throws out of
+ * `handle_request` — the catch path under test.
+ *
+ * BOTH ways to write a header, `set` and `append`: which one the runtime
+ * calls is `impresspress-browser`'s choice (`convert.rs` appends the codec's
+ * header pairs, and sets the few it adds itself), not this test's. When this
+ * helper broke `set` alone, a runtime that moved to `append` never died, and
+ * every test using it failed on a 200 where it waited for the death.
  *
  * The RUNTIME, and nothing else in the worker. `sw.js`'s own code sets
  * exactly two headers, the `Cross-Origin-*` pair `passthrough` adds to the
@@ -45,11 +51,13 @@ export async function killRuntime(page: Page, cause: string) {
   for (const worker of workers) {
     await worker
       .evaluate((cause) => {
-        const set = Headers.prototype.set;
-        Headers.prototype.set = function (name: string, value: string) {
-          if (!/^cross-origin-/i.test(name)) throw new Error(cause);
-          return set.call(this, name, value);
-        };
+        for (const method of ['set', 'append'] as const) {
+          const write = Headers.prototype[method];
+          Headers.prototype[method] = function (name: string, value: string) {
+            if (!/^cross-origin-/i.test(name)) throw new Error(cause);
+            return write.call(this, name, value);
+          };
+        }
       }, cause)
       .catch(() => {});
   }

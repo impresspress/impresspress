@@ -58,11 +58,12 @@ thread_local! {
     static MODE: Cell<DeferMode> = const { Cell::new(DeferMode::Spawn) };
 }
 
-/// Select how [`defer`] runs tasks on this thread. The Cloudflare entry sets
-/// [`DeferMode::Queued`] once per isolate, and the browser's `initialize`
-/// once per service worker; native never calls it.
-pub fn set_mode(mode: DeferMode) {
-    MODE.with(|m| m.set(mode));
+/// Select how [`defer`] runs tasks on this thread, returning the mode it
+/// replaces (so a test that changes it can put it back). The Cloudflare entry
+/// sets [`DeferMode::Queued`] once per isolate, and the browser's
+/// `initialize` once per service worker; native never calls it.
+pub fn set_mode(mode: DeferMode) -> DeferMode {
+    MODE.with(|m| m.replace(mode))
 }
 
 /// Run `task` after the current response, as this thread's [`DeferMode`]
