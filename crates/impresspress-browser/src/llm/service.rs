@@ -101,15 +101,27 @@ impl LlmService for BrowserLlmService {
                 }
             };
 
+            // The page generates until its stream ends or is cancelled. Every
+            // exit below that is not the stream's own end (`Done`, an error
+            // frame, a failed pull, which the bridge has already closed)
+            // cancels it, so the page stops working for a reader that left.
             let mut decoder = OpenAiSseDecoder::new();
             loop {
-                if cancel.is_cancelled() {
-                    let _ = bridge::cancel_stream(&stream_id).await;
-                    break;
-                }
-                let frame = match bridge::next_chunk(&stream_id).await {
-                    Ok(f) => f,
-                    Err(e) => {
+                // Raced against the token `wafer-run/llm`'s handler fires when
+                // its output is dropped: while the model is still thinking —
+                // prefill, a long pause — no frame arrives to fail a send on,
+                // so without the race the page generated on, for nobody, until
+                // its next chunk.
+                let frame = match cancel
+                    .run_until_cancelled(bridge::next_chunk(&stream_id))
+                    .await
+                {
+                    None => {
+                        let _ = bridge::cancel_stream(&stream_id).await;
+                        return;
+                    }
+                    Some(Ok(f)) => f,
+                    Some(Err(e)) => {
                         let _ = tx.send(Err(e)).await;
                         break;
                     }
@@ -127,7 +139,9 @@ impl LlmService for BrowserLlmService {
                     StreamFrame::Chunk(s) => {
                         for chunk in decoder.push_frame(&s).chunks {
                             if tx.send(Ok(chunk)).await.is_err() {
-                                // consumer dropped
+                                // The reader dropped the stream: the page is
+                                // still generating, so stop it.
+                                let _ = bridge::cancel_stream(&stream_id).await;
                                 return;
                             }
                         }
@@ -135,7 +149,8 @@ impl LlmService for BrowserLlmService {
                     // WebLLM signals the end out-of-band; that is this
                     // transport's `[DONE]`, and it must close any tool call the
                     // model left open (a no-op when a `finish_reason` already
-                    // closed them).
+                    // closed them). The page's stream has ended, so a reader
+                    // that left by now leaves nothing to cancel.
                     StreamFrame::Done => {
                         for chunk in decoder.finish() {
                             if tx.send(Ok(chunk)).await.is_err() {
@@ -188,5 +203,187 @@ impl LlmService for BrowserLlmService {
 
     fn claims_backend(&self, backend_id: &str) -> bool {
         backend_id == WEBLLM_BACKEND
+    }
+}
+
+/// The service against a stand-in page: a worker global whose one window
+/// runs the LLM engine, holds model `m`, answers a chat with one chunk and
+/// then thinks — sends nothing more until the test makes it — and records the
+/// `llm-stream-cancel` it is sent. Everything between `chat_stream` and the
+/// page is the real `bridge.js`.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use std::future::Future;
+
+    use futures::StreamExt;
+    use js_sys::Reflect;
+    use wafer_core::interfaces::llm::service::{ChatMessage, ChatParams, ChunkDelta};
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_name = setTimeout)]
+        fn set_timeout(callback: &js_sys::Function, delay_ms: i32) -> JsValue;
+        #[wasm_bindgen(js_name = clearTimeout)]
+        fn clear_timeout(id: &JsValue);
+    }
+
+    /// `fut`'s output, or a failure naming `what` after five seconds. The
+    /// timer only turns a hang into a failure, and is cleared either way.
+    async fn bounded<F: Future + Unpin>(fut: F, what: &str) -> F::Output {
+        let mut timer_id = JsValue::UNDEFINED;
+        let timer = JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+            timer_id = set_timeout(&resolve, 5_000);
+        }));
+        let outcome = futures::future::select(fut, timer).await;
+        clear_timeout(&timer_id);
+        match outcome {
+            futures::future::Either::Left((output, _)) => output,
+            futures::future::Either::Right(_) => panic!("{what}: nothing within 5 s"),
+        }
+    }
+
+    /// Install the stand-in page; its handle is `globalThis.__llmTestPage`.
+    fn install_page() -> JsValue {
+        js_sys::Function::new_no_args(
+            r#"
+            const chunk = (text) => JSON.stringify({ choices: [{ delta: { content: text } }] });
+            let cancelled;
+            const page = {
+                id: 'llm-test-page',
+                stream: null,
+                cancelled: new Promise((resolve) => { cancelled = resolve; }),
+                send(text) {
+                    globalThis.__impresspressCompleteLlmMessage({
+                        type: 'llm-stream-frame', id: page.stream, kind: 'chunk', payload: chunk(text),
+                    });
+                },
+                postMessage(msg) {
+                    if (msg.type === 'engine-probe') {
+                        queueMicrotask(() => globalThis.__impresspressCompleteEngineProbe({
+                            type: 'engine-present', id: msg.id, loaded: ['m'], loading: [],
+                        }));
+                    } else if (msg.type === 'llm-chat-stream-request') {
+                        page.stream = msg.id;
+                        queueMicrotask(() => page.send('one'));
+                    } else if (msg.type === 'llm-stream-cancel') {
+                        cancelled(msg.id);
+                    }
+                },
+            };
+            globalThis.self = {
+                clients: {
+                    matchAll: async () => [page],
+                    get: async (id) => (id === page.id ? page : undefined),
+                },
+            };
+            globalThis.__llmTestPage = page;
+            return page;
+            "#,
+        )
+        .call0(&JsValue::UNDEFINED)
+        .expect("install the stand-in page")
+    }
+
+    fn remove_page() {
+        let global = js_sys::global();
+        Reflect::delete_property(&global, &JsValue::from_str("self")).expect("remove self");
+        Reflect::delete_property(&global, &JsValue::from_str("__llmTestPage"))
+            .expect("remove the page");
+    }
+
+    /// The id of the stream the page was sent a cancel for.
+    async fn cancelled(page: &JsValue, what: &str) -> String {
+        let promise: js_sys::Promise = Reflect::get(page, &JsValue::from_str("cancelled"))
+            .expect("the page's cancel promise")
+            .unchecked_into();
+        bounded(JsFuture::from(promise), what)
+            .await
+            .expect("the cancel promise resolves")
+            .as_string()
+            .expect("a stream id")
+    }
+
+    fn stream_id(page: &JsValue) -> String {
+        Reflect::get(page, &JsValue::from_str("stream"))
+            .expect("the page's stream")
+            .as_string()
+            .expect("a stream was started")
+    }
+
+    async fn chat(cancel: CancellationToken) -> BoxStream<'static, Result<ChatChunk, LlmError>> {
+        BrowserLlmService::new()
+            .chat_stream(
+                ChatRequest {
+                    backend_id: WEBLLM_BACKEND.to_string(),
+                    model: "m".to_string(),
+                    messages: vec![ChatMessage::user("hi")],
+                    params: ChatParams::default(),
+                    tools: Vec::new(),
+                    extra: serde_json::Value::Null,
+                },
+                cancel,
+            )
+            .await
+    }
+
+    async fn first_text(stream: &mut BoxStream<'static, Result<ChatChunk, LlmError>>) {
+        let first = bounded(stream.next(), "the first chunk")
+            .await
+            .expect("a first item")
+            .expect("a chunk");
+        assert!(
+            matches!(&first.delta, ChunkDelta::Text(t) if t == "one"),
+            "{first:?}"
+        );
+    }
+
+    /// A chat whose reader leaves while the model is thinking — the handler
+    /// fires the token, no frame arrives — tells the page to stop.
+    ///
+    /// The producer checked the token only between frames, so while the
+    /// page was silent it waited on the next frame and the page generated
+    /// on until it sent one.
+    #[wasm_bindgen_test]
+    async fn a_cancel_while_the_model_is_thinking_stops_the_page() {
+        let page = install_page();
+        let cancel = CancellationToken::new();
+        let mut stream = chat(cancel.clone()).await;
+        first_text(&mut stream).await;
+
+        cancel.cancel();
+
+        assert_eq!(
+            cancelled(&page, "the page's cancel while it thinks").await,
+            stream_id(&page)
+        );
+        remove_page();
+    }
+
+    /// A reader that drops the stream is found out at the next chunk, whose
+    /// send fails — and the page, still generating, is told to stop.
+    ///
+    /// The producer returned there without cancelling the page's stream, so
+    /// the page generated to the end of the answer for nobody.
+    #[wasm_bindgen_test]
+    async fn a_reader_that_drops_the_stream_stops_the_page_at_the_next_chunk() {
+        let page = install_page();
+        let mut stream = chat(CancellationToken::new()).await;
+        first_text(&mut stream).await;
+
+        drop(stream);
+        js_sys::Function::new_no_args("globalThis.__llmTestPage.send('two');")
+            .call0(&JsValue::UNDEFINED)
+            .expect("the page sends its next chunk");
+
+        assert_eq!(
+            cancelled(&page, "the page's cancel after a failed send").await,
+            stream_id(&page)
+        );
+        remove_page();
     }
 }

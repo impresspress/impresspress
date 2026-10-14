@@ -1,79 +1,32 @@
-//! Server-Sent Events framing shared by the two SSE-producing endpoints:
-//! chat streaming ([`sse_chat_response`]) and model loading
-//! ([`sse_json_response`]). Both emit the same content-type meta event and
-//! the same terminal frames ([`SSE_DONE_FRAME`] / [`SSE_ERROR_FRAME`]) via
-//! the shared [`sse_json_frame`] encoder, so the wire format can't drift
-//! between them.
+//! The two SSE-producing llm endpoints: chat streaming
+//! ([`sse_chat_response`]) and model loading ([`sse_json_response`]).
 //!
-//! Every SSE response ends in one of those two terminal frames followed by an
-//! explicit `Complete` ([`finish_sse`]). The error frame is the in-band
-//! failure signal, and a body that ends in it is whole: by the time it is
-//! sent the status line and every earlier frame are on the wire on a
-//! streaming transport, and an `Error` terminal would only abort that body,
-//! or turn it into a 500 on a buffering one, discarding the frame that says
-//! what happened. The one path without a terminal is a consumer that has
-//! already gone away, where there is no one left to send one to.
+//! Both are [`crate::sse::event_stream`]s, so the SSE wire rules — the head
+//! (`text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`),
+//! the open frame that commits it at once, the frame encoding, the
+//! `[DONE]` / `event: error` terminals, and stopping as soon as the client
+//! goes away — are the shared module's, and cannot drift between the two.
+//!
+//! A client that goes away stops the model: each producer reads its upstream
+//! through [`EventSink::pull`], which ends the read the moment the response
+//! is dropped, and the upstream stream is dropped with the producer. That is
+//! what fires the cancellation token `wafer-core`'s llm handler gave the
+//! service, so a provider request in flight is abandoned rather than run to
+//! its next token — or, for a model that is still thinking, to its end.
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use wafer_core::clients::{
     llm::{ChatChunk, ChunkDelta},
     NativeTypedFrameStream,
 };
-use wafer_run::{
-    context::Context, Message, MetaEntry, OutputSink, OutputStream, META_RESP_CONTENT_TYPE,
-};
+use wafer_run::{context::Context, Message, OutputStream};
 
 use super::chat::MAX_BUFFERED_RESPONSE_BYTES;
-use crate::blocks::{llm::messages_create, messages::contracts::EntryRole};
-
-/// Terminal SSE frame for natural end-of-stream, letting clients distinguish
-/// it from a transport-level disconnect.
-const SSE_DONE_FRAME: &[u8] = b"data: [DONE]\n\n";
-
-/// Terminal SSE frame emitted when the service stream yields an error or an
-/// item fails to JSON-encode, so the consumer sees a clean SSE event instead
-/// of an abrupt disconnect.
-const SSE_ERROR_FRAME: &[u8] = b"event: error\ndata: {}\n\n";
-
-/// Encode one typed item as an SSE `data: <json>\n\n` frame.
-///
-/// Returns `None` when JSON encoding fails; callers emit [`SSE_ERROR_FRAME`]
-/// and terminate. Shared by [`sse_json_response`] and [`sse_chat_response`]
-/// so the SSE wire format cannot drift between the generic and the
-/// chat-finalizing paths.
-fn sse_json_frame<T: serde::Serialize>(item: &T) -> Option<Vec<u8>> {
-    let json = serde_json::to_vec(item).ok()?;
-    let mut frame = Vec::with_capacity(json.len() + 8);
-    frame.extend_from_slice(b"data: ");
-    frame.extend_from_slice(&json);
-    frame.extend_from_slice(b"\n\n");
-    Some(frame)
-}
-
-/// End an SSE response: send `frame` (one of [`SSE_DONE_FRAME`] /
-/// [`SSE_ERROR_FRAME`]) and then the `Complete` terminal. A frame the
-/// consumer is no longer there to receive ends the producer without a
-/// terminal; the dropped sink then closes the stream as an error nobody reads.
-async fn finish_sse(sink: OutputSink, frame: &[u8]) {
-    if sink.send_chunk(frame.to_vec()).await.is_ok() {
-        let _ = sink.complete(Vec::new()).await;
-    }
-}
-
-/// Send the `text/event-stream` content-type as a mid-stream meta event so
-/// the HTTP listener writes the SSE header before the first `data:` frame.
-/// A send failure only means the consumer already dropped the stream; the
-/// producer's next `send_chunk` surfaces that, so it is ignored here.
-async fn send_sse_content_type(sink: &OutputSink) {
-    let _ = sink
-        .send_meta(MetaEntry {
-            key: META_RESP_CONTENT_TYPE.to_string(),
-            value: "text/event-stream".to_string(),
-        })
-        .await;
-}
+use crate::{
+    blocks::{llm::messages_create, messages::contracts::EntryRole},
+    sse::{event_stream, json_frame, EventSink, Pulled, DONE_FRAME, ERROR_FRAME},
+};
 
 /// SSE wrapper for the chat endpoint: frames each [`ChatChunk`] exactly like
 /// [`sse_json_response`] while accumulating `ChunkDelta::Text` deltas, then
@@ -100,6 +53,20 @@ async fn send_sse_content_type(sink: &OutputSink) {
 /// `handle_chat_stream` reads that item before the response starts and
 /// answers it with a status, as `handle_chat` does.
 ///
+/// A client that goes away mid-answer stops the model, and today no
+/// assistant turn is stored. That is not because nothing was delivered: the
+/// client holds every frame sent before it left, and the thread is left
+/// ending in the user's turn, so the next request rebuilds a history without
+/// the reply the user saw. It is because keeping it is a write issued after
+/// the consumer is gone, which on Cloudflare nothing keeps the invocation
+/// alive for (the producer-lifetime rule in `wafer_block::spawn`). The
+/// decision is to keep the delivered text, marked as cut off; how that one
+/// final write survives on every target is follow-up work (SSE D3), shared
+/// with the storage access log's `CANCELLED` row
+/// (`blocks::storage::forward_logged`).
+/// A client that leaves after the last token but before the model reports
+/// its end can land on either side: whichever the pull sees first decides.
+///
 /// Generic over the chunk stream (rather than taking
 /// [`NativeTypedFrameStream`]`<ChatChunk>` directly, whose constructor is
 /// private to wafer-core) so tests can drive it with a scripted stream. The
@@ -117,16 +84,19 @@ where
         + Unpin
         + 'static,
 {
-    OutputStream::from_producer(move |sink, _cancel| async move {
-        send_sse_content_type(&sink).await;
-
+    event_stream(move |events: EventSink| async move {
         let mut stream = stream;
         let mut content = String::new();
         let mut truncated = false;
-        while let Some(item) = stream.next().await {
-            let Ok(chunk) = item else {
-                finish_sse(sink, SSE_ERROR_FRAME).await;
-                return;
+        loop {
+            let chunk = match events.pull(&mut stream).await {
+                Pulled::Item(Ok(chunk)) => chunk,
+                Pulled::Item(Err(_)) => {
+                    events.finish(ERROR_FRAME).await;
+                    return;
+                }
+                Pulled::Ended => break,
+                Pulled::ConsumerGone => return,
             };
             if let ChunkDelta::Text(s) = &chunk.delta {
                 if truncated || content.len() + s.len() > MAX_BUFFERED_RESPONSE_BYTES {
@@ -141,11 +111,11 @@ where
                     content.push_str(s);
                 }
             }
-            let Some(frame) = sse_json_frame(&chunk) else {
-                finish_sse(sink, SSE_ERROR_FRAME).await;
+            let Some(frame) = json_frame(&chunk) else {
+                events.finish(ERROR_FRAME).await;
                 return;
             };
-            if sink.send_chunk(frame).await.is_err() {
+            if events.send(frame).await.is_err() {
                 return;
             }
         }
@@ -182,55 +152,55 @@ where
                 error = %error,
                 "llm streamed assistant turn was delivered but could not be stored"
             );
-            finish_sse(sink, SSE_ERROR_FRAME).await;
+            events.finish(ERROR_FRAME).await;
             return;
         }
 
-        finish_sse(sink, SSE_DONE_FRAME).await;
+        events.finish(DONE_FRAME).await;
     })
 }
 
-/// Stream a typed frame stream to the client as JSON Server-Sent Events.
+/// Stream a typed frame stream to the client as JSON Server-Sent Events:
+/// each item as a `data: <json>\n\n` frame, then `data: [DONE]` at a natural
+/// end. A service or encode error becomes a terminal `event: error` frame.
 ///
-/// Emits the `text/event-stream` content-type as a mid-stream meta event so
-/// the HTTP listener writes the SSE header before the first `data:` frame,
-/// then re-encodes each typed item as a `data: <json>\n\n` frame. A service
-/// or encode error becomes a terminal `event: error\ndata: {}\n\n` frame; a
-/// natural end-of-stream becomes a terminal `data: [DONE]\n\n` frame so
-/// clients can distinguish it from a transport-level disconnect.
-///
-/// Used by the model-load endpoint; the chat-stream endpoint uses
-/// [`sse_chat_response`], which shares the same frame encoding via
-/// [`sse_json_frame`] and the same terminal frames so the wire format can't
-/// drift between them.
+/// Used by the model-load endpoint, whose first progress item can be a
+/// download away: the head and the open frame go out before it.
 pub(super) fn sse_json_response<T>(stream: NativeTypedFrameStream<T>) -> OutputStream
 where
     T: serde::Serialize + serde::de::DeserializeOwned + Unpin + Send + 'static,
 {
-    OutputStream::from_producer(move |sink, _cancel| async move {
-        send_sse_content_type(&sink).await;
-
+    event_stream(move |events: EventSink| async move {
         let mut stream = stream;
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = match events.pull(&mut stream).await {
+                Pulled::Item(item) => item,
+                Pulled::Ended => break,
+                Pulled::ConsumerGone => return,
+            };
             // A mid-stream service error or a JSON-encode failure both
             // terminate the stream with a final `event: error` frame, so the
             // consumer sees a clean SSE event instead of an abrupt disconnect.
-            let Some(frame) = item.ok().and_then(|v| sse_json_frame(&v)) else {
-                finish_sse(sink, SSE_ERROR_FRAME).await;
+            let Some(frame) = item.ok().and_then(|v| json_frame(&v)) else {
+                events.finish(ERROR_FRAME).await;
                 return;
             };
-            if sink.send_chunk(frame).await.is_err() {
+            if events.send(frame).await.is_err() {
                 return;
             }
         }
-        finish_sse(sink, SSE_DONE_FRAME).await;
+        events.finish(DONE_FRAME).await;
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use futures::StreamExt;
+
     use super::*;
-    use crate::blocks::llm::routes::test_support::RecordingCtx;
+    use crate::{blocks::llm::routes::test_support::RecordingCtx, sse::OPEN_FRAME};
 
     #[tokio::test]
     async fn sse_chat_response_persists_assistant_turn_at_done() {
@@ -249,6 +219,10 @@ mod tests {
         let body = String::from_utf8(buf.body).expect("SSE body is utf8");
 
         assert!(
+            body.starts_with(std::str::from_utf8(OPEN_FRAME).expect("utf8")),
+            "the open frame comes first, got: {body}"
+        );
+        assert!(
             body.ends_with("data: [DONE]\n\n"),
             "expected terminal [DONE] frame, got: {body}"
         );
@@ -256,11 +230,10 @@ mod tests {
             body.contains("Hel") && body.contains("lo"),
             "both text deltas must be forwarded as frames, got: {body}"
         );
-        assert!(
-            buf.meta
-                .iter()
-                .any(|m| m.key == META_RESP_CONTENT_TYPE && m.value == "text/event-stream"),
-            "content-type meta must announce text/event-stream"
+        assert_eq!(
+            buf.meta,
+            crate::sse::leading_meta(),
+            "the head is the SSE head: content type, no-cache, no proxy buffering"
         );
 
         let calls = ctx.calls();
@@ -444,6 +417,71 @@ mod tests {
         assert!(
             !content.contains("overflow"),
             "the overflowing delta must not be persisted"
+        );
+    }
+
+    /// An upstream that never yields, the way a model is while it thinks,
+    /// and that reports when it is dropped.
+    struct Thinking(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl futures::Stream for Thinking {
+        type Item = Result<ChatChunk, wafer_run::WaferError>;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for Thinking {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.0.take() {
+                let _ = dropped.send(());
+            }
+        }
+    }
+
+    /// A consumer that goes away while the model is silent stops the model
+    /// at once, and no turn is stored.
+    ///
+    /// The producer used to wait on the model's next item with the
+    /// cancellation token unread, so a client that left while the model was
+    /// thinking kept the provider call running until its next token — and
+    /// a model that never sent another one kept it running for good.
+    #[tokio::test]
+    async fn a_dropped_consumer_stops_the_upstream_while_it_is_idle() {
+        let ctx = RecordingCtx::default();
+        let (dropped, upstream_dropped) = tokio::sync::oneshot::channel();
+        let mut out = sse_chat_response(
+            futures::stream::iter([Ok(ChatChunk::text("Hel"))]).chain(Thinking(Some(dropped))),
+            ctx.clone_arc(),
+            Message::new("create:/b/llm/api/chat/stream"),
+            "thread-1".to_string(),
+        );
+        // Read up to the first content frame: the producer is then waiting
+        // on the silent model.
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), out.next())
+                .await
+                .expect("the first frame is forwarded")
+                .expect("the stream is open");
+            if matches!(&event, wafer_block::stream::StreamEvent::Chunk(c) if c.starts_with(b"data: "))
+            {
+                break;
+            }
+        }
+
+        drop(out);
+
+        tokio::time::timeout(Duration::from_secs(5), upstream_dropped)
+            .await
+            .expect("the model's stream is dropped once the consumer goes away")
+            .expect("the drop is reported");
+        assert!(
+            ctx.calls().is_empty(),
+            "an answer the client left part-way is not stored (until SSE D3)"
         );
     }
 }

@@ -86,6 +86,7 @@ pub mod runtime_kind;
 pub mod sandbox_mode;
 pub mod secret_tables;
 pub mod sqlite_text_error;
+pub mod sse;
 pub mod ssrf;
 pub mod streaming;
 pub mod ui;

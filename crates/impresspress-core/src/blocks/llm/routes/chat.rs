@@ -1308,6 +1308,15 @@ mod tests {
         }
     }
 
+    /// Read the open frame every SSE response starts its body with.
+    async fn expect_open(out: &mut OutputStream) {
+        assert_eq!(
+            next_frame(out).await.as_deref(),
+            std::str::from_utf8(crate::sse::OPEN_FRAME).ok(),
+            "the stream opens with the SSE open frame"
+        );
+    }
+
     /// Wait, a scheduling step at most, for `done`.
     async fn until(what: &str, done: impl Fn() -> bool) {
         tokio::time::timeout(STEP, async {
@@ -1343,6 +1352,7 @@ mod tests {
         .await
         .expect("the status line waits for the first item only");
 
+        expect_open(&mut out).await;
         let first = next_frame(&mut out).await.expect("the first frame");
         assert!(first.contains("Hel"), "{first}");
 
@@ -1379,6 +1389,7 @@ mod tests {
             chat_body(&thread_id),
         )
         .await;
+        expect_open(&mut out).await;
         next_frame(&mut out).await.expect("the first frame");
         drop(out);
 
@@ -1386,6 +1397,42 @@ mod tests {
         // may already be gone by then, so a refused send is fine too.
         let _ = feed.items.unbounded_send(Ok(ChatChunk::text("lo")));
         until("the chat is cancelled once its reader goes away", || {
+            feed.cancelled()
+        })
+        .await;
+    }
+
+    /// A client that goes away while the model is silent — thinking, with no
+    /// next item to send — cancels the chat at once, not at the model's next
+    /// token.
+    ///
+    /// The route used to learn the client had left only from a frame it could
+    /// not deliver, so until the model spoke again the provider call ran on
+    /// for nobody, and a model that never spoke again ran on for good.
+    #[tokio::test]
+    async fn a_client_that_goes_away_while_the_model_is_silent_cancels_the_chat() {
+        use crate::blocks::llm::routes::test_support::fed_llm_block;
+
+        let (llm, feed) = fed_llm_block();
+        let (ctx, thread_id) = chat_fixture_serving(llm).await;
+        feed.items
+            .unbounded_send(Ok(ChatChunk::text("Hel")))
+            .expect("feed");
+        let mut out = handle_chat_stream(
+            &stub_block(),
+            &ctx,
+            &crate::test_support::auth_msg("create", "/b/llm/api/chat/stream", "user-a"),
+            chat_body(&thread_id),
+        )
+        .await;
+        expect_open(&mut out).await;
+        next_frame(&mut out).await.expect("the first frame");
+        assert!(!feed.cancelled(), "the model is still answering");
+
+        // No further item is fed: the model is silent.
+        drop(out);
+
+        until("the chat is cancelled while the model is silent", || {
             feed.cancelled()
         })
         .await;
