@@ -26,13 +26,15 @@ what it did happens on every native boot.
 created since it was retired. Nothing in this build reads it. A version built
 before the native auto-migration release (2026-10-07) gated each block's
 migrations on that column: on Cloudflare, while it kept serving during a
-deploy — or for good, after a failed one — each of its cold builds re-applied
-its whole migration list for every block it had blessed. That overwrote the
-new version's records of what is applied, bumped the KV config stamp (so the
-candidate's prepared plan went stale before promotion) and re-ran old data
-repairs; had auth's list changed, it would have signed every user out again
-on every cold build. With the column empty, such a version logs `schema drift`
-and serves on the schema it finds.
+deploy — or for good, after a failed one — its next cold build after the new
+version recorded a list re-applied its own whole list for every block it had
+blessed. That overwrote the new version's records of what is applied, bumped
+the KV config stamp (so the candidate's prepared plan went stale before
+promotion) and re-ran old data repairs; had auth's list changed, it would have
+signed every user out. It happened once each time the versions diverged, and
+on every cold build while the re-apply kept failing part way (as it does when
+it runs out of D1 statements). With the column empty, such a version logs
+`schema drift` and serves on the schema it finds.
 
 **When it takes effect.** Once a build carrying it has applied admin's list:
 on Cloudflare at that deploy's `/_deploy/prepare`, natively at the next boot.
@@ -41,11 +43,16 @@ admin's list, so that deploy or boot re-runs admin's whole list (001-009);
 every file in it is re-runnable. Rolling back to an older version with its
 migrations applied blesses its rows again; the next deploy of this build
 re-runs admin's list, because the older one re-recorded it, and empties them
-again.
+again. One narrow case is not covered: an older version that receives its
+first traffic while the deploy is applying 009 can read the rows from before
+009 ran (D1 mid-deploy, or a stale KV copy in another location) and bless a
+block other than admin again; nothing then re-runs 009 until admin's list
+next changes.
 
 **Who has to act.** Nobody. The guarantee that a still-serving older version
 cannot change the schema holds only between versions on the same migration
-protocol: keep traffic off an older version during a deploy where you can.
+protocol: keep traffic off an older version during a deploy where you can,
+which also closes the case above.
 
 ### Branding: the built-in mark is the clay character — no action required
 

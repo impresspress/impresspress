@@ -242,14 +242,16 @@ pub async fn apply_pending(
             tracing::warn!(error = %failed, "migration failed");
             failed.to_string()
         })?;
-    // Record only after every file has run, and keep it the next write.
-    // Besides stamping the list, this typed write to `block_settings` is what
-    // drops Cloudflare's KV row cache of that table (`cache_key::invalidate_keys`
-    // emits the all-rows key `cfg:v1:block_settings:__all__` for it); the files
-    // above went through `db::ddl`, whose `exec_raw` invalidates nothing. Admin's
-    // 009, which rewrites `blessed_hash` on every row by a raw `UPDATE`, reaches
-    // an old version's cached reads only through this write — see the 009 note
-    // in `blocks/admin/migrations/mod.rs`.
+    // Record only after every file has run: a list is never stamped as
+    // applied unless all of it ran. On Cloudflare this typed write to
+    // `block_settings` also drops the KV row cache of that table
+    // (`cache_key::invalidate_keys` emits the all-rows key
+    // `cfg:v1:block_settings:__all__` for it), which the files above cannot
+    // do: they went through `db::ddl`, whose `exec_raw` invalidates nothing.
+    // It is one of the two ways a raw rewrite of the table, like admin's 009,
+    // reaches an older version's cached reads; the deploy funnel's
+    // read-through reads of the table after admin's `Init` are the other. See
+    // the 009 note in `blocks/admin/migrations/mod.rs`.
     record_applied(ctx, block_name, &code_hash).await
 }
 

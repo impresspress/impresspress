@@ -1272,384 +1272,67 @@ mod tests {
 
 /// Admin's migration 009 empties `blessed_hash` on every `block_settings` row
 /// by a raw `UPDATE`, and a raw statement reaches D1 through
-/// [`KvCachedD1DatabaseService::exec_raw`], which invalidates nothing. The
-/// cached copy of the whole table, `cfg:v1:block_settings:__all__`, is what an
-/// older version's cold build reads; it is dropped only by the typed write
-/// `migration_helper::apply_pending` makes after the list has run, when it
-/// records the list as applied. These tests hold that order on the wiring a
-/// deploy funnel runs admin's `Init` with.
+/// [`KvCachedD1DatabaseService::exec_raw`], which invalidates nothing. Two
+/// later steps of the deploy funnel bring `cfg:v1:block_settings:__all__` —
+/// the cached whole table an older version's cold build reads — in line with
+/// D1: the typed write `migration_helper::apply_pending` makes right after the
+/// list has run, when it records the list as applied, drops the key; and the
+/// funnel's read-through `block_settings` reads after admin's `Init` rewrite
+/// it from D1 (`boot_hooks`'s
+/// `the_deploy_funnel_leaves_the_all_rows_key_holding_the_cleared_rows` holds
+/// the value that results). This module holds the first: the record follows
+/// the list and its write drops the key.
 #[cfg(test)]
 mod admin_migration_009_tests {
-    use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+    use std::{collections::HashMap, rc::Rc, sync::Arc};
 
-    use impresspress_core::{
-        blocks::admin::{
-            migrations::{migration_files, BLOCK_SETTINGS_CLEAR_BLESSED_HASH},
-            AdminBlock, ADMIN_BLOCK_ID,
-        },
-        features::{BlockSettings, BlockState, MigrationState, BLOCK_SETTINGS_CONFIG_KEY},
-        kv::KvBackend,
-        migration_helper::RUN_MIGRATIONS_KEY,
-        platform_state::block_settings,
-    };
-    use wafer_block::db::{Filter, ListOptions};
-    use wafer_core::interfaces::database::service::{
-        AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
-        WriteOutcome,
-    };
+    use impresspress_core::{blocks::admin::ADMIN_BLOCK_ID, platform_state::block_settings};
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::{CacheMode, KvCachedD1DatabaseService};
+    use crate::test_fakes::{
+        admin_009_clear_statement, blessed_row, deploy_admin_runtime, BlockSettingsD1, Log,
+        MemoryKv,
+    };
 
     /// The KV key holding every `block_settings` row: what an older version's
     /// cold build reads, for up to the row cache's 24 h TTL. Spelled out
     /// rather than derived, because the old version reads this exact key.
     const ALL_ROWS_KEY: &str = "cfg:v1:block_settings:__all__";
 
-    /// One ordered log both fakes append to, so a test can say which came
-    /// first: a statement reaching D1 or a key leaving KV.
-    type Log = Rc<RefCell<Vec<String>>>;
-
-    /// KV that misses every read and logs every write and delete.
-    struct LoggingKv(Log);
-
-    #[async_trait::async_trait(?Send)]
-    impl KvBackend for LoggingKv {
-        async fn get(&self, _key: &str) -> Result<Option<String>, String> {
-            Ok(None)
-        }
-
-        async fn put_with_ttl(
-            &self,
-            key: &str,
-            _value: &str,
-            _ttl_secs: u64,
-        ) -> Result<(), String> {
-            self.0.borrow_mut().push(format!("kv put {key}"));
-            Ok(())
-        }
-
-        async fn put(&self, key: &str, _value: &str) -> Result<(), String> {
-            self.0.borrow_mut().push(format!("kv put {key}"));
-            Ok(())
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), String> {
-            self.0.borrow_mut().push(format!("kv delete {key}"));
-            Ok(())
-        }
-    }
-
-    /// A D1 stand-in for a database an earlier deploy migrated: its
-    /// `block_settings` table holds admin's row, stamped with an older list.
-    /// Logs every raw statement and every typed write; reads of any other
-    /// table find nothing.
-    struct DeployedD1 {
-        log: Log,
-        admin_row: Record,
-    }
-
-    fn unused<T>() -> Result<T, DatabaseError> {
-        Err(DatabaseError::Internal("unused in this test".into()))
-    }
-
-    #[wafer_block::wafer_async_trait]
-    impl DatabaseService for DeployedD1 {
-        async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-            if collection == block_settings::TABLE && id == self.admin_row.id {
-                return Ok(self.admin_row.clone());
-            }
-            Err(DatabaseError::NotFound)
-        }
-
-        async fn list(
-            &self,
-            collection: &str,
-            _opts: &ListOptions,
-        ) -> Result<RecordList, DatabaseError> {
-            let records = if collection == block_settings::TABLE {
-                vec![self.admin_row.clone()]
-            } else {
-                Vec::new()
-            };
-            Ok(RecordList {
-                total_count: records.len() as i64,
-                records,
-                page: 1,
-                page_size: 500,
-            })
-        }
-
-        async fn create(
-            &self,
-            collection: &str,
-            data: HashMap<String, serde_json::Value>,
-        ) -> Result<Record, DatabaseError> {
-            self.log
-                .borrow_mut()
-                .push(format!("d1 create {collection}"));
-            Ok(Record {
-                id: "created".to_string(),
-                data: data.into_iter().collect(),
-            })
-        }
-
-        async fn update(
-            &self,
-            collection: &str,
-            id: &str,
-            data: HashMap<String, serde_json::Value>,
-        ) -> Result<Record, DatabaseError> {
-            self.log
-                .borrow_mut()
-                .push(format!("d1 update {collection}/{id}"));
-            let mut record = self.get(collection, id).await?;
-            record.data.extend(data);
-            Ok(record)
-        }
-
-        async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
-            unused()
-        }
-
-        async fn count(
-            &self,
-            _collection: &str,
-            _filters: &[Filter],
-        ) -> Result<i64, DatabaseError> {
-            Ok(0)
-        }
-
-        async fn sum(
-            &self,
-            _collection: &str,
-            _field: &str,
-            _filters: &[Filter],
-        ) -> Result<f64, DatabaseError> {
-            unused()
-        }
-
-        async fn increment_field_where(
-            &self,
-            _collection: &str,
-            _col: &str,
-            _delta: i64,
-            _filters: &[Filter],
-        ) -> Result<i64, DatabaseError> {
-            unused()
-        }
-
-        async fn query_raw(
-            &self,
-            _query: &str,
-            _args: &[serde_json::Value],
-        ) -> Result<Vec<Record>, DatabaseError> {
-            unused()
-        }
-
-        async fn exec_raw(
-            &self,
-            query: &str,
-            _args: &[serde_json::Value],
-        ) -> Result<i64, DatabaseError> {
-            self.log.borrow_mut().push(format!("d1 exec {query}"));
-            Ok(0)
-        }
-
-        async fn create_many(
-            &self,
-            _collection: &str,
-            _rows: Vec<HashMap<String, serde_json::Value>>,
-        ) -> Result<i64, DatabaseError> {
-            unused()
-        }
-
-        async fn take_where(
-            &self,
-            _collection: &str,
-            _filters: &[Filter],
-        ) -> Result<Vec<Record>, DatabaseError> {
-            unused()
-        }
-
-        async fn update_where(
-            &self,
-            _collection: &str,
-            _filters: &[Filter],
-            _data: HashMap<String, serde_json::Value>,
-        ) -> Result<(), DatabaseError> {
-            unused()
-        }
-
-        async fn batch(&self, _ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
-            unused()
-        }
-
-        async fn insert_guarded(
-            &self,
-            _collection: &str,
-            _data: HashMap<String, serde_json::Value>,
-            _guards: &[CapGuard],
-        ) -> Result<GuardedInsert, DatabaseError> {
-            unused()
-        }
-
-        async fn update_guarded(
-            &self,
-            _collection: &str,
-            _filters: &[Filter],
-            _data: HashMap<String, serde_json::Value>,
-            _guards: &[CapGuard],
-        ) -> Result<GuardedUpdate, DatabaseError> {
-            unused()
-        }
-
-        async fn upsert(
-            &self,
-            _collection: &str,
-            _spec: UpsertSpec,
-        ) -> Result<Option<Record>, DatabaseError> {
-            unused()
-        }
-
-        async fn aggregate(
-            &self,
-            _collection: &str,
-            _spec: AggregateSpec,
-        ) -> Result<Vec<Record>, DatabaseError> {
-            unused()
-        }
-
-        async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
-            unused()
-        }
-
-        async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
-            unused()
-        }
-
-        async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
-            unused()
-        }
-
-        async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
-            unused()
-        }
-
-        async fn schema_add_column(
-            &self,
-            _table: &str,
-            _column: &Column,
-        ) -> Result<(), DatabaseError> {
-            unused()
-        }
-
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
-    }
-
     const OLDER_LIST: &str = "an-older-admin-list";
 
-    fn admin_row() -> Record {
-        let mut data = HashMap::new();
-        data.insert("block_name".to_string(), serde_json::json!(ADMIN_BLOCK_ID));
-        data.insert("enabled".to_string(), serde_json::json!(1));
-        data.insert("current_hash".to_string(), serde_json::json!(OLDER_LIST));
-        data.insert("blessed_hash".to_string(), serde_json::json!(OLDER_LIST));
-        data.insert("seed_defaults_hash".to_string(), serde_json::json!(""));
-        data.insert(
-            "created_at".to_string(),
-            serde_json::json!("2026-09-27T00:00:00Z"),
-        );
-        data.insert(
-            "updated_at".to_string(),
-            serde_json::json!("2026-09-27T00:00:00Z"),
-        );
-        Record {
-            id: "bs_admin".to_string(),
-            data: data.into_iter().collect(),
-        }
-    }
-
-    /// The executable `UPDATE` of 009, as `db::ddl` hands it to D1.
-    fn clear_statement() -> String {
-        let (_, sql) = migration_files("sqlite")
-            .iter()
-            .find(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
-            .expect("009 is wired into admin's SQLite list");
-        let at = sql
-            .find("UPDATE impresspress__admin__block_settings")
-            .expect("009 updates block_settings");
-        sql[at..].trim().trim_end_matches(';').to_string()
-    }
-
-    /// **Admin's `Init`, applying a list that holds 009, drops the all-rows
-    /// key after 009's `UPDATE` reached D1.** The wiring is the deploy
-    /// funnel's (`/_deploy/prepare` and `/_deploy/init`): the KV row cache in
-    /// front of D1, reading through, with the per-write config stamp off, and
-    /// `IMPRESSPRESS_RUN_MIGRATIONS` set. Admin's row records an older list,
-    /// so the list runs, as it does on every deployment that applied 001-008.
+    /// **Admin's `Init`, applying a list that holds 009, records the list
+    /// right after 009's `UPDATE` reached D1, and that record drops the
+    /// all-rows key.** The wiring is the deploy funnel's (`/_deploy/prepare`
+    /// and `/_deploy/init`): the KV row cache in front of D1, reading through,
+    /// with the per-write config stamp off, and `IMPRESSPRESS_RUN_MIGRATIONS`
+    /// set. Admin's row records an older list, so the list runs, as it does on
+    /// every deployment that applied 001-008.
     ///
     /// Fails if `apply_pending` records the list before running it, or if the
     /// record stops being a typed write the row cache invalidates on.
     #[wasm_bindgen_test]
     async fn applying_admins_list_drops_the_all_rows_key_after_009() {
         let log = Log::default();
-        let d1 = DeployedD1 {
-            log: Rc::clone(&log),
-            admin_row: admin_row(),
-        };
         let db = KvCachedD1DatabaseService::with_mode(
-            Arc::new(d1),
-            Arc::new(LoggingKv(Rc::clone(&log))),
+            Arc::new(BlockSettingsD1::new(
+                Rc::clone(&log),
+                vec![blessed_row(
+                    "bs_admin",
+                    ADMIN_BLOCK_ID,
+                    OLDER_LIST,
+                    OLDER_LIST,
+                )],
+            )),
+            Arc::new(MemoryKv::new(Rc::clone(&log), HashMap::new())),
             CacheMode {
                 read_through: true,
                 bump_on_write: false,
             },
         );
 
-        let mut wafer = wafer_run::Wafer::new(Arc::new(wafer_run::StaticConfigSource::default()))
-            .expect("Wafer::new");
-        wafer.set_admin_block(ADMIN_BLOCK_ID);
-        wafer_core::service_blocks::database::register_with(&mut wafer, Arc::new(db))
-            .expect("register the database");
-        // Admin `requires` both, so the runtime does not seal without them.
-        wafer_core::service_blocks::config::register_with(
-            &mut wafer,
-            Arc::new(crate::config_service::HashMapConfigService::new(
-                HashMap::new(),
-            )),
-        )
-        .expect("register config");
-        wafer_core::service_blocks::crypto::register_with(
-            &mut wafer,
-            Arc::new(crate::test_fakes::FixedCrypto),
-        )
-        .expect("register crypto");
-        wafer
-            .register_block(ADMIN_BLOCK_ID, Arc::new(AdminBlock::new()))
-            .expect("register admin");
-        let mut blocks = HashMap::new();
-        blocks.insert(
-            ADMIN_BLOCK_ID.to_string(),
-            BlockState {
-                enabled: true,
-                migration: MigrationState {
-                    current_hash: OLDER_LIST.to_string(),
-                },
-                seed_defaults_hash: String::new(),
-            },
-        );
-        let mut snapshot = HashMap::new();
-        snapshot.insert(RUN_MIGRATIONS_KEY.to_string(), "1".to_string());
-        snapshot.insert(
-            BLOCK_SETTINGS_CONFIG_KEY.to_string(),
-            BlockSettings::from_blocks(blocks).to_config_json(),
-        );
-        wafer.set_config_snapshot(snapshot);
-        wafer.seal().await.expect("seal");
+        let wafer = deploy_admin_runtime(Arc::new(db), OLDER_LIST).await;
 
         wafer
             .init_block(ADMIN_BLOCK_ID)
@@ -1657,7 +1340,7 @@ mod admin_migration_009_tests {
             .expect("admin's Init applies its list");
 
         let log = log.borrow();
-        let clear = format!("d1 exec {}", clear_statement());
+        let clear = format!("d1 exec {}", admin_009_clear_statement());
         let cleared_at = log
             .iter()
             .position(|entry| *entry == clear)
