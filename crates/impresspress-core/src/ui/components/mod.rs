@@ -27,7 +27,7 @@ pub use button::{
 pub use callout::{callout, CalloutTone};
 pub use card::Card;
 pub use chart::{bar_chart_card, line_chart_card, ChartHistory};
-pub use empty::empty_state;
+pub use empty::{empty_note, empty_state};
 pub use endpoints::endpoint_table;
 pub use form::{password_field, reveal_toggle, PasswordPurpose, SearchInput};
 pub use modal::{modal, modal_cancel, modal_footer, Modal, ModalSize};

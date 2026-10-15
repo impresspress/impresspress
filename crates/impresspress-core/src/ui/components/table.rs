@@ -334,7 +334,9 @@ enum Layout {
 ///
 /// `rows` is a `Vec` because the component needs to know whether it is empty:
 /// an empty table renders the empty slot in place of the whole table, header
-/// included — use [`empty_state`](DataTable::empty_state) for it.
+/// included. Fill it with [`empty_state`](DataTable::empty_state) for a table
+/// on the page background, or [`empty_note`](DataTable::empty_note) for one
+/// inside a `Card::flush()`.
 ///
 /// [`data_table`] is the four-argument shorthand and delegates here.
 pub struct DataTable<'a> {
@@ -374,17 +376,30 @@ impl<'a> DataTable<'a> {
     }
 
     /// What to render when there are no rows, as raw markup. Prefer
-    /// [`empty_state`](DataTable::empty_state).
+    /// [`empty_state`](DataTable::empty_state) or
+    /// [`empty_note`](DataTable::empty_note).
     pub fn empty(mut self, empty: Markup) -> Self {
         self.empty = empty;
         self
     }
 
-    /// The shared empty state ([`super::empty_state`]) in place of the whole
+    /// The framed empty state ([`super::empty_state`]) in place of the whole
     /// table when there are no rows: a title, one sentence and an optional
-    /// call to action. No header is rendered over it.
+    /// call to action. No header is rendered over it. For a table on the
+    /// page background; a table inside a `Card` takes
+    /// [`empty_note`](DataTable::empty_note), because the framed state is a
+    /// card-level surface and a card holds none (layout rule 2).
     pub fn empty_state(mut self, title: &str, body: &str, action: Option<Markup>) -> Self {
         self.empty = super::empty_state(icons::inbox(), title, body, action);
+        self
+    }
+
+    /// One muted sentence ([`super::empty_note`]) in place of the whole table
+    /// when there are no rows. For a table inside a `Card::flush()`, so the
+    /// card can be flush whether or not it has rows: the note takes the
+    /// card's inset, which a flush body does not give it (`card.css`).
+    pub fn empty_note(mut self, text: &str) -> Self {
+        self.empty = super::empty_note(text, None);
         self
     }
 
@@ -413,7 +428,7 @@ impl<'a> DataTable<'a> {
     /// Render the table.
     pub fn render(self) -> Markup {
         if self.rows.is_empty() {
-            return html! { div .data-table__empty { (self.empty) } };
+            return self.empty;
         }
         let columns = self.columns;
         // An optional column is dropped when no row fills it in.
@@ -578,7 +593,7 @@ mod tests {
         );
         let s =
             data_table::<fn(usize) -> Option<String>>(&cols, Vec::new(), None, empty).into_string();
-        assert!(s.contains("data-table__empty"));
+        assert!(s.starts_with(r#"<div class="empty">"#), "{s}");
         assert!(s.contains("No users"));
         assert!(!s.contains("<tbody>"));
     }
@@ -889,10 +904,8 @@ mod tests {
             )
             .render()
             .into_string();
-        assert!(
-            s.starts_with(r#"<div class="data-table__empty"><div class="empty">"#),
-            "{s}"
-        );
+        // The framed state is the whole output: no wrapper insets its frame.
+        assert!(s.starts_with(r#"<div class="empty">"#), "{s}");
         assert!(
             s.contains(r#"<h2 class="empty__title">No users</h2>"#),
             "{s}"
@@ -908,6 +921,31 @@ mod tests {
             "{s}"
         );
         assert!(!s.contains("<table") && !s.contains("<th"), "{s}");
+    }
+
+    /// `.empty_note(..)` renders one muted sentence in place of the whole
+    /// table: what a flush card holds when it has no rows, so the card is
+    /// flush either way and still holds no card-level surface.
+    #[test]
+    fn empty_note_replaces_the_whole_table_with_one_sentence() {
+        let s = DataTable::new(&CARD_COLS)
+            .empty_note("No users yet.")
+            .render()
+            .into_string();
+        assert_eq!(s, r#"<p class="empty-note">No users yet.</p>"#);
+        let card = crate::ui::components::Card::titled(
+            "Recent users",
+            DataTable::new(&CARD_COLS)
+                .empty_note("No users yet.")
+                .render(),
+        )
+        .flush()
+        .render()
+        .into_string();
+        assert!(
+            crate::test_support::dom::card_level_inside_card(&card).is_empty(),
+            "{card}"
+        );
     }
 
     /// A scrolling grid is a labelled, focusable region, so a keyboard user

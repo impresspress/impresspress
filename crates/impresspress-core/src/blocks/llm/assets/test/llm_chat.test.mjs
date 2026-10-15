@@ -210,7 +210,26 @@ test('beside the list, a thread link opens the thread in place and marks it curr
 
   await new Promise((r) => setImmediate(r));
   assert.equal(h.area.children.length, 1);
-  assert.equal(h.area.children[0].className, 'chat-empty-state text-muted');
+  assert.equal(h.area.children[0].className, 'empty-note');
+});
+
+test('the first message sent into an empty thread replaces its empty note', async () => {
+  const h = harness({
+    reply: (url) => (url === '/b/llm/api/chat'
+      ? { status: 200, body: { content: 'hello', message_id: 'e-1', model: 'm', truncated: false } }
+      : null),
+  });
+  h.click(threadLink(h.list, 't-1'));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.area.children[0].className, 'empty-note');
+
+  h.input.value = 'hi';
+  h.submit();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(
+    h.area.children.map((c) => c.className),
+    ['message-card message-card--user', 'message-card message-card--neutral'],
+  );
 });
 
 test('on a phone showing the list, a thread link navigates instead', () => {

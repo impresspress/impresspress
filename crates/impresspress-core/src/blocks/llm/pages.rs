@@ -310,7 +310,8 @@ fn thread_list_items(threads: &[ContextView], active_id: Option<&str>) -> Markup
 }
 
 /// Messages pane for the chat_page template. When no thread is selected,
-/// shows the "Create a thread first" empty-state element. When a thread
+/// shows a one-line `empty_note` naming what to do; the pane is already a
+/// framed surface, so the note adds none. When a thread
 /// IS selected, renders an empty `#messages-area` that the JS bootstrap
 /// fills from the `<script type="application/json" id="llm-chat-bootstrap">`
 /// carrier emitted by `render_page_body`.
@@ -323,10 +324,8 @@ fn render_messages_pane(_entries: &[serde_json::Value], thread_id: Option<&str>)
         // a grey slab inside the white pane and double-scrolled.
         div #messages-area {
             @if thread_id.is_none() {
-                div #no-thread-prompt .chat-empty-state {
-                    div .chat-empty-state__icon { (ui::icons::message_square()) }
-                    p .text-lg .mb-2 { "Start a new conversation" }
-                    p .text-muted .mb-6 { "Choose a thread, or start one with " strong { "New thread" } "." }
+                div #no-thread-prompt {
+                    (ui::components::empty_note("Choose a thread, or start one with New thread.", None))
                 }
             }
             // When thread_id is Some, the JS bootstrap fills #messages-area
@@ -911,8 +910,16 @@ mod tests {
     #[test]
     fn render_messages_pane_empty_renders_no_thread_prompt() {
         let html = render_messages_pane(&[], None).into_string();
-        assert!(html.contains(r#"id="no-thread-prompt""#));
-        assert!(html.contains("Start a new conversation"));
+        // One muted line in the pane, not a framed surface with an icon: the
+        // shared `empty_note`, inside the element llm-chat.js removes.
+        assert!(
+            html.contains(concat!(
+                r#"<div id="no-thread-prompt"><p class="empty-note">"#,
+                "Choose a thread, or start one with New thread.</p></div>",
+            )),
+            "{html}"
+        );
+        assert!(!html.contains("<svg"), "{html}");
     }
 
     #[test]
@@ -992,7 +999,7 @@ mod tests {
             .into_markup()
             .into_string();
         assert!(html.contains(r#"id="no-thread-prompt""#));
-        assert!(html.contains("Start a new conversation"));
+        assert!(html.contains("Choose a thread, or start one with New thread."));
         assert!(html.contains(r#"id="chat-form""#));
         assert!(
             html.contains("chat-form--disabled"),

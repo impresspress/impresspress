@@ -23,7 +23,7 @@ use crate::{
         },
     },
     ui::{
-        components::{self, Badge, BadgeVariant},
+        components::{self, empty_note, Badge, BadgeVariant},
         html_response, icons,
         shell::Topbar,
         templates::list_page,
@@ -261,11 +261,7 @@ fn right_pane_tabs(selected: Option<&str>, tab: Tab) -> Markup {
 /// `0` count.
 async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, WaferError> {
     let Some(name) = table else {
-        return Ok(html! {
-            div .empty-state {
-                p { "Select a table on the left to view its schema." }
-            }
-        });
+        return Ok(empty_note("Select a table to view its columns.", None));
     };
 
     // The selected name is user input: a name the backend cannot quote, or
@@ -274,14 +270,16 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
     let (columns, row_count) = match introspect_columns(ctx, name).await {
         Ok(schema) => schema,
         Err(IntrospectError::InvalidName) => {
-            return Ok(html! {
-                div .empty-state { p { "\"" (name) "\" is not a valid table name." } }
-            })
+            return Ok(empty_note(
+                &format!("\"{name}\" is not a valid table name."),
+                None,
+            ))
         }
         Err(IntrospectError::NoSuchTable) => {
-            return Ok(html! {
-                div .empty-state { p { "There is no table named \"" (name) "\"." } }
-            })
+            return Ok(empty_note(
+                &format!("There is no table named \"{name}\"."),
+                None,
+            ))
         }
         Err(IntrospectError::Read(e)) => return Err(e),
     };
@@ -638,10 +636,43 @@ mod tests {
         assert_eq!(parts.status, 200);
         let html = String::from_utf8(parts.body).expect("UTF-8 body");
         assert!(
-            html.contains("There is no table named &quot;no_such_table&quot;."),
+            html.contains(
+                r#"<p class="empty-note">There is no table named &quot;no_such_table&quot;.</p>"#
+            ),
             "{html}"
         );
         assert!(!html.contains("0 rows"), "{html}");
+    }
+
+    /// With no table selected, and for a name the backend cannot quote, the
+    /// schema panel says so in one line: the panel already sits in a pane,
+    /// so it is an `empty_note`, not a second framed surface.
+    #[tokio::test]
+    async fn the_schema_panel_says_what_to_do_in_one_line() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+
+        let parts = browser_request(&ctx, admin_msg("retrieve", "/b/admin/database")).await;
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(
+            html.contains(r#"<p class="empty-note">Select a table to view its columns.</p>"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"class="empty""#), "{html}");
+
+        let mut msg = admin_msg("retrieve", "/b/admin/database");
+        msg.set_meta("req.query.table", "bad name;");
+        let parts = browser_request(&ctx, msg).await;
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(
+            html.contains(
+                r#"<p class="empty-note">&quot;bad name;&quot; is not a valid table name.</p>"#
+            ),
+            "{html}"
+        );
     }
 
     /// Control: a real table still shows its columns and count.
