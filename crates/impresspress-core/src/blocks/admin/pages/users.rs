@@ -129,7 +129,7 @@ async fn users_tab(
         },
     )
     .await?;
-    let table = users_table(&list.rows, ctx, current_user_id).await?;
+    let table = users_table(&list.rows, ctx, current_user_id, !search.is_empty()).await?;
     let search_box = components::SearchInput {
         id: "users-search",
         name: "search",
@@ -154,11 +154,14 @@ async fn users_tab(
 
 /// Render the users table body. Async because it enriches each user with roles.
 ///
-/// A failed roles read is an error, not a table of users with no roles.
+/// A failed roles read is an error, not a table of users with no roles. With
+/// no rows it is the framed empty state, which says whether the search found
+/// nothing (`searching`) or there are no users at all.
 async fn users_table(
     records: &[UserRow],
     ctx: &dyn Context,
     current_user_id: &str,
+    searching: bool,
 ) -> Result<Markup, WaferError> {
     // Bulk-fetch all roles for the visible users in a single query (was N+1:
     // one `list_all` per row), via the shared `ops::fetch_roles` helper.
@@ -175,7 +178,15 @@ async fn users_table(
 
     Ok(components::DataTable::new(&USER_COLUMNS)
         .rows(rows)
-        .empty(html! { p .text-center .text-muted { "No users found" } })
+        .empty_state(
+            "No users found",
+            if searching {
+                "No user's email or ID matches this search."
+            } else {
+                "Users appear here once they sign up."
+            },
+            None,
+        )
         .render())
 }
 
@@ -683,6 +694,32 @@ mod tests {
             html.contains(r#"datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
             "the Created cell must be a <time>: {html}"
         );
+    }
+
+    /// A search that matches nobody shows the framed empty state saying so,
+    /// in place of the table: not a bare sentence, and no header over nothing.
+    #[tokio::test]
+    async fn a_search_with_no_match_shows_the_empty_state() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        let mut msg = admin_msg("retrieve", "/b/admin/users");
+        msg.set_meta("req.query.search", "nobody-matches-this");
+
+        let parts = crate::blocks::admin::test_support::browser_request(&ctx, msg).await;
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+
+        assert_eq!(parts.status, 200, "{html}");
+        assert!(
+            html.contains(concat!(
+                r#"<h2 class="empty__title">No users found</h2>"#,
+                r#"<p class="empty__body">No user's email or ID matches this search.</p>"#,
+            )),
+            "{html}"
+        );
+        assert!(html.contains(r#"<div class="empty">"#), "{html}");
+        assert!(!html.contains("<thead>"), "{html}");
     }
 
     /// A key the auth block would refuse is not shown as active. Revoked and

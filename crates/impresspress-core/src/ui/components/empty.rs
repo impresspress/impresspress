@@ -8,7 +8,10 @@
 //! - [`empty_note`] is the one inside a `Card`, where a second frame would be
 //!   a card inside a card (rule 2): one muted sentence, unframed.
 //!
-//! These two are the only writers of `.empty` and `.empty-note`.
+//! These two are the only writers of `.empty` and `.empty-note` in Rust. One
+//! script writes the note's markup too: `blocks/llm/assets/llm-chat.js` builds
+//! the messages pane's "No messages yet." line in the browser as the same
+//! `p.empty-note` this module renders.
 
 use maud::{html, Markup};
 
