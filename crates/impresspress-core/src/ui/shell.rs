@@ -341,12 +341,12 @@ mod tests {
         assert!(!s.contains("topbar__crumbs"));
     }
 
-    /// Regression guard for the double-h1 review finding: pages that render
-    /// `components::page_header(...)` in their body (products, llm,
-    /// legalpages/auth_ui settings, userportal branding, ...) must not add a
-    /// second h1 next to the topbar's — the body header is an h2.
+    /// Regression guard for the double-h1 review finding: a page's body
+    /// sections are `components::Card`s, and a card's title must not add a
+    /// second h1 next to the topbar's. Read off the element tree: the outline
+    /// is the topbar's h1, then each card's h2 under it.
     #[test]
-    fn shell_page_with_body_page_header_still_has_exactly_one_h1() {
+    fn shell_page_with_body_cards_still_has_exactly_one_h1() {
         let groups = one_group(vec![item("Products", "/b/products/")]);
         let tb = Topbar {
             crumbs: vec![Crumb {
@@ -355,11 +355,10 @@ mod tests {
             }],
             ..Topbar::default()
         };
-        let body = crate::ui::components::page_header(
-            "Products Overview",
-            Some("Product catalog statistics"),
-            None,
-        );
+        let body = html! {
+            (crate::ui::components::Card::titled("Overview", html! { p { "Totals" } }).render())
+            (crate::ui::components::Card::plain(html! { p { "Notes" } }).render())
+        };
         let s = shell(
             NavKind::Admin,
             &groups,
@@ -375,12 +374,10 @@ mod tests {
         )
         .into_string();
         assert_eq!(
-            s.matches("<h1").count(),
-            1,
-            "the shell topbar owns the only h1; body page_header must be h2: {s}"
+            crate::test_support::dom::heading_outline(&s),
+            vec![(1, "Products".to_string()), (2, "Overview".to_string())],
+            "the shell topbar owns the only h1; a card title is an h2: {s}"
         );
-        assert!(s.contains(r#"<h1 class="topbar__title">Products</h1>"#));
-        assert!(s.contains(r#"<h2 class="page-title">Products Overview</h2>"#));
     }
 
     #[test]

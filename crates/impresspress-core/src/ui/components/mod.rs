@@ -25,7 +25,7 @@ pub use button::{
     button, filter_links, filter_toggle, subnav, tab_navigation, BtnVariant, FilterLinks, Tab,
 };
 pub use callout::{callout, CalloutTone};
-pub use card::page_header;
+pub use card::Card;
 pub use chart::{bar_chart_card, line_chart_card, sparkline, ChartHistory};
 pub use empty::empty_state;
 pub use endpoints::endpoint_table;

@@ -1,111 +1,84 @@
-/* Page Header — `components::page_header`. The `.page-header` block that
- * stood here belonged to `templates::render_header`, a second renderer that
- * every one of its call sites invoked with an empty title, so it painted
- * nothing on any page. */
-.page-title {
-	font-size: 1.5rem; font-weight: 600;
-	color: var(--text-primary); margin-bottom: var(--space-2);
-}
-
-.page-subtitle {
-	color: var(--text-secondary);
-	font-size: 0.875rem; margin-bottom: var(--space-8);
-}
-
-/* Cards */
-.card {
-	background: white; border-radius: 8px;
-	border: 1px solid var(--border-color);
-	padding: var(--space-6); margin-bottom: var(--space-6);
-}
-
-.card-title {
-	font-size: 1rem; font-weight: 600; color: var(--text-primary);
-}
-
 /* ===== Card =====
-   NOTE: this rule intentionally does not restate `padding`. The plain-card
-   rule above owns it, and plain cards (`div .card { ...content... }`, still
-   the pattern in llm/files/messages/tickets) need it.
+   `components::Card` is the only writer of `.card` and `.card__*`. One
+   surface, one padding: the card owns it, so a card with a head and a body
+   and a card with only a body sit their content the same 20px in, and the
+   head is part of the card rather than a band across it (no divider).
 
-   But a card built from `.card__head`/`.card__body` gets its padding from
-   those children, and was ALSO inheriting the plain rule's 24px on top:
-   measured on the live dashboard, body content sat 49px in from the card
-   edge instead of 24px, and the head's bottom border floated 25px short of
-   each edge instead of spanning the card. 17 of the admin's cards render
-   through `__body` and every one of them was double-padded -- this is the
-   systemic half of the "padding isn't consistent" report (the `.card-body`
-   -> `.card__body` typo fixed earlier was the local half), and it is also
-   what the `.p-0` overrides on the LLM pages were quietly compensating for.
-
-   Zeroed only when such a child is actually present, so plain cards keep
-   their 24px and no call site has to change. `:has()` is a lighter
-   requirement than the `color-mix()` this bundle already ships (Chrome
-   105 vs 111, Safari 15.4 vs 16.2, Firefox 121 vs 113). */
-.card { background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg); margin-bottom: var(--space-4); }
-/* A plain card's padding tightens on a phone. Stated here, beside the rule it
-   narrows and before every card modifier, so a modifier that sets its own
-   padding or margin (`.thread-card`, `.message-card--*`) still wins below
-   720px. Anywhere that loads after this file (layouts/page.css) it would
+   `.card__body` adds no padding of its own. A `Card::flush()` card drops
+   the card's padding instead, gives it back to its head, and lets the body
+   run edge to edge: a `DataTable` there loses its frame, and the card's
+   frame is the table's (layout rule 2, the one card-level surface a card
+   may hold). */
+.card {
+	background: var(--surface-1);
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-lg);
+	padding: var(--space-5);
+	margin-bottom: var(--space-4);
+}
+/* Tighter on a phone. Stated here, before every card modifier, so a
+   modifier that sets its own padding (`.card--flush`) still wins below
+   720px; anywhere that loads after this file (layouts/page.css) it would
    override them all. */
 @media (max-width: 720px) {
 	.card { padding: var(--space-4); }
 }
-.card:has(> .card__head), .card:has(> .card__body) { padding: 0; }
-.card__head { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--border-light); }
-.card__title { margin: 0; font-size: var(--text-lg); font-weight: 500; color: var(--text-primary); }
-.card__subtitle { margin: 0; font-size: var(--text-xs); color: var(--text-muted); }
-.card__actions { margin-left: auto; display: flex; gap: var(--space-2); }
-.card__body { padding: var(--space-6); }
-/* Card nested inside a container that already draws a border/shadow (e.g. a
- * `<details>` disclosure) — drop the card's own so they don't double up. */
-.card--flat { border: 0; box-shadow: none; }
+/* Title block, then the head link (`Card::link`) at the end, on the
+   title's first baseline: the link is a taller box than its text (the
+   44px target on touch), so top alignment would sit its label below the
+   title's. It wraps rather than overflow: on a phone the link drops under
+   the title. */
+.card__head {
+	display: flex; flex-wrap: wrap; align-items: first baseline;
+	gap: var(--space-2) var(--space-4);
+	margin-bottom: var(--space-4);
+}
+.card__title { margin: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
+.card__subtitle { margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--text-secondary); }
+.card__actions { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+/* A text link, not a button: --primary-button is the text-safe red (4.99:1
+   on white; --primary-color is 3.66:1). Held to the target floor on touch. */
+.card__link {
+	display: inline-flex; align-items: center; gap: var(--space-1);
+	min-height: var(--target-min);
+	font-size: var(--text-sm); font-weight: 500;
+	color: var(--primary-button); text-decoration: none;
+}
+.card__link:hover { text-decoration: underline; }
+/* Sized to the 14px label rather than the icon set's 18px default. */
+.card__link svg { width: 14px; height: 14px; flex-shrink: 0; }
+/* The card's padding is the only space under its content: a trailing
+   paragraph's or form group's own bottom margin would add to it, so cards
+   would end at different depths depending on what they hold. */
+.card__body > :last-child { margin-bottom: 0; }
+.card--flush { padding: 0; overflow: hidden; }
+.card--flush > .card__head { padding: var(--space-5) var(--space-5) 0; }
+@media (max-width: 720px) {
+	.card--flush > .card__head { padding: var(--space-4) var(--space-4) 0; }
+}
+/* The table's frame is the card's. On a wide screen its first and last
+   columns take the card's inset, so the cells line up with the head. */
+.card--flush .data-table { border: 0; border-radius: 0; }
+@media (min-width: 721px) {
+	.card--flush .data-table th:first-child,
+	.card--flush .data-table td:first-child { padding-left: var(--space-5); }
+	.card--flush .data-table th:last-child,
+	.card--flush .data-table td:last-child { padding-right: var(--space-5); }
+}
+/* Below 720px a data table turns each row into a framed box of its own
+   (table.css "Card mode"). In a flush card that would be a card inside a
+   card, clipped against its edges: the rows become divided bands at the
+   card's phone inset instead. */
+@media (max-width: 720px) {
+	.card--flush .data-table:not(.data-table--scroll) tr {
+		border: 0; border-radius: 0; margin: 0;
+		padding: var(--space-3) var(--space-4);
+	}
+	.card--flush .data-table:not(.data-table--scroll) tr + tr { border-top: 1px solid var(--border-light); }
+}
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
-.card__head--end { align-items: flex-end; flex-wrap: wrap; }
 
-/* ===== Portal dashboard (Phase 4 PR-1) ===== */
-.dashboard-apps-card .card__body { padding: var(--space-4); }
-.dashboard-apps-grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-	gap: var(--space-4);
-}
-.dashboard-app-tile {
-	display: flex;
-	align-items: center;
-	gap: var(--space-2);
-	padding: var(--space-4);
-	background: var(--surface-2);
-	border: 1px solid var(--border-light);
-	border-radius: var(--radius-md);
-	text-decoration: none;
-	color: var(--text-primary);
-	transition: background 0.15s, transform 0.05s;
-}
-.dashboard-app-tile:hover { background: var(--surface-3); }
-.dashboard-app-tile:active { transform: translateY(1px); }
-/* --accent-primary is not a token and never has been -- with no fallback
-   this `color` was dropped entirely and the mark inherited the tile's text
-   colour. It meant the brand accent; --primary-button is that accent's
-   AA-safe sibling (4.99:1 on white), which clears the 4.5:1 text floor and
-   the 3:1 non-text floor alike -- so it is correct whether this renders a
-   glyph or an icon. (Nothing currently renders `.dashboard-app-tile*` or
-   `.dashboard-orgs-card*`; that is why the dropped declaration went unseen.) */
-.dashboard-app-tile__icon { flex-shrink: 0; color: var(--primary-button); }
-.dashboard-app-tile__label { font-weight: 500; }
-
-.dashboard-orgs-card .card__head {
-	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-}
-.dashboard-orgs-card .card__head-action {
-	font-size: var(--text-sm);
-	/* Text link: --primary-color is 3.66:1 on white, below AA. */
-	color: var(--primary-button);
-	text-decoration: none;
-}
 /* ===== Security page (Phase 4 PR-2) ===== */
 .security-section { margin-bottom: var(--space-6); }
 .linked-providers-list { list-style: none; padding: 0; margin: 0; }
@@ -448,18 +421,6 @@
 	position: relative; z-index: 1;
 	/* Match the meta-row baseline; no absolute positioning so the Open
 	   button can never overlap the next card's title (the previous bug). */
-}
-
-/* ===== Dashboard chart card header (mobile) =====
-   Chart card titles wrap awkwardly when "Last 30 days" rides on the same row.
-   Stack title above metadata at narrow widths. */
-@media (max-width: 720px) {
-	.card .chart-header,
-	.card > header,
-	.chart-card__head {
-		flex-direction: column;
-		align-items: flex-start;
-	}
 }
 
 /* ===== Messages page (Contexts list) =====
@@ -809,14 +770,10 @@
  * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
  * `<style>` block (task 12e). Products cards are the shared `.card`: the
  * products-only radius and shadow went with the products tab strip. */
-/* Onboarding guide. The three tiles are cards and now look like cards: they
-   used to carry a bespoke treatment -- 20px padding (--space-5, off the 24px
-   every other card body uses), a 14px radius (the scale has 12px), a
-   diagonal brand-tinted gradient and a 26px drop shadow no other surface in
-   the admin has. Next to the plain white cards on every neighbouring page it
-   read as a different design language rather than the same one. */
+/* Onboarding guide. The three tiles are cards and look like cards: the
+   same surface, border, 12px radius and 20px padding as `.card`. */
 .products-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
-.products-guide__item { position: relative; padding: var(--space-6); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-1); }
+.products-guide__item { position: relative; padding: var(--space-5); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-1); }
 /* At the original 14% mix, --primary-button on this background only reaches
    4.12:1 (computed) -- below the 4.5:1 AA floor for the "1"/"2"/"3" digit
    this renders (products/pages.rs). A 6% mix keeps the same pale-pink chip
@@ -845,8 +802,6 @@
 .product-template-card input { margin-top: var(--space-1); }
 .product-template-card strong, .product-template-card span { grid-column: 2; }
 .product-template-card strong { margin: 0 !important; }
-[data-wizard-step] > .card__head { background: color-mix(in srgb, var(--surface-1) 94%, var(--primary-color) 6%); }
-[data-offer-card] > .card__head { align-items: flex-start; background: linear-gradient(120deg, color-mix(in srgb, var(--surface-1) 94%, var(--primary-color) 6%), var(--surface-1)); }
 @media (max-width: 760px) {
 	.products-guide { grid-template-columns: 1fr; }
 	.product-template-grid { grid-template-columns: 1fr; }

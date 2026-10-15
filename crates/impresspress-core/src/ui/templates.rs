@@ -5,8 +5,9 @@
 //! page HTML outside this module.
 //!
 //! None of these templates renders a page header. The shell's topbar owns the
-//! page's `h1` (`ui::shell::render_topbar`); a body-level heading is
-//! `components::page_header`, rendered by the page into the template's body.
+//! page's `h1` (`ui::shell::render_topbar`); a body-level heading is an `h2`
+//! (a `components::Card` title or a `components::section_header`), rendered
+//! by the page into the template's body.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
