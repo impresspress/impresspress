@@ -108,11 +108,11 @@
     return el;
   }
 
-  // The "nothing here yet" line in the messages pane; the first message
-  // appended replaces it.
+  // The "nothing here yet" line in the messages pane, the markup
+  // `components::empty_note` writes; the first message appended replaces it.
   function emptyLine(text) {
     var p = document.createElement('p');
-    p.className = 'chat-empty-state text-muted';
+    p.className = 'empty-note';
     p.textContent = text;
     return p;
   }
@@ -120,7 +120,7 @@
   function appendMessageCard(role, content, opts) {
     var area = document.getElementById('messages-area');
     if (!area) return null;
-    var placeholder = area.querySelector('.chat-empty-state');
+    var placeholder = area.querySelector('.empty-note');
     if (placeholder) placeholder.remove();
 
     var date = new Date().toISOString().slice(0, 10);

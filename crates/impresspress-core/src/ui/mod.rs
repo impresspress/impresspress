@@ -3280,7 +3280,6 @@ mod tests {
             "dashboard-grid__secondary",
             "db-table-list__count",
             "detail-body__main",
-            "empty__action",
             "form-section__head",
             "messages-new__title",
             "messages-new__type",

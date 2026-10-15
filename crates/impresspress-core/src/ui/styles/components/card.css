@@ -76,6 +76,16 @@
 	}
 	.card--flush .data-table:not(.data-table--scroll) tr + tr { border-top: 1px solid var(--border-light); }
 }
+/* A flush card with no rows holds an `empty_note` (`DataTable::empty_note`)
+   where the table would be. A sentence has no frame to absorb, so it takes
+   the card's inset back: under the head, it lines up with the title; with
+   no head, it is padded on every side like a framed card's content. */
+.card--flush .empty-note { padding: 0 var(--space-5) var(--space-5); }
+.card--flush > .card__body:first-child .empty-note { padding-top: var(--space-5); }
+@media (max-width: 720px) {
+	.card--flush .empty-note { padding: 0 var(--space-4) var(--space-4); }
+	.card--flush > .card__body:first-child .empty-note { padding-top: var(--space-4); }
+}
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 
@@ -586,16 +596,6 @@
    `blocks/admin/pages/blocks.rs`'s `.block-card--disabled` for the same
    `class={ "x" @if cond { " x--disabled" } }` pattern this follows. */
 .chat-form--disabled { opacity: 0.4; pointer-events: none; }
-
-/* ===== Chat empty state (no thread selected) ===== */
-.chat-empty-state { text-align: center; padding: var(--space-12) var(--space-4); }
-/* Was `font-size: 2.5rem`, sizing a 40px "\u{1f4ac}" emoji glyph. The icon is
-   now `icons::message_square()`; an SVG does not scale with font-size, so the
-   40px is restated as explicit width/height or it would render at the icon
-   set's 18px default. Muted so a large empty-state mark reads as quiet
-   furniture rather than an alert. */
-.chat-empty-state__icon { margin-bottom: var(--space-3); color: var(--text-muted); line-height: 0; }
-.chat-empty-state__icon svg { width: 40px; height: 40px; }
 
 /* ===== Model load progress (llm chat right rail) =====
    `.model-progress-fill`'s width starts at 0% and is updated at runtime by
