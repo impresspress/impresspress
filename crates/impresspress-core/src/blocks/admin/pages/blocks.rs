@@ -11,7 +11,7 @@ use crate::{
     ui::{
         self,
         components::{
-            self, empty_state, tab_navigation, Badge, BadgeVariant, Modal, ModalSize, Tab,
+            self, empty_state, tab_navigation, Badge, BadgeVariant, Card, Modal, ModalSize, Tab,
         },
         icons,
         shell::Topbar,
@@ -557,22 +557,17 @@ const DETAIL_MODAL_ID: &str = "block-detail";
 fn custom_tab_content() -> maud::Markup {
     html! {
         div .custom-tab {
-            section .card {
-                header .card__head {
-                    h2 .card__title { (icons::package()) " Custom Blocks" }
+            (Card::titled("Custom blocks", html! {
+                p .custom-tab__hint {
+                    "Custom blocks are auto-discovered from the "
+                    code { "blocks/" }
+                    " directory. Use "
+                    code { "wafer build" }
+                    " to compile blocks locally, then restart the server. Browse the "
+                    a href="https://wafer.run/registry" target="_blank" { "WAFER registry" }
+                    " for available WASM blocks."
                 }
-                div .card__body {
-                    p .custom-tab__hint {
-                        "Custom blocks are auto-discovered from the "
-                        code { "blocks/" }
-                        " directory. Use "
-                        code { "wafer build" }
-                        " to compile blocks locally, then restart the server. Browse the "
-                        a href="https://wafer.run/registry" target="_blank" { "WAFER registry" }
-                        " for available WASM blocks."
-                    }
-                }
-            }
+            }).render())
         }
     }
 }
@@ -863,5 +858,27 @@ mod outage_tests {
             .break_reads();
         let msg = admin_msg("retrieve", "/b/admin/blocks");
         assert_eq!(output_http_status(blocks_page(&ctx, &msg).await).await, 500);
+    }
+}
+
+#[cfg(test)]
+mod custom_tab_tests {
+    use super::custom_tab_content;
+    use crate::test_support::dom;
+
+    /// The Custom tab's notice is a titled card: its heading is an h2 under
+    /// the page's h1, in sentence case.
+    #[test]
+    fn the_custom_tab_is_a_titled_card() {
+        let html = custom_tab_content().into_string();
+        assert!(
+            html.starts_with(r#"<div class="custom-tab"><section class="card">"#),
+            "{html}"
+        );
+        assert_eq!(
+            dom::heading_outline(&html),
+            vec![(2, "Custom blocks".to_string())],
+            "{html}"
+        );
     }
 }

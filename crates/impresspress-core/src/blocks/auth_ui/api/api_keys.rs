@@ -12,6 +12,7 @@ use wafer_run::{context::Context, InputStream, Message, OutputStream};
 use crate::{
     blocks::{auth::repo::api_keys, auth_ui::contracts, crud},
     http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json},
+    ui::components::Card,
     util::{hex_encode, sha256_hex},
 };
 
@@ -146,32 +147,31 @@ pub async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream)
             if !msg.get_meta("http.header.hx-request").is_empty() {
                 let key_for_display = key_string.clone();
                 let name = record.name;
-                let markup = maud::html! {
-                    div .card .api-key-card {
-                        div .card__head { h2 .card__title { "Key created — save it now" } }
-                        div .card__body {
-                            p .api-key-copy-hint .text-13 {
-                                "This is the only time the full key will be shown. Copy it now."
-                            }
-                            div .api-key-reveal-row {
-                                code #new-api-key .api-key-value .text-13 {
-                                    (key_for_display)
-                                }
-                                // Chrome's `copy-text` verb reads the key
-                                // out of `#new-api-key`, so the key itself is
-                                // never written into an attribute — which is
-                                // also what the inline handler this replaced
-                                // was careful to avoid.
-                                button type="button" .btn .btn--secondary .btn--sm .flex-none
-                                    data-action="copy-text" data-copy-source="new-api-key"
-                                { "Copy" }
-                            }
-                            p .api-key-name-hint {
-                                "Name: " (name)
-                            }
+                let markup = Card::titled(
+                    "Key created — save it now",
+                    maud::html! {
+                        p .api-key-copy-hint .text-13 {
+                            "This is the only time the full key will be shown. Copy it now."
                         }
-                    }
-                };
+                        div .api-key-reveal-row {
+                            code #new-api-key .api-key-value .text-13 {
+                                (key_for_display)
+                            }
+                            // Chrome's `copy-text` verb reads the key
+                            // out of `#new-api-key`, so the key itself is
+                            // never written into an attribute — which is
+                            // also what the inline handler this replaced
+                            // was careful to avoid.
+                            button type="button" .btn .btn--secondary .btn--sm .flex-none
+                                data-action="copy-text" data-copy-source="new-api-key"
+                            { "Copy" }
+                        }
+                        p .api-key-name-hint {
+                            "Name: " (name)
+                        }
+                    },
+                )
+                .render();
                 crate::ui::html_response_closing_modal(
                     markup,
                     "create-api-key",
@@ -498,6 +498,31 @@ mod tests {
         let keys = api_keys::list_for_user(&ctx, &owner).await.unwrap();
         assert_eq!(keys.len(), 3);
         assert!(keys.iter().all(|k| k.expires_at.is_none()));
+    }
+
+    /// An htmx create answers with the key in a titled card, which replaces
+    /// the API-keys tab: an h2 under the page's h1, and the key in the body.
+    #[tokio::test]
+    async fn an_htmx_create_reveals_the_key_in_a_titled_card() {
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let owner = seed_user(&ctx).await;
+        let mut msg = routed(auth_msg("create", KEYS_PATH, &owner));
+        msg.set_meta("http.header.hx-request", "true");
+        let out = handle_create(
+            &ctx,
+            &msg,
+            InputStream::from_bytes(serde_json::json!({"name": "ci"}).to_string().into_bytes()),
+        )
+        .await;
+        let html = crate::test_support::output_html(out).await;
+        assert!(html.starts_with(r#"<section class="card">"#), "{html}");
+        assert_eq!(
+            crate::test_support::dom::heading_outline(&html),
+            vec![(2, "Key created — save it now".to_string())],
+            "{html}"
+        );
+        assert!(html.contains(r#"id="new-api-key""#), "{html}");
+        assert!(html.contains("Name: ci"), "{html}");
     }
 
     /// Same contract for `handle_delete`.

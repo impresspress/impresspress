@@ -392,7 +392,7 @@ impl<'a> DataTable<'a> {
     /// reach every `<td>`'s `data-label`, so the mobile card-collapse keeps
     /// naming its cells — this only drops the header band. For a table that
     /// reads as a two-column list rather than as a grid (the administration
-    /// dashboard's "Recent Users" card).
+    /// dashboard's "Recent users" card).
     pub fn headless(mut self) -> Self {
         self.head = false;
         self

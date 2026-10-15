@@ -155,7 +155,7 @@ function harness({ bootstrap = [], conversationDisplay = 'flex', reply = null } 
 
 function threadLink(list, id) {
   const a = list.appendChild(new El('a'));
-  a.className = 'card thread-card';
+  a.className = 'thread-card';
   a.dataset.threadId = id;
   a.dataset.active = 'false';
   return a;
@@ -170,9 +170,9 @@ test('message cards use the shared card and badge classes, with no inline style'
     ],
   });
   const [user, assistant, system] = area.children;
-  assert.equal(user.className, 'card message-card--user');
-  assert.equal(assistant.className, 'card message-card--neutral');
-  assert.equal(system.className, 'card message-card--warning');
+  assert.equal(user.className, 'message-card message-card--user');
+  assert.equal(assistant.className, 'message-card message-card--neutral');
+  assert.equal(system.className, 'message-card message-card--warning');
 
   const userBadge = user.querySelector('.badge');
   assert.equal(userBadge.className, 'badge text-capitalize');
@@ -240,7 +240,7 @@ test('a chat the server refuses shows the reason it gives, not "No response"', a
   assert.ok(h.fetches.includes('/b/llm/api/chat'), h.fetches.join(', '));
   const cards = h.area.children;
   const last = cards[cards.length - 1];
-  assert.equal(last.className, 'card message-card--warning', 'the refusal is a system card');
+  assert.equal(last.className, 'message-card message-card--warning', 'the refusal is a system card');
   assert.equal(last.querySelector('.message-card__content').textContent, 'Error: ' + reason);
   assert.ok(
     !cards.some((c) => (c.querySelector('.message-card__content')?.textContent ?? '').includes('No response')),
@@ -261,6 +261,6 @@ test('a chat the server answers is shown as the reply', async () => {
 
   const cards = h.area.children;
   const last = cards[cards.length - 1];
-  assert.equal(last.className, 'card message-card--neutral');
+  assert.equal(last.className, 'message-card message-card--neutral');
   assert.equal(last.querySelector('.message-card__content').innerHTML, '<p>hello</p>');
 });

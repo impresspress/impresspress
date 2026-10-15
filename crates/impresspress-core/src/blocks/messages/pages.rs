@@ -15,7 +15,7 @@ use super::{
 use crate::{
     ui::{
         self,
-        components::{self, Badge, BadgeVariant},
+        components::{self, Badge, BadgeVariant, Card},
         icons,
         shell::Crumb,
     },
@@ -69,7 +69,7 @@ pub fn entry_card(record: &db::Record) -> Result<Markup, WaferError> {
     // Card accents: the person's own entries get a quiet slate tint, machine
     // entries stay neutral, and only genuinely semantic kinds keep a semantic
     // hue (notification/system = warning yellow). Keep in sync with
-    // `messageCardHtml` in blocks/llm/assets/llm-chat.js — same cards,
+    // `messageCard` in blocks/llm/assets/llm-chat.js — same cards,
     // JS-rendered.
     let (card_variant, kind_badge) = match kind {
         EntryKind::Artifact | EntryKind::Status => {
@@ -84,7 +84,7 @@ pub fn entry_card(record: &db::Record) -> Result<Markup, WaferError> {
     };
 
     Ok(html! {
-        div .card .(card_variant) {
+        div .message-card .(card_variant) {
             div .message-card__head {
                 (Badge::new(kind_badge).classes("text-capitalize").render(html! { (wire_str(&kind)) }))
                 @if let Some(role) = role {
@@ -135,40 +135,35 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     };
 
     let content = html! {
-        section .card .messages-new {
-            header .card__head {
-                h2 .card__title { "New context" }
-            }
-            div .card__body {
-                form .messages-new__form
-                    hx-post="/b/messages/api/contexts"
-                    hx-target="#context-list"
-                    hx-swap="afterbegin"
-                    // The swap has just put a row in the list, so the empty
-                    // state is now false. It is removed here rather than
-                    // re-rendered server-side: the response is one row, and
-                    // re-sending the whole list to delete one sentence would
-                    // cost every reader the scroll position. The effects are
-                    // applied by `ui/assets/chrome.js` (section 5).
-                    data-reset-on-success
-                    data-remove-on-success="context-list-empty"
-                {
-                    div .form-group {
-                        label .form-label for="new-context-type" { "Type" }
-                        select .form-input .messages-new__type #new-context-type name="type" {
-                            option value="conversation" { "Conversation" }
-                            option value="task" { "Task" }
-                            option value="notification" { "Notification" }
-                        }
+        (Card::titled("New context", html! {
+            form .messages-new__form
+                hx-post="/b/messages/api/contexts"
+                hx-target="#context-list"
+                hx-swap="afterbegin"
+                // The swap has just put a row in the list, so the empty
+                // state is now false. It is removed here rather than
+                // re-rendered server-side: the response is one row, and
+                // re-sending the whole list to delete one sentence would
+                // cost every reader the scroll position. The effects are
+                // applied by `ui/assets/chrome.js` (section 5).
+                data-reset-on-success
+                data-remove-on-success="context-list-empty"
+            {
+                div .form-group {
+                    label .form-label for="new-context-type" { "Type" }
+                    select .form-input .messages-new__type #new-context-type name="type" {
+                        option value="conversation" { "Conversation" }
+                        option value="task" { "Task" }
+                        option value="notification" { "Notification" }
                     }
-                    div .form-group {
-                        label .form-label for="new-context-title" { "Title" }
-                        input .form-input .messages-new__title #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
-                    }
-                    button .btn .btn--primary type="submit" { "Create" }
                 }
+                div .form-group {
+                    label .form-label for="new-context-title" { "Title" }
+                    input .form-input .messages-new__title #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
+                }
+                button .btn .btn--primary type="submit" { "Create" }
             }
-        }
+        }).render())
 
         div #context-list .messages-list {
             @if contexts.is_empty() {
@@ -425,8 +420,7 @@ fn render_default_view(entries: &[db::Record], context_id: &str) -> Result<Marku
             }
         }
 
-        section .card { div .card__body {
-            (components::section_header("Add entry", None))
+        (Card::titled("Add entry", html! {
             form
                 hx-post=(post_url)
                 hx-target="#entries-list"
@@ -463,7 +457,7 @@ fn render_default_view(entries: &[db::Record], context_id: &str) -> Result<Marku
                 }
                 (composer_row("entry-content", "Entry", "Entry content", "Add", false))
             }
-        } }
+        }).render())
     })
 }
 
@@ -516,7 +510,7 @@ fn render_conversation_thread_list(siblings: &[&db::Record], active_id: &str) ->
                         @let date = updated_at.get(..10).unwrap_or(updated_at);
                         @let is_active = id == active_id;
                         a
-                            .card .thread-card
+                            .thread-card
                             href={"/b/messages/contexts/" (id)}
                             data-context-id=(id)
                             data-active=(if is_active { "true" } else { "false" })
@@ -664,7 +658,25 @@ mod tests {
         // The title is the topbar's; the body repeats no heading for it and
         // draws no second way back beside the trail.
         assert!(!html.contains("Do thing"), "{html}");
-        assert!(!html.contains("page-title"), "{html}");
+        // The body's headings are the empty state's and the "Add entry"
+        // card's, both h2s under the topbar's h1; the entries sit beside that
+        // card, not in it.
+        assert_eq!(
+            crate::test_support::dom::heading_outline(&html),
+            vec![
+                (2, "No entries yet".to_string()),
+                (2, "Add entry".to_string())
+            ],
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<h2 class="card__title">Add entry</h2>"#),
+            "the form is a titled card: {html}"
+        );
+        assert!(
+            crate::test_support::dom::card_level_inside_card(&html).is_empty(),
+            "{html}"
+        );
         // Both pickers are labelled, and the composer is the shared row.
         assert!(
             html.contains(r#"<label class="form-label" for="entry-kind">Kind</label>"#),
@@ -703,7 +715,7 @@ mod tests {
     fn entry_cards_draw_shared_badges() {
         let user = entry_card(&entry("user")).expect("decodes").into_string();
         assert!(
-            user.contains(r#"class="card message-card--user""#),
+            user.contains(r#"class="message-card message-card--user""#),
             "{user}"
         );
         assert!(
@@ -776,6 +788,12 @@ mod tests {
         );
         assert!(html.contains("Sibling"));
         assert!(html.contains("Conversations"), "thread-list header missing");
+        // A conversation is a link in the list, not a page-level `Card`.
+        assert!(
+            html.contains(r#"<a class="thread-card" href="/b/messages/contexts/ctx-2""#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"class="card"#), "{html}");
         // Active marker on the active context, not the sibling.
         assert!(html.contains(r#"data-context-id="ctx-1""#));
         assert!(html.contains(r#"data-active="true""#));
@@ -982,6 +1000,21 @@ mod form_contract_tests {
         );
         assert!(
             html.contains(r#"<button class="btn btn--primary" type="submit">Create</button>"#),
+            "{html}"
+        );
+        // The form is the "New context" card; the list and its empty state
+        // sit beside it on the page, not inside it.
+        assert_eq!(
+            crate::test_support::dom::heading_outline(&html),
+            vec![
+                (1, "Messages".to_string()),
+                (2, "New context".to_string()),
+                (2, "No messages yet".to_string())
+            ],
+            "{html}"
+        );
+        assert!(
+            crate::test_support::dom::card_level_inside_card(&html).is_empty(),
             "{html}"
         );
     }

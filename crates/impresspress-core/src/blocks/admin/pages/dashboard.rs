@@ -8,7 +8,7 @@ use crate::{
     blocks::auth::repo::users::{self, DailySignups},
     platform_state::request_logs::{self, DailyCounts, TodayCounts},
     ui::{
-        components::{self, Badge},
+        components::{self, Badge, Card},
         icons,
         shell::Topbar,
         templates::dashboard_page,
@@ -41,20 +41,13 @@ fn tile_value(value: &Option<String>) -> &str {
 /// those render an axis and a flat line, which reads as a real measurement of
 /// zero rather than as an absent one.
 fn chart_unavailable_card(title: &str, subtitle: &str, view_href: &str) -> maud::Markup {
-    html! {
-        section .card {
-            header .card__head {
-                div {
-                    h2 .card__title { (title) }
-                    p .card__subtitle { (subtitle) }
-                }
-                a .btn .btn--ghost .btn--sm .card__actions href=(view_href) { "View" }
-            }
-            div .card__body {
-                p .text-muted .text-sm { (CARD_UNAVAILABLE) }
-            }
-        }
-    }
+    Card::titled(
+        title,
+        html! { p .text-muted .text-sm { (CARD_UNAVAILABLE) } },
+    )
+    .subtitle(subtitle)
+    .link("View", view_href)
+    .render()
 }
 
 /// Trailing 30-day window as `(oldest_day, oldest_day_midnight_iso)`.
@@ -319,18 +312,14 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ),
     ];
 
-    let recent_users_card = html! {
-        section .card {
-            header .card__head {
-                h2 .card__title { "Recent Users" }
-                a .btn .btn--ghost .btn--sm href="/b/admin/users" { "View all" }
-            }
-            div .card__body {
-                @if let Some(recent_users) = &recent_users {
-                @if recent_users.is_empty() {
-                    p .text-muted .text-sm { "No users yet" }
-                } @else {
-                    @let rows: Vec<components::TableRow> = recent_users.iter().map(|record| {
+    // A card holding a table is flush, so the table's frame is the card's
+    // (layout rule 2); a card holding a sentence keeps its padding.
+    let recent_users_card = {
+        let (body, has_rows) = match &recent_users {
+            Some(recent_users) if !recent_users.is_empty() => {
+                let rows: Vec<components::TableRow> = recent_users
+                    .iter()
+                    .map(|record| {
                         let created = record.created_at.as_str();
                         components::TableRow::new(vec![
                             html! { (record.email) },
@@ -338,28 +327,30 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             // and the component owns the `<td>`.
                             html! { div .text-muted .text-right { (components::timestamp(created)) } },
                         ])
-                    }).collect();
-                    (components::DataTable::new(&RECENT_USERS_COLUMNS).rows(rows).headless().render())
-                }
-                } @else {
-                    p .text-muted .text-sm { (CARD_UNAVAILABLE) }
-                }
+                    })
+                    .collect();
+                let table = components::DataTable::new(&RECENT_USERS_COLUMNS)
+                    .rows(rows)
+                    .headless()
+                    .render();
+                (table, true)
             }
-        }
+            Some(_) => (html! { p .text-muted .text-sm { "No users yet" } }, false),
+            None => (
+                html! { p .text-muted .text-sm { (CARD_UNAVAILABLE) } },
+                false,
+            ),
+        };
+        let card = Card::titled("Recent users", body).link("View all", "/b/admin/users");
+        if has_rows { card.flush() } else { card }.render()
     };
 
-    let recent_errors_card = html! {
-        section .card {
-            header .card__head {
-                h2 .card__title { "Recent server errors" }
-                a .btn .btn--ghost .btn--sm .card__actions href=(SERVER_ERRORS_LOGS_HREF) { "View all" }
-            }
-            div .card__body {
-                @if let Some(recent_errors) = &recent_errors {
-                @if recent_errors.is_empty() {
-                    p .text-muted .text-sm { (NO_RECENT_SERVER_ERRORS) }
-                } @else {
-                    @let rows: Vec<Vec<Markup>> = recent_errors.iter().map(|row| {
+    let recent_errors_card = {
+        let (body, has_rows) = match &recent_errors {
+            Some(recent_errors) if !recent_errors.is_empty() => {
+                let rows: Vec<Vec<Markup>> = recent_errors
+                    .iter()
+                    .map(|row| {
                         let code = row.status_code;
                         let created = row.created_at.as_str();
                         vec![
@@ -368,19 +359,28 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             html! { (components::breakable_id(&row.path)) },
                             html! { span .text-muted { (components::timestamp(created)) } },
                         ]
-                    }).collect();
-                    (components::data_table::<fn(usize) -> Option<String>>(
-                        &RECENT_ERRORS_COLUMNS,
-                        rows,
-                        None,
-                        html! {},
-                    ))
-                }
-                } @else {
-                    p .text-muted .text-sm { (CARD_UNAVAILABLE) }
-                }
+                    })
+                    .collect();
+                let table = components::data_table::<fn(usize) -> Option<String>>(
+                    &RECENT_ERRORS_COLUMNS,
+                    rows,
+                    None,
+                    html! {},
+                );
+                (table, true)
             }
-        }
+            Some(_) => (
+                html! { p .text-muted .text-sm { (NO_RECENT_SERVER_ERRORS) } },
+                false,
+            ),
+            None => (
+                html! { p .text-muted .text-sm { (CARD_UNAVAILABLE) } },
+                false,
+            ),
+        };
+        let card =
+            Card::titled("Recent server errors", body).link("View all", SERVER_ERRORS_LOGS_HREF);
+        if has_rows { card.flush() } else { card }.render()
     };
 
     let new_users_chart = match &new_users_daily {
@@ -495,7 +495,7 @@ fn plural(n: i64, one: &str, many: &str) -> String {
     }
 }
 
-/// The dashboard cards' table columns. "Recent Users" renders headless — it
+/// The dashboard cards' table columns. "Recent users" renders headless — it
 /// reads as a two-column list, not a grid — but still declares its columns,
 /// because the `data-label` the component stamps on every `<td>` is what names
 /// the cells when the table collapses to cards on a narrow viewport.
@@ -890,8 +890,63 @@ mod outage_tests {
 
         assert!(
             html.contains(r#"datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
-            "the Recent Users date must be a <time>: {html}"
+            "the Recent users date must be a <time>: {html}"
         );
+    }
+
+    /// The recent-rows and chart panels are `Card`s, each an h2 under the
+    /// page's h1. A card holding a table is flush, so the table's frame is
+    /// the card's (layout rule 2); one holding the empty sentence is not, so
+    /// the sentence keeps the card's padding.
+    #[tokio::test]
+    async fn the_panels_are_cards_and_only_a_card_holding_a_table_is_flush() {
+        use crate::test_support::dom;
+
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let fresh = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        assert_eq!(
+            dom::heading_outline(&fresh),
+            [
+                (1, "Dashboard"),
+                (2, "New users"),
+                (2, "Requests"),
+                (2, "Server errors"),
+                (2, "Client errors"),
+                (2, "Recent users"),
+                (2, "Recent server errors"),
+            ]
+            .map(|(level, text)| (level, text.to_string()))
+            .to_vec(),
+            "{fresh}"
+        );
+        assert!(!fresh.contains("card--flush"), "{fresh}");
+        assert!(dom::card_level_inside_card(&fresh).is_empty(), "{fresh}");
+
+        ctx.seed_auth_user("u-1").await;
+        request_logs::insert(
+            &ctx,
+            &request_logs::NewRequestLog {
+                method: "GET",
+                path: "/failed",
+                status_code: 500,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "",
+            },
+        )
+        .await
+        .expect("seed a request log row");
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        assert_eq!(
+            html.matches(r#"<section class="card card--flush">"#)
+                .count(),
+            2,
+            "both recent-rows cards hold a table: {html}"
+        );
+        assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
     }
 
     /// Two tiles carry figures the visual-baseline suite masks: "Avg

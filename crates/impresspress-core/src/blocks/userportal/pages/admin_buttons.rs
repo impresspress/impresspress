@@ -20,7 +20,12 @@ use crate::{
     // the grant `admin::AdminBlock` declares for it.
     blocks::{admin::logs::audit_log, crud},
     http::{err_bad_request, err_not_found},
-    ui::{self, components, icons, sidebar::nav_icon},
+    ui::{
+        self,
+        components::{self, Card},
+        icons,
+        sidebar::nav_icon,
+    },
     util::{json_map, parse_form_body, stamp_created, stamp_updated, RecordExt},
 };
 
@@ -67,51 +72,46 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
     };
 
     let content = html! {
-        section .card .mb-6 {
-            header .card__head {
-                h2 .card__title { "Add a button" }
-            }
-            div .card__body {
-                // One row on a wide screen, two columns on a tablet, one on a
-                // phone (`.admin-buttons-form-grid` in card.css) — the five
-                // fixed columns it had never collapsed.
-                form
-                    hx-post="/b/userportal/admin/buttons"
-                    hx-target="#buttons-table"
-                    hx-swap="outerHTML"
-                    .admin-buttons-form-grid
-                {
-                    div .form-group .m-0 {
-                        label .form-label for="label" { "Label" }
-                        input .form-input #label type="text" name="label"
-                            placeholder="e.g. My Products" required;
-                    }
-                    div .form-group .m-0 {
-                        label .form-label for="path" { "Path" }
-                        input .form-input #path type="text" name="path"
-                            placeholder="e.g. /b/products/mine" required;
-                    }
-                    div .form-group .m-0 {
-                        label .form-label for="icon" { "Icon" }
-                        select .form-select #icon name="icon" {
-                            @for &(value, display) in ICON_OPTIONS {
-                                option value=(value) { (display) }
-                            }
-                        }
-                    }
-                    div .form-group .m-0 {
-                        label .form-label for="sort_order" { "Order" }
-                        input .form-input #sort_order type="number" name="sort_order" value="0";
-                    }
-                    div .admin-buttons-form-grid__submit {
-                        // Full width on a phone (D4's opt-in `.btn--block`).
-                        button .btn .btn--primary .btn--block type="submit" {
-                            (icons::plus()) " Add button"
+        (Card::titled("Add a button", html! {
+            // One row on a wide screen, two columns on a tablet, one on a
+            // phone (`.admin-buttons-form-grid` in card.css) — the five
+            // fixed columns it had never collapsed.
+            form
+                hx-post="/b/userportal/admin/buttons"
+                hx-target="#buttons-table"
+                hx-swap="outerHTML"
+                .admin-buttons-form-grid
+            {
+                div .form-group .m-0 {
+                    label .form-label for="label" { "Label" }
+                    input .form-input #label type="text" name="label"
+                        placeholder="e.g. My Products" required;
+                }
+                div .form-group .m-0 {
+                    label .form-label for="path" { "Path" }
+                    input .form-input #path type="text" name="path"
+                        placeholder="e.g. /b/products/mine" required;
+                }
+                div .form-group .m-0 {
+                    label .form-label for="icon" { "Icon" }
+                    select .form-select #icon name="icon" {
+                        @for &(value, display) in ICON_OPTIONS {
+                            option value=(value) { (display) }
                         }
                     }
                 }
+                div .form-group .m-0 {
+                    label .form-label for="sort_order" { "Order" }
+                    input .form-input #sort_order type="number" name="sort_order" value="0";
+                }
+                div .admin-buttons-form-grid__submit {
+                    // Full width on a phone (D4's opt-in `.btn--block`).
+                    button .btn .btn--primary .btn--block type="submit" {
+                        (icons::plus()) " Add button"
+                    }
+                }
             }
-        }
+        }).render())
 
         (render_buttons_table(&buttons))
 
@@ -505,10 +505,19 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200, "{html}");
-        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        // The title is the topbar's h1 alone; the add form is a card under
+        // it, with its own h2, and no card-level surface sits inside it.
+        assert_eq!(
+            crate::test_support::dom::heading_outline(&html),
+            vec![
+                (1, "Portal buttons".to_string()),
+                (2, "Add a button".to_string())
+            ],
+            "{html}"
+        );
         assert!(
-            !html.contains("page-title"),
-            "no body header repeating the title: {html}"
+            crate::test_support::dom::card_level_inside_card(&html).is_empty(),
+            "{html}"
         );
         assert!(
             html.contains(r#"class="admin-buttons-form-grid""#),
