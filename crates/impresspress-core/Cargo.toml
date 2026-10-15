@@ -46,6 +46,12 @@ postgres = []
 # wires the production `DatabaseBlock` over `SQLiteDatabaseService`. Enabled
 # via the self dev-dependency below; never enabled in production builds.
 test-support = ["dep:wafer-block-sqlite"]
+# Exposes `after_response::{enter_for_test, current_for_test}`, which no
+# production path may call: the Cloudflare adapter's wasm32 tests stand in
+# for a request hard-stopped mid-poll with them. No dependencies, so it builds
+# for wasm32, which `test-support` does not. Enabled only by that crate's
+# dev-dependency.
+test-hooks = []
 storage-local = []
 storage-s3 = []
 # Enable WASM block loading via the wasmi interpreter for auto-discovery.

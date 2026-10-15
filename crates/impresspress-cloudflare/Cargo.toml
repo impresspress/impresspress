@@ -200,6 +200,12 @@ maud = { workspace = true }
 # command anyone ran, including whole-workspace runs used to gate merges.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+# `test-hooks`: `after_response::{enter_for_test, current_for_test}`, which the
+# root-scope tests (`src/root_scope_tests.rs`) use to stand in for a request
+# hard-stopped mid-poll. Dev-only, so production builds never see them.
+impresspress-core = { path = "../impresspress-core", default-features = false, features = [
+    "test-hooks",
+] }
 
 [lints]
 workspace = true

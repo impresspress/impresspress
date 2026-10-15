@@ -5,9 +5,9 @@
 //!
 //! A host that must not pay for that work on the response path (the
 //! Cloudflare Worker, the browser's service worker) runs each request's
-//! dispatch inside [`scope`] with a fresh [`AfterResponse`], and afterwards
-//! takes the audit row and the tasks out of it and runs them under that same
-//! request's services. Outside a scope, the pipeline inserts the audit row
+//! dispatch inside [`scope_root`] or [`scope`] with a fresh [`AfterResponse`],
+//! and afterwards takes the audit row and the tasks out of it and runs them
+//! under that same request's services. Outside a scope, the pipeline inserts the audit row
 //! inline and [`crate::deferred`] spawns (native).
 //!
 //! The scope is selected per POLL, not per isolate: one Workers isolate
@@ -271,22 +271,34 @@ pub(crate) fn queue_task(task: DeferredTask) -> Result<(), DeferredTask> {
     Ok(())
 }
 
-/// Restores the previously current scope when a poll ends, including when
+/// What a [`Scoped`] future's poll puts back when it ends, including when
 /// the inner poll unwinds.
 struct ScopeGuard {
-    previous: Option<Rc<AfterResponse>>,
+    restore: Option<Rc<AfterResponse>>,
 }
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        CURRENT.with(|slot| slot.replace(self.previous.take()));
+        CURRENT.with(|slot| slot.replace(self.restore.take()));
     }
 }
 
+/// Which constructor made a [`Scoped`] future, and so what its polls put
+/// back. Chosen at the call site, never at run time: see [`scope_root`].
+#[derive(Clone, Copy)]
+enum ScopeKind {
+    /// [`scope`]: restore whatever the poll found.
+    Nested,
+    /// [`scope_root`]: restore nothing, and report a request found current
+    /// on entry through `found_stale`.
+    Root { found_stale: fn() },
+}
+
 /// A future that makes its request's [`AfterResponse`] current on every
-/// poll. See [`scope`].
+/// poll. See [`scope`] and [`scope_root`].
 pub struct Scoped<F> {
     after: Rc<AfterResponse>,
+    kind: ScopeKind,
     inner: Pin<Box<F>>,
 }
 
@@ -294,8 +306,19 @@ impl<F: Future> Future for Scoped<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        let _guard = ScopeGuard {
-            previous: CURRENT.with(|slot| slot.replace(Some(Rc::clone(&self.after)))),
+        let found = CURRENT.with(|slot| slot.replace(Some(Rc::clone(&self.after))));
+        let _guard = match self.kind {
+            ScopeKind::Nested => ScopeGuard { restore: found },
+            ScopeKind::Root { found_stale } => {
+                // Nothing a root's poll can be nested in has a request
+                // current, so `found` is a request whose own guard never
+                // ran: it was hard-stopped mid-poll. Dropping it here frees
+                // that request's work.
+                if found.is_some() {
+                    found_stale();
+                }
+                ScopeGuard { restore: None }
+            }
         };
         self.inner.as_mut().poll(cx)
     }
@@ -304,23 +327,63 @@ impl<F: Future> Future for Scoped<F> {
 /// Run `future` with the audit row and deferred tasks it produces queued
 /// into `after` rather than inserted or spawned, and the [`final_write`]
 /// guards it takes registered on `after` for the host to wait on.
+///
+/// Each poll restores what it found current, so this nests inside another
+/// request scope. A host's outermost scope, on a future it hands its
+/// executor, is [`scope_root`] instead.
 pub fn scope<F: Future>(after: Rc<AfterResponse>, future: F) -> Scoped<F> {
     Scoped {
         after,
+        kind: ScopeKind::Nested,
         inner: Box::pin(future),
     }
 }
 
-/// Make `after` current for the rest of this thread, for a test that calls a
-/// handler directly and then runs what it deferred.
-#[cfg(test)]
-pub(crate) fn enter_for_test(after: Rc<AfterResponse>) {
+/// [`scope`] for the outermost after-response scope of a future the host
+/// hands its executor (the Cloudflare adapter's `dispatch`, polled from the
+/// Worker's `fetch` future). Each poll leaves no request current when it
+/// ends, rather than restoring what it found.
+///
+/// # Why roots exist
+///
+/// A host that can stop a guest mid-poll (Cloudflare Workers' CPU limit)
+/// skips every destructor, the scope guard's included, so the request it
+/// stopped stays current for the life of the isolate. A nested scope
+/// restores what it found, so every later request would put the dead
+/// request's work back at the end of each poll, and anything polled outside
+/// a scope — a producer's own task, a host task — would queue its audit row,
+/// deferred tasks and final writes into it instead of being told no request
+/// is in scope.
+///
+/// The executor never polls one task inside another's poll, so nothing a
+/// root's poll can be nested in has a request current. A root therefore
+/// restores nothing, which clears a dead request at the end of the next
+/// root's first poll. Nesting is decided by the call site, not counted at
+/// run time: a depth counter would be stranded by the same hard stop.
+///
+/// A root that finds a request current on entry calls `found_stale`: a
+/// request was hard-stopped in this isolate. The host owns the log line,
+/// since only it knows where its logs go.
+pub fn scope_root<F: Future>(after: Rc<AfterResponse>, future: F, found_stale: fn()) -> Scoped<F> {
+    Scoped {
+        after,
+        kind: ScopeKind::Root { found_stale },
+        inner: Box::pin(future),
+    }
+}
+
+/// Make `after` current for the rest of this thread, as a request whose
+/// guard never ran leaves it: for a test that calls a handler directly and
+/// then runs what it deferred, or one that stands in for a hard-stopped
+/// request.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn enter_for_test(after: Rc<AfterResponse>) {
     CURRENT.with(|slot| slot.set(after));
 }
 
-/// The scope [`enter_for_test`] installed, if any.
-#[cfg(test)]
-pub(crate) fn current_for_test() -> Option<Rc<AfterResponse>> {
+/// The request current on this thread, if any.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn current_for_test() -> Option<Rc<AfterResponse>> {
     current()
 }
 
@@ -387,6 +450,86 @@ mod tests {
             }
         })
         .await;
+    }
+
+    thread_local! {
+        /// How often a root reported a request left current, on this test's
+        /// thread. A `found_stale` hook is a `fn`, so it cannot capture.
+        static FOUND_STALE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count_found_stale() {
+        FOUND_STALE.with(|count| count.set(count.get() + 1));
+    }
+
+    fn found_stale() -> usize {
+        FOUND_STALE.with(std::cell::Cell::get)
+    }
+
+    /// A request hard-stopped mid-poll leaves its work current: its scope
+    /// guard never ran. The next root's poll runs under its own request,
+    /// reports the dead one, and leaves nothing current, so a row queued
+    /// outside every scope afterwards comes back to its caller.
+    #[tokio::test]
+    async fn a_root_clears_a_request_a_hard_stop_left_current_and_reports_it() {
+        let dead = AfterResponse::new();
+        enter_for_test(Rc::clone(&dead));
+        let live = AfterResponse::new();
+        let reported = found_stale();
+
+        scope_root(
+            Rc::clone(&live),
+            async {
+                assert!(queue_audit_row(row("live")).is_ok());
+                yield_once().await;
+            },
+            count_found_stale,
+        )
+        .await;
+
+        assert_eq!(
+            found_stale() - reported,
+            1,
+            "reported on the first poll only"
+        );
+        assert!(current_for_test().is_none(), "the dead request is cleared");
+        assert!(queue_audit_row(row("outside")).is_err());
+        assert_eq!(label(&live.take_audit_row().unwrap()), "live");
+        assert!(
+            dead.take_audit_row().is_none(),
+            "nothing reached the dead request"
+        );
+        assert_eq!(
+            Rc::strong_count(&dead),
+            1,
+            "the slot's reference was dropped"
+        );
+    }
+
+    /// A root that finds nothing current reports nothing.
+    #[tokio::test]
+    async fn a_root_on_a_clean_slot_reports_nothing() {
+        CURRENT.with(IsolateCell::clear);
+        let reported = found_stale();
+        scope_root(AfterResponse::new(), yield_once(), count_found_stale).await;
+        assert_eq!(found_stale(), reported);
+        assert!(current_for_test().is_none());
+    }
+
+    /// A nested scope still restores what it found, so it stays correct
+    /// inside another request scope; it does not clear a dead request.
+    #[tokio::test]
+    async fn a_nested_scope_restores_what_it_found() {
+        let outer = AfterResponse::new();
+        enter_for_test(Rc::clone(&outer));
+
+        scope(AfterResponse::new(), yield_once()).await;
+
+        assert!(
+            current_for_test().is_some_and(|after| Rc::ptr_eq(&after, &outer)),
+            "the nested scope put back what it found"
+        );
+        CURRENT.with(IsolateCell::clear);
     }
 
     /// Two requests interleaved in one isolate, each queueing its audit row

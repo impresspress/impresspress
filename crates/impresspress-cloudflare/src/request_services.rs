@@ -3,9 +3,9 @@
 //! A cached [`wafer_run::Wafer`] must not retain D1, KV, R2, or other
 //! request-derived Workers handles. The service blocks inside that Wafer
 //! therefore hold the stateless forwarding proxies in this module. Every poll
-//! of the top-level dispatch future installs the current request's concrete
-//! [`RequestServices`] bundle, and restores the previous bundle before yielding
-//! back to the Workers executor.
+//! of a request's scoped future installs the request's concrete
+//! [`RequestServices`] bundle, and takes it out again before yielding back to
+//! the Workers executor.
 //!
 //! The poll boundary is the important part. Workers may interleave fetch
 //! events whenever one request returns `Poll::Pending`; a plain
@@ -17,6 +17,38 @@
 //! This relies on Cloudflare's single-threaded wasm32 isolate execution model.
 //! It is adapter-local: native and VM runtimes continue to inject their normal
 //! long-lived services directly.
+//!
+//! # Root and nested scopes
+//!
+//! Workers can stop a request mid-poll (its CPU limit), and a stop runs no
+//! destructor: the scope guard that would have taken the bundle out never
+//! runs, and the dead request's bundle stays current. So what a poll puts back
+//! when it ends is decided by the constructor, at the call site:
+//!
+//! - [`scope_root`] puts back nothing. It is the outermost scope of a future
+//!   the adapter hands the executor, and nothing else:
+//!   - the `fetch` future: `dispatch`'s scope (`lib.rs`);
+//!   - each deferred task, which runs in the `ctx.wait_until` future that
+//!     carries the request's after-response work (`dispatch`);
+//!   - the `scheduled` future's sweep (`run_sweep`, `lib.rs`);
+//!   - each spawned producer ([`wrap_spawned`]).
+//!
+//!   The executor never polls one task inside another's poll, so nothing a
+//!   root's poll is nested in has a bundle current. A root that finds one has
+//!   found a hard-stopped request, logs `ip-root-found-stale` (see
+//!   [`report_root_found_stale`]), and clears it when its poll ends.
+//! - [`scope`] and [`scope_sync`] put back what they found, so they nest: the
+//!   runtime build's scopes (`runtime_build`), which today run on the `fetch`
+//!   and `scheduled` futures before their root and so find nothing. A nested
+//!   scope where a root belongs only delays the clearing to the next root; a
+//!   root where a nested scope belongs would empty the outer scope's bundle
+//!   in the middle of its poll. When in doubt, nest.
+//!
+//! Nesting cannot be counted at run time instead: a depth counter would be
+//! stranded by the same stop. The `ctx.wait_until` futures other than the
+//! deferred tasks hold no scope: the audit-row write uses a D1 handle of its
+//! own, and the final-write wait and the config-version retry reach no
+//! request service.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -232,8 +264,23 @@ pub(crate) struct RequestServices {
     logger: Option<Arc<dyn LoggerService>>,
     config_source: Option<Arc<dyn ConfigSource>>,
     release_assets: Result<Option<Arc<ReleaseAssetIdentity>>, String>,
-    #[cfg(test)]
+    /// This bundle's number in the Wasm instance, for the
+    /// `ip-root-found-stale` line: [`RequestServices::new`] numbers bundles
+    /// from 1 in the order it builds them. Tests set their own.
     marker: usize,
+}
+
+thread_local! {
+    /// The marker the next [`RequestServices::new`] bundle takes.
+    static NEXT_MARKER: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
+fn next_marker() -> usize {
+    NEXT_MARKER.with(|next| {
+        let marker = next.get();
+        next.set(marker.wrapping_add(1));
+        marker
+    })
 }
 
 impl RequestServices {
@@ -261,8 +308,7 @@ impl RequestServices {
             logger: Some(logger),
             config_source: Some(config_source),
             release_assets: ReleaseAssetIdentity::from_environment(environment),
-            #[cfg(test)]
-            marker: 0,
+            marker: next_marker(),
         })
     }
 
@@ -349,10 +395,11 @@ thread_local! {
     /// of isolate state — entered and left on every poll of every request,
     /// and read by every service proxy — so a borrow flag stranded by a
     /// Cloudflare hard-stop would take the whole isolate down with it. With
-    /// no borrow flag the worst an interrupted holder leaves is an empty
-    /// slot, which the proxies below already report as "used outside request
-    /// poll scope": a loud, per-request error instead of a permanently
-    /// unsettled response promise.
+    /// no borrow flag, a stop inside the cell's own `replace` leaves an empty
+    /// slot, which the proxies below report as "used outside request poll
+    /// scope". A stop anywhere else in a scoped poll leaves the stopped
+    /// request's bundle here, because its scope guard never runs; the next
+    /// [`scope_root`] poll clears it (see the module doc).
     static CURRENT: IsolateCell<Rc<RequestServices>> = const { IsolateCell::new() };
 }
 
@@ -380,28 +427,80 @@ pub(crate) fn current_release_asset_identity(
     }
 }
 
+/// What one scoped poll puts back when it ends.
 struct ScopeGuard {
-    previous: Option<Rc<RequestServices>>,
+    restore: Option<Rc<RequestServices>>,
 }
 
 impl ScopeGuard {
+    /// A nested scope: put back what the poll found.
     fn enter(services: Rc<RequestServices>) -> Self {
         let previous = CURRENT.with(|slot| slot.replace(Some(services)));
-        Self { previous }
+        Self { restore: previous }
+    }
+
+    /// A root scope: put back nothing, and report a bundle found current,
+    /// which only a hard-stopped request can have left there.
+    fn enter_root(services: Rc<RequestServices>) -> Self {
+        let found = CURRENT.with(|slot| slot.replace(Some(services)));
+        if let Some(stale) = found {
+            report_root_found_stale(REQUEST_SERVICES_CELL, Some(stale.marker));
+        }
+        Self { restore: None }
     }
 }
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        CURRENT.with(|slot| slot.replace(self.previous.take()));
+        CURRENT.with(|slot| slot.replace(self.restore.take()));
     }
 }
 
+/// The `ip-root-found-stale` cell name for [`CURRENT`].
+const REQUEST_SERVICES_CELL: &str = "request-services";
+/// The `ip-root-found-stale` cell name for
+/// `impresspress_core::after_response`'s current request.
+const AFTER_RESPONSE_CELL: &str = "after-response";
+
+/// `ip-root-found-stale <cell> <marker>`: a root scope found `cell` holding a
+/// request on entry. The marker is the dead [`RequestServices`] bundle's, or
+/// `-` for a cell whose value carries none.
+///
+/// The Worker's executor diagnostic lines share one shape: an `ip-` event
+/// name, then space-separated fields, `-` for a field not known. This one is
+/// not behind the `IMPRESSPRESS_EXECUTOR_TRACE` var that gates the
+/// per-request lines: it is logged only after a request was hard-stopped,
+/// which an operator needs to see on any deployment, and it costs nothing
+/// otherwise. It lands in the log of the invocation whose root found it,
+/// beside that invocation's own lines.
+fn root_found_stale_line(cell: &str, marker: Option<usize>) -> String {
+    let marker = marker.map_or_else(|| "-".to_string(), |marker| marker.to_string());
+    format!("ip-root-found-stale {cell} {marker}")
+}
+
+/// Log [`root_found_stale_line`].
+pub(crate) fn report_root_found_stale(cell: &str, marker: Option<usize>) {
+    worker::console_log!("{}", root_found_stale_line(cell, marker));
+}
+
+/// The `found_stale` hook of the adapter's
+/// `impresspress_core::after_response::scope_root`.
+pub(crate) fn after_response_found_stale() {
+    report_root_found_stale(AFTER_RESPONSE_CELL, None);
+}
+
 /// Run synchronous builder/start work with the same request-current service
-/// selection used by async dispatch.
+/// selection used by async dispatch. Nested: it puts back what it found.
 pub(crate) fn scope_sync<T>(services: Rc<RequestServices>, f: impl FnOnce() -> T) -> T {
     let _guard = ScopeGuard::enter(services);
     f()
+}
+
+/// Which constructor made a [`ScopedFuture`]. See the module doc.
+#[derive(Clone, Copy)]
+enum ScopeKind {
+    Nested,
+    Root,
 }
 
 /// A future that re-enters its request service scope on every poll.
@@ -410,6 +509,7 @@ pub(crate) fn scope_sync<T>(services: Rc<RequestServices>, f: impl FnOnce() -> T
 /// [`wafer_block::spawn::SpawnedTask`] — is scoped without a second box.
 pub(crate) struct ScopedFuture<F: ?Sized> {
     services: Rc<RequestServices>,
+    kind: ScopeKind,
     inner: Pin<Box<F>>,
 }
 
@@ -417,16 +517,48 @@ impl<F: Future + ?Sized> Future for ScopedFuture<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        let _guard = ScopeGuard::enter(self.services.clone());
+        let services = self.services.clone();
+        let _guard = match self.kind {
+            ScopeKind::Nested => ScopeGuard::enter(services),
+            ScopeKind::Root => ScopeGuard::enter_root(services),
+        };
         self.inner.as_mut().poll(cx)
     }
 }
 
+/// A nested request scope: each poll puts back the bundle it found. See the
+/// module doc for where a [`scope_root`] belongs instead.
 pub(crate) fn scope<F: Future>(services: Rc<RequestServices>, future: F) -> ScopedFuture<F> {
     ScopedFuture {
         services,
+        kind: ScopeKind::Nested,
         inner: Box::pin(future),
     }
+}
+
+/// The root request scope of a future the adapter hands the executor: each
+/// poll puts back nothing, and a bundle found current on entry is reported
+/// and dropped. See the module doc for the call sites.
+pub(crate) fn scope_root<F: Future>(services: Rc<RequestServices>, future: F) -> ScopedFuture<F> {
+    ScopedFuture {
+        services,
+        kind: ScopeKind::Root,
+        inner: Box::pin(future),
+    }
+}
+
+/// Leave `services` current as a request hard-stopped mid-poll leaves its
+/// bundle: a scope guard whose `Drop` never runs.
+#[cfg(test)]
+pub(crate) fn strand_for_test(services: Rc<RequestServices>) {
+    std::mem::forget(ScopeGuard::enter(services));
+}
+
+/// Take whatever bundle is current, so a test that stranded one leaves the
+/// thread as it found it.
+#[cfg(test)]
+pub(crate) fn clear_for_test() {
+    CURRENT.with(IsolateCell::clear);
 }
 
 /// The isolate's spawn wrapper (`wafer_block::spawn::set_spawn_wrapper`,
@@ -443,6 +575,10 @@ pub(crate) fn scope<F: Future>(services: Rc<RequestServices>, future: F) -> Scop
 /// request (nothing current) is passed through bare, so a proxy call from it
 /// is still refused loudly.
 ///
+/// The scope is a root ([`scope_root`]): `spawn_producer` always hands the
+/// task to `spawn_local`, so it is a task of its own and nothing else's poll
+/// encloses it.
+///
 /// Only the services scope is carried. A producer's
 /// `impresspress_core::deferred::defer` stays refused, and a final-write
 /// guard it takes (`impresspress_core::after_response::final_write`) is a
@@ -458,6 +594,7 @@ pub(crate) fn wrap_spawned(
     match current() {
         Some(services) => Box::pin(ScopedFuture {
             services,
+            kind: ScopeKind::Root,
             inner: task,
         }),
         None => task,
