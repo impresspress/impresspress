@@ -68,8 +68,13 @@ impl<'a> Stat<'a> {
 ///   left alone beside an empty column;
 /// - one column when even two would be too narrow.
 ///
-/// The minimum width is what the widest marker a value shows
-/// ("Unavailable") needs, so a figure never breaks mid-word.
+/// Each stat is at least 11rem wide, which leaves 142px for its value at
+/// 1.25rem/600. A value word that fits that (DejaVu Sans, the font CI
+/// renders) never breaks: today the widest is the dashboard's outage marker
+/// "Unavailable", at 132.5px. Anything wider breaks mid-word, so a marker
+/// must fit or wrap at a space ("Not configured"), and a figure must be at
+/// most about ten characters: an eleven-character amount such as
+/// "12345678.90", or a ten-digit JPY amount, would break.
 ///
 /// Holds one to [`MAX_STATS`] stats.
 pub fn stat_row(stats: Vec<Stat<'_>>) -> Markup {
@@ -173,7 +178,8 @@ mod tests {
     /// The rows the layout spec (`stat-row.spec.ts`) lays out in a real
     /// browser, with values as the pages format them: the dashboard (five),
     /// the dashboard during an outage (five "Unavailable" markers), an order
-    /// (four, money and an email) and a single stat. The spec reads them from
+    /// (four, money and an email), a seller's state words (four, the longest
+    /// real ones) and a single stat. The spec reads them from
     /// a fixture file so it runs against `stat_row`'s markup rather than a
     /// copy of it; this keeps the file what `stat_row` renders today. To
     /// refresh it after a deliberate markup change, write `stat_row_fixture()`
@@ -204,8 +210,14 @@ mod tests {
             Stat::new("Customer", "jane.doe@example.com"),
             Stat::new("Items", "3"),
         ]);
+        let seller = stat_row(vec![
+            Stat::new("Payments", "Disabled"),
+            Stat::new("Payouts", "Disabled"),
+            Stat::new("Verification", "Incomplete"),
+            Stat::new("Platform fee", "Not configured"),
+        ]);
         let single = stat_row(vec![Stat::new("Purchases", "27")]);
-        [dashboard, outage, order, single]
+        [dashboard, outage, order, seller, single]
             .map(|row| format!("{}\n", row.into_string()))
             .concat()
     }

@@ -8606,8 +8606,8 @@ async fn an_unreadable_fee_setting_leaves_the_admin_seller_pages_and_suspension_
         "the suspend control renders"
     );
     assert!(
-        detail.contains("Misconfigured"),
-        "the fee is shown as misconfigured"
+        detail.contains(r#"<div class="stat__label">Platform fee</div><div class="stat__value">Not configured</div>"#),
+        "the fee is shown as not configured: {detail}"
     );
 
     // The suspension itself lands; the answer that cannot carry a fee is a

@@ -12,11 +12,12 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * - otherwise two columns, an odd last stat spanning both (no stat alone
  *   beside an empty column);
  * - one column when two do not fit.
- * Whatever the layout, no figure or marker breaks mid-word; only an email,
- * wider than any stat, may.
+ * Whatever the layout, no value word breaks mid-word: the fixture carries the
+ * widest figures and markers the pages show. Only an email, wider than any
+ * stat, may break.
  *
  * The markup is `fixtures/stat-row.html` (the dashboard, the dashboard during
- * an outage, an order, and a single stat), which a Rust test
+ * an outage, an order, a seller's state words, and a single stat), which a Rust test
  * (`the_stat_row_e2e_fixture_is_what_stat_row_renders`) keeps equal to what
  * `stat_row` renders. It is mounted into a real admin page so it gets the
  * page's real stylesheet and shell. Writes nothing (see `e2e:visual`).
@@ -127,7 +128,7 @@ function expectShape(row: Row, shape: Shape, what: string) {
   }
 }
 
-const NAMES = ['dashboard', 'outage', 'order', 'single'];
+const NAMES = ['dashboard', 'outage', 'order', 'seller', 'single'];
 
 test.describe('a stat row', () => {
   test.use({ storageState: ADMIN_STATE_PATH });
@@ -137,14 +138,19 @@ test.describe('a stat row', () => {
       await page.setViewportSize({ width, height: 860 });
       await mountFixture(page);
       const rows = await layout(page);
-      expect(rows.map((r) => r.stats.length)).toEqual([5, 5, 4, 1]);
+      expect(rows.map((r) => r.stats.length)).toEqual([5, 5, 4, 4, 1]);
       for (const [r, row] of rows.entries()) {
         expectShape(row, expectedShape(row), `${NAMES[r]} at ${width}px`);
         expect(row.brokenWords, `${NAMES[r]} at ${width}px`).toEqual([]);
       }
       if (width === 1280) {
-        // The design target: a full dashboard and an order each in one row.
-        expect(rows.map(expectedShape).slice(0, 3)).toEqual(['one row', 'one row', 'one row']);
+        // The design target: a full dashboard and a row of four each in one row.
+        expect(rows.map(expectedShape).slice(0, 4)).toEqual([
+          'one row',
+          'one row',
+          'one row',
+          'one row',
+        ]);
       }
       for (const stat of rows.flatMap((r) => r.stats)) {
         // Sentence case as written, at the 14px floor.

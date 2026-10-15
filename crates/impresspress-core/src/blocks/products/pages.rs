@@ -1278,7 +1278,7 @@ pub async fn admin_seller_detail(
                     components::Stat::new("Payments", if seller.capabilities.charges_enabled { "Enabled" } else { "Disabled" }),
                     components::Stat::new("Payouts", if seller.capabilities.payouts_enabled { "Enabled" } else { "Disabled" }),
                     components::Stat::new("Verification", if seller.capabilities.details_submitted { "Complete" } else { "Incomplete" }),
-                    components::Stat::new("Platform fee", &fee.map_or_else(|()| "Misconfigured".to_string(), |fee| fee_percent(fee.into()))),
+                    components::Stat::new("Platform fee", &fee.map_or_else(|()| "Not configured".to_string(), |fee| fee_percent(fee.into()))),
                 ]))
                 details .products-plain-details {
                     summary { "Technical account details" }
