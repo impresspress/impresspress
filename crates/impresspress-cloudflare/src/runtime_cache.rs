@@ -524,11 +524,19 @@ fn store(rt: Rc<ReadyRuntime>) {
     crate::database::forget_isolate_schema();
     // `IsolateCell::set` installs the new runtime BEFORE dropping the old
     // one. That matters here: the displaced `Rc<ReadyRuntime>` is often the
-    // last handle to an entire Wafer, and dropping it frees that runtime (no
-    // block or service keeps a context of it; `grep-guard-stored-context.sh`
-    // and the `Weak` probe tests hold that), so its destructor is long enough
-    // to be interrupted — and `*slot.borrow_mut() = Some(rt)` would have run
-    // that destructor with the borrow held.
+    // last handle to an entire Wafer, and dropping it then frees that
+    // runtime, so its destructor is long enough to be interrupted — and
+    // `*slot.borrow_mut() = Some(rt)` would have run that destructor with the
+    // borrow held.
+    //
+    // "Frees" holds because no block or service stores a context of the
+    // runtime: `scripts/grep-guard-stored-context.sh` checks the source, and
+    // the `Weak` probes in `impresspress-server` (native) and
+    // `impresspress-browser` (wasm32) check a booted runtime — neither runs
+    // this Worker build. The one known holder past the drop is a stream
+    // producer whose consumer left: on Workers it is never polled again and
+    // keeps the runtime it captured until the isolate dies (the spawn
+    // lifetime rule in `wafer_block::spawn`).
     RUNTIME.with(|r| r.set(rt));
 }
 

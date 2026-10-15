@@ -265,7 +265,9 @@ fn auth_block_probe(wafer: &wafer_run::Wafer) -> std::sync::Weak<dyn Block> {
 /// `AuthServiceImpl::init` kept its `Init` context in the service the auth
 /// block owns: a reference cycle, and no runtime was ever freed. This is the
 /// wasm half of `impresspress-server`'s `runtime_drop` test, over the boot
-/// funnel the browser shares with native, on the wasm32 build.
+/// funnel the browser shares with native, on the wasm32 build. It runs with
+/// this crate's features, which leave core's feature blocks off, so it covers
+/// auth and core on wasm32; the native test covers the full block set.
 #[wasm_bindgen_test]
 async fn a_booted_runtime_is_freed_when_dropped() {
     let wafer = booted_runtime().await;

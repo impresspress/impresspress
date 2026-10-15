@@ -16,11 +16,14 @@
 //! another secret is refused, so the secret it read is the deployment's.
 //!
 //! The runtime is the one the server binary builds and boots
-//! (`build_native_runtime` + `boot_native`), with this crate's features: the
-//! default `impresspress-core` block set, which is every block a native build
-//! ships. The same probe runs under wasm-bindgen-test in
-//! `impresspress-browser` (`boot/tests.rs`), over the boot funnel the browser
-//! shares with native.
+//! (`build_native_runtime` + `boot_native`), carrying every block
+//! `impresspress-core` enables by default: this crate's dev-dependency turns
+//! them on, and the test asserts they are registered ([`FEATURE_BLOCKS`]), so
+//! a run that builds a reduced runtime fails instead of proving less. The
+//! same probe runs under wasm-bindgen-test in `impresspress-browser`
+//! (`boot/tests.rs`), over the boot funnel the browser shares with native;
+//! that run has core's block features off, so it covers auth and core on
+//! wasm32.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -39,6 +42,21 @@ use wafer_run::{context::Context, InputStream, LifecycleEvent, Message, OutputSt
 const ADMIN_EMAIL: &str = "admin@runtime-drop.test";
 /// The block that asks `wafer-run/auth` who its caller is.
 const CALLER: &str = "test/whoami";
+
+/// One block per `impresspress-core` default block feature. The runtime
+/// under test must carry them all: the leak was per runtime, so a runtime
+/// missing its feature blocks proves less than the one a native build ships.
+/// This crate's dev-dependency on `impresspress-core` turns them on.
+const FEATURE_BLOCKS: &[&str] = &[
+    "impresspress/files",
+    "impresspress/messages",
+    "impresspress/llm",
+    "impresspress/legalpages",
+    "impresspress/tickets",
+    "impresspress/userportal",
+    "impresspress/products",
+    "impresspress/signal",
+];
 
 /// Answers every request with the user `require_user` resolves its
 /// credential to, through the typed auth client, as any feature block does.
@@ -150,6 +168,16 @@ async fn a_runtime_that_served_auth_checks_is_freed_when_dropped() {
         .await
         .expect("boot the native runtime");
     assert!(report.ok, "every block initializes: {report:?}");
+    let missing: Vec<&str> = FEATURE_BLOCKS
+        .iter()
+        .copied()
+        .filter(|name| wafer.lookup_block(name).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the runtime lacks feature blocks {missing:?}; registered: {:?}",
+        wafer.block_names()
+    );
 
     // The deployment's JWT master secret, generated when the variables were
     // seeded, and the bootstrap admin auth's `Init` created.

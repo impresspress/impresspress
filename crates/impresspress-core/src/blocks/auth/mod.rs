@@ -204,8 +204,8 @@ pub(crate) enum PasswordCheck {
 /// own fault while checking (an `Internal` such as a failed offload to its
 /// blocking pool, or on Cloudflare the password-hasher Worker's Durable
 /// Object not answering) — and is `Err`, logged and classified by
-/// [`credential_check_failed`] (a refusal keeps its 403 or 429, anything else
-/// is a 503).
+/// [`credential_check_failed`] (a refusal keeps its 403 or 429, a cancelled
+/// or late request keeps its 499 or 504, anything else is a 503).
 pub(crate) async fn check_password(
     ctx: &dyn wafer_run::context::Context,
     user_id: &str,

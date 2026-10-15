@@ -5,16 +5,22 @@
 //! checks the whole heap instead, so it also catches a leak that bypasses
 //! that block: a `mem::forget`, a `Box::leak`, a static cache keyed per
 //! runtime. Each iteration builds and boots the runtime the server binary
-//! does (`build_native_runtime` + `boot_native`, the default block set) over
-//! a fresh SQLite file, then drops it. Live heap bytes are read after each
-//! drop.
+//! does (`build_native_runtime` + `boot_native`) over a fresh SQLite file,
+//! then drops it. Live heap bytes are read after each drop. The runtime
+//! carries every block `impresspress-core` enables by default — this crate's
+//! dev-dependency turns them on, whatever else `cargo` builds alongside —
+//! and is about 20 MB of live heap once booted.
 //!
 //! The baseline is the reading after the FIRST iteration, not before it: the
 //! first build fills one-time state that is never freed by design (tracing
 //! callsites, `LazyLock` statics, the first SQLite open, the tokio blocking
 //! pool), and a later build reuses it. With the stored `Init` context put
 //! back into `AuthServiceImpl`, every iteration retains its whole runtime:
-//! this test then reads about 1.6 MB more live heap per cycle, linearly.
+//! this test then reads about 19.8 MB more live heap per cycle, linearly.
+//!
+//! What it does not see: memory the bundled SQLite allocates from the C
+//! heap (the counter wraps only Rust's global allocator), and anything a
+//! served request would retain — it builds and boots, and serves nothing.
 //!
 //! A `#[global_allocator]` is per binary, which is why this is a test file of
 //! its own.
@@ -120,7 +126,7 @@ const ITERATIONS: usize = 8;
 
 /// Live bytes the last reading may exceed the baseline by. Measured at
 /// 0 bytes after the first build (one transient reading of about 1 KB in
-/// three runs), while one leaked runtime is about 1.6 MB here; the slack
+/// three runs), while one leaked runtime is about 19.8 MB here; the slack
 /// only absorbs allocator noise in long-lived pools.
 const SLACK_BYTES: isize = 64 * 1024;
 

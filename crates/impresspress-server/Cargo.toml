@@ -31,6 +31,14 @@ tokio = { workspace = true, features = ["macros"] }
 workspace = true
 
 [dev-dependencies]
+# The tests build and boot the runtime a native build ships, so they need
+# every block `impresspress-core` turns on by default. The `[dependencies]`
+# entry above takes core with `default-features = false` (the consumer
+# chooses), so without this a `cargo test -p impresspress-server` run would
+# boot a runtime with no feature blocks at all — about 2 MB instead of about
+# 20 MB — and the runtime probes would only cover the full set when another
+# selected package happened to enable it.
+impresspress-core = { path = "../impresspress-core" }
 tempfile = "3"
 # Signs the access JWT `tests/runtime_drop.rs` authenticates through the
 # runtime, the way auth-ui signs one.

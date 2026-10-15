@@ -90,8 +90,9 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     // wrong password, and pays for the same verification: the crypto service
     // rejects such a hash without doing the work, and a faster or different
     // answer would tell the caller this email has an account. A comparison
-    // that could not run at all (WRAP refusal, crypto service down) is the
-    // classified 403/429/503 on both arms, known email or not.
+    // that could not run at all (WRAP refusal, crypto service down, the
+    // request cancelled or late) is the answer `credential_check_failed`
+    // classifies (403/429, 499/504, else 503) on both arms, known email or not.
     let password_ok = match (&user_row, stored_hash) {
         (Some(user), Some(hash)) => {
             match check_password(ctx, &user.id, &body.password, hash).await {
