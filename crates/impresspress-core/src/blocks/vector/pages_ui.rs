@@ -11,7 +11,7 @@ use super::service::{display_index_name, vector_backend_available, IndexRow};
 use crate::{
     ui::{
         self,
-        components::{self, BadgeVariant, DataTable, TableCol, TableRow},
+        components::{self, Action, ActionTarget, BadgeVariant, DataTable, TableCol, TableRow},
         icons,
         shell::Crumb,
         templates::{detail_page, list_page, DetailMeta},
@@ -76,18 +76,12 @@ const INDEX_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Keyword search"),
 ];
 
-/// The topbar's "+ Create index" trigger, which the empty list's call to
+/// The topbar's "Create index" trigger, which the empty list's call to
 /// action repeats.
 fn create_index_button() -> Markup {
-    components::button(
-        components::BtnVariant::Primary,
-        components::CtrlSize::Md,
-        "+ Create index",
-        maud::PreEscaped(
-            r#"type="button" data-action="modal-open" data-modal-target="create-vector-index""#
-                .to_string(),
-        ),
-    )
+    Action::primary("Create index", ActionTarget::Modal("create-vector-index"))
+        .icon(icons::plus())
+        .render()
 }
 
 /// "Yes" / "No" for an index's keyword search: positive when on, neutral
@@ -103,7 +97,7 @@ fn keyword_badge(on: bool) -> Markup {
 /// The index list, each row linking to its detail page.
 ///
 /// With no index there are two different pages: a deployment that can create
-/// one gets the empty state and its "+ Create index"; one with no vector
+/// one gets the empty state and its "Create index"; one with no vector
 /// backend (`backend_available == false`) renders nothing here, because the
 /// page's callout already says why there are none and what would change
 /// that — a second "No vector indexes yet" under it would only repeat it,

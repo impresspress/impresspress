@@ -5,7 +5,7 @@ import { PHONE, targetFloor } from './fixtures/targets';
 /**
  * The storage and messages pages, driven in a browser against the real server.
  *
- * - Files: "+ New bucket" opens the shared modal and lands in the new bucket;
+ * - Files: "New bucket" opens the shared modal and lands in the new bucket;
  *   an upload comes back as a row whose checkbox is named after the file and
  *   whose "more actions" button opens a menu the keyboard drives; a bulk
  *   delete asks through the shared dialog, and its outcome — including a
@@ -33,7 +33,7 @@ test('a bucket created from the modal takes an upload with labelled row controls
   await loginAsAdmin(page);
   await page.goto('/b/storage/', { waitUntil: 'networkidle' });
 
-  await page.locator('.topbar__actions').getByRole('button', { name: '+ New bucket' }).click();
+  await page.locator('.topbar__actions').getByRole('button', { name: 'New bucket' }).click();
   const dialog = page.getByRole('dialog', { name: 'New bucket' });
   await expect(dialog).toBeVisible();
   await dialog.getByLabel('Name').fill(bucket);
@@ -44,7 +44,7 @@ test('a bucket created from the modal takes an upload with labelled row controls
   // The empty bucket offers the upload it is waiting for.
   await expect(page.getByRole('heading', { level: 2, name: 'This folder is empty' })).toBeVisible();
 
-  // Upload through the picker every "+ Upload" opens. The listing is
+  // Upload through the picker every "Upload" opens. The listing is
   // swapped in place, not the page reloaded, so the outcome stays on screen.
   await page.locator('#file-upload-input').setInputFiles({
     name: 'notes.txt',

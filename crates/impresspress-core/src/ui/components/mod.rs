@@ -1,6 +1,7 @@
 //! Shared UI components. One file per family; the CSS for each lives at
 //! `ui/styles/components/<same-name>.css`.
 
+mod action;
 mod auth;
 mod avatar;
 mod badge;
@@ -18,12 +19,11 @@ mod stat;
 mod table;
 mod time;
 
+pub use action::{Action, ActionTarget, Emphasis};
 pub use auth::{alert, alert_message, auth_panel, oauth_button, AlertVariant};
 pub use avatar::{avatar, CtrlSize};
 pub use badge::{badge, status_badge, Badge, BadgeVariant};
-pub use button::{
-    button, filter_links, filter_toggle, subnav, tab_navigation, BtnVariant, FilterLinks, Tab,
-};
+pub use button::{filter_links, filter_toggle, subnav, tab_navigation, FilterLinks, Tab};
 pub use callout::{callout, CalloutTone};
 pub use card::Card;
 pub use chart::{bar_chart_card, line_chart_card, ChartHistory};

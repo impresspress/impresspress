@@ -237,7 +237,7 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                     span .text-muted { "(you)" }
                 } @else {
                     @if disabled {
-                        button .btn .btn--sm .btn--success
+                        button .btn .btn--sm .btn--secondary
                             type="button"
                             hx-post={"/b/admin/users/" (record.id) "/enable"}
                             hx-target={"#user-row-" (record.id)}
@@ -836,6 +836,32 @@ mod tests {
             "{roles}"
         );
         assert!(roles.contains("btn--ghost-danger btn--icon"), "{roles}");
+    }
+
+    /// A disabled user's row offers Enable as a plain secondary button, the
+    /// same weight as Disable: re-enabling is not the page's main action, so
+    /// it takes no colour of its own.
+    #[tokio::test]
+    async fn a_disabled_users_enable_is_a_secondary_button() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+
+        let parts = crate::blocks::admin::test_support::browser_request(
+            &ctx,
+            admin_msg("create", "/b/admin/users/u-1/disable"),
+        )
+        .await;
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert_eq!(parts.status, 200, "{html}");
+        assert!(
+            html.contains(
+                r#"<button class="btn btn--sm btn--secondary" type="button" hx-post="/b/admin/users/u-1/enable""#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("btn--success"), "{html}");
     }
 
     /// Disable answers one `<tr>`, swapped over the user's row. When the row

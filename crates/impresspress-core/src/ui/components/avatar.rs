@@ -1,6 +1,6 @@
 //! Avatar (Phase 1)
 
-/// Size for buttons (and other form controls when adopted).
+/// An [`avatar`]'s size.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum CtrlSize {

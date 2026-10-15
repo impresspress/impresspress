@@ -2,6 +2,7 @@
 
 use maud::{html, Markup, PreEscaped};
 
+use super::action::{Action, Emphasis};
 use crate::ui::icons;
 
 /// A card: one framed surface on the page background, holding one section of
@@ -22,6 +23,7 @@ pub struct Card<'a> {
     body: Markup,
     subtitle: Option<&'a str>,
     link: Option<(&'a str, &'a str)>,
+    action: Option<Action<'a>>,
     flush: bool,
     warning: bool,
     id: Option<&'a str>,
@@ -46,6 +48,7 @@ impl<'a> Card<'a> {
             body,
             subtitle: None,
             link: None,
+            action: None,
             flush: false,
             warning: false,
             id: None,
@@ -64,6 +67,22 @@ impl<'a> Card<'a> {
     /// arrow. Needs a [`titled`](Card::titled) card.
     pub fn link(mut self, label: &'a str, href: &'a str) -> Self {
         self.link = Some((label, href));
+        self
+    }
+
+    /// One action at the end of the head, after the [`link`](Card::link)
+    /// if there is one ("Add grant", "Edit in variables"). Needs a
+    /// [`titled`](Card::titled) card.
+    ///
+    /// Only a Secondary or Quiet [`Action`]: a card head is never where the
+    /// page's one primary lives, nor where a destructive control goes.
+    pub fn action(mut self, action: Action<'a>) -> Self {
+        assert!(
+            matches!(action.emphasis(), Emphasis::Secondary | Emphasis::Quiet),
+            "a card head takes a Secondary or Quiet action, got {:?}",
+            action.emphasis()
+        );
+        self.action = Some(action);
         self
     }
 
@@ -113,8 +132,9 @@ impl<'a> Card<'a> {
 
     pub fn render(self) -> Markup {
         assert!(
-            self.title.is_some() || (self.subtitle.is_none() && self.link.is_none()),
-            "a subtitle or a head link needs a titled card"
+            self.title.is_some()
+                || (self.subtitle.is_none() && self.link.is_none() && self.action.is_none()),
+            "a subtitle, a head link or a head action needs a titled card"
         );
         let class = match (self.flush, self.warning) {
             (false, false) => "card",
@@ -133,9 +153,14 @@ impl<'a> Card<'a> {
                                 p .card__subtitle { (subtitle) }
                             }
                         }
-                        @if let Some((label, href)) = self.link {
+                        @if self.link.is_some() || self.action.is_some() {
                             div .card__actions {
-                                a .card__link href=(href) { (label) (icons::arrow_right()) }
+                                @if let Some((label, href)) = self.link {
+                                    a .card__link href=(href) { (label) (icons::arrow_right()) }
+                                }
+                                @if let Some(action) = self.action {
+                                    (action.render())
+                                }
                             }
                         }
                     }
@@ -195,7 +220,7 @@ fn with_data_attributes(card: Markup, data: &[(&'static str, &str)]) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::dom;
+    use crate::{test_support::dom, ui::components::ActionTarget};
 
     fn table() -> Markup {
         html! { div .data-table { table { tr { td { "row" } } } } }
@@ -239,6 +264,67 @@ mod tests {
             ),
             "{s}"
         );
+    }
+
+    #[test]
+    fn the_head_action_ends_the_head_after_the_link() {
+        let s = Card::titled("Custom grants", html! {})
+            .link("Docs", "/docs")
+            .action(
+                Action::secondary("Add grant", ActionTarget::Modal("add-grant"))
+                    .icon(icons::plus()),
+            )
+            .render()
+            .into_string();
+        assert!(
+            s.contains(r#"<div class="card__actions"><a class="card__link" href="/docs">Docs<svg"#),
+            "{s}"
+        );
+        assert!(
+            s.contains(
+                r#"</a><button class="btn btn--secondary" type="button" data-action="modal-open" data-modal-target="add-grant"><svg"#
+            ),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"</svg>Add grant</button></div></header><div class="card__body">"#),
+            "{s}"
+        );
+
+        let alone = Card::titled("Defaults", html! {})
+            .action(Action::quiet("Edit in variables", ActionTarget::Link("/v")))
+            .render()
+            .into_string();
+        assert!(
+            alone.contains(
+                r#"</div><div class="card__actions"><a class="btn btn--ghost" href="/v">Edit in variables</a></div></header>"#
+            ),
+            "{alone}"
+        );
+        // A card head never holds the page's primary.
+        assert!(dom::visible_primaries(&s).0.is_empty());
+    }
+
+    #[test]
+    fn a_card_head_refuses_a_primary_or_a_destructive_action() {
+        for action in [
+            Action::primary("Save", ActionTarget::Submit { form: None }),
+            Action::danger("Delete", ActionTarget::Link("/")),
+            Action::quiet_danger("Remove", ActionTarget::Link("/")),
+        ] {
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = Card::titled("t", html! {}).action(action);
+            }));
+            assert!(refused.is_err());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a subtitle, a head link or a head action needs a titled card")]
+    fn a_plain_card_takes_no_head_action() {
+        let _ = Card::plain(html! {})
+            .action(Action::secondary("x", ActionTarget::Link("/")))
+            .render();
     }
 
     #[test]
@@ -346,6 +432,62 @@ mod tests {
         );
     }
 
+    /// The buttons and card heads `card-head-action.spec.ts` lays out in a
+    /// real browser: one action of each emphasis (and a small one), a card
+    /// whose head holds a subtitle and an action, and a card whose long
+    /// title is followed by both a link and an action. The spec reads it
+    /// from a fixture file; this keeps that file what the builders render.
+    /// To refresh it after a deliberate markup change, write
+    /// `card_head_fixture()` to the path below.
+    fn card_head_fixture() -> String {
+        let target = ActionTarget::Link("/b/admin/");
+        let buttons = html! {
+            div #buttons {
+                (Action::primary("New bucket", ActionTarget::Modal("new-bucket")).icon(icons::plus()).render())
+                (Action::secondary("Secondary", target).render())
+                (Action::quiet("Quiet", target).render())
+                (Action::quiet_danger("Quiet danger", target).render())
+                (Action::danger("Danger", target).render())
+                (Action::secondary("Enable", ActionTarget::Delegated("enable")).small().render())
+            }
+        };
+        let grants = Card::titled("Custom grants", html! { p { "Grants an admin added." } })
+            .subtitle("Added at runtime, on top of the grants declared in code")
+            .action(
+                Action::secondary("Add grant", ActionTarget::Modal("add-grant"))
+                    .icon(icons::plus()),
+            )
+            .render();
+        let defaults = Card::titled(
+            "Defaults for every new conversation thread",
+            html! { p { "Model and temperature." } },
+        )
+        .link("View documentation", "/b/admin/")
+        .action(Action::quiet(
+            "Edit in variables",
+            ActionTarget::Link("/b/admin/"),
+        ))
+        .render();
+        format!(
+            "{}\n",
+            html! { (buttons) (grants) (defaults) }.into_string()
+        )
+    }
+
+    #[test]
+    fn the_card_head_e2e_fixture_is_what_the_builders_render() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-web/tests/e2e/fixtures/card-head-action.html"
+        );
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            on_disk,
+            card_head_fixture(),
+            "{path} is out of date; write the expected text above to it"
+        );
+    }
+
     #[test]
     fn data_attributes_on_a_plain_card_go_on_its_div() {
         let s = Card::plain(html! { "b" })
@@ -386,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a subtitle or a head link needs a titled card")]
+    #[should_panic(expected = "a subtitle, a head link or a head action needs a titled card")]
     fn a_plain_card_takes_no_head_parts() {
         let _ = Card::plain(html! {}).subtitle("orphan").render();
     }
