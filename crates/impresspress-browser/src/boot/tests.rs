@@ -236,3 +236,72 @@ async fn a_final_router_override_declared_on_the_builder_takes_effect() {
     );
     assert_eq!(parts.body, WRAPPED_BODY);
 }
+
+/// A runtime the funnel booted, with its `wafer-run/auth` block, through
+/// [`BrowserServices::boot`] on a fresh database.
+async fn booted_runtime() -> wafer_run::Wafer {
+    crate::database::test_support::fresh_db().await;
+    let services = BrowserServices::new(Vec::new()).expect("the browser services construct");
+    let builder = services.builder().await.expect("a builder");
+    services
+        .boot(builder, None)
+        .await
+        .expect("the runtime boots")
+}
+
+/// A `Weak` on `wafer`'s registered `wafer-run/auth` block. The runtime's
+/// context owns every registered block, so anything that keeps a context of
+/// this runtime alive keeps that block alive too.
+fn auth_block_probe(wafer: &wafer_run::Wafer) -> std::sync::Weak<dyn Block> {
+    Arc::downgrade(
+        &wafer
+            .lookup_block("wafer-run/auth")
+            .expect("the auth block is registered")
+            .1,
+    )
+}
+
+/// **A booted runtime is freed when it is dropped.** Until 2026-10
+/// `AuthServiceImpl::init` kept its `Init` context in the service the auth
+/// block owns: a reference cycle, and no runtime was ever freed. This is the
+/// wasm half of `impresspress-server`'s `runtime_drop` test, over the boot
+/// funnel the browser shares with native, on the wasm32 build.
+#[wasm_bindgen_test]
+async fn a_booted_runtime_is_freed_when_dropped() {
+    let wafer = booted_runtime().await;
+    let probe = auth_block_probe(&wafer);
+    drop(wafer);
+    assert!(
+        probe.upgrade().is_none(),
+        "the auth block outlived its runtime: something keeps a context of it"
+    );
+}
+
+/// **A runtime swapped out by an activation is freed once its handle goes.**
+/// Every dev-sandbox activation `replace_wafer`s, and `impresspress-web`'s
+/// `RetainedRuntime` keeps the displaced runtime for one rollback only. When
+/// that last handle is dropped the displaced runtime, auth block included,
+/// must go with it, or each activation leaks the runtime it replaced.
+#[wasm_bindgen_test]
+async fn a_runtime_replace_wafer_displaced_is_freed_with_its_last_handle() {
+    let first = booted_runtime().await;
+    let probe = auth_block_probe(&first);
+    // Other tests in this binary may have installed a runtime already.
+    if crate::is_initialized() {
+        drop(crate::replace_wafer(first).expect("a runtime is installed"));
+    } else {
+        crate::store_wafer(first).expect("the first runtime installs");
+    }
+
+    let second = booted_runtime().await;
+    let displaced = crate::replace_wafer(second).expect("a runtime is installed");
+    assert!(
+        probe.upgrade().is_some(),
+        "the displaced runtime lives while its handle does"
+    );
+    drop(displaced);
+    assert!(
+        probe.upgrade().is_none(),
+        "the displaced runtime's auth block outlived its last handle"
+    );
+}

@@ -580,12 +580,17 @@ pub(crate) async fn current_auth_version(
 /// anonymous tells a signed-in client it has been signed out. So the request
 /// is refused with this. A refusal the database classifier keeps
 /// ([`crate::blocks::crud::classify_db_error`]: a WRAP denial's 403 "Access
-/// denied", a quota's 429, a duplicate key's 409) is answered as it stands; any other fault is
-/// logged under `context` and answered `Unavailable` (503), the status a
-/// client retries rather than one that means "sign in again".
+/// denied", a quota's 429, a duplicate key's 409) is answered as it stands. A
+/// read the runtime refused because the request was cancelled or ran out of
+/// time keeps that code ([`request_ended`]). Any other fault is logged under
+/// `context` and answered `Unavailable` (503), the status a client retries
+/// rather than one that means "sign in again".
 pub(crate) fn credential_check_failed(error: WaferError, context: &str) -> WaferError {
     use crate::blocks::crud::{classify_db_error, DbFailure};
 
+    if let Some(ended) = request_ended(&error, context) {
+        return ended;
+    }
     match classify_db_error(error, None, context) {
         DbFailure::Refused(refusal) => refusal.into_error(),
         DbFailure::Internal(fault) => {
@@ -593,6 +598,28 @@ pub(crate) fn credential_check_failed(error: WaferError, context: &str) -> Wafer
             credential_check_unavailable()
         }
     }
+}
+
+/// A call that failed because the request it serves was cancelled
+/// (`Cancelled`, 499) or ran out of time (`DeadlineExceeded`, 504), as the
+/// error the request ends with: the same code, and a message of this
+/// crate's own rather than the backend's.
+///
+/// The runtime refuses a call made from a cancelled or late frame with
+/// exactly these codes (`call_gates::admit_call`), and a credential check
+/// runs in the request's frame, so they say what happened to the request —
+/// not that its credential is bad. Answering them `Unauthorized` (401) would
+/// tell a signed-in client it has been signed out; folding them into the 503
+/// of a backend that is down would hide that the request itself ended.
+/// `None` for every other error.
+pub(crate) fn request_ended(error: &WaferError, context: &str) -> Option<WaferError> {
+    let message = match error.code {
+        wafer_run::ErrorCode::Cancelled => "The request was cancelled",
+        wafer_run::ErrorCode::DeadlineExceeded => "The request ran out of time",
+        _ => return None,
+    };
+    tracing::info!(context = %context, error = %error, "credential check ended with its request");
+    Some(WaferError::new(error.code, message))
 }
 
 /// Hash a password being set (sign-up, a password change or reset, a

@@ -4,10 +4,7 @@
 use std::sync::Arc;
 
 use impresspress_core::{
-    blocks::auth::{
-        migrations,
-        service::{AuthServiceImpl, BlockState},
-    },
+    blocks::auth::{migrations, service::AuthServiceImpl},
     test_support::seed_user,
 };
 use wafer_core::interfaces::auth::service::{AuthError, AuthService, Role, UserId};
@@ -28,9 +25,9 @@ async fn user_profile_returns_row_with_empty_orgs() {
         .insert(ctx.as_ref())
         .await;
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let p = svc
-        .user_profile(UserId(u.id.clone()))
+        .user_profile(&*ctx, UserId(u.id.clone()))
         .await
         .expect("profile");
     assert_eq!(p.id, UserId(u.id));
@@ -47,9 +44,9 @@ async fn user_profile_missing_user_is_not_found() {
         Arc::new(auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await);
     migrations::apply(ctx.as_ref()).await.expect("migrations");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .user_profile(UserId("nonexistent".to_string()))
+        .user_profile(&*ctx, UserId("nonexistent".to_string()))
         .await
         .expect_err("missing user");
     assert!(
@@ -69,8 +66,11 @@ async fn user_profile_maps_non_admin_role_to_user() {
         .insert(ctx.as_ref())
         .await;
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
-    let p = svc.user_profile(UserId(u.id)).await.expect("profile");
+    let svc = AuthServiceImpl;
+    let p = svc
+        .user_profile(&*ctx, UserId(u.id))
+        .await
+        .expect("profile");
     assert!(matches!(p.role, Role::User));
     assert!(p.avatar_url.is_none());
 }

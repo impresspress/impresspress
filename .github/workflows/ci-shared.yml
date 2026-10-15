@@ -112,6 +112,13 @@ jobs:
       - name: Lint — wasm-pack and cargo install --path run the lock check
         run: bash scripts/grep-guard-locked.sh
 
+      # A context stored in block or service state is a reference cycle
+      # through the registered blocks: the runtime is never freed. The
+      # `Weak` probe tests prove the runtime drops; this points a reviewer at
+      # the shape that broke it.
+      - name: Lint — no runtime context stored in block or service state
+        run: bash scripts/grep-guard-stored-context.sh
+
       - name: Install Rust
         run: rustup toolchain install
 

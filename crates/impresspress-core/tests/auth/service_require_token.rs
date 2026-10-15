@@ -7,7 +7,7 @@ use impresspress_core::{
     blocks::auth::{
         migrations,
         repo::pats,
-        service::{hash_token, AuthServiceImpl, BlockState},
+        service::{hash_token, AuthServiceImpl},
     },
     test_support::seed_user,
 };
@@ -63,16 +63,16 @@ async fn require_token_enforces_scope_and_rejects_an_access_jwt() {
     .await
     .expect("seed noscope pat");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
 
     let got = svc
-        .require_token(&bearer(ok_raw), TokenScope::Publish)
+        .require_token(&*ctx, &bearer(ok_raw), TokenScope::Publish)
         .await
         .expect("scoped pat");
     assert_eq!(got.0, u.id);
 
     let err = svc
-        .require_token(&bearer(noscope_raw), TokenScope::Publish)
+        .require_token(&*ctx, &bearer(noscope_raw), TokenScope::Publish)
         .await
         .expect_err("pat missing scope");
     assert!(
@@ -87,7 +87,7 @@ async fn require_token_enforces_scope_and_rejects_an_access_jwt() {
         .mint_access_token(&u.id, &[], Duration::from_secs(3600))
         .await;
     let err = svc
-        .require_token(&bearer(&access), TokenScope::Publish)
+        .require_token(&*ctx, &bearer(&access), TokenScope::Publish)
         .await
         .expect_err("an access jwt carries no scopes");
     assert!(
@@ -96,7 +96,7 @@ async fn require_token_enforces_scope_and_rejects_an_access_jwt() {
     );
 
     let err = svc
-        .require_token(&Message::new("x"), TokenScope::Publish)
+        .require_token(&*ctx, &Message::new("x"), TokenScope::Publish)
         .await
         .expect_err("no creds");
     assert!(matches!(err, AuthError::Unauthorized));

@@ -63,8 +63,8 @@ use crate::routing::ExtraRoute;
 /// `Clone` is shallow — every interior field is already `Arc`/`Mutex`-shared
 /// (or trivially copyable), so a clone produces another handle pointing at
 /// the same database, blocks map, and config. Used by [`Context::clone_arc`]
-/// so service objects (e.g. `AuthServiceImpl`) can stash an owning context
-/// handle in a `OnceLock` past the lifetime of a `&TestContext` borrow.
+/// for work that outlives the borrow but not the call — a deferred task, a
+/// stream producer — never for a handle stored in block or service state.
 #[derive(Clone)]
 pub struct TestContext {
     /// The raw `DatabaseService` behind `database_block`, kept around so
@@ -1683,6 +1683,33 @@ impl TestContext {
                 error,
             }),
         );
+    }
+
+    /// Answer `error` to every `wafer-run/database` call whose op
+    /// ([`Message::action`], e.g. `"database.list"`) and `collection` match,
+    /// from every frame this context dispatches — the caller's and every
+    /// callee's — while every other call reaches the real in-memory SQLite.
+    ///
+    /// [`FailingDbOpContext`]'s counterpart for code that reaches the
+    /// database through a frame the test does not hold: a service block that
+    /// is handed the `ctx` of each call it serves (the framework `AuthBlock`
+    /// over `AuthServiceImpl`) dispatches from the callee frame this context
+    /// builds, which a wrapper around the caller's context never sees. The
+    /// decorator sits in front of the database block itself, so it is what
+    /// every frame reaches.
+    pub fn refuse_database_op(
+        mut self,
+        op: &'static str,
+        collection: &'static str,
+        error: WaferError,
+    ) -> Self {
+        self.database_block = Arc::new(RefusingDatabaseOp {
+            inner: self.database_block.clone(),
+            op,
+            collection,
+            error,
+        });
+        self
     }
 
     /// Replace the database backing this context with one whose mutating
@@ -3608,6 +3635,42 @@ impl Block for RefusingConfigOp {
             .map(|req| req.key)
             .unwrap_or_default();
         if &requested == key {
+            return OutputStream::error(self.error.clone());
+        }
+        self.inner
+            .handle(ctx, msg, InputStream::from_bytes(body))
+            .await
+    }
+}
+
+/// The database block behind [`TestContext::refuse_database_op`]: answers
+/// `error` to every request whose op and `collection` match, and hands every
+/// other request to the real database block.
+struct RefusingDatabaseOp {
+    inner: Arc<dyn Block>,
+    op: &'static str,
+    collection: &'static str,
+    error: WaferError,
+}
+
+#[wafer_block::wafer_async_trait]
+impl Block for RefusingDatabaseOp {
+    fn info(&self) -> BlockInfo {
+        self.inner.info()
+    }
+
+    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        if msg.action() != self.op {
+            return self.inner.handle(ctx, msg, input).await;
+        }
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
+        let collection = wafer_block::codec::decode::<CollectionPeek>(&body)
+            .map(|p| p.collection)
+            .unwrap_or_default();
+        if collection == self.collection {
             return OutputStream::error(self.error.clone());
         }
         self.inner

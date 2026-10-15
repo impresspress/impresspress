@@ -523,10 +523,12 @@ fn store(rt: Rc<ReadyRuntime>) {
     // `database::D1DatabaseService::schema_cache`.
     crate::database::forget_isolate_schema();
     // `IsolateCell::set` installs the new runtime BEFORE dropping the old
-    // one. That matters here: the displaced `Rc<ReadyRuntime>` may be the
-    // last handle to an entire Wafer, so its destructor is long enough to be
-    // interrupted — and `*slot.borrow_mut() = Some(rt)` would have run that
-    // destructor with the borrow held.
+    // one. That matters here: the displaced `Rc<ReadyRuntime>` is often the
+    // last handle to an entire Wafer, and dropping it frees that runtime (no
+    // block or service keeps a context of it; `grep-guard-stored-context.sh`
+    // and the `Weak` probe tests hold that), so its destructor is long enough
+    // to be interrupted — and `*slot.borrow_mut() = Some(rt)` would have run
+    // that destructor with the borrow held.
     RUNTIME.with(|r| r.set(rt));
 }
 

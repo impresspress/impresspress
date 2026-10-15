@@ -255,6 +255,7 @@ pub(crate) fn log_email_not_sent(flow: &str, user_id: &str, failure: &EmailNotSe
 /// records its own with [`log_email_not_sent`] or a log line of its own.
 pub(crate) struct LaterMail {
     limiter: std::sync::Arc<UserRateLimiter>,
+    // stored-context: allow (a deferred task, drained when the request ends)
     ctx: std::sync::Arc<dyn Context>,
     msg: Message,
 }

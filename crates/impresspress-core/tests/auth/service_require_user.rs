@@ -14,7 +14,7 @@ use impresspress_core::{
     blocks::auth::{
         migrations,
         repo::{jwt_blocklist, pats, users},
-        service::{hash_token, AuthServiceImpl, BlockState},
+        service::{hash_token, AuthServiceImpl},
     },
     test_support::{seed_user, TestContext},
 };
@@ -70,25 +70,25 @@ async fn require_user_accepts_an_access_jwt_and_a_pat_and_rejects_missing_creds(
     .await
     .expect("seed pat");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
 
     // Access JWT → user.
     let got = svc
-        .require_user(&msg_with_bearer(&access))
+        .require_user(&*ctx, &msg_with_bearer(&access))
         .await
         .expect("access jwt auth");
     assert_eq!(got.0, uid);
 
     // Bearer that is not a JWT → PAT lookup → user.
     let got = svc
-        .require_user(&msg_with_bearer(pat_raw))
+        .require_user(&*ctx, &msg_with_bearer(pat_raw))
         .await
         .expect("bearer pat auth");
     assert_eq!(got.0, uid);
 
     // No creds → Unauthorized.
     let err = svc
-        .require_user(&Message::new("x"))
+        .require_user(&*ctx, &Message::new("x"))
         .await
         .expect_err("missing creds should fail");
     assert!(
@@ -98,7 +98,7 @@ async fn require_user_accepts_an_access_jwt_and_a_pat_and_rejects_missing_creds(
 
     // Unknown bearer → not a JWT, no PAT row → Unauthorized.
     let err = svc
-        .require_user(&msg_with_bearer("not-a-token"))
+        .require_user(&*ctx, &msg_with_bearer("not-a-token"))
         .await
         .expect_err("unknown bearer");
     assert!(matches!(err, AuthError::Unauthorized));
@@ -127,9 +127,9 @@ async fn require_user_accepts_the_auth_token_cookie() {
     let mut msg = Message::new("auth.require_user");
     msg.set_meta("http.header.cookie", format!("auth_token={access}"));
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let got = svc
-        .require_user(&msg)
+        .require_user(&*ctx, &msg)
         .await
         .expect("the auth_token cookie is the credential a browser sends");
     assert_eq!(got.0, uid);
@@ -152,9 +152,9 @@ async fn the_auth_token_cookie_is_still_verified() {
     let mut msg = Message::new("auth.require_user");
     msg.set_meta("http.header.cookie", format!("auth_token={refresh}"));
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg)
+        .require_user(&*ctx, &msg)
         .await
         .expect_err("a refresh token in the cookie must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -167,13 +167,13 @@ async fn the_auth_token_cookie_is_still_verified() {
 async fn require_user_ignores_a_wafer_session_cookie() {
     let (_raw, ctx) = fixture().await;
     let uid = seed_user_id(ctx.as_ref(), "cookie@example.com").await;
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
 
     let mut msg = Message::new("auth.require_user");
     msg.set_meta("http.header.cookie", format!("wafer_session={uid}"));
 
     let err = svc
-        .require_user(&msg)
+        .require_user(&*ctx, &msg)
         .await
         .expect_err("a session cookie must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -195,9 +195,9 @@ async fn require_user_rejects_a_refresh_jwt() {
         )
         .await;
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&refresh))
+        .require_user(&*ctx, &msg_with_bearer(&refresh))
         .await
         .expect_err("a refresh token must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -210,9 +210,9 @@ async fn require_user_rejects_an_expired_access_jwt() {
 
     let expired = sign_access_token_expired(&uid, chrono::Utc::now().timestamp() - 60);
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&expired))
+        .require_user(&*ctx, &msg_with_bearer(&expired))
         .await
         .expect_err("an expired token must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -244,9 +244,9 @@ async fn require_user_rejects_a_blocklisted_jti() {
     .await
     .expect("blocklist the jti");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&token))
+        .require_user(&*ctx, &msg_with_bearer(&token))
         .await
         .expect_err("a blocklisted jti must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -270,9 +270,9 @@ async fn require_user_rejects_a_stale_auth_version() {
         .await
         .expect("bump auth_version");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&token))
+        .require_user(&*ctx, &msg_with_bearer(&token))
         .await
         .expect_err("a token behind the user's auth_version must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -297,9 +297,9 @@ async fn require_user_rejects_a_foreign_issuer() {
         )
         .await;
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&token))
+        .require_user(&*ctx, &msg_with_bearer(&token))
         .await
         .expect_err("a foreign issuer must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -319,9 +319,9 @@ async fn require_user_rejects_a_disabled_account_on_the_jwt_path() {
         .await
         .expect("disable the account");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&token))
+        .require_user(&*ctx, &msg_with_bearer(&token))
         .await
         .expect_err("a disabled account must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
@@ -346,9 +346,9 @@ async fn require_user_rejects_an_expired_pat() {
     .await
     .expect("seed expired pat");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(expired_pat_raw))
+        .require_user(&*ctx, &msg_with_bearer(expired_pat_raw))
         .await
         .expect_err("expired pat");
     assert!(matches!(err, AuthError::Unauthorized));
@@ -376,9 +376,9 @@ async fn require_user_rejects_a_token_signed_with_a_foreign_secret() {
     let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
         .expect("sign with a foreign key");
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_user(&msg_with_bearer(&token))
+        .require_user(&*ctx, &msg_with_bearer(&token))
         .await
         .expect_err("a foreign-secret token must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");

@@ -28,7 +28,7 @@
 //     this crate's own — `ImpresspressRouterBlock`, `TransformersEmbedBlock`,
 //     `ImpresspressStorageBlock` — but the `Arc` around it is not.
 //  2. A few are struct FIELDS with no API parameter behind them —
-//     `BlockState::ctx`, `DevShared`'s handles. Those are forced by the
+//     `DevShared`'s handles. Those are forced by the
 //     NATIVE build instead: this crate is dual-target, `AuthService` and
 //     friends are `MaybeSend + MaybeSync` which is real `Send + Sync` off
 //     wasm32, and an `Rc` field would make the owning type fail that bound.
