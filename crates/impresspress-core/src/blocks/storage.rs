@@ -38,7 +38,10 @@ use wafer_run::{
 };
 
 use super::admin::STORAGE_ACCESS_LOGS_TABLE;
-use crate::util::{json_map, now_millis};
+use crate::{
+    after_response::FinalWrite,
+    util::{json_map, now_millis},
+};
 
 /// `wafer-run/storage`: wafer-core's storage block with an access log.
 pub struct ImpresspressStorageBlock {
@@ -150,7 +153,19 @@ impl Block for ImpresspressStorageBlock {
         let start = now_millis();
         let kind = msg.kind.clone();
         let inner_out = self.inner.handle(ctx, msg, input).await;
-        forward_logged(inner_out, ctx.clone_arc(), caller, kind, path, start)
+        // Taken here, while the request is dispatched, for every op: the
+        // producer writes its access row last, and on a cancelled request
+        // that write comes after the consumer has gone.
+        let final_write = crate::after_response::final_write();
+        forward_logged(
+            inner_out,
+            ctx.clone_arc(),
+            caller,
+            kind,
+            path,
+            start,
+            final_write,
+        )
     }
 
     async fn lifecycle(
@@ -188,12 +203,13 @@ impl Block for ImpresspressStorageBlock {
 /// logged it as served.
 ///
 /// The access is then logged as [`STATUS_CANCELLED`] — a write issued after
-/// the consumer is gone. Natively the producer task runs it to the end. On
-/// Cloudflare nothing keeps the invocation alive for it once the response is
-/// torn down (the producer-lifetime rule in `wafer_block::spawn`), so the row
-/// may never land. Making that one final write survive is follow-up work
-/// (SSE D3), shared with the chat route's cut-off reply
-/// (`blocks::llm::routes::streaming::sse_chat_response`).
+/// the consumer is gone. `final_write`, the guard [`ImpresspressStorageBlock`]
+/// took while the request was dispatched
+/// ([`crate::after_response::final_write`]), keeps the request alive for it
+/// where the host would otherwise end it with the response (Cloudflare, the
+/// browser's service worker); natively the producer task runs it to the end.
+/// The guard is held through every outcome's row write and dropped after it
+/// — or when the producer returns, on a path that writes no row.
 fn forward_logged(
     inner: impl Stream<Item = StreamEvent> + Send + Unpin + 'static,
     ctx: Arc<dyn Context>,
@@ -201,15 +217,25 @@ fn forward_logged(
     kind: String,
     path: String,
     start: u64,
+    final_write: FinalWrite,
 ) -> OutputStream {
     OutputStream::from_producer(move |sink, cancel| async move {
         let mut inner = inner;
+        let mut final_write = Some(final_write);
         // Every outcome after the backend was reached carries how long it
         // took, in its own column: the status says what happened, the
         // duration how long, so neither has to be parsed out of the other.
-        let log = |status: String| {
+        // The row is the producer's last write, so the guard goes with it.
+        let mut log = |status: String| {
             let elapsed = i64::try_from(now_millis().saturating_sub(start)).unwrap_or(i64::MAX);
-            log_storage_access(ctx.as_ref(), &caller, &kind, &path, status, Some(elapsed))
+            let write =
+                log_storage_access(ctx.as_ref(), &caller, &kind, &path, status, Some(elapsed));
+            let guard = final_write.take();
+            async move {
+                let written = write.await;
+                drop(guard);
+                written
+            }
         };
         let ok = || STATUS_OK.to_string();
         let mut body_forwarded = false;
@@ -289,8 +315,9 @@ const STATUS_OK: &str = "OK";
 /// (`dev::blobs::exists`), and a `HEAD` on a download, whose body the
 /// transport never pulls. Whether such a read logs `OK` or `CANCELLED`
 /// depends on whether the backend had queued its terminal before the drop,
-/// i.e. on the object's size. On Cloudflare the row is best effort; see
-/// [`forward_logged`].
+/// i.e. on the object's size. The row is written after the consumer is gone;
+/// on a host that would end the request with its response, the request's
+/// final-write guard keeps it alive for that write. See [`forward_logged`].
 pub(crate) const STATUS_CANCELLED: &str = "CANCELLED";
 
 /// Log a storage access event (best-effort). `duration_ms` is how long the
@@ -326,7 +353,10 @@ pub fn create(service: Arc<dyn StorageService>) -> Arc<ImpresspressStorageBlock>
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        rc::Rc,
+        sync::{Arc, Mutex},
+    };
 
     use futures::StreamExt as _;
     use wafer_block::{
@@ -907,6 +937,7 @@ mod tests {
             ServiceOp::STORAGE_GET.to_string(),
             "impresspress/files/f/k".to_string(),
             crate::util::now_millis(),
+            crate::after_response::final_write(),
         );
 
         assert!(
@@ -954,6 +985,7 @@ mod tests {
                 ServiceOp::STORAGE_GET.to_string(),
                 "impresspress/files/f/k".to_string(),
                 crate::util::now_millis(),
+                crate::after_response::final_write(),
             );
 
             let err = chunks(out)
@@ -971,6 +1003,107 @@ mod tests {
                 rows[0].1.starts_with("ERROR: ") && rows[0].1.contains(name),
                 "{name}: a refused terminal must be logged as an error: {rows:?}"
             );
+        }
+    }
+
+    /// Every op holds its request's final-write guard through its access-row
+    /// write and releases it after: the request's host waits for the row,
+    /// and stops waiting once it is written.
+    ///
+    /// The row write is parked ([`TestContext::hold_next_database_create`])
+    /// so the guard's state can be read while it is in flight. Fails if
+    /// `handle` takes no guard for an op (the host sees no final write), or
+    /// if the guard is released before the row is written.
+    #[tokio::test]
+    async fn every_op_holds_the_final_write_guard_through_its_access_row() {
+        use std::time::Duration;
+
+        use futures::FutureExt as _;
+        use wafer_block::wire::storage::{DeleteRequest, ListRequest};
+
+        use crate::after_response::{scope, AfterResponse};
+
+        fn encoded<T: serde::Serialize>(req: &T) -> InputStream {
+            InputStream::from_bytes(wafer_block::codec::encode(req).expect("encode request"))
+        }
+
+        let ops = [
+            (ServiceOp::STORAGE_GET, encoded(&get("uploads", "a.txt"))),
+            (
+                ServiceOp::STORAGE_GET_STREAMING,
+                encoded(&get("uploads", "a.txt")),
+            ),
+            (ServiceOp::STORAGE_PUT, encoded(&put("uploads", "b.txt"))),
+            (
+                ServiceOp::STORAGE_DELETE,
+                encoded(&DeleteRequest {
+                    folder: "uploads".into(),
+                    key: "a.txt".into(),
+                }),
+            ),
+            (
+                ServiceOp::STORAGE_LIST,
+                encoded(&ListRequest {
+                    folder: "uploads".into(),
+                    prefix: String::new(),
+                    limit: 0,
+                    offset: 0,
+                    cursor: None,
+                }),
+            ),
+        ];
+        for (op, input) in ops {
+            let (ctx, hold) = ctx_as("impresspress/files", Vec::new())
+                .await
+                .hold_next_database_create(STORAGE_ACCESS_LOGS_TABLE);
+            let (block, store) = shim();
+            store
+                .put(
+                    "impresspress/files/uploads",
+                    "a.txt",
+                    b"payload",
+                    "text/plain",
+                )
+                .await
+                .expect("seed");
+            let after = AfterResponse::new();
+
+            let out = scope(Rc::clone(&after), call(&block, &ctx, op, input)).await;
+            let writes = after.take_final_writes();
+            assert_eq!(
+                writes.len(),
+                1,
+                "{op}: the request waits for its access row"
+            );
+            let mut released = Box::pin(writes.released());
+            let consumer = tokio::spawn(chunks(out));
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !hold.was_reached() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{op}: the access row is written"));
+            assert!(
+                released.as_mut().now_or_never().is_none(),
+                "{op}: the guard is held while the row is being written"
+            );
+            hold.release();
+            tokio::time::timeout(Duration::from_secs(5), released)
+                .await
+                .unwrap_or_else(|_| panic!("{op}: the guard is released after the row"));
+            assert!(
+                !hold.budget_expired(),
+                "{op}: the row was released, not timed out"
+            );
+            consumer
+                .await
+                .expect("the consumer ran")
+                .unwrap_or_else(|e| panic!("{op}: served: {e:?}"));
+            let rows = audit_rows(&ctx).await;
+            assert_eq!(rows.len(), 1, "{op}: {rows:?}");
+            assert_eq!(rows[0].1, STATUS_OK, "{op}: {rows:?}");
         }
     }
 
@@ -1002,6 +1135,7 @@ mod tests {
             ServiceOp::STORAGE_GET.to_string(),
             "impresspress/files/uploads/big.bin".to_string(),
             crate::util::now_millis(),
+            crate::after_response::final_write(),
         );
         let first = tokio::time::timeout(Duration::from_secs(5), out.next())
             .await

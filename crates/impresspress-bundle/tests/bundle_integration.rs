@@ -1006,8 +1006,9 @@ fn a_site_or_plain_bundle_leaves_bypassed_responses_to_the_network() {
 }
 
 /// `handle_request` resolves to `{ response, after }`, and `after` — the
-/// request's audit row and deferred tasks, run once the response is out — is
-/// kept alive with `event.waitUntil`. Without it the browser may stop the
+/// request's audit row and deferred tasks, run once the response is out, and
+/// the final writes its producers still owe — is kept alive with
+/// `event.waitUntil`. Without it the browser may stop the
 /// worker as soon as the response is delivered, and that work is lost; no
 /// end-to-end test can see the loss, because a worker under test is rarely
 /// stopped that fast. `waitUntil` needs the fetch event, so `handleFetch`
