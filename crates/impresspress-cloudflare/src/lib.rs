@@ -90,6 +90,7 @@ pub mod crypto_service;
 pub mod database;
 mod deploy_endpoints;
 mod environment;
+mod executor_trace;
 pub mod helpers;
 mod host_policy;
 pub mod kv_cached_db;
@@ -291,6 +292,45 @@ where
     // `worker::Env` keeps travelling alongside it for the D1/KV/R2 *bindings*,
     // which are not var reads. See `environment`'s module doc.
     let environment = CfEnvironment::capture(&env);
+    // Executor diagnostics, `None` unless `IMPRESSPRESS_EXECUTOR_TRACE=1`.
+    // Taken before the first await, so its `ip-poll` line marks this
+    // future's first poll; see `executor_trace`'s module doc.
+    let trace = executor_trace::on_first_poll(&environment, &req);
+    let mut result = route_request(
+        req,
+        env,
+        ctx,
+        environment,
+        request_config,
+        register_blocks,
+        register_post_build,
+    )
+    .await;
+    if let (Some(trace), Ok(response)) = (&trace, &mut result) {
+        trace.stamp(response);
+    }
+    result
+}
+
+/// [`run_with_config`]'s routing, every path of it: the `/_deploy/*`
+/// endpoints, the `*.workers.dev` lockdown, the `/b/static/` R2 read-through
+/// and dispatch.
+async fn route_request<F, G>(
+    req: worker::Request,
+    env: worker::Env,
+    ctx: worker::Context,
+    environment: CfEnvironment,
+    request_config: HashMap<String, String>,
+    register_blocks: F,
+    register_post_build: G,
+) -> worker::Result<worker::Response>
+where
+    F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
+    G: FnOnce(
+        &mut wafer_run::Wafer,
+        Arc<dyn StorageService>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
     // The D1 statements this invocation sends, counted across every D1
     // service it builds (its request services, a runtime build, the audit-row
     // write it hands to `ctx.wait_until`), against D1's per-invocation query

@@ -18,6 +18,7 @@ pub use impresspress_core::{
 use super::{
     assets::{resolve_asset_base_url, ReleaseManifest},
     build::WORKER_BUILD_VERSION,
+    entry::{stage_entry_module, ENTRY_MODULE_FILE},
     prepared::{
         ApplicationArtifactIdentity, PreparedModule, PREPARED_MODULE_DIR, PREPARED_SHIM_FILE,
         PREPARED_TEXT_GLOB,
@@ -176,7 +177,7 @@ pub fn generate(cfg: &CloudflareConfig, repo_root: &Path, out_dir: &Path) -> Res
 /// [`super::build::run`] has already produced.
 ///
 /// This deliberately omits Wrangler's custom `[build]` hook. `versions
-/// upload` still bundles the staged `shim.mjs` and its modules, but it must
+/// upload` still bundles the entry module and the modules it imports, but it must
 /// not compile the consumer crate a second time: doing so is both expensive
 /// and breaks the guarantee that the locally inspected Wasm is the artifact
 /// being uploaded.
@@ -361,6 +362,9 @@ fn generate_named(
         prepared,
     } = identities;
     let mut value = base_toml(cfg, role);
+    // `main` names it, relative to this config; written with every config so
+    // no config can name a module that is not there.
+    stage_entry_module(out_dir)?;
 
     if let Some(rel) = cfg.wrangler_overrides_path.as_ref() {
         let abs = repo_root.join(rel);
@@ -760,10 +764,9 @@ fn base_toml(cfg: &CloudflareConfig, role: ConfigRole) -> toml::Value {
     let mut root = toml::map::Map::new();
     root.insert("name".into(), Value::String(cfg.worker_name.clone()));
     root.insert("account_id".into(), Value::String(cfg.account_id.clone()));
-    root.insert(
-        "main".into(),
-        Value::String("../../build/worker/shim.mjs".into()),
-    );
+    // The generated entry module, which wraps worker-build's shim; see
+    // `super::entry`. `generate_named` writes it beside this config.
+    root.insert("main".into(), Value::String(ENTRY_MODULE_FILE.into()));
     root.insert(
         "compatibility_date".into(),
         Value::String(cfg.compatibility_date.clone()),
@@ -791,7 +794,8 @@ fn base_toml(cfg: &CloudflareConfig, role: ConfigRole) -> toml::Value {
     // local `impresspress build --target cloudflare` path in
     // `build::ensure_worker_build_installed`) — worker-build 0.8.x rejects
     // consumers using `worker < 0.8` (hard version check) and changed its
-    // output layout from `build/worker/shim.mjs` (which `main` points to)
+    // output layout from `build/worker/shim.mjs` (which the entry module
+    // `main` names imports; see `super::entry`)
     // to `build/index.js`. Until we upgrade the `worker` crate, lock the
     // toolchain to this exact version for both the local build and the
     // wrangler-driven rebuild during deploy.

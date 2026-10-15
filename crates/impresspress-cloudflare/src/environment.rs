@@ -56,6 +56,11 @@ pub(crate) const ALLOW_WORKERS_DEV_KEY: &str = "IMPRESSPRESS_ALLOW_WORKERS_DEV";
 /// [`make_console_logger`](crate::make_console_logger).
 pub(crate) const CF_LOG_LEVEL_KEY: &str = "IMPRESSPRESS_CF_LOG_LEVEL";
 
+/// Worker var (`env.var`) that turns on the executor diagnostics in
+/// [`crate::executor_trace`]. Set to `"1"` on a test Worker only; unset (or
+/// anything else) and those diagnostics emit no log line and no header.
+pub(crate) const EXECUTOR_TRACE_KEY: &str = "IMPRESSPRESS_EXECUTOR_TRACE";
+
 /// Worker `Env` bindings that override D1 variables (set via
 /// `wrangler secret put`). Most config belongs in D1 so admins can manage it
 /// through the dashboard — this list stays short.
@@ -124,6 +129,7 @@ pub(crate) struct CfEnvironment {
     allow_workers_dev: Option<String>,
     deploy_token: Option<String>,
     d1_queries_per_invocation: Option<String>,
+    executor_trace: Option<String>,
 
     // ── the password hasher: read into the crypto service only ──────────────
     // The pepper is not here: it is the password-hasher Worker's, read from
@@ -212,6 +218,7 @@ impl CfEnvironment {
             allow_workers_dev: var(env, ALLOW_WORKERS_DEV_KEY),
             deploy_token: secret(env, impresspress_core::config_vars::DEPLOY_TOKEN_KEY),
             d1_queries_per_invocation: var(env, D1_QUERIES_PER_INVOCATION_KEY),
+            executor_trace: var(env, EXECUTOR_TRACE_KEY),
 
             password_hasher_shards: var(env, impresspress_password::protocol::SHARDS_VAR),
 
@@ -368,6 +375,21 @@ impl CfEnvironment {
     /// way — see [`host_policy`](crate::host_policy).
     pub(crate) fn allows_workers_dev(&self) -> bool {
         self.allow_workers_dev.as_deref() == Some("1")
+    }
+
+    /// Whether this Worker emits the executor diagnostics
+    /// ([`crate::executor_trace`]): `IMPRESSPRESS_EXECUTOR_TRACE` is exactly
+    /// `"1"`, the same spelling the generated JS entry module tests for.
+    pub(crate) fn executor_trace_enabled(&self) -> bool {
+        self.executor_trace.as_deref() == Some("1")
+    }
+
+    /// Bind `IMPRESSPRESS_EXECUTOR_TRACE` to the raw string a Worker var would
+    /// carry. Test-only: production code fills every field through
+    /// [`capture`](Self::capture) and nowhere else.
+    #[cfg(test)]
+    pub(crate) fn set_executor_trace_for_test(&mut self, value: &str) {
+        self.executor_trace = Some(value.to_string());
     }
 
     /// This deploy's `WAFER_RUN__DATABASE__STRICT_SCHEMA` verdict — whether a
@@ -653,6 +675,7 @@ pub(crate) mod test_support {
             allow_workers_dev: None,
             deploy_token: None,
             d1_queries_per_invocation: None,
+            executor_trace: None,
             password_hasher_shards: None,
             release_asset_id: None,
             release_asset_prefix: None,
@@ -704,6 +727,9 @@ pub(crate) mod test_support {
             ("deploy_token", |e| e.deploy_token = Some("v".to_string())),
             ("d1_queries_per_invocation", |e| {
                 e.d1_queries_per_invocation = Some("v".to_string())
+            }),
+            ("executor_trace", |e| {
+                e.executor_trace = Some("v".to_string())
             }),
             ("password_hasher_shards", |e| {
                 e.password_hasher_shards = Some("v".to_string())
@@ -846,6 +872,7 @@ mod tests {
             (ALLOW_WORKERS_DEV_KEY, "1"),
             (impresspress_core::config_vars::DEPLOY_TOKEN_KEY, "token"),
             (D1_QUERIES_PER_INVOCATION_KEY, "50"),
+            (EXECUTOR_TRACE_KEY, "1"),
             (impresspress_password::protocol::SHARDS_VAR, "5"),
             (
                 request_services::RELEASE_ASSET_ID_VAR,
@@ -915,6 +942,7 @@ mod tests {
         assert!(captured.allows_workers_dev());
         assert_eq!(captured.deploy_token(), Some("token"));
         assert_eq!(captured.d1_queries_per_invocation(), Ok(50));
+        assert!(captured.executor_trace_enabled());
         assert_eq!(captured.password_hasher_shards(), Ok(5));
         assert_eq!(
             captured.release_asset_vars().prefix,

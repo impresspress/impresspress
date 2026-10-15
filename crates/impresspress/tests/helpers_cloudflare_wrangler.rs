@@ -3,6 +3,7 @@ use std::fs;
 use impresspress::cli::helpers::cloudflare::{
     assets::release_manifest_from_staged_dir,
     build::WORKER_BUILD_VERSION,
+    entry::entry_module_source,
     prepared::{stage_prepared_module, ApplicationArtifactIdentity, PREPARED_TEXT_GLOB},
     wrangler::{
         generate, generate_candidate_upload, generate_final_upload, generate_password_hasher,
@@ -99,7 +100,12 @@ fn generate_writes_wrangler_toml_with_required_fields() {
     assert!(body.contains(r#"database_name = "wafer-site-prod""#));
     assert!(body.contains(r#"binding = "STORAGE""#));
     assert!(body.contains(r#"bucket_name = "wafer-site-assets""#));
-    assert!(body.contains(r#"main = "../../build/worker/shim.mjs""#));
+    assert!(body.contains(r#"main = "entry.mjs""#));
+    assert_eq!(
+        fs::read_to_string(out.join("entry.mjs")).unwrap(),
+        entry_module_source(),
+        "the config's `main` is written beside it"
+    );
     assert!(
         body.contains(r#"binding = "CF_VERSION_METADATA""#),
         "runtime cache invalidation needs the Worker version identity:\n{body}"
@@ -814,9 +820,13 @@ fn candidate_and_final_configs_reuse_identity_but_only_final_loads_text_plan() {
 
     assert!(candidate.get("build").is_none());
     assert!(final_cfg.get("build").is_none());
+    // Both versions enter through the generated entry module: the candidate
+    // names it directly, the final version through the prepared wrapper that
+    // re-exports it (`prepared::stage_prepared_module`).
+    assert_eq!(candidate["main"].as_str(), Some("entry.mjs"));
     assert_eq!(
-        candidate["main"].as_str(),
-        Some("../../build/worker/shim.mjs")
+        fs::read_to_string(out.join("entry.mjs")).unwrap(),
+        entry_module_source()
     );
     assert_eq!(
         final_cfg["main"].as_str(),
