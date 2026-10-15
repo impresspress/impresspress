@@ -263,6 +263,13 @@ question 3 and the first review-closure prerequisite.
 
 ### RT-01 — Cold contenders independently hydrate complete prepared runtimes
 
+**Status (2026-10-15): fixed.** A cold contender now waits on its own timer for
+the slot owner's build and serves the runtime it publishes; it re-enters
+`get_or_build` once, then answers `RuntimeBuildBusy` (503, `Retry-After`). A
+failed owner is recorded in `BUILD_LAST_FAILURE` so its waiters answer 503
+instead of rebuilding in turn. See `runtime_cache::admit_cold`. The line
+numbers below describe the code before the fix.
+
 **Observed path**
 
 `crates/impresspress-cloudflare/src/runtime_cache.rs:636-689`

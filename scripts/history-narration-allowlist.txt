@@ -13,7 +13,6 @@
 # not been rewritten yet. Rewrite them when you touch the file. Say what the
 # code does; the history is in `git log`.
 1	crates/impresspress-cloudflare/src/crypto_service.rs
-1	crates/impresspress-cloudflare/src/runtime_cache.rs
 1	crates/impresspress-core/Cargo.toml
 1	crates/impresspress-core/src/blocks/admin/migrations/mod.rs
 5	crates/impresspress-core/src/blocks/admin/mod.rs

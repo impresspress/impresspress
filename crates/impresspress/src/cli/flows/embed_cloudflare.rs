@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 
 use crate::cli::helpers::cloudflare::{
-    assets, build as cf_build, deploy as cf_deploy, env, first_create, password_hasher,
+    analytics, assets, build as cf_build, deploy as cf_deploy, env, first_create, password_hasher,
     profile_check, wrangler,
 };
 
@@ -487,13 +487,30 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     .await?;
     cf_deploy::smoke_preview_lockdown(&final_upload.preview_url).await?;
     cf_deploy::smoke_authenticated_get(&final_upload.preview_url, &deploy_token, "/health").await?;
-    cf_deploy::smoke_authenticated_concurrency(
+    // The memory report below counts the smoke's requests only, so its window
+    // opens here, after verify, lockdown and `/health`.
+    let smoke_since = impresspress_core::util::now_rfc3339();
+    let smoke = cf_deploy::smoke_authenticated_concurrency(
         &final_upload.preview_url,
         &deploy_token,
         &cfg.deploy_smoke_paths,
         cf_deploy::KV_PROPAGATION_SETTLE,
     )
-    .await?;
+    .await;
+    // How close the smoke came to the 128 MB isolate limit, read back from
+    // Cloudflare's analytics — printed whether the smoke passed or not, since
+    // a failed smoke is when the peak matters most.
+    analytics::report_candidate_memory(
+        &analytics::CandidateWindow {
+            account_id: &cfg.account_id,
+            script_name: &cfg.worker_name,
+            version_id: &final_upload.version_id,
+            since: &smoke_since,
+        },
+        cf_deploy::CONCURRENT_SMOKE_TOTAL_REQUESTS as u64,
+    )
+    .await;
+    smoke?;
     deployment_gate.final_verified()?;
     println!(
         "-> final candidate plan, release asset, preview lockdown, /health, and \

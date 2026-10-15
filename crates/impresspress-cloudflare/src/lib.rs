@@ -428,13 +428,12 @@ where
 
     match result {
         Ok(response) => Ok(response),
-        Err(e)
-            if e.downcast_ref::<runtime_cache::RuntimeBuildBusy>()
-                .is_some() =>
-        {
-            worker::console_log!("impresspress-cloudflare runtime build busy; retrying is safe");
+        Err(ref e) if let Some(&busy) = e.downcast_ref::<runtime_cache::RuntimeBuildBusy>() => {
+            worker::console_log!("impresspress-cloudflare {busy}; retrying is safe");
             let mut response = worker::Response::error("service temporarily unavailable", 503)?;
-            response.headers_mut().set("Retry-After", "1")?;
+            response
+                .headers_mut()
+                .set("Retry-After", &busy.retry_after_secs().to_string())?;
             Ok(response)
         }
         Err(e) => {

@@ -68,6 +68,12 @@ pub enum CacheOutcome {
         build_ordinal: u32,
         duration_ms: u64,
     },
+    /// Nothing usable was cached and another request in this isolate owned
+    /// the build slot, so this request waited on its own timer and served the
+    /// runtime that owner published — no KV read, no build of its own.
+    /// `waited_ms` is how long it waited. Concurrent cold requests in one
+    /// isolate share one build this way instead of building one each.
+    Waited { waited_ms: u64 },
 }
 
 impl CacheOutcome {
@@ -79,14 +85,15 @@ impl CacheOutcome {
             Self::ProbeFailed => "probe-failed",
             Self::Rebuilt { .. } => "rebuilt",
             Self::ColdBuilt { .. } => "cold-built",
+            Self::Waited { .. } => "waited",
         }
     }
 
     /// This isolate's cumulative runtime-build count, if this outcome paid
-    /// for a build; `None` for `Hit`/`ProbedFresh`.
+    /// for a build; `None` for every outcome that did not, `Waited` included.
     pub fn build_ordinal(self) -> Option<u32> {
         match self {
-            Self::Hit | Self::ProbedFresh | Self::ProbeFailed => None,
+            Self::Hit | Self::ProbedFresh | Self::ProbeFailed | Self::Waited { .. } => None,
             Self::Rebuilt { build_ordinal, .. } | Self::ColdBuilt { build_ordinal, .. } => {
                 Some(build_ordinal)
             }
@@ -96,10 +103,18 @@ impl CacheOutcome {
     /// Runtime-cache resolution duration when this request built a Wafer.
     pub fn build_duration_ms(self) -> Option<u64> {
         match self {
-            Self::Hit | Self::ProbedFresh | Self::ProbeFailed => None,
+            Self::Hit | Self::ProbedFresh | Self::ProbeFailed | Self::Waited { .. } => None,
             Self::Rebuilt { duration_ms, .. } | Self::ColdBuilt { duration_ms, .. } => {
                 Some(duration_ms)
             }
+        }
+    }
+
+    /// How long this request waited for another request's build, if it did.
+    pub fn wait_ms(self) -> Option<u64> {
+        match self {
+            Self::Waited { waited_ms } => Some(waited_ms),
+            _ => None,
         }
     }
 }
@@ -115,14 +130,21 @@ impl CacheOutcome {
 /// actively misleading. When this request paid for a build, the ordinal is
 /// folded into the `desc` text instead (`"rebuilt (build 3)"`), while the
 /// separately measured elapsed milliseconds are emitted as
-/// `runtime-build;dur=<ms>`.
+/// `runtime-build;dur=<ms>`. A request that waited for another request's
+/// build emits its wait as `runtime-wait;dur=<ms>`.
 pub fn server_timing_header(outcome: CacheOutcome) -> String {
     match (outcome.build_ordinal(), outcome.build_duration_ms()) {
         (Some(n), Some(duration_ms)) => format!(
             "cache;desc=\"{} (build {n})\", runtime-build;dur={duration_ms}",
             outcome.as_str()
         ),
-        _ => format!("cache;desc=\"{}\"", outcome.as_str()),
+        _ => match outcome.wait_ms() {
+            Some(waited_ms) => format!(
+                "cache;desc=\"{}\", runtime-wait;dur={waited_ms}",
+                outcome.as_str()
+            ),
+            None => format!("cache;desc=\"{}\"", outcome.as_str()),
+        },
     }
 }
 
@@ -232,6 +254,23 @@ mod tests {
                 duration_ms: 82,
             }),
             r#"cache;desc="cold-built (build 1)", runtime-build;dur=82"#
+        );
+    }
+
+    #[test]
+    fn a_waiter_reports_its_wait_and_no_build() {
+        // A request that waited for another request's build paid no build of
+        // its own; reporting one would make the live check ("one build per
+        // isolate") unreadable from Server-Timing.
+        let waited = CacheOutcome::Waited { waited_ms: 640 };
+        assert_eq!(waited.as_str(), "waited");
+        assert_eq!(waited.build_ordinal(), None);
+        assert_eq!(waited.build_duration_ms(), None);
+        assert_eq!(waited.wait_ms(), Some(640));
+        assert_eq!(CacheOutcome::Hit.wait_ms(), None);
+        assert_eq!(
+            server_timing_header(waited),
+            r#"cache;desc="waited", runtime-wait;dur=640"#
         );
     }
 

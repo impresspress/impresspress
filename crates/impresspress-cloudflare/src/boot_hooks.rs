@@ -134,8 +134,8 @@ impl impresspress_core::builder::BootHooks for CfDeployBootHooks {
 ///    this module's own comments flag for Cloudflare error 1102.
 /// 3. **Concurrent isolates race the insert.** `block_name` is `TEXT NOT NULL
 ///    UNIQUE`; `load_and_seed` is read-then-write with no conflict tolerance,
-///    and `hydrate_transient_dynamic_runtime` fires fleet-wide on a generation
-///    bump, so the losing isolate answers a unique-constraint 500.
+///    and a generation bump rebuilds runtimes across the fleet, so the
+///    losing isolate answers a unique-constraint 500.
 ///
 /// Auto-generated secrets are seeding too, and are likewise the funnel's job:
 /// this hook does not call `variables::seed_auto_generated`.

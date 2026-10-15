@@ -268,7 +268,11 @@ load-bearing for access decisions, guarded upstream by an exhaustive
   `CfBootHooks`. 5.5's own evidence ("removes a copy rather than adding work")
   holds for the two dynamic builds and not for this one: `build_runtime` takes
   its settings from the plan and does zero D1 structural reads there, so the
-  seed would add two D1 round trips to a ~132us hydration on every cold isolate.
+  seed would add two D1 round trips to a prepared hydration on every cold isolate.
+  (This note first called that hydration ~132us. Measured 2026-10-15 it is
+  170–245 ms of CPU locally, and a cold request that builds one measured about
+  400–670 ms of CPU on Cloudflare, its own work included; what the plan saves
+  is the D1 round trips, not CPU.)
   One line to flip if the ruling is meant literally.
 - **Seed cost, as 5.5 required:** two D1 reads, zero writes on a settled
   deployment — one `find_by_key` for the single `auto_generate` var in the

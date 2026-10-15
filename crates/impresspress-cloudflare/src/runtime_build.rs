@@ -65,11 +65,9 @@ pub(crate) struct BuiltRuntime {
 /// storage block — is now `impresspress_core::builder::boot`'s ordering, with
 /// this function supplying only the Cloudflare-specific answers:
 ///
-/// - **Grants come from D1.** `runtime_cache::get_or_build`'s stored build
-///   remembered to load them and `hydrate_transient_dynamic_runtime` had to
-///   repeat the call; nothing but a comment recorded that the prepared path's
-///   omission was deliberate. `GrantSource` makes it an argument the compiler
-///   demands.
+/// - **Grants come from D1.** Every dynamic build loads them, and the
+///   prepared path deliberately does not; `GrantSource` makes that an
+///   argument the compiler demands rather than a comment.
 /// - **The seeding hook runs here and only here.** Seeding — structural
 ///   `block_settings` rows and auto-generated secrets — is a deploy-time
 ///   mutation, and this is the deploy. Its cost is two D1 reads plus, on a
@@ -88,7 +86,7 @@ pub(crate) async fn boot_deploy_runtime(built: &mut BuiltRuntime) -> Result<Boot
 }
 
 /// Run the same lifecycle over a **dynamically built request-path** runtime —
-/// the stored per-isolate build and the request-local transient one.
+/// the per-isolate build `runtime_cache::get_or_build` publishes.
 ///
 /// Same grant source as the deploy funnel, and a deliberately different hook:
 /// [`CfRequestBootHooks`] re-reads `block_settings` and republishes it, and
@@ -155,10 +153,13 @@ async fn boot_dynamic(
 ///   would be wrong here: they re-read `block_settings` because their own
 ///   pre-`build()` read predates admin's migration, whereas this path takes
 ///   its settings from the plan and performs **no** D1 structural read at
-///   all. Adding one would put back exactly what the plan exists to remove
-///   (~132us hydration versus a measured up-to-8.4s dynamic build), on every
-///   cold isolate, to re-derive state the deploy funnel already sealed into
-///   the plan.
+///   all. Adding one would put back exactly what the plan exists to remove —
+///   D1 round trips and subrequests (a dynamic build measured up to 8.4 s of
+///   wall time) — on every cold isolate, to re-derive state the deploy funnel
+///   already sealed into the plan. The plan saves I/O, not CPU: a cold
+///   prepared build still costs 170–245 ms of CPU locally, and a cold request
+///   that builds one measured about 400–670 ms of CPU on Cloudflare, its own
+///   work included (CF-RESOURCE-LIMITS, 2026-10-15).
 pub(crate) async fn boot_prepared_runtime(built: &mut BuiltRuntime) -> Result<BootReport, String> {
     request_services::scope(built.services.clone(), async {
         impresspress_core::builder::boot(
