@@ -289,6 +289,64 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_card_can_be_hidden() {
+        let s = Card::plain(html! { "b" })
+            .hidden(true)
+            .render()
+            .into_string();
+        assert_eq!(
+            s,
+            r#"<div class="card" hidden><div class="card__body">b</div></div>"#
+        );
+    }
+
+    /// The flush card the phone-layout spec (`card-flush.spec.ts`) lays out
+    /// in a real browser. The spec reads it from a fixture file so it runs
+    /// against `Card`'s markup rather than a copy of it; this keeps the file
+    /// what `Card` renders today. To refresh it after a deliberate markup
+    /// change, write `flush_card_fixture()` to the path below.
+    fn flush_card_fixture() -> String {
+        let cols = [
+            super::super::TableCol::new("Email").primary(),
+            super::super::TableCol::new("Role"),
+            super::super::TableCol::new("Created"),
+        ];
+        let rows = [
+            ("admin@example.com", "Admin", "Oct 1"),
+            ("bob@example.com", "User", "Oct 2"),
+        ]
+        .into_iter()
+        .map(|(email, role, created)| {
+            super::super::TableRow::new(vec![
+                html! { (email) },
+                html! { (role) },
+                html! { (created) },
+            ])
+        })
+        .collect();
+        let table = super::super::DataTable::new(&cols).rows(rows).render();
+        let card = Card::titled("Recent users", table)
+            .flush()
+            .link("View users", "/b/admin/users")
+            .render();
+        format!("{}\n", card.into_string())
+    }
+
+    #[test]
+    fn the_flush_card_e2e_fixture_is_what_card_renders() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-web/tests/e2e/fixtures/card-flush.html"
+        );
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            on_disk,
+            flush_card_fixture(),
+            "{path} is out of date; write the expected text above to it"
+        );
+    }
+
+    #[test]
     fn data_attributes_on_a_plain_card_go_on_its_div() {
         let s = Card::plain(html! { "b" })
             .data("offer-card", "")

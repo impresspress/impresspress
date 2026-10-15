@@ -23,10 +23,13 @@
 @media (max-width: 720px) {
 	.card { padding: var(--space-4); }
 }
-/* Title block, then the head link (`Card::link`) at the end. It wraps
-   rather than overflow: on a phone the link drops under the title. */
+/* Title block, then the head link (`Card::link`) at the end, on the
+   title's first baseline: the link is a taller box than its text (the
+   44px target on touch), so top alignment would sit its label below the
+   title's. It wraps rather than overflow: on a phone the link drops under
+   the title. */
 .card__head {
-	display: flex; flex-wrap: wrap; align-items: flex-start;
+	display: flex; flex-wrap: wrap; align-items: first baseline;
 	gap: var(--space-2) var(--space-4);
 	margin-bottom: var(--space-4);
 }
@@ -53,7 +56,26 @@
 @media (max-width: 720px) {
 	.card--flush > .card__head { padding: var(--space-4) var(--space-4) 0; }
 }
+/* The table's frame is the card's. On a wide screen its first and last
+   columns take the card's inset, so the cells line up with the head. */
 .card--flush .data-table { border: 0; border-radius: 0; }
+@media (min-width: 721px) {
+	.card--flush .data-table th:first-child,
+	.card--flush .data-table td:first-child { padding-left: var(--space-5); }
+	.card--flush .data-table th:last-child,
+	.card--flush .data-table td:last-child { padding-right: var(--space-5); }
+}
+/* Below 720px a data table turns each row into a framed box of its own
+   (table.css "Card mode"). In a flush card that would be a card inside a
+   card, clipped against its edges: the rows become divided bands at the
+   card's phone inset instead. */
+@media (max-width: 720px) {
+	.card--flush .data-table:not(.data-table--scroll) tr {
+		border: 0; border-radius: 0; margin: 0;
+		padding: var(--space-3) var(--space-4);
+	}
+	.card--flush .data-table:not(.data-table--scroll) tr + tr { border-top: 1px solid var(--border-light); }
+}
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 
@@ -748,14 +770,10 @@
  * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
  * `<style>` block (task 12e). Products cards are the shared `.card`: the
  * products-only radius and shadow went with the products tab strip. */
-/* Onboarding guide. The three tiles are cards and now look like cards: they
-   used to carry a bespoke treatment -- 20px padding (--space-5, off the 24px
-   every other card body uses), a 14px radius (the scale has 12px), a
-   diagonal brand-tinted gradient and a 26px drop shadow no other surface in
-   the admin has. Next to the plain white cards on every neighbouring page it
-   read as a different design language rather than the same one. */
+/* Onboarding guide. The three tiles are cards and look like cards: the
+   same surface, border, 12px radius and 20px padding as `.card`. */
 .products-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
-.products-guide__item { position: relative; padding: var(--space-6); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-1); }
+.products-guide__item { position: relative; padding: var(--space-5); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-1); }
 /* At the original 14% mix, --primary-button on this background only reaches
    4.12:1 (computed) -- below the 4.5:1 AA floor for the "1"/"2"/"3" digit
    this renders (products/pages.rs). A 6% mix keeps the same pale-pink chip

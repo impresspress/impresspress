@@ -517,8 +517,6 @@ mod tests {
             .collect()
     }
 
-    /// The drawing is decorative; the values are a real table with a
-    /// caption, inside a disclosure keyboard and touch users can open.
     /// Both chart kinds are a titled `Card`: the h2 is the series, the
     /// subtitle is the window, and "View" is the card's head link, not a
     /// button. Nothing card-level sits inside it (the values table is a
@@ -568,6 +566,8 @@ mod tests {
         }
     }
 
+    /// The drawing is decorative; the values are a real table with a
+    /// caption, inside a disclosure keyboard and touch users can open.
     #[test]
     fn chart_values_are_an_accessible_table_and_the_drawing_is_hidden() {
         for card in [

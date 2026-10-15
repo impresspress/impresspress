@@ -5,10 +5,11 @@ use maud::{html, Markup};
 /// The heading of one section of a page's body: an `h2` title with an
 /// optional trailing slot (a button, a count, a status) on the same row.
 ///
-/// This is the ONLY in-body heading a page renders. The page's own title,
-/// description and page-level actions belong in the shell topbar
-/// (`ui::shell::Topbar`), which owns the page's single `h1`; a section under
-/// it is therefore always an `h2`, whatever the section contains.
+/// An in-body heading is either this or the title of a `components::Card`
+/// (the heading of a framed section). The page's own title, description and
+/// page-level actions belong in the shell topbar (`ui::shell::Topbar`), which
+/// owns the page's single `h1`; a section under it is therefore always an
+/// `h2`, whatever the section contains.
 pub fn section_header(title: &str, action: Option<Markup>) -> Markup {
     html! {
         div .section-header {
