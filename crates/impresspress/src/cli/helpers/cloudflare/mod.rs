@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod assets;
 pub mod build;
 pub mod deploy;
+pub mod entry;
 pub mod env;
 pub mod first_create;
 pub mod password_hasher;

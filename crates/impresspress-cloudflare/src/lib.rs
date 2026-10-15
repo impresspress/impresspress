@@ -90,6 +90,7 @@ pub mod crypto_service;
 pub mod database;
 mod deploy_endpoints;
 mod environment;
+mod executor_trace;
 pub mod helpers;
 mod host_policy;
 pub mod kv_cached_db;
@@ -291,6 +292,48 @@ where
     // `worker::Env` keeps travelling alongside it for the D1/KV/R2 *bindings*,
     // which are not var reads. See `environment`'s module doc.
     let environment = CfEnvironment::capture(&env);
+    // Executor diagnostics, `None` unless `IMPRESSPRESS_EXECUTOR_TRACE=1`.
+    // Taken before the first await, so its `ip-poll` line marks this
+    // future's first poll; see `executor_trace`'s module doc.
+    let trace = executor_trace::on_first_poll(&environment, &req);
+    let mut result = route_request(
+        req,
+        env,
+        ctx,
+        environment,
+        request_config,
+        register_blocks,
+        register_post_build,
+    )
+    .await;
+    // Every `Ok` response, whichever route produced it. An `Err` becomes
+    // worker's own 500 and carries no header; the `ip-poll` line above
+    // already names the instance.
+    if let (Some(trace), Ok(response)) = (&trace, &mut result) {
+        trace.stamp(response);
+    }
+    result
+}
+
+/// [`run_with_config`]'s routing, every path of it: the `/_deploy/*`
+/// endpoints, the `*.workers.dev` lockdown, the `/b/static/` R2 read-through
+/// and dispatch.
+async fn route_request<F, G>(
+    req: worker::Request,
+    env: worker::Env,
+    ctx: worker::Context,
+    environment: CfEnvironment,
+    request_config: HashMap<String, String>,
+    register_blocks: F,
+    register_post_build: G,
+) -> worker::Result<worker::Response>
+where
+    F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
+    G: FnOnce(
+        &mut wafer_run::Wafer,
+        Arc<dyn StorageService>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
     // The D1 statements this invocation sends, counted across every D1
     // service it builds (its request services, a runtime build, the audit-row
     // write it hands to `ctx.wait_until`), against D1's per-invocation query
@@ -1920,6 +1963,87 @@ mod cold_isolate_tests {
             impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Spawn),
             impresspress_core::deferred::DeferMode::Queued,
             "serving the deploy request selected the queued defer mode"
+        );
+    }
+}
+
+/// [`run_with_config`]'s executor-trace wiring, driven through the real entry
+/// point: a missing `ip-poll` line is the wedge signal, so a refactor that
+/// dropped the `on_first_poll` call (or the header stamp) would mislabel
+/// every request while the unit tests in `executor_trace` stayed green.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod executor_trace_wiring_tests {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    /// One unauthorized `/_deploy/prepared` request — answered 404 before
+    /// any binding is touched — through `run_with_config`, with `vars` as the
+    /// Worker's `Env`.
+    async fn serve(vars: &[(&str, &str)]) -> worker::Response {
+        let env = js_sys::Object::new();
+        for (name, value) in vars {
+            js_sys::Reflect::set(&env, &(*name).into(), &(*value).into()).expect("set a var");
+        }
+        let req =
+            worker::Request::new("https://example.test/_deploy/prepared", worker::Method::Get)
+                .expect("request");
+        let ctx = worker::Context::new(
+            JsValue::from(js_sys::Object::new()).unchecked_into::<worker::worker_sys::Context>(),
+        );
+        let response = run_with_config(
+            req,
+            JsValue::from(env).unchecked_into::<worker::Env>(),
+            ctx,
+            HashMap::new(),
+            Ok::<ImpresspressBuilder, Box<dyn std::error::Error>>,
+            |_, _| Ok(()),
+        )
+        .await
+        .expect("a response");
+        assert_eq!(response.status_code(), 404, "the deploy endpoint answered");
+        response
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_traced_request_is_polled_through_the_trace_and_stamped() {
+        // Starts with no shared state and leaves the global as it found it.
+        let _clean = executor_trace::NoSharedState::take();
+        let response = serve(&[(environment::EXECUTOR_TRACE_KEY, "1")]).await;
+
+        let instance = response
+            .headers()
+            .get(executor_trace::INSTANCE_HEADER)
+            .expect("read the header")
+            .expect("a traced response carries the instance header");
+        let parts: Vec<&str> = instance.split('/').collect();
+        assert_eq!(parts.len(), 3, "<isolate>/<wasm>/<generation>: {instance}");
+        assert_eq!(parts[1].len(), 32, "a drawn wasm id: {instance}");
+        assert!(parts[2]
+            .parse::<u32>()
+            .is_ok_and(|generation| generation >= 1));
+        assert!(
+            executor_trace::NoSharedState::created_since(),
+            "the first poll ran the trace, which created the shared state"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_untraced_request_carries_no_instance_header() {
+        let _clean = executor_trace::NoSharedState::take();
+        let response = serve(&[]).await;
+
+        assert!(
+            !executor_trace::NoSharedState::created_since(),
+            "an untraced request must not create the shared state"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(executor_trace::INSTANCE_HEADER)
+                .expect("read the header"),
+            None
         );
     }
 }
