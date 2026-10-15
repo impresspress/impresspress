@@ -1,6 +1,7 @@
 //! The work one request leaves to run after its response: its
-//! `request_logs` audit row and the tasks its handlers deferred
-//! ([`crate::deferred`]).
+//! `request_logs` audit row, the tasks its handlers deferred
+//! ([`crate::deferred`]), and the final writes its producers still owe
+//! ([`final_write`]).
 //!
 //! A host that must not pay for that work on the response path (the
 //! Cloudflare Worker, the browser's service worker) runs each request's
@@ -40,6 +41,46 @@
 //! account lookup; signup defers after its settings reads and the
 //! multi-statement account insert, so its verification mail runs on what
 //! those left, which is still most of the limit.
+//!
+//! # A producer's one write after its consumer left
+//!
+//! A streamed response's producer runs on a task of its own, and the rule in
+//! `wafer_block::spawn` is that it finishes its work before its terminal:
+//! once its stream has ended, nothing keeps the request alive for it. A
+//! producer cancelled because its consumer left has no terminal, yet some
+//! still owe one bounded write: the storage block's access row for a read the
+//! client abandoned, the part of a chat reply already handed to the
+//! transport. [`final_write`] is the opt-in exception the wafer-run rule
+//! allows ("unless the host extends the request for it").
+//!
+//! - The guard is taken in a block's `handle`, which runs while the request
+//!   is dispatched, so it exists before the consumer could leave. From
+//!   inside a producer's own poll it is a no-op: the producer is polled from
+//!   its own task, outside this scope (Cloudflare re-enters only the
+//!   request's *services* there), and a guard taken that late could race the
+//!   head.
+//! - The producer drops it once the write is done, or at its terminal. A
+//!   panic or an early `return` drops it too.
+//! - The host takes [`AfterResponse::take_final_writes`] once the dispatch
+//!   has returned and keeps the request alive until [`FinalWrites::released`]
+//!   resolves: Cloudflare in a `ctx.wait_until` of its own, the browser in
+//!   the promise it hands `event.waitUntil`. The platform bounds that: on
+//!   Workers, at most 30 s after the client disconnects or the body ends. A
+//!   stream still being read has no such bound, and needs none.
+//! - Natively there is no scope, the guard is a no-op, and the producer's
+//!   tokio task carries the write while the process is up.
+//!
+//! The write runs in the producer under its own request's services, so on
+//! Cloudflare it counts against that invocation's D1 statements exactly as a
+//! handler's write does. Nothing is reserved for it: it is one or two
+//! statements against a per-invocation limit of 1,000 (the Cloudflare
+//! adapter's `database` module). It is waited on apart from the audit row
+//! and the deferred tasks, never joined into their ordering. On Cloudflare a
+//! request that queued neither (every SSE stream without the `resp.stream`
+//! marker) runs no after-response work at all, so its
+//! [`AUDIT_ROW_STATEMENTS`] stay reserved for the whole stream. That is
+//! four of a thousand, harmless and older than final writes; it is not a
+//! reason to route final writes through that work.
 
 use std::{
     collections::HashMap,
@@ -49,6 +90,7 @@ use std::{
     task::{Context as TaskContext, Poll},
 };
 
+use futures::channel::oneshot;
 use wafer_core::interfaces::database::service::DatabaseService;
 
 use crate::{deferred::DeferredTask, IsolateCell};
@@ -90,6 +132,9 @@ pub struct QueuedRequestLog {
 pub struct AfterResponse {
     audit_row: IsolateCell<QueuedRequestLog>,
     tasks: IsolateCell<Vec<DeferredTask>>,
+    /// One receiver per [`FinalWrite`] taken in this request. `take`n, not
+    /// read: [`IsolateCell::get`] needs `T: Clone`.
+    final_writes: IsolateCell<Vec<oneshot::Receiver<()>>>,
 }
 
 impl AfterResponse {
@@ -106,6 +151,69 @@ impl AfterResponse {
     /// Take every task the request deferred, in the order it deferred them.
     pub fn take_tasks(&self) -> Vec<DeferredTask> {
         self.tasks.take().unwrap_or_default()
+    }
+
+    /// Take the final writes the request's producers still owe. See
+    /// [`final_write`].
+    pub fn take_final_writes(&self) -> FinalWrites {
+        FinalWrites(self.final_writes.take().unwrap_or_default())
+    }
+}
+
+/// A promise to the host that this request still has one bounded write to
+/// make, possibly after its response has ended. Taken with [`final_write`]
+/// while the request is dispatched; released by dropping it once the write
+/// is done.
+#[must_use = "dropping the guard releases it at once; hold it until the write is done"]
+#[derive(Debug)]
+pub struct FinalWrite {
+    /// `None` outside any request scope: nothing waits on this guard.
+    _done: Option<oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl FinalWrite {
+    /// Whether a request's host waits for this guard.
+    pub(crate) fn is_held(&self) -> bool {
+        self._done.is_some()
+    }
+}
+
+/// Take a [`FinalWrite`] guard for the request being polled — or a no-op
+/// guard when no request is in scope: natively, in a test, or inside a
+/// producer's own poll. See the module doc's section on final writes.
+pub fn final_write() -> FinalWrite {
+    let Some(after) = current() else {
+        return FinalWrite { _done: None };
+    };
+    let (done, released) = oneshot::channel();
+    let mut final_writes = after.final_writes.take().unwrap_or_default();
+    final_writes.push(released);
+    after.final_writes.set(final_writes);
+    FinalWrite { _done: Some(done) }
+}
+
+/// The final writes one request's producers still owe, taken from its
+/// [`AfterResponse`] by the host.
+#[must_use]
+pub struct FinalWrites(Vec<oneshot::Receiver<()>>);
+
+impl FinalWrites {
+    /// Whether no producer of the request took a guard.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How many guards the request's producers took.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Resolves once every guard has been released. A guard is only ever
+    /// dropped, never sent on, so each receiver ends `Canceled`: that is the
+    /// release.
+    pub async fn released(self) {
+        futures::future::join_all(self.0).await;
     }
 }
 
@@ -317,6 +425,52 @@ mod tests {
             queue_audit_row(row("outside")).is_err(),
             "outside a request the row comes back to be inserted"
         );
+    }
+
+    /// A guard taken while a request is polled is that request's: its host
+    /// sees one final write, and waiting on it lasts until the guard is
+    /// dropped, not until the request's future ended.
+    #[tokio::test]
+    async fn a_guard_taken_in_a_scope_holds_its_requests_final_writes_until_dropped() {
+        let after = AfterResponse::new();
+        let other = AfterResponse::new();
+        let guard = scope(Rc::clone(&after), async { final_write() }).await;
+        assert!(guard.is_held(), "a guard taken in a scope is waited on");
+
+        let writes = after.take_final_writes();
+        assert_eq!(writes.len(), 1, "the request holds its producer's write");
+        assert!(
+            other.take_final_writes().is_empty(),
+            "and no other request does"
+        );
+        let mut released = Box::pin(writes.released());
+        assert!(
+            futures::poll!(released.as_mut()).is_pending(),
+            "the host waits while the guard is held, after the request's future ended"
+        );
+        drop(guard);
+        assert!(
+            futures::poll!(released.as_mut()).is_ready(),
+            "dropping the guard releases the host"
+        );
+        assert!(
+            after.take_final_writes().is_empty(),
+            "the host takes the writes once"
+        );
+    }
+
+    /// Outside any request scope — natively, or inside a producer's own
+    /// poll — the guard is a no-op: nothing is registered and nothing waits.
+    #[tokio::test]
+    async fn a_guard_taken_outside_any_scope_is_a_no_op() {
+        let after = AfterResponse::new();
+        let guard = final_write();
+        assert!(
+            !guard.is_held(),
+            "no host waits on a guard taken outside a scope"
+        );
+        drop(guard);
+        assert!(after.take_final_writes().is_empty());
     }
 
     /// A request whose policy writes no rows reserves nothing; every other

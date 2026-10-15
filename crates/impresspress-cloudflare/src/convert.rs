@@ -588,39 +588,12 @@ mod response_tests {
 /// which only turns a hang into a failure.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod event_stream_tests {
-    use std::future::Future;
-
     use futures::{channel::oneshot, StreamExt};
     use impresspress_core::sse::{event_stream, Pulled, OPEN_FRAME};
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::output_to_response;
-
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_name = setTimeout)]
-        fn set_timeout(callback: &js_sys::Function, delay_ms: i32) -> JsValue;
-        #[wasm_bindgen(js_name = clearTimeout)]
-        fn clear_timeout(id: &JsValue);
-    }
-
-    /// `fut`'s output, or a failure naming `what` after five seconds. The
-    /// timer only turns a hang into a failure, and is cleared either way.
-    async fn bounded<F: Future + Unpin>(fut: F, what: &str) -> F::Output {
-        let mut timer_id = JsValue::UNDEFINED;
-        let timer = worker::wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
-            &mut |resolve, _reject| {
-                timer_id = set_timeout(&resolve, 5_000);
-            },
-        ));
-        let outcome = futures::future::select(fut, timer).await;
-        clear_timeout(&timer_id);
-        match outcome {
-            futures::future::Either::Left((output, _)) => output,
-            futures::future::Either::Right(_) => panic!("{what}: nothing within 5 s"),
-        }
-    }
+    use crate::test_fakes::bounded;
 
     /// The Worker `Response` carries the SSE head and the open frame while
     /// the producer still waits on its upstream, and a client that cancels

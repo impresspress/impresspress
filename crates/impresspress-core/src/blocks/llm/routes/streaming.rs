@@ -58,12 +58,13 @@ use crate::{
 /// client holds every frame sent before it left, and the thread is left
 /// ending in the user's turn, so the next request rebuilds a history without
 /// the reply the user saw. It is because keeping it is a write issued after
-/// the consumer is gone, which on Cloudflare nothing keeps the invocation
-/// alive for (the producer-lifetime rule in `wafer_block::spawn`). The
-/// decision is to keep the delivered text, marked as cut off; how that one
-/// final write survives on every target is follow-up work (SSE D3), shared
-/// with the storage access log's `CANCELLED` row
-/// (`blocks::storage::forward_logged`).
+/// the consumer is gone, which on Cloudflare and in the browser outlives the
+/// request only under a final-write guard taken in the handler
+/// ([`crate::after_response::final_write`], as the storage access log's
+/// `CANCELLED` row does in `blocks::storage::forward_logged`), and this route
+/// takes none yet. The decision is to keep the delivered text, marked as cut
+/// off; taking the guard here and storing that text is follow-up work (SSE
+/// D3b).
 /// A client that leaves after the last token but before the model reports
 /// its end can land on either side: whichever the pull sees first decides.
 ///

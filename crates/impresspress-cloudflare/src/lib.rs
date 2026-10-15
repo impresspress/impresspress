@@ -423,6 +423,7 @@ where
     if audit_write.is_some() || !tasks.is_empty() {
         ctx.wait_until(after_response_work(audit_write, queries.clone(), tasks));
     }
+    register_final_writes(&after, |writes| ctx.wait_until(writes));
 
     retry_pending_config_version(&env, |task| ctx.wait_until(task));
 
@@ -467,6 +468,23 @@ async fn after_response_work(
     }
     queries.release_reservation();
     futures::future::join_all(tasks).await;
+}
+
+/// Keep the invocation alive for the final writes this request's producers
+/// still owe ([`after_response::final_write`]): one `wait_until` for all of
+/// them, registered before the `Response` is returned — for a streamed body
+/// that is at head time, while the body is still being produced — and
+/// settled once every guard is released. Workers keeps the invocation for
+/// it at most 30 s after the client disconnects or the body ends.
+///
+/// Kept apart from [`after_response_work`]: a final write runs in its
+/// producer under the request's own services, needs no reservation, and
+/// must not wait for, or hold back, the audit row and the deferred tasks.
+fn register_final_writes(after: &AfterResponse, wait_until: impl FnOnce(BoxedTask)) {
+    let writes = after.take_final_writes();
+    if !writes.is_empty() {
+        wait_until(Box::pin(writes.released()));
+    }
 }
 
 /// Log an audit row that could not be written, as a structured metric line
@@ -1343,7 +1361,7 @@ mod spawned_producer_scope_tests {
     }
 
     /// A `Wafer` with the grants block as its admin block.
-    fn wafer_with_grants() -> wafer_run::Wafer {
+    pub(super) fn wafer_with_grants() -> wafer_run::Wafer {
         let mut wafer = wafer_run::Wafer::new(Arc::new(wafer_run::StaticConfigSource::default()))
             .expect("Wafer::new");
         wafer.set_admin_block(ADMIN);
@@ -1353,7 +1371,7 @@ mod spawned_producer_scope_tests {
         wafer
     }
 
-    fn site_main_with(block: &str) -> String {
+    pub(super) fn site_main_with(block: &str) -> String {
         format!(
             r#"{{"id":"site-main","name":"t","version":"0.1.0","description":"t",
                 "steps":[{{"id":"only","block":"{block}"}}],
@@ -1464,6 +1482,236 @@ mod spawned_producer_scope_tests {
                 wafer_block::ServiceOp::STORAGE_CREATE_FOLDER
             )],
             "the storage block's access-log row reached this request's database"
+        );
+    }
+}
+
+/// Final writes ([`impresspress_core::after_response::final_write`]): the
+/// guard a block takes in `handle` keeps the invocation alive, through the
+/// `wait_until` [`register_final_writes`] registers, for the one write its
+/// producer makes after the client has gone; a guard a producer takes in its
+/// own poll is a no-op.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod final_write_tests {
+    use std::{rc::Rc, sync::Arc};
+
+    use futures::{channel::oneshot, StreamExt};
+    use impresspress_core::after_response::{final_write, AfterResponse};
+    use wafer_run::{Block, BlockInfo, InputStream, Message, OutputStream};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{
+        dispatch, init_isolate, register_final_writes, request_services,
+        spawned_producer_scope_tests::{site_main_with, wafer_with_grants},
+        BoxedTask,
+    };
+    use crate::test_fakes::{bounded, CreateRecordingDb};
+
+    /// The table the producers below write: one every block may write
+    /// through the stand-in admin block's grants.
+    const TABLE: &str = "impresspress__admin__storage_access_logs";
+
+    fn sse_head() -> wafer_block::MetaEntry {
+        wafer_block::MetaEntry {
+            key: wafer_block::meta::META_RESP_CONTENT_TYPE.to_string(),
+            value: "text/event-stream".to_string(),
+        }
+    }
+
+    /// Streams SSE and takes a final-write guard from its producer's own
+    /// poll, after its first chunk — too late for the host to wait on.
+    struct GuardFromProducer;
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for GuardFromProducer {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/guard-from-producer",
+                "0.0.1",
+                "http-handler@v1",
+                "takes a final-write guard inside its producer",
+            )
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::from_producer(move |sink, _cancel| async move {
+                let _ = sink.send_meta(sse_head()).await;
+                let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                let guard = final_write();
+                let _ = sink.send_chunk(b"data: two\n\n".to_vec()).await;
+                drop(guard);
+                let _ = sink.complete(Vec::new()).await;
+            })
+        }
+    }
+
+    /// A guard a producer takes from its own poll registers nothing: D1a's
+    /// wrapper re-enters the request's services only, never its
+    /// after-response scope, so a guard is only ever taken before the
+    /// consumer could have left.
+    #[wasm_bindgen_test]
+    async fn a_guard_taken_from_a_producer_poll_is_a_no_op() {
+        init_isolate();
+        let mut wafer = wafer_with_grants();
+        wafer
+            .register_block("test/guard-from-producer", Arc::new(GuardFromProducer))
+            .expect("register");
+        wafer
+            .add_flow_json(&site_main_with("test/guard-from-producer"))
+            .expect("flow");
+        wafer.seal().await.expect("seal");
+        let after = AfterResponse::new();
+        let req = worker::Request::new("https://example.test/anything", worker::Method::Get)
+            .expect("request");
+
+        let mut response = dispatch(
+            &wafer,
+            req,
+            request_services::RequestServices::marker_with_database(
+                7,
+                Arc::new(CreateRecordingDb::default()),
+            ),
+            &after,
+            &|_| {},
+        )
+        .await
+        .expect("dispatch");
+        assert_eq!(
+            response.text().await.expect("read body"),
+            "data: one\n\ndata: two\n\n",
+            "the producer ran past its guard"
+        );
+
+        assert!(
+            after.take_final_writes().is_empty(),
+            "a producer's own poll is outside the request's after-response scope"
+        );
+    }
+
+    /// The gate [`WritesAfterCancel`]'s producer waits on between the cancel
+    /// and its write, held by the test.
+    static GATE: std::sync::Mutex<Option<oneshot::Receiver<()>>> = std::sync::Mutex::new(None);
+
+    /// Takes a final-write guard in `handle`, streams one SSE frame, and once
+    /// the client has gone (and the test opens the gate) writes one row
+    /// through the request's database, then releases the guard: the storage
+    /// block's `CANCELLED` row, and a chat's cut-off reply, in miniature.
+    struct WritesAfterCancel;
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for WritesAfterCancel {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/writes-after-cancel",
+                "0.0.1",
+                "http-handler@v1",
+                "writes a row after its consumer left",
+            )
+        }
+
+        async fn handle(
+            &self,
+            ctx: &dyn wafer_run::context::Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let guard = final_write();
+            let gate = GATE
+                .lock()
+                .expect("gate")
+                .take()
+                .expect("the test set a gate");
+            let ctx = ctx.clone_arc();
+            OutputStream::from_producer(move |sink, cancel| async move {
+                let _ = sink.send_meta(sse_head()).await;
+                let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                cancel.cancelled().await;
+                let _ = gate.await;
+                let row = serde_json::json!({ "operation": "after the cancel" });
+                let _ = wafer_core::clients::database::create(
+                    ctx.as_ref(),
+                    TABLE,
+                    impresspress_core::util::json_map(row),
+                )
+                .await;
+                drop(guard);
+            })
+        }
+    }
+
+    /// **The registration.** A streamed response whose producer still owes a
+    /// write after its body is cancelled hands one promise to `wait_until`
+    /// at head time; it stays pending while the stream is open and after the
+    /// cancel, and settles only once the write, through the request's own
+    /// database, is done. Fails without [`register_final_writes`]: nothing
+    /// is handed to `wait_until`.
+    #[wasm_bindgen_test]
+    async fn a_final_write_after_the_body_is_cancelled_is_handed_to_wait_until() {
+        init_isolate();
+        let (open_gate, gate) = oneshot::channel();
+        *GATE.lock().expect("gate") = Some(gate);
+        let db = CreateRecordingDb::default();
+        let created = Rc::clone(&db.created);
+        let mut wafer = wafer_with_grants();
+        wafer_core::service_blocks::database::register_with(
+            &mut wafer,
+            request_services::database_proxy(),
+        )
+        .expect("register database");
+        wafer
+            .register_block("test/writes-after-cancel", Arc::new(WritesAfterCancel))
+            .expect("register");
+        wafer
+            .add_flow_json(&site_main_with("test/writes-after-cancel"))
+            .expect("flow");
+        wafer.seal().await.expect("seal");
+        let after = AfterResponse::new();
+        let req = worker::Request::new("https://example.test/anything", worker::Method::Get)
+            .expect("request");
+
+        let mut response = dispatch(
+            &wafer,
+            req,
+            request_services::RequestServices::marker_with_database(7, Arc::new(db)),
+            &after,
+            &|_| {},
+        )
+        .await
+        .expect("dispatch");
+        let mut handed: Vec<BoxedTask> = Vec::new();
+        register_final_writes(&after, |task| handed.push(task));
+        assert_eq!(handed.len(), 1, "one promise is handed to wait_until");
+        let mut held = handed.pop().expect("the promise");
+        assert!(
+            futures::poll!(held.as_mut()).is_pending(),
+            "the promise is pending while the stream is open"
+        );
+
+        let mut body = response.stream().expect("a streamed body");
+        let first = bounded(body.next(), "the first frame")
+            .await
+            .expect("a first chunk")
+            .expect("a readable chunk");
+        assert_eq!(first, b"data: one\n\n");
+        drop(body);
+        assert!(
+            futures::poll!(held.as_mut()).is_pending(),
+            "the promise outlives the body until the write is done"
+        );
+        assert!(created.borrow().is_empty(), "the write waits on the gate");
+
+        open_gate.send(()).expect("the producer waits on the gate");
+        bounded(held, "the final write's promise").await;
+        assert_eq!(
+            *created.borrow(),
+            vec![format!("{TABLE} after the cancel")],
+            "the write after the cancel reached the request's database before the promise \
+             settled"
         );
     }
 }

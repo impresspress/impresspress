@@ -132,10 +132,15 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// the tasks together — in a flush scope of its own, so it too exports at
 /// most once. It starts on the next task of the event loop, once the
 /// response has been handed back, and its failures are logged: there is no
-/// response left to carry them. The service worker must pass the promise to
+/// response left to carry them. It also settles no earlier than the final
+/// writes the request's producers still owe
+/// ([`final_write`](impresspress_core::after_response::final_write)) are
+/// released: a streamed reply whose reader left may still write once, from
+/// its producer. The service worker must pass the promise to
 /// `event.waitUntil`: nothing else keeps the worker alive until it settles,
-/// and a worker stopped before then loses the audit row and the deferred
-/// tasks — never the request's own changes, which were written above.
+/// and a worker stopped before then loses the audit row, the deferred tasks
+/// and the final writes — never the request's own changes, which were
+/// written above.
 ///
 /// Both scopes are re-entered on every poll, so requests interleaved on the
 /// service worker's one thread each flush their own mutations at their own
@@ -189,36 +194,50 @@ pub async fn dispatch_fetch(request: web_sys::Request) -> Result<JsValue, JsValu
 }
 
 /// The promise for the work `after` holds: its audit row, then its deferred
-/// tasks together, in one flush scope. See [`dispatch_request`].
+/// tasks together, in one flush scope, joined with the release of its final
+/// writes. See [`dispatch_request`].
 ///
-/// There is no statement reservation to release between the two, as
-/// Cloudflare's `after_response_work` does: the browser database has no
-/// per-request statement limit, so nothing was held back for the row.
+/// There is no statement reservation to release between the row and the
+/// tasks, as Cloudflare's `after_response_work` does: the browser database
+/// has no per-request statement limit, so nothing was held back for the row.
+///
+/// The final writes are joined with the whole of that work, not appended to
+/// it: a stream whose guard is still held when the row is due does not
+/// delay the row. Each final write flushes itself, outside every flush
+/// scope, as any write a producer makes does (`flush_scope`).
 fn after_response_work(after: &AfterResponse) -> js_sys::Promise {
     let audit_row = after.take_audit_row();
     let tasks = after.take_tasks();
+    let final_writes = after.take_final_writes();
     wasm_bindgen_futures::future_to_promise(async move {
-        if audit_row.is_none() && tasks.is_empty() {
+        if audit_row.is_none() && tasks.is_empty() && final_writes.is_empty() {
             return Ok(JsValue::UNDEFINED);
         }
-        next_task().await;
-        let ((), flush) = crate::flush_scope::run(async move {
-            if let Some(row) = audit_row {
-                let db = crate::make_database_service();
-                if let Err(failure) = after_response::persist_audit_row(db.as_ref(), row).await {
-                    tracing::warn!(
-                        table = failure.table,
-                        error = %failure.error,
-                        "request audit row not written"
-                    );
-                }
+        let row_and_tasks = async move {
+            if audit_row.is_none() && tasks.is_empty() {
+                return;
             }
-            futures::future::join_all(tasks).await;
-        })
-        .await;
-        if let Err(error) = flush {
-            tracing::warn!(%error, "after-response work was not written to OPFS");
-        }
+            next_task().await;
+            let ((), flush) = crate::flush_scope::run(async move {
+                if let Some(row) = audit_row {
+                    let db = crate::make_database_service();
+                    if let Err(failure) = after_response::persist_audit_row(db.as_ref(), row).await
+                    {
+                        tracing::warn!(
+                            table = failure.table,
+                            error = %failure.error,
+                            "request audit row not written"
+                        );
+                    }
+                }
+                futures::future::join_all(tasks).await;
+            })
+            .await;
+            if let Err(error) = flush {
+                tracing::warn!(%error, "after-response work was not written to OPFS");
+            }
+        };
+        futures::future::join(row_and_tasks, final_writes.released()).await;
         Ok(JsValue::UNDEFINED)
     })
 }
@@ -352,7 +371,10 @@ mod tests {
     mod after_response_order {
         use std::{collections::HashMap, sync::Arc};
 
-        use impresspress_core::routing::{ExtraRoute, RouteAccess};
+        use impresspress_core::{
+            after_response::{final_write, FinalWrite},
+            routing::{ExtraRoute, RouteAccess},
+        };
         use wafer_core::interfaces::database::service::DatabaseService;
         use wafer_run::{
             context::Context, Block, BlockInfo, InputStream, LifecycleEvent, Message, OutputStream,
@@ -364,6 +386,13 @@ mod tests {
             test_support::{fail_next_opfs_write, fresh_db, opfs_writes},
             BrowserDatabaseService,
         };
+
+        thread_local! {
+            /// The final-write guard a `/hold` request took, until its test
+            /// releases it.
+            static HELD: std::cell::RefCell<Option<FinalWrite>> =
+                const { std::cell::RefCell::new(None) };
+        }
 
         const WRITES: &str = "a2_writes";
         const LOGS: &str = impresspress_core::platform_state::request_logs::TABLE;
@@ -390,6 +419,12 @@ mod tests {
             ) -> OutputStream {
                 if msg.path().ends_with("/fail") {
                     return impresspress_core::http::err_internal_no_cause("a2test: failing");
+                }
+                if msg.path().ends_with("/hold") {
+                    // A final write still owed, as a streamed reply whose
+                    // reader left would owe one; the test releases it.
+                    HELD.with(|held| *held.borrow_mut() = Some(final_write()));
+                    return impresspress_core::http::ok_json(&serde_json::json!({ "ok": true }));
                 }
                 // Two mutations, so a request that is not one flush scope
                 // shows as two exports.
@@ -611,6 +646,85 @@ mod tests {
                 .await
                 .expect("after-response work");
             assert_eq!(logged(&db).await, 1, "a 500 is logged");
+        }
+
+        /// Whether `promise` has settled, without waiting for it: a race with
+        /// an already-resolved marker is won by `promise` only when it has
+        /// settled already, because `Promise.race` subscribes in order.
+        async fn has_settled(promise: &js_sys::Promise) -> bool {
+            const PENDING: &str = "pending";
+            let race = js_sys::Promise::race(&js_sys::Array::of2(
+                promise,
+                &js_sys::Promise::resolve(&JsValue::from_str(PENDING)),
+            ));
+            let winner = wasm_bindgen_futures::JsFuture::from(race)
+                .await
+                .expect("the race settles");
+            winner.as_string().as_deref() != Some(PENDING)
+        }
+
+        /// A request with no audit row and no deferred task — what an SSE
+        /// stream without the `resp.stream` marker is — still hands back a
+        /// pending `after` while a final write is owed, and it settles once
+        /// the guard is released. Fails while `after_response_work` resolves
+        /// at once for a request with no row and no task.
+        #[wasm_bindgen_test]
+        async fn the_after_promise_waits_for_a_final_write() {
+            let db = install("errors").await;
+
+            let (response, after) = dispatch_request(post("/b/a2test/hold"))
+                .await
+                .expect("dispatch");
+            assert_eq!(response.status(), 200);
+            next_task().await;
+            drain_microtasks().await;
+            assert_eq!(logged(&db).await, 0, "a 200 under errors queues no row");
+            assert!(
+                !has_settled(&after).await,
+                "the worker is kept alive for the owed write"
+            );
+
+            drop(
+                HELD.with(|held| held.borrow_mut().take())
+                    .expect("the request took its guard"),
+            );
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
+        }
+
+        /// A held guard does not delay the request's audit row: the row is
+        /// written on the next task, as without a guard, while `after` stays
+        /// pending for the owed write. Fails if the final writes are awaited
+        /// before the row instead of alongside it.
+        #[wasm_bindgen_test]
+        async fn a_held_guard_does_not_delay_the_audit_row() {
+            let db = install("all").await;
+
+            let (response, after) = dispatch_request(post("/b/a2test/hold"))
+                .await
+                .expect("dispatch");
+            assert_eq!(response.status(), 200);
+            // The after-response work queues its wait for the event loop's
+            // next task once its promise is first polled, in a microtask; this
+            // test's own wait is queued after it, and the row is written in
+            // the microtasks that follow the work's.
+            drain_microtasks().await;
+            next_task().await;
+            drain_microtasks().await;
+            assert_eq!(logged(&db).await, 1, "the audit row is written");
+            assert!(
+                !has_settled(&after).await,
+                "while the owed write keeps the worker alive"
+            );
+
+            drop(
+                HELD.with(|held| held.borrow_mut().take())
+                    .expect("the request took its guard"),
+            );
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
         }
     }
 }

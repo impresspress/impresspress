@@ -3,7 +3,9 @@
 //! records the rows it is asked to create, a storage service that only
 //! creates folders, and a D1 and a KV that hold `block_settings` state for the
 //! deploy funnel's migration tests. Every other call is an error, so a test
-//! that reaches one fails loudly instead of passing on a default.
+//! that reaches one fails loudly instead of passing on a default. Also
+//! [`bounded`], the five-second JS timer that turns a hung await into a
+//! failure.
 
 use std::{
     cell::RefCell,
@@ -716,5 +718,30 @@ pub(crate) fn blessed_row(id: &str, block: &str, current: &str, blessed: &str) -
     Record {
         id: id.to_string(),
         data: data.into_iter().collect(),
+    }
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = setTimeout)]
+    fn set_timeout(callback: &js_sys::Function, delay_ms: i32) -> wasm_bindgen::JsValue;
+    #[wasm_bindgen(js_name = clearTimeout)]
+    fn clear_timeout(id: &wasm_bindgen::JsValue);
+}
+
+/// `fut`'s output, or a failure naming `what` after five seconds. The timer
+/// only turns a hang into a failure, and is cleared either way.
+pub(crate) async fn bounded<F: std::future::Future + Unpin>(fut: F, what: &str) -> F::Output {
+    let mut timer_id = wasm_bindgen::JsValue::UNDEFINED;
+    let timer = worker::wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
+        &mut |resolve, _reject| {
+            timer_id = set_timeout(&resolve, 5_000);
+        },
+    ));
+    let outcome = futures::future::select(fut, timer).await;
+    clear_timeout(&timer_id);
+    match outcome {
+        futures::future::Either::Left((output, _)) => output,
+        futures::future::Either::Right(_) => panic!("{what}: nothing within 5 s"),
     }
 }
