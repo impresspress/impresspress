@@ -166,9 +166,8 @@ pub fn tabbed_page(
     }
 }
 
-/// `stats` are the page's headline figures, laid out by
-/// [`stat_row`] as the first
-/// thing on the page.
+/// `stats` are the page's headline figures, laid out by [`stat_row`] as the
+/// first thing on the page.
 ///
 /// `top_card` renders between the stat row and `dashboard-grid` — e.g. the
 /// admin dashboard's chart cards. The name is positional relative to
@@ -572,7 +571,7 @@ mod tests {
         let secondary = html! { section .card { "Recent activity" } };
         let s = dashboard_page(stats, primary, secondary, None, None).into_string();
         assert!(
-            s.starts_with(r#"<div class="page page--dashboard"><div class="stat-row"><div class="stat"><div class="stat__label">Users</div><div class="stat__value">142</div></div>"#),
+            s.starts_with(r#"<div class="page page--dashboard"><div class="stat-row"><div class="stat-row__grid"><div class="stat"><div class="stat__label">Users</div><div class="stat__value">142</div></div>"#),
             "the stat row is the first thing on the page: {s}"
         );
         assert!(

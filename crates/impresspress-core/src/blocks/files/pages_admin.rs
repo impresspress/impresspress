@@ -506,7 +506,10 @@ mod tests {
             quotas_count: 1,
         };
         let html = render_admin_overview_stats(&stats).into_string();
-        assert!(html.starts_with(r#"<div class="stat-row">"#), "{html}");
+        assert!(
+            html.starts_with(r#"<div class="stat-row"><div class="stat-row__grid">"#),
+            "{html}"
+        );
         for (label, value) in [
             ("Buckets", "3"),
             ("Files", "42"),

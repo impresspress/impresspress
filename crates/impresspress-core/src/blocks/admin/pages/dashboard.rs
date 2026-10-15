@@ -920,18 +920,19 @@ mod outage_tests {
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
     }
 
-    /// Two stats carry figures the visual-baseline suite masks: "Avg
-    /// response", a latency measured during the run that screenshots this
-    /// page, and "Requests today", a count of every request the suite made
-    /// before the capture. Both are masked by label text
-    /// (`.stat:has-text("…") .stat__value`) rather than by an attribute,
-    /// because `components::Stat` takes its value as a plain `&str` and
-    /// offers no markup slot to hang one on. That makes each label part of
-    /// the mask's contract: rename it and the mask silently stops matching,
-    /// and the stat is compared pixel by pixel again with nothing announcing
-    /// the change.
+    /// Three panels carry figures the visual-baseline suite masks: the "Avg
+    /// response" stat, a latency measured during the run that screenshots
+    /// this page, and the "Requests today" stat and the "Requests" chart,
+    /// which count every request the suite made before the capture. Each is
+    /// masked by its label text (`.stat:has-text("…") .stat__value`,
+    /// `section.card:has(h2.card__title:text-is("Requests")) .chart`) rather
+    /// than by an attribute, because `components::Stat` takes its value as a
+    /// plain `&str` and the chart card offers no slot for one either. That
+    /// makes each label part of the mask's contract: rename it and the mask
+    /// silently stops matching, and the panel is compared pixel by pixel
+    /// again with nothing announcing the change.
     #[tokio::test]
-    async fn the_masked_stats_keep_the_labels_the_visual_masks_key_on() {
+    async fn the_masked_panels_keep_the_labels_the_visual_masks_key_on() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
@@ -948,5 +949,20 @@ mod outage_tests {
                 "the masked element is the `.stat__value` that follows the label: {rest:.120}"
             );
         }
+
+        let doc = scraper::Html::parse_document(&html);
+        let selector = |s: &str| scraper::Selector::parse(s).unwrap();
+        let requests_charts = doc
+            .select(&selector("section.card"))
+            .filter(|card| {
+                card.select(&selector("h2.card__title"))
+                    .any(|title| title.text().collect::<String>() == "Requests")
+            })
+            .filter(|card| card.select(&selector(".chart")).next().is_some())
+            .count();
+        assert_eq!(
+            requests_charts, 1,
+            "visual-baseline.spec.ts masks the `.chart` of the one card titled exactly \"Requests\": {html}"
+        );
     }
 }

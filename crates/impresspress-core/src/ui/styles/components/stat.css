@@ -1,20 +1,50 @@
 /* Stat row (`components::stat_row`): one compact row of headline figures.
-   Every stat takes an equal column, however many there are (at most six), so
-   none is left alone on a second line. Below 720px two columns, and an odd
-   last stat spans both. The row sets no outer margin: the page layout around
-   it spaces it like any other block. */
-.stat-row {
+
+   The layout follows the width the row is given, not the viewport:
+   `.stat-row` is a size container and `.stat-row__grid` inside it picks one
+   of three layouts, so a row inside a card and a row on the page background
+   each fit their own width.
+   - One row of equal columns when every stat gets at least 11rem.
+   - Otherwise two columns, an odd last stat spanning both, so no stat sits
+     alone beside an empty column.
+   - One column when even two 11rem columns do not fit (a phone).
+
+   11rem is the floor that keeps a value whole: the widest marker a value
+   shows, "Unavailable" (the dashboard during an outage), fits on one line
+   inside a stat's padding at the value size below, in the fonts CI renders
+   with. Raising the value size or the padding means raising the floor and
+   the thresholds with it.
+
+   One row of n stats needs n * 11rem + (n - 1) * 0.75rem (the gap); the
+   thresholds below are that sum for each n. Two stats need what two
+   columns need, and one stat always spans the row. The row sets no outer
+   margin: the page layout around it spaces it like any other block. */
+.stat-row { container: stat-row / inline-size; }
+
+.stat-row__grid {
 	display: grid;
-	grid-auto-flow: column;
-	grid-auto-columns: minmax(0, 1fr);
+	grid-template-columns: minmax(0, 1fr);
 	gap: var(--space-3);
 }
-@media (max-width: 720px) {
-	.stat-row {
-		grid-auto-flow: row;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-	}
-	.stat-row > .stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
+@container stat-row (min-width: 22.75rem) {
+	.stat-row__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.stat-row__grid > .stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
+/* One row: the stat count picks its threshold. An odd last stat goes back
+   to its own column. */
+@container stat-row (min-width: 34.5rem) {
+	.stat-row__grid:has(> .stat:nth-child(3):last-child) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+	.stat-row__grid:has(> .stat:nth-child(3):last-child) > .stat:last-child { grid-column: auto; }
+}
+@container stat-row (min-width: 46.25rem) {
+	.stat-row__grid:has(> .stat:nth-child(4):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@container stat-row (min-width: 58rem) {
+	.stat-row__grid:has(> .stat:nth-child(5):last-child) { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+	.stat-row__grid:has(> .stat:nth-child(5):last-child) > .stat:last-child { grid-column: auto; }
+}
+@container stat-row (min-width: 69.75rem) {
+	.stat-row__grid:has(> .stat:nth-child(6):last-child) { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 
 /* A stat is a card-level surface on the page background. */
@@ -32,15 +62,16 @@
 	margin-bottom: var(--space-1);
 }
 
-/* A value can be a word or an address ("Guest", an email), so it wraps
-   rather than overflow its column. */
+/* The 11rem floor above keeps every figure and marker whole; only a token
+   wider than the whole stat (an email on order detail) breaks, and only
+   because nothing else fits it. */
 .stat__value {
-	font-size: 1.5rem;
+	font-size: 1.25rem;
 	font-weight: 600;
 	line-height: 1.25;
 	color: var(--text-primary);
 	font-variant-numeric: tabular-nums;
-	overflow-wrap: anywhere;
+	overflow-wrap: break-word;
 }
 
 .stat__detail {

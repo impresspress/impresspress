@@ -57,11 +57,19 @@ impl<'a> Stat<'a> {
     }
 }
 
-/// One compact row of [`Stat`]s: `div.stat-row > div.stat`.
+/// One compact row of [`Stat`]s: `div.stat-row > div.stat-row__grid > div.stat`.
 ///
-/// On a wide screen the stats share the row in equal columns, however many
-/// there are, so no stat is left alone on a second line. Below 720px they
-/// take two columns, and an odd last stat spans both.
+/// The layout follows the width the row itself is given, not the viewport
+/// (`.stat-row` is a CSS size container), so a row in a card and a row on
+/// the page background each pick their own:
+/// - every stat in one row of equal columns when each gets the stat's
+///   minimum width;
+/// - otherwise two columns, an odd last stat spanning both, so no stat is
+///   left alone beside an empty column;
+/// - one column when even two would be too narrow.
+///
+/// The minimum width is what the widest marker a value shows
+/// ("Unavailable") needs, so a figure never breaks mid-word.
 ///
 /// Holds one to [`MAX_STATS`] stats.
 pub fn stat_row(stats: Vec<Stat<'_>>) -> Markup {
@@ -72,7 +80,9 @@ pub fn stat_row(stats: Vec<Stat<'_>>) -> Markup {
     );
     html! {
         div .stat-row {
-            @for stat in stats { (stat.render()) }
+            div .stat-row__grid {
+                @for stat in stats { (stat.render()) }
+            }
         }
     }
 }
@@ -87,7 +97,7 @@ mod tests {
         let html = stat_row(vec![Stat::new("Total users", "142")]).into_string();
         assert_eq!(
             html,
-            r#"<div class="stat-row"><div class="stat"><div class="stat__label">Total users</div><div class="stat__value">142</div></div></div>"#
+            r#"<div class="stat-row"><div class="stat-row__grid"><div class="stat"><div class="stat__label">Total users</div><div class="stat__value">142</div></div></div></div>"#
         );
     }
 
@@ -160,27 +170,44 @@ mod tests {
         assert_eq!(html.matches(r#"class="stat""#).count(), MAX_STATS);
     }
 
-    /// The two rows the layout spec (`stat-row.spec.ts`) lays out in a real
-    /// browser: an odd row of five and an even row of four. The spec reads
-    /// them from a fixture file so it runs against `stat_row`'s markup rather
-    /// than a copy of it; this keeps the file what `stat_row` renders today.
-    /// To refresh it after a deliberate markup change, write
-    /// `stat_row_fixture()` to the path below.
+    /// The rows the layout spec (`stat-row.spec.ts`) lays out in a real
+    /// browser, with values as the pages format them: the dashboard (five),
+    /// the dashboard during an outage (five "Unavailable" markers), an order
+    /// (four, money and an email) and a single stat. The spec reads them from
+    /// a fixture file so it runs against `stat_row`'s markup rather than a
+    /// copy of it; this keeps the file what `stat_row` renders today. To
+    /// refresh it after a deliberate markup change, write `stat_row_fixture()`
+    /// to the path below.
     fn stat_row_fixture() -> String {
-        let five = stat_row(vec![
-            Stat::new("Total users", "1"),
-            Stat::new("New today", "1"),
-            Stat::new("Requests today", "4").detail(Some(html! { "2 client errors" })),
+        let dashboard = stat_row(vec![
+            Stat::new("Total users", "1204"),
+            Stat::new("New today", "12"),
+            Stat::new("Requests today", "48210")
+                .detail(Some(html! { "2 client errors · 1 rate-limited" })),
             Stat::new("Server errors today", "1").alert(true),
-            Stat::new("Avg response", "3ms"),
+            Stat::new("Avg response", "143ms"),
         ]);
-        let four = stat_row(vec![
-            Stat::new("Buckets", "2"),
-            Stat::new("Files", "14"),
-            Stat::new("Total size", "1.2 GB"),
-            Stat::new("Active shares", "0"),
+        let outage = stat_row(
+            [
+                "Total users",
+                "New today",
+                "Requests today",
+                "Server errors today",
+                "Avg response",
+            ]
+            .map(|label| Stat::new(label, "Unavailable"))
+            .into(),
+        );
+        let order = stat_row(vec![
+            Stat::new("Total", "12345.67 USD"),
+            Stat::new("Refunded", "1000.00 USD"),
+            Stat::new("Customer", "jane.doe@example.com"),
+            Stat::new("Items", "3"),
         ]);
-        format!("{}\n{}\n", five.into_string(), four.into_string())
+        let single = stat_row(vec![Stat::new("Purchases", "27")]);
+        [dashboard, outage, order, single]
+            .map(|row| format!("{}\n", row.into_string()))
+            .concat()
     }
 
     #[test]
