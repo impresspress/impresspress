@@ -323,7 +323,7 @@ async fn stripe_page_states_are_badges_and_settings_have_one_way_in() {
         ),
         "{html}"
     );
-    assert!(!html.contains("stat-value\">Unavailable"), "{html}");
+    assert!(!html.contains("stat__value\">Unavailable"), "{html}");
     assert_eq!(
         html.matches(r#"href="/b/products/admin/settings""#).count() - 1,
         1,

@@ -1,58 +1,56 @@
-/* Stats -- the ONE definition of the tile grid (dashboard, products,
-   storage overview). As many 180px+ columns as fit; two on a phone, where
-   180px would leave a single column of very wide tiles. */
-.stats-grid {
+/* Stat row (`components::stat_row`): one compact row of headline figures.
+   Every stat takes an equal column, however many there are (at most six), so
+   none is left alone on a second line. Below 720px two columns, and an odd
+   last stat spans both. The row sets no outer margin: the page layout around
+   it spaces it like any other block. */
+.stat-row {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-	gap: var(--space-4);
+	grid-auto-flow: column;
+	grid-auto-columns: minmax(0, 1fr);
+	gap: var(--space-3);
 }
 @media (max-width: 720px) {
-	.stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+	.stat-row {
+		grid-auto-flow: row;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+	.stat-row > .stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
 
-.stat-card {
-	background: var(--surface-1); border-radius: 8px;
-	padding: var(--space-6); border: 1px solid var(--border-color);
+/* A stat is a card-level surface on the page background. */
+.stat {
+	min-width: 0;
+	background: var(--surface-1);
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-lg);
+	padding: var(--space-4);
 }
 
-.stat-header {
-	display: flex; align-items: flex-start; justify-content: space-between;
-	margin-bottom: var(--space-4);
+.stat__label {
+	font-size: var(--text-sm);
+	color: var(--text-secondary);
+	margin-bottom: var(--space-1);
 }
 
-.stat-icon {
-	width: 40px; height: 40px;
-	display: flex; align-items: center; justify-content: center;
-	border-radius: 8px; flex-shrink: 0;
+/* A value can be a word or an address ("Guest", an email), so it wraps
+   rather than overflow its column. */
+.stat__value {
+	font-size: 1.5rem;
+	font-weight: 600;
+	line-height: 1.25;
+	color: var(--text-primary);
+	font-variant-numeric: tabular-nums;
+	overflow-wrap: anywhere;
 }
 
-.stat-spark { width: 4rem; height: 1.5rem; }
-
-.stat-label {
-	font-size: 0.75rem; text-transform: uppercase;
-	color: var(--text-muted); font-weight: 500;
-	letter-spacing: .06em; margin-bottom: var(--space-1);
-}
-
-.stat-value {
-	font-size: 1.875rem; font-weight: 600;
-	color: var(--text-primary); line-height: 1;
-}
-
-.stat-description {
-	font-size: 0.875rem; color: var(--text-secondary); margin-top: var(--space-2);
+.stat__detail {
+	font-size: var(--text-sm);
+	color: var(--text-secondary);
+	margin-top: var(--space-1);
 	font-variant-numeric: tabular-nums;
 }
 
 /* A figure that is a problem whenever it is not zero (the dashboard's server
    errors). The label names what is counted; the tone only draws the eye.
    --accent-danger-text is the AA-safe red for text on white. */
-.stat-card--alert { border-color: var(--accent-danger); }
-.stat-card--alert .stat-value,
-.stat-card--alert .stat-icon { color: var(--accent-danger-text); }
-
-@media (max-width: 720px) {
-	.stat-card { padding: var(--space-4); min-width: 0; }
-	.stat-value { font-size: 1.5rem; }
-}
-
+.stat--alert .stat__value { color: var(--accent-danger-text); }

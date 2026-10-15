@@ -1,5 +1,4 @@
-//! Dashboard charts: the 30-day line and bar chart cards and the stat-tile
-//! sparkline.
+//! Dashboard charts: the 30-day line and bar chart cards.
 //!
 //! Both chart cards are one component ([`chart_card`]) with two plot kinds,
 //! so they share the value axis, the gridlines, the per-day tooltips, the
@@ -275,59 +274,6 @@ fn date_range(data: &[(String, i64)]) -> Markup {
     }
 }
 
-/// Tiny inline-SVG trend line for a stat tile. Decorative: the tile already
-/// states the value in text, so this is aria-hidden.
-///
-/// Uses a 100x24 viewBox with `preserveAspectRatio="none"` so it stretches to
-/// whatever width the tile gives it without needing a layout measurement.
-pub fn sparkline(series: &[i64], color_var: &str) -> Markup {
-    if series.is_empty() {
-        return html! {};
-    }
-    let max = series.iter().copied().max().unwrap_or(0);
-    let min = series.iter().copied().min().unwrap_or(0);
-    // A flat series has zero span. Rendering it along the bottom edge would
-    // read as "zero" / "lowest", which is wrong when the value is nonzero —
-    // a flat line means "no change", so it belongs at the vertical centre
-    // of the 24-tall viewBox (y = 12.0), not at y = 24.0.
-    let flat = max == min;
-    let step = if series.len() > 1 {
-        100.0 / (series.len() - 1) as f64
-    } else {
-        0.0
-    };
-    let points = series
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let x = i as f64 * step;
-            let y = if flat {
-                12.0
-            } else {
-                24.0 - ((*v - min) as f64 / (max - min) as f64) * 24.0
-            };
-            format!("{x:.2},{y:.2}")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    html! {
-        svg .sparkline viewBox="0 0 100 24" preserveAspectRatio="none"
-            aria-hidden="true" style=(format!("--chart-color: {color_var}")) {
-            // See the note in `line_chart_card` on why SVG shape elements use `{}`
-            // rather than maud's `;` void syntax — it matters once a shape has
-            // siblings, but keeping it consistent here avoids relying on the
-            // enclosing `</svg>` to implicitly close a dangling tag.
-            //
-            // `vector-effect="non-scaling-stroke"` matters here too: `.stat-spark`
-            // is 4rem x 1.5rem, a different aspect ratio than the 100x24 viewBox,
-            // so preserveAspectRatio="none" scales x and y unevenly. Without this,
-            // the stroke renders visibly thicker in one axis than the other.
-            polyline points=(points) fill="none" stroke="var(--chart-color)"
-                stroke-width="1.5" vector-effect="non-scaling-stroke" {}
-        }
-    }
-}
-
 /// The value axis of a [`line_chart_card`]: integer ticks from 0 to `top`,
 /// `step` apart, where every tick sits on its own gridline.
 #[derive(Debug, PartialEq, Eq)]
@@ -395,65 +341,6 @@ impl ValueAxis {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn sparkline_emits_one_point_per_sample_and_is_decorative() {
-        let m = super::sparkline(&[0, 5, 3], "var(--primary-color)").into_string();
-        assert!(m.contains("<svg"));
-        assert!(
-            m.contains(r#"aria-hidden="true""#),
-            "sparkline duplicates the value beside it"
-        );
-        let pts = m
-            .split("points=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
-        assert_eq!(
-            pts.split_whitespace().count(),
-            3,
-            "one point per sample: {pts}"
-        );
-    }
-
-    #[test]
-    fn sparkline_flat_series_does_not_divide_by_zero() {
-        let m = super::sparkline(&[4, 4, 4], "var(--primary-color)").into_string();
-        assert!(m.contains("points="), "flat series must still render");
-        assert!(!m.contains("NaN"), "flat series produced NaN: {m}");
-    }
-
-    #[test]
-    fn sparkline_flat_series_renders_at_vertical_centre() {
-        // A flat line means "no change"; drawing it along the bottom edge
-        // (y = 24.0) would misleadingly read as "zero" / "lowest" instead.
-        // It must sit at the viewBox's vertical midpoint, y = 12.0.
-        let m = super::sparkline(&[4, 4, 4], "var(--primary-color)").into_string();
-        let pts = m
-            .split("points=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
-        for point in pts.split_whitespace() {
-            let y = point.split(',').nth(1).unwrap();
-            assert_eq!(
-                y, "12.00",
-                "flat series must sit at the centre, not an edge: {pts}"
-            );
-        }
-    }
-
-    #[test]
-    fn sparkline_empty_series_renders_nothing() {
-        assert_eq!(
-            super::sparkline(&[], "var(--primary-color)").into_string(),
-            ""
-        );
-    }
-
     #[test]
     fn line_chart_card_has_gridlines_and_axis_labels() {
         let data = vec![("2026-08-01".to_string(), 1), ("2026-08-02".to_string(), 3)];

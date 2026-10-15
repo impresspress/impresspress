@@ -9,29 +9,28 @@ use crate::{
     platform_state::request_logs::{self, DailyCounts, TodayCounts},
     ui::{
         components::{self, Badge, Card},
-        icons,
         shell::Topbar,
         templates::dashboard_page,
     },
 };
 
-/// What a stat tile shows when the aggregate behind it could not be read.
+/// What a stat shows when the aggregate behind it could not be read.
 ///
 /// The dashboard is the page an operator opens *during* an outage, so a
-/// failed read marks its own tile rather than failing the whole page (the
+/// failed read marks its own stat rather than failing the whole page (the
 /// one exception to the group-1 rule). It must still be a marker and not a
-/// number: `0` is a claim, and "Total Users 0" during a database outage is
+/// number: `0` is a claim, and "Total users 0" during a database outage is
 /// the claim that the deployment has no users.
-const TILE_UNAVAILABLE: &str = "Unavailable";
+const STAT_UNAVAILABLE: &str = "Unavailable";
 
 /// The same marker for the card- and chart-shaped panels, which have a body
 /// rather than a value.
 const CARD_UNAVAILABLE: &str = "Could not load";
 
-/// A tile's pre-formatted figure, or [`TILE_UNAVAILABLE`] when the aggregate
+/// A stat's pre-formatted figure, or [`STAT_UNAVAILABLE`] when the aggregate
 /// behind it could not be read.
-fn tile_value(value: &Option<String>) -> &str {
-    value.as_deref().unwrap_or(TILE_UNAVAILABLE)
+fn stat_value(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or(STAT_UNAVAILABLE)
 }
 
 /// A chart card whose series could not be read: the same head, and the marker
@@ -97,7 +96,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // Every read below is independent, so we issue them concurrently with
     // `futures::join!`. Concurrency alone doesn't cut the D1 *statement* count,
     // though — each round-trip is a billed statement on Cloudflare — so the
-    // header tiles now fold their several per-filter counts into ONE aggregate
+    // header figures now fold their several per-filter counts into ONE aggregate
     // per table (conditional `CaseWhenSum` columns), and the two REQUEST_LOGS
     // chart series come from ONE grouped-by-day statement. That is eight D1
     // statements to render the whole page (was ten): two consolidated header
@@ -161,7 +160,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // Each read is logged and marked where it renders, rather than being
     // published as `0` and the empty state. Everything below reads `Option`:
     // `None` is "could not be read", and it never reaches a figure, a table
-    // row, a chart or a sparkline.
+    // row or a chart.
     let request_counts = match request_counts_r {
         Ok(counts) => Some(counts),
         Err(e) => {
@@ -250,66 +249,22 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .as_ref()
         .map(|c: &TodayCounts| format!("{:.0}ms", c.avg_ms));
 
-    // Sparklines reuse the daily series already fetched for the charts below —
-    // no extra D1 statements. "Avg response" has no per-day series fetched, so
-    // its sparkline is `None` rather than reusing an unrelated metric — and so
-    // is any sparkline whose series could not be read.
-    let spark = |series: &Option<Vec<(String, i64)>>, color: &str| {
-        series.as_ref().map(|series| {
-            components::sparkline(&series.iter().map(|(_, v)| *v).collect::<Vec<_>>(), color)
-        })
-    };
-    let new_users_spark = spark(&new_users_daily, "var(--primary-color)");
-    // Neutral ink for traffic, which is not a warning; the danger red only on
-    // a server-error series that has a server error in it.
-    let requests_spark = spark(&requests_daily, NEUTRAL_SERIES);
     let server_errors_colour = server_errors_daily
         .as_deref()
         .map_or(QUIET_SERIES, server_error_colour);
-    let server_errors_spark = spark(&server_errors_daily, server_errors_colour);
 
+    // Five figures, no trend lines: the charts below draw the 30-day series.
     let stats = vec![
-        // A running total has no daily series of its own; the signup
-        // sparkline beside it would draw "new per day" under a cumulative
-        // figure and read as the total's trend. No sparkline.
-        components::stat_card(
-            "Total Users",
-            tile_value(&user_count_str),
-            icons::users(),
-            None,
-        ),
-        components::stat_card(
-            "New Today",
-            tile_value(&new_users_str),
-            icons::user_plus(),
-            new_users_spark,
-        ),
-        components::StatCard::new(
-            "Requests Today",
-            tile_value(&requests_str),
-            icons::file_text(),
-        )
-        .spark(requests_spark)
-        .detail(requests_detail)
-        .render(),
+        components::Stat::new("Total users", stat_value(&user_count_str)),
+        components::Stat::new("New today", stat_value(&new_users_str)),
+        components::Stat::new("Requests today", stat_value(&requests_str)).detail(requests_detail),
         // Server errors (5xx) only: this deployment failing. Red whenever it
         // is not zero, and the "Recent server errors" card and the logs
         // page's "Server errors" filter it links to count the same rows
         // (`request_logs::StatusClass`).
-        components::StatCard::new(
-            "Server Errors Today",
-            tile_value(&server_errors_str),
-            icons::triangle_alert(),
-        )
-        .spark(server_errors_spark)
-        .alert(server_errors.is_some_and(|n| n > 0))
-        .render(),
-        components::stat_card(
-            "Avg Response",
-            tile_value(&avg_ms_str),
-            icons::activity(),
-            None,
-        ),
+        components::Stat::new("Server errors today", stat_value(&server_errors_str))
+            .alert(server_errors.is_some_and(|n| n > 0)),
+        components::Stat::new("Avg response", stat_value(&avg_ms_str)),
     ];
 
     // A card holding a table is flush, so the table's frame is the card's
@@ -476,7 +431,7 @@ fn server_error_colour(series: &[(String, i64)]) -> &'static str {
     }
 }
 
-/// Where the dashboard's server-error tile, card and chart send an operator:
+/// Where the dashboard's server-error stat, card and chart send an operator:
 /// the logs page narrowed by the same rule they count by.
 const SERVER_ERRORS_LOGS_HREF: &str = "/b/admin/logs?server_errors=1";
 
@@ -527,21 +482,16 @@ mod tests {
     #[test]
     fn dashboard_renders_stats_before_charts() {
         let m = crate::ui::templates::dashboard_page(
-            vec![crate::ui::components::stat_card(
-                "TOTAL USERS",
-                "1",
-                maud::html! { span .probe-icon {} },
-                None,
-            )],
+            vec![crate::ui::components::Stat::new("Total users", "1")],
             maud::html! { div .probe-primary {} },
             maud::html! {},
             None,
             None,
         )
         .into_string();
-        let stats = m.find("stats-grid").expect("stats grid missing");
+        let stats = m.find("stat-row").expect("stat row missing");
         let charts = m.find("dashboard-grid").expect("charts grid missing");
-        assert!(stats < charts, "stat tiles must precede the charts row");
+        assert!(stats < charts, "the stat row must precede the charts row");
     }
 
     /// Value for `date` in a `(date, count)` series, or `-1` if absent.
@@ -603,7 +553,7 @@ mod outage_tests {
     //! The dashboard is the one page in group 1 that must NOT fail whole.
     //!
     //! It aggregates six independent reads and it is the page an operator
-    //! opens *during* an outage, so a failed read marks its own tile and the
+    //! opens *during* an outage, so a failed read marks its own stat and the
     //! rest of the page still renders. What it must never do is what it did:
     //! publish the failure as the number `0` and the empty state, so a
     //! deployment in trouble rendered as a healthy, unused one — "Total Users
@@ -614,7 +564,7 @@ mod outage_tests {
     use crate::test_support::{admin_msg, output_html, output_http_status, TestContext};
 
     #[tokio::test]
-    async fn every_failed_read_marks_its_own_tile_and_the_page_still_renders() {
+    async fn every_failed_read_marks_its_own_stat_and_the_page_still_renders() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
@@ -630,20 +580,20 @@ mod outage_tests {
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
         assert!(
-            !html.contains(r#"<div class="stat-value">0</div>"#),
+            !html.contains(r#"<div class="stat__value">0</div>"#),
             "a failed read must not be published as the figure 0: {html}"
         );
         assert_eq!(
-            html.matches(TILE_UNAVAILABLE).count(),
+            html.matches(STAT_UNAVAILABLE).count(),
             5,
-            "all five stat tiles are fed by the two failed aggregates"
+            "all five stats are fed by the two failed aggregates"
         );
         assert!(
             !html.contains(NO_RECENT_SERVER_ERRORS),
             "an unreadable error log must not render as 'no errors recently': {html}"
         );
         assert!(
-            !html.contains("stat-card--alert"),
+            !html.contains("stat--alert"),
             "an unreadable server-error count is not an alert: {html}"
         );
         assert!(
@@ -661,10 +611,6 @@ mod outage_tests {
              zero-filled 30-day series draws a flat line along the axis, which is a \
              picture of 'nothing happened': {html}"
         );
-        assert!(
-            !html.contains("stat-spark"),
-            "a sparkline drawn from an unreadable series is the same lie in miniature: {html}"
-        );
     }
 
     /// The healthy render is untouched: real figures, both empty states, and
@@ -677,7 +623,7 @@ mod outage_tests {
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
         assert!(
-            !html.contains(TILE_UNAVAILABLE) && !html.contains(CARD_UNAVAILABLE),
+            !html.contains(STAT_UNAVAILABLE) && !html.contains(CARD_UNAVAILABLE),
             "a healthy dashboard carries no unavailable marker: {html}"
         );
         assert!(
@@ -696,32 +642,58 @@ mod outage_tests {
         );
     }
 
-    /// "Total Users" is cumulative: no per-day sparkline under it. The error
-    /// tile says what it counts.
+    /// Five figures in one row, labelled in sentence case as written, with
+    /// nothing drawn: the 30-day series are the charts' to draw. The error
+    /// figure says what it counts.
     #[tokio::test]
-    async fn the_cumulative_tile_has_no_sparkline_and_the_error_tile_says_server_errors() {
+    async fn the_stat_row_is_five_sentence_case_figures_with_no_drawing() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
-        assert!(!tile(&html, "Total Users").contains("stat-spark"), "{html}");
-        assert!(tile(&html, "New Today").contains("stat-spark"), "{html}");
+        let start = html
+            .find(r#"<div class="stat-row">"#)
+            .expect("the stat row");
+        let row = &html[start..html[start..].find("dashboard-charts").unwrap() + start];
+        let labels: Vec<&str> = row
+            .split(r#"<div class="stat__label">"#)
+            .skip(1)
+            .map(|rest| &rest[..rest.find('<').unwrap()])
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Total users",
+                "New today",
+                "Requests today",
+                "Server errors today",
+                "Avg response"
+            ],
+            "{row}"
+        );
         assert!(
-            tile(&html, "Server Errors Today").contains("stat-spark"),
-            "{html}"
+            !row.contains("<svg"),
+            "a stat draws no icon and no trend: {row}"
         );
         assert!(!html.contains("4xx/5xx"), "{html}");
     }
 
-    /// The markup of the stat tile labelled `label`, from its opening
-    /// `.stat-card` to the end of its value and detail.
-    fn tile(html: &str, label: &str) -> String {
+    /// The markup of the stat labelled `label`, from its opening `.stat` to
+    /// the end of its value and detail.
+    fn stat(html: &str, label: &str) -> String {
+        const OPEN: [&str; 2] = [r#"<div class="stat">"#, r#"<div class="stat stat--alert">"#];
         let at = html
-            .find(&format!(r#"<div class="stat-label">{label}</div>"#))
-            .unwrap_or_else(|| panic!("no {label} tile: {html}"));
-        let start = html[..at].rfind(r#"<div class="stat-card"#).unwrap();
-        let end = html[at..]
-            .find(r#"<div class="stat-card"#)
+            .find(&format!(r#"<div class="stat__label">{label}</div>"#))
+            .unwrap_or_else(|| panic!("no {label} stat: {html}"));
+        let start = OPEN
+            .iter()
+            .filter_map(|open| html[..at].rfind(open))
+            .max()
+            .unwrap();
+        let end = OPEN
+            .iter()
+            .filter_map(|open| html[at..].find(open))
+            .min()
             .map_or(html.len(), |n| at + n);
         html[start..end].to_string()
     }
@@ -758,18 +730,18 @@ mod outage_tests {
         }
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
-        let server = tile(&html, "Server Errors Today");
+        let server = stat(&html, "Server errors today");
         assert!(
-            server.starts_with(r#"<div class="stat-card stat-card--alert">"#),
+            server.starts_with(r#"<div class="stat stat--alert">"#),
             "{server}"
         );
         assert!(
-            server.contains(r#"<div class="stat-value">1</div>"#),
+            server.contains(r#"<div class="stat__value">1</div>"#),
             "{server}"
         );
         assert!(
-            server.contains("--chart-color: var(--accent-danger)"),
-            "{server}"
+            html.contains("--chart-color: var(--accent-danger)"),
+            "a window with a server error draws its chart in red: {html}"
         );
         assert!(
             html.contains("--chart-color: var(--text-primary)")
@@ -777,16 +749,15 @@ mod outage_tests {
             "traffic is drawn in neutral ink, not the warning amber: {html}"
         );
 
-        let requests = tile(&html, "Requests Today");
-        assert!(!requests.contains("stat-card--alert"), "{requests}");
+        let requests = stat(&html, "Requests today");
+        assert!(!requests.contains("stat--alert"), "{requests}");
         assert!(
-            requests.contains(r#"<div class="stat-value">4</div>"#),
+            requests.contains(r#"<div class="stat__value">4</div>"#),
             "{requests}"
         );
         assert!(
-            requests.contains(
-                r#"<div class="stat-description">2 client errors · 1 rate-limited</div>"#
-            ),
+            requests
+                .contains(r#"<div class="stat__detail">2 client errors · 1 rate-limited</div>"#),
             "the client errors break the request figure down, the 429 among them: {requests}"
         );
 
@@ -812,18 +783,18 @@ mod outage_tests {
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
-        let server = tile(&html, "Server Errors Today");
-        assert!(server.starts_with(r#"<div class="stat-card">"#), "{server}");
+        let server = stat(&html, "Server errors today");
+        assert!(server.starts_with(r#"<div class="stat">"#), "{server}");
         assert!(
             !html.contains("--chart-color: var(--accent-danger)"),
-            "no server error in the window: neither its sparkline nor its chart is red: {html}"
+            "no server error in the window: its chart is not red: {html}"
         );
         assert!(
-            server.contains(r#"<div class="stat-value">0</div>"#),
+            server.contains(r#"<div class="stat__value">0</div>"#),
             "{server}"
         );
         assert!(
-            tile(&html, "Requests Today").contains("0 client errors"),
+            stat(&html, "Requests today").contains("0 client errors"),
             "{html}"
         );
     }
@@ -949,32 +920,32 @@ mod outage_tests {
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
     }
 
-    /// Two tiles carry figures the visual-baseline suite masks: "Avg
-    /// Response", a latency measured during the run that screenshots this
-    /// page, and "Requests Today", a count of every request the suite made
+    /// Two stats carry figures the visual-baseline suite masks: "Avg
+    /// response", a latency measured during the run that screenshots this
+    /// page, and "Requests today", a count of every request the suite made
     /// before the capture. Both are masked by label text
-    /// (`.stat-card:has-text("…") .stat-value`) rather than by an attribute,
-    /// because `components::stat_card` takes its value as a plain `&str` and
+    /// (`.stat:has-text("…") .stat__value`) rather than by an attribute,
+    /// because `components::Stat` takes its value as a plain `&str` and
     /// offers no markup slot to hang one on. That makes each label part of
     /// the mask's contract: rename it and the mask silently stops matching,
-    /// and the tile is compared pixel by pixel again with nothing announcing
+    /// and the stat is compared pixel by pixel again with nothing announcing
     /// the change.
     #[tokio::test]
-    async fn the_masked_tiles_keep_the_labels_the_visual_masks_key_on() {
+    async fn the_masked_stats_keep_the_labels_the_visual_masks_key_on() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
-        for tile in ["Avg Response", "Requests Today"] {
-            let label = format!(r#"<div class="stat-label">{tile}</div>"#);
+        for stat in ["Avg response", "Requests today"] {
+            let label = format!(r#"<div class="stat__label">{stat}</div>"#);
             let at = html.find(&label).unwrap_or_else(|| {
-                panic!("visual-baseline.spec.ts masks this tile by this exact label, which is gone: {label} in {html}")
+                panic!("visual-baseline.spec.ts masks this stat by this exact label, which is gone: {label} in {html}")
             });
             let rest = &html[at + label.len()..];
             assert!(
-                rest.starts_with(r#"<div class="stat-value">"#),
-                "the masked element is the `.stat-value` that follows the label: {rest:.120}"
+                rest.starts_with(r#"<div class="stat__value">"#),
+                "the masked element is the `.stat__value` that follows the label: {rest:.120}"
             );
         }
     }

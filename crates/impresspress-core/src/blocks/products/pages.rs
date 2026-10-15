@@ -33,6 +33,28 @@ fn display_money(amount_minor: i64, currency: &str) -> String {
     }
 }
 
+/// One currency's four headline figures. The rest of its analytics are a
+/// key/value list under them: a stat row holds headlines, not every number.
+fn analytics_headline(currency: &CommerceAnalytics, seller_view: bool) -> Markup {
+    let gross = display_money(currency.gross_volume_minor, &currency.currency);
+    let refunded = display_money(currency.refunded_volume_minor, &currency.currency);
+    let net = display_money(currency.net_volume_minor, &currency.currency);
+    let fees = display_money(currency.platform_fees_minor, &currency.currency);
+    components::stat_row(vec![
+        components::Stat::new("Gross sales", &gross),
+        components::Stat::new("Customer refunds", &refunded),
+        components::Stat::new(
+            if seller_view {
+                "After refunds"
+            } else {
+                "Net sales"
+            },
+            &net,
+        ),
+        components::Stat::new("Platform fees", &fees),
+    ])
+}
+
 fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: bool) -> Markup {
     html! {
         section .products-section {
@@ -54,18 +76,15 @@ fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: 
                             (components::status_badge(&currency.currency))
                         }
                         div .card__body {
-                            div .stats-grid {
-                                (components::stat_card("Gross sales", &display_money(currency.gross_volume_minor, &currency.currency), icons::dollar_sign(), None))
-                                (components::stat_card("Customer refunds", &display_money(currency.refunded_volume_minor, &currency.currency), icons::arrow_down_left(), None))
-                                (components::stat_card(if seller_view { "After refunds" } else { "Net sales" }, &display_money(currency.net_volume_minor, &currency.currency), icons::arrow_up_right(), None))
-                                (components::stat_card("Platform fees", &display_money(currency.platform_fees_minor, &currency.currency), icons::dollar_sign(), None))
+                            (analytics_headline(currency, seller_view))
+                            dl .products-status-list {
                                 @if seller_view {
-                                    (components::stat_card("Before Stripe fees", &display_money(currency.net_volume_minor.saturating_sub(currency.platform_fees_minor), &currency.currency), icons::arrow_up_right(), None))
+                                    div { dt { "Before Stripe fees" } dd { (display_money(currency.net_volume_minor.saturating_sub(currency.platform_fees_minor), &currency.currency)) } }
                                 }
-                                (components::stat_card("Failed orders", &currency.failed_order_count.to_string(), icons::info(), None))
-                                (components::stat_card("Past due", &currency.past_due_subscription_count.to_string(), icons::help_circle(), None))
-                                (components::stat_card("Open disputes", &format!("{} · {}", currency.open_dispute_count, display_money(currency.open_disputed_volume_minor, &currency.currency)), icons::help_circle(), None))
-                                (components::stat_card("Lost disputes", &format!("{} · {}", currency.lost_dispute_count, display_money(currency.lost_disputed_volume_minor, &currency.currency)), icons::arrow_down_left(), None))
+                                div { dt { "Failed orders" } dd { (currency.failed_order_count) } }
+                                div { dt { "Past due" } dd { (currency.past_due_subscription_count) } }
+                                div { dt { "Open disputes" } dd { (currency.open_dispute_count) " · " (display_money(currency.open_disputed_volume_minor, &currency.currency)) } }
+                                div { dt { "Lost disputes" } dd { (currency.lost_dispute_count) " · " (display_money(currency.lost_disputed_volume_minor, &currency.currency)) } }
                             }
                             p .text-muted .text-sm {
                                 "Subscriptions: " (currency.active_subscription_count) " active, "
@@ -445,12 +464,12 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let content = html! {
-        div .stats-grid {
-            (components::stat_card("Products", &products_count.to_string(), icons::package(), None))
-            (components::stat_card("Groups", &groups_count.to_string(), icons::folder(), None))
-            (components::stat_card("Offers", &offers_count.to_string(), icons::dollar_sign(), None))
-            (components::stat_card("Orders", &purchases_count.to_string(), icons::shopping_cart(), None))
-        }
+        (components::stat_row(vec![
+            components::Stat::new("Products", &products_count.to_string()),
+            components::Stat::new("Groups", &groups_count.to_string()),
+            components::Stat::new("Offers", &offers_count.to_string()),
+            components::Stat::new("Orders", &purchases_count.to_string()),
+        ]))
         section .products-section {
             (components::section_header("Get selling in three steps", None))
             p .section-desc { "Start with the essentials. You can refine every setting later." }
@@ -1255,12 +1274,12 @@ pub async fn admin_seller_detail(
                 }
             }
             div .card__body {
-                div .stats-grid {
-                    (components::stat_card("Payments", if seller.capabilities.charges_enabled { "Enabled" } else { "Disabled" }, icons::dollar_sign(), None))
-                    (components::stat_card("Payouts", if seller.capabilities.payouts_enabled { "Enabled" } else { "Disabled" }, icons::arrow_up_right(), None))
-                    (components::stat_card("Verification", if seller.capabilities.details_submitted { "Complete" } else { "Incomplete" }, icons::info(), None))
-                    (components::stat_card("Platform fee", &fee.map_or_else(|()| "Misconfigured".to_string(), |fee| fee_percent(fee.into())), icons::dollar_sign(), None))
-                }
+                (components::stat_row(vec![
+                    components::Stat::new("Payments", if seller.capabilities.charges_enabled { "Enabled" } else { "Disabled" }),
+                    components::Stat::new("Payouts", if seller.capabilities.payouts_enabled { "Enabled" } else { "Disabled" }),
+                    components::Stat::new("Verification", if seller.capabilities.details_submitted { "Complete" } else { "Incomplete" }),
+                    components::Stat::new("Platform fee", &fee.map_or_else(|()| "Misconfigured".to_string(), |fee| fee_percent(fee.into()))),
+                ]))
                 details .products-plain-details {
                     summary { "Technical account details" }
                     div .text-sm {
@@ -3165,6 +3184,15 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
         (0, None, 0)
     };
 
+    let purchases = purchases_count.to_string();
+    let products_for_sale = product_count.to_string();
+    let mut commerce_stats = vec![components::Stat::new("Purchases", &purchases)];
+    if seller_enabled {
+        commerce_stats.push(components::Stat::new(
+            "Products for sale",
+            &products_for_sale,
+        ));
+    }
     let content = html! {
         div #commerce-portal-error .text-sm hidden .text-danger .mb-4 {}
         (components::callout(
@@ -3173,12 +3201,7 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
             html! { p { "Purchases stay separate from products you sell, so it is always clear whether you are buying or managing a storefront." } },
             Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/my-purchases" { "View order history" } }),
         ))
-        div .stats-grid {
-            (components::stat_card("Purchases", &purchases_count.to_string(), icons::shopping_cart(), None))
-            @if seller_enabled {
-                (components::stat_card("Products for sale", &product_count.to_string(), icons::package(), None))
-            }
-        }
+        (components::stat_row(commerce_stats))
         section .card .mt-4 {
             header .card__head {
                 div {
@@ -3620,12 +3643,12 @@ async fn order_detail(
     let content = html! {
         p .text-muted .mt-0 { "Placed " (components::timestamp(purchase.str_field("created_at"))) }
         div #order-detail-error .login-error hidden {}
-        div .stats-grid {
-            (components::stat_card("Total", &display_money(purchase.i64_field("total_cents"), currency), icons::dollar_sign(), None))
-            (components::stat_card("Refunded", &display_money(refunded_total, currency), icons::arrow_down_left(), None))
-            (components::stat_card("Customer", if buyer.is_empty() { "Guest" } else { buyer }, icons::users(), None))
-            (components::stat_card("Items", &line_items.len().to_string(), icons::package(), None))
-        }
+        (components::stat_row(vec![
+            components::Stat::new("Total", &display_money(purchase.i64_field("total_cents"), currency)),
+            components::Stat::new("Refunded", &display_money(refunded_total, currency)),
+            components::Stat::new("Customer", if buyer.is_empty() { "Guest" } else { buyer }),
+            components::Stat::new("Items", &line_items.len().to_string()),
+        ]))
         details .products-plain-details {
             summary { "View order total breakdown" }
             div .products-form-grid .products-form-grid--compact .text-sm {
@@ -4241,4 +4264,95 @@ pub(crate) async fn settings_allowlist(
     ctx: &dyn Context,
 ) -> Result<Vec<wafer_run::ConfigVar>, wafer_run::WaferError> {
     Ok(settings_vars(ctx).await?.all())
+}
+
+#[cfg(test)]
+mod analytics_tests {
+    use super::*;
+
+    fn usd() -> CommerceAnalytics {
+        CommerceAnalytics {
+            currency: "USD".to_string(),
+            gross_volume_minor: 10_000,
+            refunded_volume_minor: 1_000,
+            net_volume_minor: 9_000,
+            platform_fees_minor: 500,
+            order_count: 4,
+            paid_order_count: 3,
+            refunded_order_count: 1,
+            failed_order_count: 2,
+            open_dispute_count: 1,
+            open_disputed_volume_minor: 300,
+            lost_dispute_count: 0,
+            lost_disputed_volume_minor: 0,
+            active_subscription_count: 0,
+            trialing_subscription_count: 0,
+            past_due_subscription_count: 5,
+            canceled_subscription_count: 0,
+            top_products: Vec::new(),
+        }
+    }
+
+    fn labels<'h>(html: &'h str, open: &str) -> Vec<&'h str> {
+        html.split(open)
+            .skip(1)
+            .map(|rest| &rest[..rest.find('<').unwrap()])
+            .collect()
+    }
+
+    /// Each currency leads with four headline figures in a stat row; every
+    /// other figure is a row of the key/value list under it, so the stat row
+    /// never runs past its six-stat limit.
+    #[test]
+    fn a_currency_leads_with_four_stats_and_lists_the_rest() {
+        let admin = analytics_section(&[usd()], "Sales", false).into_string();
+        assert_eq!(
+            labels(&admin, r#"<div class="stat__label">"#),
+            [
+                "Gross sales",
+                "Customer refunds",
+                "Net sales",
+                "Platform fees"
+            ],
+            "{admin}"
+        );
+        assert_eq!(
+            labels(&admin, "<dt>"),
+            [
+                "Failed orders",
+                "Past due",
+                "Open disputes",
+                "Lost disputes"
+            ],
+            "{admin}"
+        );
+        assert!(admin.contains("<dt>Past due</dt><dd>5</dd>"), "{admin}");
+        assert!(
+            admin.contains(&format!(
+                "<dt>Open disputes</dt><dd>1 · {}</dd>",
+                display_money(300, "USD")
+            )),
+            "{admin}"
+        );
+
+        let seller = analytics_section(&[usd()], "Sales", true).into_string();
+        assert_eq!(
+            labels(&seller, r#"<div class="stat__label">"#),
+            [
+                "Gross sales",
+                "Customer refunds",
+                "After refunds",
+                "Platform fees"
+            ],
+            "{seller}"
+        );
+        assert_eq!(labels(&seller, "<dt>")[0], "Before Stripe fees", "{seller}");
+        assert!(
+            seller.contains(&format!(
+                "<dt>Before Stripe fees</dt><dd>{}</dd>",
+                display_money(8_500, "USD")
+            )),
+            "{seller}"
+        );
+    }
 }

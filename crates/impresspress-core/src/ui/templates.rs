@@ -11,7 +11,11 @@
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-use super::{assets, SiteConfig};
+use super::{
+    assets,
+    components::{stat_row, Stat},
+    SiteConfig,
+};
 
 /// `list_page` template.
 ///
@@ -162,19 +166,17 @@ pub fn tabbed_page(
     }
 }
 
-/// `stats` are rendered tiles — `components::stat_card(..)` calls the page
-/// makes itself. The template lays them out in `.stats-grid` and does not
-/// describe them: a struct of the four `stat_card` arguments existed only so
-/// this function could make that call, which made `stat_card`'s signature the
-/// second place a tile's shape was written down.
+/// `stats` are the page's headline figures, laid out by
+/// [`stat_row`] as the first
+/// thing on the page.
 ///
-/// `top_card` renders between the stat tiles and `dashboard-grid` — e.g. the
-/// admin dashboard's three chart cards. The name is positional relative to
+/// `top_card` renders between the stat row and `dashboard-grid` — e.g. the
+/// admin dashboard's chart cards. The name is positional relative to
 /// `dashboard-grid` (the two-column primary/secondary row below it), not
 /// relative to the page as a whole: stats always render first, matching the
 /// mockup's stats → charts → tables order.
 pub fn dashboard_page(
-    stats: Vec<Markup>,
+    stats: Vec<Stat<'_>>,
     primary_card: Markup,
     secondary_card: Markup,
     full_width_card: Option<Markup>,
@@ -182,11 +184,7 @@ pub fn dashboard_page(
 ) -> Markup {
     html! {
         div .page .page--dashboard {
-            @if !stats.is_empty() {
-                div .stats-grid {
-                    @for s in &stats { (s) }
-                }
-            }
+            (stat_row(stats))
             @if let Some(tc) = top_card { div .dashboard-top { (tc) } }
             div .dashboard-grid {
                 div .dashboard-grid__primary { (primary_card) }
@@ -460,7 +458,6 @@ pub fn public_page(opts: PublicPage<'_>, body: Markup) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::components::stat_card;
 
     #[test]
     fn list_page_renders_filters_table_pagination() {
@@ -570,28 +567,22 @@ mod tests {
 
     #[test]
     fn dashboard_renders_stats_and_cards() {
-        let stats = vec![
-            stat_card(
-                "Users",
-                "142",
-                html! { span .probe-icon-users {} },
-                Some(html! { span .probe-spark {} }),
-            ),
-            stat_card(
-                "Storage",
-                "1.2 GB",
-                html! { span .probe-icon-storage {} },
-                None,
-            ),
-        ];
+        let stats = vec![Stat::new("Users", "142"), Stat::new("Storage", "1.2 GB")];
         let primary = html! { section .card { "Quick actions" } };
         let secondary = html! { section .card { "Recent activity" } };
         let s = dashboard_page(stats, primary, secondary, None, None).into_string();
-        assert!(s.contains("stats-grid"));
-        assert!(s.contains(">Users<"));
-        assert!(s.contains("142"));
-        assert!(s.contains("probe-icon-users"), "icon must render");
-        assert!(s.contains("probe-spark"), "sparkline must render when Some");
+        assert!(
+            s.starts_with(r#"<div class="page page--dashboard"><div class="stat-row"><div class="stat"><div class="stat__label">Users</div><div class="stat__value">142</div></div>"#),
+            "the stat row is the first thing on the page: {s}"
+        );
+        assert!(
+            s.contains(r#"<div class="stat__value">1.2 GB</div>"#),
+            "{s}"
+        );
+        assert!(
+            !s.contains("<svg"),
+            "a stat draws no icon and no sparkline: {s}"
+        );
         assert!(s.contains("Quick actions"));
         assert!(s.contains("Recent activity"));
         assert!(!s.contains("dashboard-wide"));
@@ -600,14 +591,14 @@ mod tests {
     #[test]
     fn dashboard_page_renders_optional_top_card_between_stats_and_grid() {
         let m = dashboard_page(
-            vec![stat_card("Users", "1", html! { span .probe-icon {} }, None)],
+            vec![Stat::new("Users", "1")],
             html! { div #primary {} },
             html! { div #secondary {} },
             None,
             Some(html! { div #top-card { "QA" } }),
         );
         let s = m.into_string();
-        let stats = s.find("stats-grid").expect("stats-grid div present");
+        let stats = s.find("stat-row").expect("stat-row div present");
         let top = s.find("dashboard-top").expect("dashboard-top div present");
         let grid = s
             .find("dashboard-grid")

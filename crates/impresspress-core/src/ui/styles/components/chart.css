@@ -190,9 +190,3 @@
 	transform: translate(-50%, -50%);
 }
 
-/* Sparkline — tiny decorative trend line inside a stat tile. */
-.sparkline {
-	width: 100%;
-	height: 100%;
-	overflow: visible;
-}
