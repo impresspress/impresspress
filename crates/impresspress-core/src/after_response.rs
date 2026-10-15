@@ -297,14 +297,17 @@ enum ScopeKind {
 /// A future that makes its request's [`AfterResponse`] current on every
 /// poll, or no request at all. See [`scope`], [`scope_root`] and
 /// [`scope_root_outside_request`].
-pub struct Scoped<F> {
+///
+/// `F` may be unsized so a future that is already boxed is scoped without a
+/// second box ([`scope_root_outside_request_boxed`]).
+pub struct Scoped<F: ?Sized> {
     /// `None` only for [`scope_root_outside_request`].
     after: Option<Rc<AfterResponse>>,
     kind: ScopeKind,
     inner: Pin<Box<F>>,
 }
 
-impl<F: Future> Future for Scoped<F> {
+impl<F: Future + ?Sized> Future for Scoped<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
@@ -392,10 +395,19 @@ pub fn scope_root<F: Future>(after: Rc<AfterResponse>, future: F, found_stale: f
 /// rest of this module documents. A request found current on entry is
 /// reported through `found_stale`, as [`scope_root`] does.
 pub fn scope_root_outside_request<F: Future>(future: F, found_stale: fn()) -> Scoped<F> {
+    scope_root_outside_request_boxed(Box::pin(future), found_stale)
+}
+
+/// [`scope_root_outside_request`] for a future the host has already boxed (a
+/// spawned task), which it takes as it is rather than boxing it again.
+pub fn scope_root_outside_request_boxed<F: Future + ?Sized>(
+    future: Pin<Box<F>>,
+    found_stale: fn(),
+) -> Scoped<F> {
     Scoped {
         after: None,
         kind: ScopeKind::Root { found_stale },
-        inner: Box::pin(future),
+        inner: future,
     }
 }
 

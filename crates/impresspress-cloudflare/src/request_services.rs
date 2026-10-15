@@ -586,6 +586,27 @@ pub(crate) fn scope_root_outside_dispatch<F: Future>(
     )
 }
 
+/// [`scope_root_outside_dispatch`] for a task [`wrap_spawned`] receives
+/// already boxed. Each layer takes the box it is given, so the two roots add
+/// one box each, and the task's own box is not boxed again.
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+fn scope_root_outside_dispatch_spawned(
+    services: Rc<RequestServices>,
+    task: wafer_block::spawn::SpawnedTask,
+) -> wafer_block::spawn::SpawnedTask {
+    let outside_request: wafer_block::spawn::SpawnedTask = Box::pin(
+        impresspress_core::after_response::scope_root_outside_request_boxed(
+            task,
+            after_response_found_stale,
+        ),
+    );
+    Box::pin(ScopedFuture {
+        services,
+        kind: ScopeKind::Root,
+        inner: outside_request,
+    })
+}
+
 /// Leave `services` current as a request hard-stopped mid-poll leaves its
 /// bundle: a scope guard whose `Drop` never runs.
 #[cfg(test)]
@@ -614,7 +635,7 @@ pub(crate) fn clear_for_test() {
 /// request (nothing current) is passed through bare, so a proxy call from it
 /// is still refused loudly.
 ///
-/// The scope is a root ([`scope_root_outside_dispatch`]): `spawn_producer`
+/// The scope is a root ([`scope_root_outside_dispatch_spawned`]): `spawn_producer`
 /// always hands the task to `spawn_local`, so it is a task of its own and
 /// nothing else's poll encloses it.
 ///
@@ -631,7 +652,7 @@ pub(crate) fn wrap_spawned(
     task: wafer_block::spawn::SpawnedTask,
 ) -> wafer_block::spawn::SpawnedTask {
     match current() {
-        Some(services) => Box::pin(scope_root_outside_dispatch(services, task)),
+        Some(services) => scope_root_outside_dispatch_spawned(services, task),
         None => task,
     }
 }

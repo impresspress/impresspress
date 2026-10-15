@@ -399,10 +399,11 @@ async fn a_spawned_producer_is_a_root() {
     let seen = Rc::new(Cell::new(None));
     let observed = Rc::clone(&seen);
     let task: wafer_block::spawn::SpawnedTask = Box::pin(async move {
-        yield_once().await;
-        observed.set(request_services::current_marker());
+        // In the first poll, the one that finds the stopped request.
         drop(after_response::final_write());
         impresspress_core::deferred::defer(async {});
+        yield_once().await;
+        observed.set(request_services::current_marker());
     });
     let wrapped = request_services::scope_sync(RequestServices::marker(10), || {
         request_services::wrap_spawned(task)
