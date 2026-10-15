@@ -157,8 +157,9 @@ async fn boot_dynamic(
 ///   D1 round trips and subrequests (a dynamic build measured up to 8.4 s of
 ///   wall time) — on every cold isolate, to re-derive state the deploy funnel
 ///   already sealed into the plan. The plan saves I/O, not CPU: a cold
-///   prepared hydration still costs 170–245 ms of CPU locally and 400–730 ms
-///   on Cloudflare (CF-RESOURCE-LIMITS, 2026-10-15).
+///   prepared build still costs 170–245 ms of CPU locally, and a cold request
+///   that builds one measured about 400–670 ms of CPU on Cloudflare, its own
+///   work included (CF-RESOURCE-LIMITS, 2026-10-15).
 pub(crate) async fn boot_prepared_runtime(built: &mut BuiltRuntime) -> Result<BootReport, String> {
     request_services::scope(built.services.clone(), async {
         impresspress_core::builder::boot(

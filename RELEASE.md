@@ -19,6 +19,34 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: concurrent cold requests share one runtime build; new 503s, and a deploy step
+
+**What changes.** A cold request on Cloudflare that finds another request in
+the same isolate building the runtime now waits for that build and serves it,
+instead of building a runtime of its own (each one is 13–20 MB of Wasm memory
+against the 128 MB isolate limit; enough of them at once killed the isolate).
+The wait lasts at most one build lease (10 s). Two cases that used to build or
+answer 500 now answer **503 with `Retry-After: 1`**:
+
+- the build the request waited for failed (the build's own request still
+  answers the 500; the next cold request retries the build), and
+- the request waited once, re-checked, and found another build in progress.
+
+A scheduled (cron) run that lands in either case logs the error and skips
+that run's sweep until the next schedule.
+
+`impresspress deploy --target cloudflare` now reads the final candidate's
+per-isolate memory from Cloudflare's Workers analytics after the concurrency
+smoke and prints it (peak `wasmMemoryBytes` and `memoryUsageBytes` by request
+status, against the 128 MB limit). It runs `wrangler auth token --json` for
+the credential and polls the analytics for up to about 3 minutes while the
+smoke's requests arrive. The step is informational: an unreadable token or
+an analytics error prints a note and the deploy continues.
+
+**Who has to act.** Nobody. A client or monitor that treats any 503 from a
+cold isolate as an outage should honour `Retry-After`. A deploy run under a
+credential with no bearer token (an API-key login) skips the memory report.
+
 ### Migrations: an older version still serving no longer re-applies its migrations (admin migration 009)
 
 **What changes.** Admin migration 009 empties `blessed_hash` on every row of

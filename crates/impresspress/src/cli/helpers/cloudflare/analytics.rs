@@ -202,6 +202,11 @@ async fn read_peaks(
         if seen >= expected_requests || attempt == POLL_ATTEMPTS {
             break;
         }
+        println!(
+            "-> waiting for Cloudflare analytics: {seen} of {expected_requests} smoke requests \
+             counted (check {attempt} of {POLL_ATTEMPTS}, every {}s)",
+            POLL_INTERVAL.as_secs()
+        );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
     Ok(rows)

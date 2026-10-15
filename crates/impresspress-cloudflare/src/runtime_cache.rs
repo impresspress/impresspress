@@ -9,13 +9,25 @@
 //! destructors, and a borrow flag stranded that way wedges the isolate for
 //! good (see the `thread_local!` block's comment).
 //!
-//! Runtime construction is single-flight per isolate. One request owns the
-//! build slot ([`BuildGuard`]); a cold request that finds the slot owned and
-//! nothing it can serve WAITS for that build instead of building a runtime of
-//! its own ([`admit_cold`] / [`wait_for_owner`]). Each runtime is 13–20 MB of
-//! Wasm memory against a 128 MB isolate and 400–730 ms of CPU on Cloudflare, so
+//! Request-path runtime construction is single-flight per isolate. One
+//! request owns the build slot ([`BuildGuard`]); a cold request that finds the
+//! slot owned and nothing it can serve WAITS for that build instead of
+//! building a runtime of its own ([`admit_cold`] / [`wait_for_owner`]). Each
+//! runtime is 13–20 MB of Wasm memory against a 128 MB isolate, and a cold
+//! request that builds one measured about 400–670 ms of CPU on Cloudflare, so
 //! k concurrent cold requests each building their own is what killed an
 //! isolate in the 2026-10-14 deploy smoke.
+//!
+//! Two builds happen outside that rule, and both are bounded:
+//!
+//! - The deploy funnel (`/_deploy/init`, `/_deploy/prepare`,
+//!   `deploy_endpoints.rs`) builds a fresh runtime without the slot, because
+//!   it must not use the cache. It is token-gated and operator-driven: at most
+//!   one extra runtime, during a deploy.
+//! - An owner still building past [`BUILD_HARD_LEASE_MS`] keeps building after
+//!   a waiter reclaims the slot. Its late publish is refused and it serves its
+//!   runtime request-locally ([`publish_runtime`]); its failure is not
+//!   recorded against the new owner ([`BuildGuard::record_failure`]).
 //!
 //! The wait never awaits the owner's future and is never woken by the owner:
 //! the build performs D1/KV I/O, a future created by one Workers request must
@@ -595,9 +607,9 @@ fn prepared_cache_identity(plan_hash: &str, environment_identity: &str) -> Strin
 /// Return true only for the exact plan/environment pair previously bypassed.
 /// Encountering a new identity clears stale isolate-local bypass state.
 fn prepared_is_bypassed(identity: &str) -> bool {
-    // `retain_if_eq` is where the clear-on-mismatch semantics live, and it is
-    // held by tests that actually run — this crate is wasm32-only, so its own
-    // unit tests are compiled but never executed.
+    // `retain_if_eq` is where the clear-on-mismatch semantics live.
+    // `bypass_is_scoped_to_exact_plan_and_environment_identity` below holds
+    // them through this function; the `cloudflare-wasm-test` job runs it.
     PREPARED_BYPASS.with(|slot| slot.retain_if_eq(identity))
 }
 
@@ -837,9 +849,12 @@ impl RuntimeKind {
     /// log field uses ([`ReadyRuntime::kind_label`]), which is derived from a
     /// finished runtime and so cannot name a build that never finished.
     ///
-    /// Every build is the slot owner's — no request builds beside it — so
-    /// the path is the whole distinction; the owner's failure is recorded
-    /// for its waiters in `BUILD_LAST_FAILURE`.
+    /// On the request path every build is the slot owner's, so the path is
+    /// the whole distinction; the owner's failure is recorded for its waiters
+    /// in `BUILD_LAST_FAILURE`. The two builds outside the slot are named in
+    /// the module doc: the deploy funnel, which boots through its own funnel
+    /// and never reaches this, and an owner that outlives the hard lease,
+    /// which still names its path here.
     fn lifecycle(&self) -> &'static str {
         match self {
             Self::Dynamic { .. } => "dynamic",
@@ -1028,17 +1043,57 @@ where
         queries,
         request_config,
     };
-    get_or_build_attempt(inputs, register_blocks, register_post_build, Attempt::First).await
+    with_one_reentry(
+        (register_blocks, register_post_build),
+        |(register_blocks, register_post_build), attempt| {
+            get_or_build_attempt(inputs, register_blocks, register_post_build, attempt)
+        },
+    )
+    .await
 }
 
+/// How one pass through the cache ended.
+enum Pass<H, T> {
+    Done(T),
+    /// The request waited and found nothing it accepts; `H` is what it still
+    /// owns (the unconsumed build hooks) for the next pass.
+    Reenter(H),
+}
+
+/// The one place a request's passes are sequenced: an [`Attempt::First`]
+/// pass, and at most one [`Attempt::Reentry`] pass after it. A `Reentry`
+/// pass never waits ([`admit_cold`] answers `SlotBusy` instead), so no request
+/// waits more than once; a second `Reenter` is answered the same way.
+async fn with_one_reentry<H, T, Fut>(
+    hooks: H,
+    mut pass: impl FnMut(H, Attempt) -> Fut,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    Fut: std::future::Future<Output = Result<Pass<H, T>, Box<dyn std::error::Error>>>,
+{
+    let hooks = match pass(hooks, Attempt::First).await? {
+        Pass::Done(done) => return Ok(done),
+        Pass::Reenter(hooks) => hooks,
+    };
+    match pass(hooks, Attempt::Reentry).await? {
+        Pass::Done(done) => Ok(done),
+        Pass::Reenter(_) => Err(RuntimeBuildBusy::SlotBusy.into()),
+    }
+}
+
+/// What a pass through the cache produces: a runtime, or the hooks back for
+/// the re-entry.
+type PassResult<F, G> =
+    Result<Pass<(F, G), (Rc<ReadyRuntime>, CacheOutcome)>, Box<dyn std::error::Error>>;
+
 /// One pass through the cache. A request that waited and found nothing comes
-/// back here once as [`Attempt::Reentry`]; see [`admit_cold`].
+/// back here once as [`Attempt::Reentry`], through [`with_one_reentry`].
 async fn get_or_build_attempt<F, G>(
     inputs: RequestInputs<'_>,
     register_blocks: F,
     register_post_build: G,
     attempt: Attempt,
-) -> Result<(Rc<ReadyRuntime>, CacheOutcome), Box<dyn std::error::Error>>
+) -> PassResult<F, G>
 where
     F: FnOnce(
         crate::ImpresspressBuilder,
@@ -1062,9 +1117,11 @@ where
     // work.
     //
     // What the plan removes is the D1 structural reads: their round trips and
-    // subrequests. It does not make a build cheap. A cold prepared hydration
-    // measured 170–245 ms of CPU locally and 400–730 ms on Cloudflare, and a
-    // built runtime holds 13–20 MB of Wasm memory against the isolate's 128 MB
+    // subrequests. It does not make a build cheap. A cold prepared build
+    // measured 170–245 ms of CPU locally; a cold request that builds one
+    // measured about 400–670 ms of CPU on Cloudflare, its own work included
+    // (733 ms was the deploy funnel's `/_deploy/prepare`). A built runtime
+    // holds 13–20 MB of Wasm memory against the isolate's 128 MB
     // (CF-RESOURCE-LIMITS, 2026-10-15). That is why a cold request that finds
     // another request building waits for that build ([`admit_cold`]) instead
     // of hydrating one of its own.
@@ -1090,7 +1147,7 @@ async fn get_or_build_dynamic<F, G>(
     register_blocks: F,
     register_post_build: G,
     attempt: Attempt,
-) -> Result<(Rc<ReadyRuntime>, CacheOutcome), Box<dyn std::error::Error>>
+) -> PassResult<F, G>
 where
     F: FnOnce(
         crate::ImpresspressBuilder,
@@ -1113,14 +1170,14 @@ where
         if let Some(rt) =
             cached().filter(|rt| dynamic_runtime_is_warm(rt, &environment_identity, now))
         {
-            return Ok((rt, CacheOutcome::Hit));
+            return Ok(Pass::Done((rt, CacheOutcome::Hit)));
         }
     }
 
     // A healthy owner is rebuilding and the last complete runtime is still
     // serviceable: stale-while-revalidate.
     if let Some(rt) = dynamic_runtime_while_building(now, &environment_identity) {
-        return Ok((rt, CacheOutcome::Hit));
+        return Ok(Pass::Done((rt, CacheOutcome::Hit)));
     }
 
     let timer = WorkerTimer;
@@ -1131,16 +1188,10 @@ where
     let build_guard = match admission {
         ColdAdmission::Build(guard) => guard,
         ColdAdmission::Serve { rt, waited_ms } => {
-            return Ok((rt, CacheOutcome::Waited { waited_ms }));
+            return Ok(Pass::Done((rt, CacheOutcome::Waited { waited_ms })));
         }
         ColdAdmission::Reenter => {
-            return Box::pin(get_or_build_attempt(
-                inputs,
-                register_blocks,
-                register_post_build,
-                Attempt::Reentry,
-            ))
-            .await;
+            return Ok(Pass::Reenter((register_blocks, register_post_build)));
         }
     };
     as_owner(
@@ -1156,6 +1207,7 @@ where
         ),
     )
     .await
+    .map(Pass::Done)
 }
 
 /// The dynamic build, run by the request that owns the slot.
@@ -1368,7 +1420,7 @@ async fn get_or_build_prepared<F, G>(
     register_blocks: F,
     register_post_build: G,
     attempt: Attempt,
-) -> Result<(Rc<ReadyRuntime>, CacheOutcome), Box<dyn std::error::Error>>
+) -> PassResult<F, G>
 where
     F: FnOnce(
         crate::ImpresspressBuilder,
@@ -1386,7 +1438,7 @@ where
         if let Some(rt) = cached()
             .filter(|rt| prepared_runtime_is_warm(rt, &environment_identity, &plan_generation, now))
         {
-            return Ok((rt, CacheOutcome::Hit));
+            return Ok(Pass::Done((rt, CacheOutcome::Hit)));
         }
     }
 
@@ -1398,7 +1450,7 @@ where
                 && rt.version == plan_generation
                 && rt.config_version.is_some()
         }) {
-            return Ok((rt, CacheOutcome::Hit));
+            return Ok(Pass::Done((rt, CacheOutcome::Hit)));
         }
     }
 
@@ -1410,19 +1462,13 @@ where
     let build_guard = match admission {
         ColdAdmission::Build(guard) => guard,
         ColdAdmission::Serve { rt, waited_ms } => {
-            return Ok((rt, CacheOutcome::Waited { waited_ms }));
+            return Ok(Pass::Done((rt, CacheOutcome::Waited { waited_ms })));
         }
         // Re-entry also covers an owner that bypassed this plan while this
         // request waited: the runtime it published is dynamic, which this
         // path's predicate refuses, and re-entry routes to the dynamic path.
         ColdAdmission::Reenter => {
-            return Box::pin(get_or_build_attempt(
-                inputs,
-                register_blocks,
-                register_post_build,
-                Attempt::Reentry,
-            ))
-            .await;
+            return Ok(Pass::Reenter((register_blocks, register_post_build)));
         }
     };
     let owned = as_owner(
@@ -1440,7 +1486,7 @@ where
     )
     .await?;
     match owned {
-        PreparedOwned::Ready(rt, outcome) => Ok((rt, outcome)),
+        PreparedOwned::Ready(rt, outcome) => Ok(Pass::Done((rt, outcome))),
         PreparedOwned::BypassPlan {
             register_blocks,
             register_post_build,
@@ -1686,55 +1732,83 @@ mod tests {
         Refused(RuntimeBuildBusy),
     }
 
-    /// One cold request on the dynamic path, through the production admission
-    /// ([`admit_cold`]), owner wrapper ([`as_owner`]) and publish
-    /// ([`publish_runtime`]), with a fake build of `build_ticks` I/O turns.
-    /// A `Reenter` loops once with [`Attempt::Reentry`], as
-    /// `get_or_build_dynamic` re-enters `get_or_build_attempt`.
+    /// One cold request on the dynamic path. Its passes are sequenced by the
+    /// production [`with_one_reentry`] — the loop `get_or_build` runs — and
+    /// each pass goes through the production admission ([`admit_cold`]),
+    /// owner wrapper ([`as_owner`]) and publish ([`publish_runtime`]), with a
+    /// fake build of `build_ticks` I/O turns.
     async fn cold_request(
         timer: &FakeTimer,
         builds: &Cell<u32>,
         build_ticks: u32,
         build_fails: bool,
     ) -> Served {
-        let mut attempt = Attempt::First;
-        loop {
+        let served = with_one_reentry((), |(), attempt| async move {
             let admission = admit_cold(attempt, timer, |rt, now| {
                 dynamic_runtime_is_warm(rt, "env-test", now)
             })
+            .await?;
+            let guard = match admission {
+                ColdAdmission::Serve { .. } => return Ok(Pass::Done(Served::Waited)),
+                ColdAdmission::Reenter => return Ok(Pass::Reenter(())),
+                ColdAdmission::Build(guard) => guard,
+            };
+            let built = as_owner(&guard, timer, async {
+                builds.set(builds.get() + 1);
+                for _ in 0..build_ticks {
+                    YieldOnce(false).await;
+                }
+                if build_fails {
+                    Err("admin Init failed")
+                } else {
+                    Ok(ready_runtime_until(
+                        timer.now_ms() + PROBE_INTERVAL_FLOOR_MS,
+                    ))
+                }
+            })
             .await;
-            match admission {
-                Err(busy) => return Served::Refused(busy),
-                Ok(ColdAdmission::Serve { .. }) => return Served::Waited,
-                Ok(ColdAdmission::Reenter) => {
-                    assert_eq!(attempt, Attempt::First, "a request re-enters at most once");
-                    attempt = Attempt::Reentry;
+            Ok(Pass::Done(match built {
+                Ok(rt) => {
+                    publish_runtime(&guard, &rt, builds.get(), 0, true);
+                    Served::Built
                 }
-                Ok(ColdAdmission::Build(guard)) => {
-                    let built = as_owner(&guard, timer, async {
-                        builds.set(builds.get() + 1);
-                        for _ in 0..build_ticks {
-                            YieldOnce(false).await;
-                        }
-                        if build_fails {
-                            Err("admin Init failed")
-                        } else {
-                            Ok(ready_runtime_until(
-                                timer.now_ms() + PROBE_INTERVAL_FLOOR_MS,
-                            ))
-                        }
-                    })
-                    .await;
-                    return match built {
-                        Ok(rt) => {
-                            publish_runtime(&guard, &rt, builds.get(), 0, true);
-                            Served::Built
-                        }
-                        Err(_) => Served::BuildFailed,
-                    };
-                }
-            }
+                Err(_) => Served::BuildFailed,
+            }))
+        })
+        .await;
+        match served {
+            Ok(served) => served,
+            Err(error) => Served::Refused(
+                *error
+                    .downcast_ref::<RuntimeBuildBusy>()
+                    .expect("the only error a request answers here is RuntimeBuildBusy"),
+            ),
         }
+    }
+
+    /// A prepared owner that finds its plan stale releases the slot and the
+    /// dynamic path takes it again in the same poll
+    /// (`get_or_build_prepared` → `PreparedOwned::BypassPlan`). This owner
+    /// does exactly that between its two halves, then publishes.
+    async fn handing_off_owner(timer: &FakeTimer, builds: &Cell<u32>) -> Served {
+        let Ok(ColdAdmission::Build(prepared)) =
+            admit_cold(Attempt::First, timer, |_, _| false).await
+        else {
+            panic!("the first request owns the slot");
+        };
+        for _ in 0..3 {
+            YieldOnce(false).await;
+        }
+        drop(prepared);
+        let dynamic = BuildGuard::try_acquire(timer.now_ms())
+            .expect("the released slot is free in the same poll");
+        builds.set(builds.get() + 1);
+        for _ in 0..3 {
+            YieldOnce(false).await;
+        }
+        let rt = ready_runtime_until(timer.now_ms() + PROBE_INTERVAL_FLOOR_MS);
+        publish_runtime(&dynamic, &rt, builds.get(), 0, true);
+        Served::Built
     }
 
     fn count(outcomes: &[Served], wanted: Served) -> usize {
@@ -1807,42 +1881,79 @@ mod tests {
 
     /// A wait is bounded by the build leases, a request re-enters once, and a
     /// re-entered request that finds the slot owned again answers the
-    /// retryable 503 at once — it never waits a second time.
+    /// retryable 503 at once — it never waits a second time. Driven through
+    /// [`with_one_reentry`], so a production loop whose second pass waited
+    /// again would hold the request for another full lease.
     #[wasm_bindgen_test]
     async fn a_wait_is_bounded_and_a_second_miss_is_a_retryable_503() {
         reset_isolate();
         let timer = FakeTimer::starting_at(1_000);
+        let builds = Cell::new(0);
         // A live owner that never publishes: its request is suspended, not
         // stopped, so its liveness token protects it until the hard lease.
-        let owner = BuildGuard::try_acquire(timer.now_ms()).unwrap();
-        let started = timer.now_ms();
-
-        let first = admit_cold(Attempt::First, &timer, |_, _| false).await;
-        assert!(matches!(first, Ok(ColdAdmission::Reenter)));
-        let waited = timer.now_ms() - started;
-        assert!(
-            (BUILD_HARD_LEASE_MS..BUILD_HARD_LEASE_MS + BUILD_WAIT_POLL_MS).contains(&waited),
-            "the wait ends at the owner's hard lease, after {waited} ms"
-        );
-
-        // Another request reclaims the expired slot before this one re-enters.
-        let reclaimer = BuildGuard::try_acquire(timer.now_ms())
-            .expect("past the hard lease the slot is reclaimable");
-        let sleeps_before = timer.sleeps.get();
-        let second = admit_cold(Attempt::Reentry, &timer, |_, _| false).await;
-        let Err(busy) = second else {
-            panic!("a re-entered request that finds the slot owned must answer 503");
+        let stuck = BuildGuard::try_acquire(timer.now_ms()).unwrap();
+        let waiter_done = Cell::new(false);
+        // Another request that takes the slot the moment the lease frees it
+        // (polled first each turn), and holds it while the waiter re-enters.
+        let reclaimer = async {
+            loop {
+                timer.sleep(BUILD_WAIT_POLL_MS).await;
+                if let Some(guard) = BuildGuard::try_acquire(timer.now_ms()) {
+                    while !waiter_done.get() {
+                        timer.sleep(BUILD_WAIT_POLL_MS).await;
+                    }
+                    drop(guard);
+                    return;
+                }
+            }
         };
-        assert_eq!(busy, RuntimeBuildBusy::SlotBusy);
-        assert_eq!(timer.sleeps.get(), sleeps_before, "it does not wait again");
+        let waiter = async {
+            let served = cold_request(&timer, &builds, 1, false).await;
+            waiter_done.set(true);
+            served
+        };
+
+        let ((), served) = futures::future::join(reclaimer, waiter).await;
+
+        assert_eq!(served, Served::Refused(RuntimeBuildBusy::SlotBusy));
+        assert_eq!(builds.get(), 0);
+        let elapsed = timer.now_ms() - 1_000;
+        assert!(
+            elapsed < BUILD_HARD_LEASE_MS + 4 * BUILD_WAIT_POLL_MS,
+            "one bounded wait, then 503 — not a second wait ({elapsed} ms)"
+        );
         assert_eq!(
-            busy.retry_after_secs(),
+            RuntimeBuildBusy::SlotBusy.retry_after_secs(),
             1,
             "lib.rs sends this as Retry-After"
         );
+        drop(stuck);
+    }
 
-        drop(reclaimer);
-        drop(owner);
+    /// A prepared owner that bypasses its stale plan hands the slot to the
+    /// dynamic build in the same poll. Its waiters must wait through the
+    /// handoff and be served — a wait that ended when the owner token changed
+    /// would re-enter into the dynamic owner's build and answer 503, every
+    /// waiter in the post-deploy window.
+    #[wasm_bindgen_test]
+    async fn waiters_wait_through_the_prepared_to_dynamic_handoff() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(1_000);
+        let builds = Cell::new(0);
+
+        let (owner, waiters) = futures::future::join(
+            handing_off_owner(&timer, &builds),
+            futures::future::join_all((0..7).map(|_| cold_request(&timer, &builds, 3, false))),
+        )
+        .await;
+
+        assert_eq!(owner, Served::Built);
+        assert_eq!(builds.get(), 1, "{waiters:?}");
+        assert_eq!(
+            count(&waiters, Served::Waited),
+            7,
+            "every waiter is served by the dynamic owner: {waiters:?}"
+        );
     }
 
     /// A hard stop runs no destructor, so the owner's guard and its liveness

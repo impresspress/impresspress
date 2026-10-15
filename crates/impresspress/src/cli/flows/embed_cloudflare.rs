@@ -478,7 +478,6 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     // 5. The final version must prove it parsed/applied the packaged plan and
     //    can read an immutable representative asset, then serve a normal
     //    route. Neither request reruns migrations or seeds.
-    let final_requests_since = impresspress_core::util::now_rfc3339();
     cf_deploy::call_deploy_verify(
         &final_upload.preview_url,
         &deploy_token,
@@ -488,6 +487,9 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     .await?;
     cf_deploy::smoke_preview_lockdown(&final_upload.preview_url).await?;
     cf_deploy::smoke_authenticated_get(&final_upload.preview_url, &deploy_token, "/health").await?;
+    // The memory report below counts the smoke's requests only, so its window
+    // opens here, after verify, lockdown and `/health`.
+    let smoke_since = impresspress_core::util::now_rfc3339();
     let smoke = cf_deploy::smoke_authenticated_concurrency(
         &final_upload.preview_url,
         &deploy_token,
@@ -503,7 +505,7 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
             account_id: &cfg.account_id,
             script_name: &cfg.worker_name,
             version_id: &final_upload.version_id,
-            since: &final_requests_since,
+            since: &smoke_since,
         },
         cf_deploy::CONCURRENT_SMOKE_TOTAL_REQUESTS as u64,
     )
