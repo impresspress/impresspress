@@ -8,9 +8,26 @@
 //! The module is worker-build's shim with one change: its default export is
 //! subclassed so that a Worker whose `IMPRESSPRESS_EXECUTOR_TRACE` var is
 //! `"1"` logs an `ip-entry` line for each request before the shim's `fetch`
-//! runs, that is before any Rust runs. `impresspress_cloudflare`'s
-//! `executor_trace` module documents the signals and the shared state, whose
-//! global and field names this module must keep in step with.
+//! runs, that is before the request's Rust future exists.
+//! `impresspress_cloudflare`'s `executor_trace` module documents the signals
+//! and the shared state, whose global, field and export names this module must
+//! keep in step with.
+//!
+//! The line's wasm id, generation and stack figure come from that module's
+//! synchronous `__impresspressExecutorProbe` export, which worker-build
+//! installs on its entrypoint class like every export, called through `super`
+//! after the shim's re-initialization check has run. They therefore name the
+//! instance that serves the request, a freshly reset one included. A probe
+//! that throws (a trap in a broken instance) still leaves the line, with `-`
+//! for what it would have said, and its error reaches the shim's catch exactly
+//! as a trap in `fetch` would.
+//!
+//! The line is logged in `fetch`, not in a constructor before `super()`.
+//! Before `super()` the shim's re-initialization has not run, so the probe
+//! would name the instance about to be discarded, and the request the seq is
+//! keyed by is not an argument there. The cost is one edge: a reset that
+//! itself throws in the construct trap leaves no `ip-entry` although JS ran;
+//! the tail still shows `Reinitializing Wasm application` and the exception.
 //!
 //! The subclass composes with the shim rather than copying it. worker-build's
 //! default export is a `Proxy` over its entrypoint class whose `construct`
@@ -21,6 +38,14 @@
 //! through the same wrapper the shim's own `fetch` was, and `super.fetch`
 //! is the shim's. Unset, the override delegates without reading or writing
 //! anything but the var.
+//!
+//! That holds for worker-build's default handler template, the one every
+//! impresspress build uses. A build with `RUN_TO_COMPLETION` set gets an
+//! `async function fetch`, which the shim wraps in its *async* wrapper
+//! (rejected `RuntimeError`s reach its critical-error handling); this
+//! synchronous override would take the sync wrapper instead and bypass that.
+//! impresspress never sets it; a change that did would have to make the
+//! override `async` too.
 
 use std::path::{Path, PathBuf};
 
@@ -45,10 +70,14 @@ export default class extends Shim {{
     if (this.env.IMPRESSPRESS_EXECUTOR_TRACE === '1') {{
       const trace = (globalThis.__impresspressExecutorTrace ??= {{}});
       trace.isolateId ??= crypto.randomUUID().replaceAll('-', '');
-      trace.wasmGeneration ??= 0;
       trace.seq = (trace.seq ?? 0) + 1;
       (trace.requests ??= new WeakMap()).set(request, trace.seq);
-      console.log(`ip-entry ${{trace.isolateId}} ${{trace.wasmGeneration}} ${{trace.seq}}`);
+      let wasm;
+      try {{
+        wasm = super.__impresspressExecutorProbe();
+      }} finally {{
+        console.log(`ip-entry ${{trace.isolateId}} ${{wasm?.wasm ?? '-'}} ${{wasm?.generation ?? '-'}} ${{trace.seq}} ${{wasm?.stack ?? '-'}}`);
+      }}
     }}
     return super.fetch(request);
   }}
@@ -104,27 +133,32 @@ mod tests {
             "crypto.randomUUID()",
             "console.log(",
             ".set(request, trace.seq)",
+            "__impresspressExecutorProbe",
         ] {
             assert!(branch.contains(statement), "{statement} not in the branch");
             assert!(!before.contains(statement), "{statement} before the gate");
             assert!(!rest.contains(statement), "{statement} after the gate");
         }
         assert!(branch.contains(
-            "console.log(`ip-entry ${trace.isolateId} ${trace.wasmGeneration} ${trace.seq}`);"
+            "console.log(`ip-entry ${trace.isolateId} ${wasm?.wasm ?? '-'} \
+             ${wasm?.generation ?? '-'} ${trace.seq} ${wasm?.stack ?? '-'}`);"
         ));
     }
 
     /// The names the Rust side (`impresspress_cloudflare::executor_trace`)
-    /// reads. A rename on either side breaks the join between `ip-entry` and
-    /// `ip-poll`, so both are spelled out here.
+    /// reads and exports. A rename on either side breaks the join between
+    /// `ip-entry` and `ip-poll`, so both are spelled out here.
     #[test]
     fn the_shared_state_uses_the_names_the_rust_side_reads() {
         let source = entry_module_source();
         for name in [
             "globalThis.__impresspressExecutorTrace",
             "trace.isolateId",
-            "trace.wasmGeneration",
             "trace.requests",
+            "super.__impresspressExecutorProbe()",
+            "wasm?.wasm",
+            "wasm?.generation",
+            "wasm?.stack",
         ] {
             assert!(source.contains(name), "{name} missing:\n{source}");
         }

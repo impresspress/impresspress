@@ -2,26 +2,36 @@
 //! is `"1"`.
 //!
 //! They exist to classify a request Workers reports as hung at ~0 ms CPU after
-//! an earlier request in the same isolate was hard-stopped. Three explanations
-//! fit that row, and each leaves a different trail here:
+//! an earlier request in the same isolate was hard-stopped. The explanations
+//! that fit that row each leave a different trail here:
 //!
 //! - the runtime never ran the Worker's JavaScript: no `ip-entry` line;
 //! - the JavaScript ran and created the Rust `fetch` future, but the executor
 //!   never polled it (js-sys's task queue stranded by the kill): `ip-entry`
-//!   and no `ip-poll`;
+//!   and no `ip-poll`, on a wasm id that has served traced requests before;
 //! - worker-build's shim re-instantiated the Wasm module after a
-//!   `WebAssembly.RuntimeError`, and the request on the fresh instance failed:
-//!   a generation higher than the isolate's earlier requests.
+//!   `WebAssembly.RuntimeError`: the `ip-entry` of the first request the new
+//!   instance serves carries a new wasm id and the next generation, whether or
+//!   not that request is ever polled;
+//! - the shadow stack ran out after a series of kills (each kill skips the
+//!   epilogues that restore `__stack_pointer`): the stack figure on both lines
+//!   falls kill by kill, then a trap and a reset.
 //!
 //! # The signals
 //!
-//! - `ip-entry <isolate> <generation> <seq>`: logged by the generated JS entry
-//!   module (`impresspress`'s `cli::helpers::cloudflare::entry`) before the
-//!   shim's `fetch` is called, so before any Rust runs.
-//! - `ip-poll <isolate> <wasm> <generation> <seq>`: logged by [`on_first_poll`],
-//!   which [`run_with_config`](crate::run_with_config) calls before its first
-//!   await, so the line marks the request future's first poll.
-//! - `x-ip-instance: <isolate>/<wasm>/<generation>` on the response.
+//! - `ip-entry <isolate> <wasm> <generation> <seq> <stack>`: logged by the
+//!   generated JS entry module (`impresspress`'s
+//!   `cli::helpers::cloudflare::entry`) before it calls the shim's `fetch`.
+//!   The wasm id, generation and stack come from [`executor_probe`], a
+//!   synchronous export the module calls after the shim's
+//!   re-initialization check, so they name the instance that serves the
+//!   request. The probe runs outside the executor, so it answers even when the
+//!   task queue is wedged.
+//! - `ip-poll <isolate> <wasm> <generation> <seq> <stack>`: logged by
+//!   [`on_first_poll`], which [`run_with_config`](crate::run_with_config) calls
+//!   before its first await, so the line marks the request future's first
+//!   poll.
+//! - `x-ip-instance: <isolate>/<wasm>/<generation>` on every `Ok` response.
 //!
 //! # The identities
 //!
@@ -30,26 +40,37 @@
 //!   re-instantiation of the Wasm module.
 //! - **wasm**: random, held in a Rust `thread_local`. A re-instantiated module
 //!   has fresh linear memory and so draws a new one.
-//! - **generation**: a counter held in JavaScript, incremented by the first
-//!   traced request each Wasm instance serves. A JS value survives
-//!   `__wbg_reset_state`, so `generation - 1` is how many times the shim reset
-//!   this isolate's instance.
+//! - **generation**: a counter held in JavaScript, incremented when an instance
+//!   draws its wasm id, which happens on the first traced request it serves
+//!   (in the probe, or in [`on_first_poll`] when there is no entry module). A
+//!   JS value survives `__wbg_reset_state`, so `generation - 1` is how many
+//!   times the shim reset this isolate's instance before that request.
 //! - **seq**: the entry module's per-isolate request number. It reaches Rust
 //!   through a `WeakMap` keyed by the request object, which is the same JS
 //!   object the shim hands to the Rust `fetch`; a single "current request"
 //!   global would be overwritten by a concurrent request before this one's
 //!   first poll.
+//! - **stack**: the address of a local in a non-inlined function, i.e. a
+//!   point on the shadow stack. On `ip-entry` it is taken from the probe,
+//!   called from JS with no Rust frame below it, so it is the stack pointer
+//!   of an idle instance; on `ip-poll` it is taken at a fixed call depth. On
+//!   one wasm id either figure should not move; a figure that falls is stack
+//!   leaked by hard-stopped requests.
 //!
 //! A field the entry module did not provide (a hand-written Wrangler config
 //! whose `main` is worker-build's shim) prints as `-`.
 //!
 //! With the var unset nothing here runs past the flag check: no JS global is
-//! read or created, no line is logged, no header is set.
+//! read or created, no line is logged, no header is set. The probe is the one
+//! piece the var cannot gate directly, because worker-build exposes every
+//! export as an entrypoint method, which a service binding can call with
+//! arguments of its choosing; it answers `undefined`, having touched nothing,
+//! unless the shared state exists, and only a traced request creates that.
 
 use std::cell::OnceCell;
 
 use js_sys::{Object, Reflect, WeakMap};
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::{prelude::wasm_bindgen, JsCast, JsValue};
 
 use crate::environment::CfEnvironment;
 
@@ -60,6 +81,12 @@ pub(crate) const STATE_GLOBAL: &str = "__impresspressExecutorTrace";
 const ISOLATE_ID_FIELD: &str = "isolateId";
 const WASM_GENERATION_FIELD: &str = "wasmGeneration";
 const REQUESTS_FIELD: &str = "requests";
+
+/// The fields of the object [`executor_probe`] returns, read by the entry
+/// module.
+const PROBE_WASM_FIELD: &str = "wasm";
+const PROBE_GENERATION_FIELD: &str = "generation";
+const PROBE_STACK_FIELD: &str = "stack";
 
 /// The response header carrying [`RequestTrace::instance`].
 pub(crate) const INSTANCE_HEADER: &str = "x-ip-instance";
@@ -91,6 +118,16 @@ thread_local! {
     static WASM_INSTANCE: OnceCell<WasmInstance> = const { OnceCell::new() };
 }
 
+/// A point on the shadow stack: the address of a local whose address is
+/// taken, which on wasm32 puts it in linear memory below `__stack_pointer`.
+/// Not inlined, so every caller measures from its own frame at one fixed
+/// extra depth.
+#[inline(never)]
+fn stack_address() -> usize {
+    let marker = 0_u8;
+    std::ptr::from_ref(std::hint::black_box(&marker)) as usize
+}
+
 /// One request's identities, as the `ip-poll` line and the response header
 /// carry them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,18 +136,20 @@ pub(crate) struct RequestTrace {
     wasm: String,
     generation: u32,
     seq: Option<u32>,
+    stack: usize,
 }
 
 impl RequestTrace {
-    /// `ip-poll <isolate> <wasm> <generation> <seq>`.
+    /// `ip-poll <isolate> <wasm> <generation> <seq> <stack>`.
     pub(crate) fn poll_line(&self) -> String {
         format!(
-            "ip-poll {} {} {} {}",
+            "ip-poll {} {} {} {} {}",
             self.isolate.as_deref().unwrap_or("-"),
             self.wasm,
             self.generation,
             self.seq
                 .map_or_else(|| "-".to_string(), |seq| seq.to_string()),
+            self.stack,
         )
     }
 
@@ -158,6 +197,41 @@ pub(crate) fn on_first_poll(
     Some(trace)
 }
 
+/// The identity of the Wasm instance serving the current request, for the
+/// entry module's `ip-entry` line: `{ wasm, generation, stack }`, or
+/// `undefined` when no traced request has run in this isolate.
+///
+/// Synchronous and executor-free: it answers on an instance whose task queue
+/// is wedged. Called on a fresh (or freshly reset) instance it draws that
+/// instance's id, exactly as [`on_first_poll`] would have.
+#[wasm_bindgen(js_name = __impresspressExecutorProbe)]
+pub fn executor_probe() -> JsValue {
+    WASM_INSTANCE.with(|instance| probe(&js_sys::global(), instance))
+}
+
+/// [`executor_probe`]'s work against an explicit global object and instance
+/// cell, like [`trace_request`].
+fn probe(global: &Object, instance: &OnceCell<WasmInstance>) -> JsValue {
+    let Some(state) = existing_state(global) else {
+        return JsValue::UNDEFINED;
+    };
+    let instance = instance.get_or_init(|| WasmInstance::start(&state));
+    let answer = Object::new();
+    set_field(&answer, PROBE_WASM_FIELD, &JsValue::from_str(&instance.id));
+    set_field(
+        &answer,
+        PROBE_GENERATION_FIELD,
+        &JsValue::from(instance.generation),
+    );
+    // A JS number holds every wasm32 address exactly.
+    set_field(
+        &answer,
+        PROBE_STACK_FIELD,
+        &JsValue::from(stack_address() as f64),
+    );
+    answer.into()
+}
+
 /// [`on_first_poll`]'s work against an explicit global object and instance
 /// cell, so tests can stand in a fresh isolate and a fresh Wasm instance.
 fn trace_request(
@@ -174,16 +248,21 @@ fn trace_request(
         wasm: instance.id.clone(),
         generation: instance.generation,
         seq: request_seq(&state, request),
+        stack: stack_address(),
     }
+}
+
+/// The shared state object, if a traced request has created it.
+fn existing_state(global: &Object) -> Option<Object> {
+    Reflect::get(global, &JsValue::from_str(STATE_GLOBAL))
+        .ok()
+        .and_then(|value| value.dyn_into::<Object>().ok())
 }
 
 /// The shared state object, created on `global` when the entry module has
 /// not created it (a Worker whose `main` is worker-build's shim directly).
 fn shared_state(global: &Object) -> Object {
-    let existing = Reflect::get(global, &JsValue::from_str(STATE_GLOBAL))
-        .ok()
-        .and_then(|value| value.dyn_into::<Object>().ok());
-    existing.unwrap_or_else(|| {
+    existing_state(global).unwrap_or_else(|| {
         let state = Object::new();
         set_field(global, STATE_GLOBAL, &state);
         state
@@ -212,10 +291,9 @@ fn as_count(value: &JsValue) -> Option<u32> {
 }
 
 /// A property write on a plain JS object. It cannot fail on the objects this
-/// module writes to (the global object and the state object it owns); were it
-/// to, the next `ip-poll` line shows the unchanged value, which is the
-/// diagnostic's whole job to show, so the failure is not raised into the
-/// request.
+/// module writes to (the global object and the objects it creates); were it
+/// to, the next line shows the unchanged value, which is the diagnostic's
+/// whole job to show, so the failure is not raised into the request.
 fn set_field(target: &Object, field: &str, value: &JsValue) {
     if Reflect::set(target, &JsValue::from_str(field), value).is_err() {
         worker::console_log!("ip-trace-state-unset {field}");
@@ -230,33 +308,23 @@ mod tests {
     use crate::environment::test_support::empty_environment;
 
     /// The state object as the generated entry module leaves it after numbering
-    /// `request` as `seq`: an isolate id, the counter it found, and the map.
-    fn state_as_entry_module_leaves_it(
-        global: &Object,
-        isolate: &str,
-        generation: u32,
-        request: &Object,
-        seq: u32,
-    ) {
+    /// `request` as `seq`: an isolate id and the map. The generation counter
+    /// is the Rust side's; a test that needs a prior count sets it itself.
+    fn state_as_entry_module_leaves_it(global: &Object, isolate: &str, request: &Object, seq: u32) {
         let state = Object::new();
         let requests = WeakMap::new();
         requests.set(request, &JsValue::from(seq));
         Reflect::set(&state, &ISOLATE_ID_FIELD.into(), &isolate.into()).unwrap();
-        Reflect::set(
-            &state,
-            &WASM_GENERATION_FIELD.into(),
-            &JsValue::from(generation),
-        )
-        .unwrap();
         Reflect::set(&state, &REQUESTS_FIELD.into(), &requests).unwrap();
         Reflect::set(global, &STATE_GLOBAL.into(), &state).unwrap();
     }
 
     fn global_state(global: &Object) -> Object {
-        Reflect::get(global, &STATE_GLOBAL.into())
-            .unwrap()
-            .dyn_into()
-            .unwrap()
+        existing_state(global).expect("the shared state exists")
+    }
+
+    fn probe_field(answer: &JsValue, field: &str) -> JsValue {
+        Reflect::get(answer, &field.into()).unwrap()
     }
 
     #[wasm_bindgen_test]
@@ -294,7 +362,7 @@ mod tests {
     fn on_it_reads_the_entry_modules_identities_and_counts_this_instance() {
         let global = Object::new();
         let request = Object::new();
-        state_as_entry_module_leaves_it(&global, "isolate-a", 0, &request, 7);
+        state_as_entry_module_leaves_it(&global, "isolate-a", &request, 7);
         let instance = OnceCell::new();
 
         let trace = trace_request(&global, &instance, &request);
@@ -310,9 +378,29 @@ mod tests {
         );
         assert_eq!(
             trace.poll_line(),
-            format!("ip-poll isolate-a {} 1 7", trace.wasm)
+            format!("ip-poll isolate-a {} 1 7 {}", trace.wasm, trace.stack)
         );
         assert_eq!(trace.instance(), format!("isolate-a/{}/1", trace.wasm));
+    }
+
+    /// The stack field is a real shadow-stack address: non-zero, and the same
+    /// for two measurements taken at the same depth on one instance, which is
+    /// what lets a falling figure across requests read as a leak.
+    #[wasm_bindgen_test]
+    fn the_stack_figure_is_an_address_stable_at_one_depth() {
+        let global = Object::new();
+        let request = Object::new();
+        state_as_entry_module_leaves_it(&global, "isolate-s", &request, 1);
+        let instance = OnceCell::new();
+
+        let first = trace_request(&global, &instance, &request);
+        let second = trace_request(&global, &instance, &request);
+
+        assert_ne!(first.stack, 0);
+        assert_eq!(first.stack, second.stack);
+        let line = first.poll_line();
+        let figure = line.rsplit(' ').next().unwrap();
+        assert_eq!(figure.parse::<usize>().unwrap(), first.stack, "{line}");
     }
 
     /// Later requests on the same instance keep its id and generation, and
@@ -321,7 +409,7 @@ mod tests {
     fn later_requests_on_one_instance_share_its_identity() {
         let global = Object::new();
         let first = Object::new();
-        state_as_entry_module_leaves_it(&global, "isolate-b", 0, &first, 1);
+        state_as_entry_module_leaves_it(&global, "isolate-b", &first, 1);
         let instance = OnceCell::new();
         let first_trace = trace_request(&global, &instance, &first);
 
@@ -348,7 +436,7 @@ mod tests {
     fn a_reset_instance_is_the_next_generation_with_a_new_id() {
         let global = Object::new();
         let request = Object::new();
-        state_as_entry_module_leaves_it(&global, "isolate-c", 0, &request, 1);
+        state_as_entry_module_leaves_it(&global, "isolate-c", &request, 1);
         let before = trace_request(&global, &OnceCell::new(), &request);
         let after = trace_request(&global, &OnceCell::new(), &request);
 
@@ -368,12 +456,73 @@ mod tests {
         assert_eq!(trace.isolate, None);
         assert_eq!(trace.seq, None);
         assert_eq!(trace.generation, 1);
-        assert_eq!(trace.poll_line(), format!("ip-poll - {} 1 -", trace.wasm));
+        assert_eq!(
+            trace.poll_line(),
+            format!("ip-poll - {} 1 - {}", trace.wasm, trace.stack)
+        );
         assert_eq!(trace.instance(), format!("-/{}/1", trace.wasm));
         assert_eq!(
             count_field(&global_state(&global), WASM_GENERATION_FIELD),
             Some(1),
             "the shared state is created where the entry module did not create it",
+        );
+    }
+
+    /// Untraced, the probe is inert: whatever a service binding calls it
+    /// with, it answers `undefined`, creates no state and draws no instance.
+    #[wasm_bindgen_test]
+    fn the_probe_answers_nothing_until_a_traced_request_created_the_state() {
+        let global = Object::new();
+        let instance = OnceCell::new();
+
+        assert!(probe(&global, &instance).is_undefined());
+        assert!(existing_state(&global).is_none(), "no state created");
+        assert!(instance.get().is_none(), "no instance drawn");
+    }
+
+    /// The probe draws the serving instance's identity, so the `ip-entry` of
+    /// the first request on a reset instance already names the new instance
+    /// whether or not that request is ever polled; and the poll that follows
+    /// on the same instance reports the same identity.
+    #[wasm_bindgen_test]
+    fn the_probe_names_the_serving_instance_and_the_poll_agrees() {
+        let global = Object::new();
+        let request = Object::new();
+        state_as_entry_module_leaves_it(&global, "isolate-p", &request, 3);
+        let old = OnceCell::new();
+        let old_answer = probe(&global, &old);
+        let reset = OnceCell::new();
+        let reset_answer = probe(&global, &reset);
+
+        assert_eq!(probe_field(&old_answer, PROBE_GENERATION_FIELD), 1);
+        assert_eq!(
+            probe_field(&reset_answer, PROBE_GENERATION_FIELD),
+            2,
+            "the reset instance's first probe is the next generation"
+        );
+        let reset_id = probe_field(&reset_answer, PROBE_WASM_FIELD)
+            .as_string()
+            .unwrap();
+        assert_ne!(
+            probe_field(&old_answer, PROBE_WASM_FIELD)
+                .as_string()
+                .unwrap(),
+            reset_id
+        );
+        assert!(
+            probe_field(&reset_answer, PROBE_STACK_FIELD)
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+
+        let poll = trace_request(&global, &reset, &request);
+        assert_eq!(poll.wasm, reset_id);
+        assert_eq!(poll.generation, 2);
+        assert_eq!(
+            count_field(&global_state(&global), WASM_GENERATION_FIELD),
+            Some(2),
+            "the poll did not draw a second time"
         );
     }
 
@@ -384,6 +533,7 @@ mod tests {
             wasm: "w".into(),
             generation: 3,
             seq: Some(4),
+            stack: 5,
         };
         let mut response = worker::Response::ok("body").unwrap();
         trace.stamp(&mut response);
