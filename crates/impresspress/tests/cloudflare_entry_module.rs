@@ -2,8 +2,10 @@
 //! Node against worker-build's own shim.
 //!
 //! `support/cloudflare_entry/worker-build-0.7.5-shim.js` is
-//! `worker-build-0.7.5/src/js/shim.js` verbatim (Apache-2.0, Cloudflare), the
-//! version `build::WORKER_BUILD_VERSION` pins. The test fills its two
+//! `worker-build-0.7.5/src/js/shim.js` verbatim (Apache-2.0, Cloudflare; the
+//! licence is `support/cloudflare_entry/LICENSE-worker-build`, the provenance
+//! `support/cloudflare_entry/README.md`), the version
+//! `build::WORKER_BUILD_VERSION` pins. The test fills its two
 //! placeholders the way worker-build 0.7.5's `generate_handlers` does for this
 //! Worker's two exports, and points its imports at stand-ins: `cloudflare:workers`
 //! at a `WorkerEntrypoint` that stores `ctx`/`env`, and `./index.js` at a module
@@ -17,7 +19,10 @@
 //!   included, and nothing creates the shared state;
 //! - with it on, every request gets one `ip-entry` line naming the instance
 //!   that serves it: the request after the reset already carries the new wasm
-//!   id and the next generation.
+//!   id and the next generation;
+//! - a probe that traps still leaves a dashed `ip-entry` line, and its error
+//!   takes the path of a trap in `fetch`: `Critical`, the throw, then the
+//!   reset on the next request.
 
 use std::{fs, path::Path, process::Command};
 
@@ -150,6 +155,45 @@ fn traced_each_request_logs_the_instance_that_serves_it() {
             "state seq=2",
             // The reset runs in the construct trap, before the override:
             // the next ip-entry already names the new instance.
+            "Reinitializing Wasm application",
+            "ip-entry <isolate> wasm-2 2 3 1024",
+            "response 200 https://example.test/c sameEnv=true",
+            "state seq=3",
+            "ip-entry <isolate> wasm-2 2 4 1024",
+            "response 200 https://example.test/d sameEnv=true",
+            "state seq=4",
+        ]
+    );
+}
+
+#[test]
+fn a_probe_that_traps_leaves_a_dashed_line_and_resets_like_a_fetch_trap() {
+    let repo = tempfile::tempdir().unwrap();
+    let out = stage(repo.path());
+
+    let lines = serve(&out, "./entry.mjs", "probe-trap");
+
+    let isolate = lines[0]
+        .strip_prefix("ip-entry ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or_else(|| panic!("the first line is an ip-entry: {lines:?}"))
+        .to_string();
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|line| line.replace(&isolate, "<isolate>"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "ip-entry <isolate> wasm-1 1 1 1024",
+            "response 200 https://example.test/a sameEnv=true",
+            "state seq=1",
+            // The `finally` still logs, with dashes for what the probe would
+            // have said; the error then reaches the shim's catch.
+            "ip-entry <isolate> - - 2 -",
+            "Critical RuntimeError: memory access out of bounds",
+            "threw RuntimeError",
+            "state seq=2",
             "Reinitializing Wasm application",
             "ip-entry <isolate> wasm-2 2 3 1024",
             "response 200 https://example.test/c sameEnv=true",

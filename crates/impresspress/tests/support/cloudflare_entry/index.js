@@ -14,7 +14,16 @@ export function __wbg_reset_state() {
   memory = freshMemory();
 }
 
+// The driver's `probe-trap` mode sets `__stubProbeTrapsOnCall` to make the
+// probe itself trap on that call, as it would on a broken instance (an
+// exhausted shadow stack).
+let probeCalls = 0;
+
 export function __impresspressExecutorProbe() {
+  probeCalls += 1;
+  if (probeCalls === globalThis.__stubProbeTrapsOnCall) {
+    throw new WebAssembly.RuntimeError('memory access out of bounds');
+  }
   const state = globalThis.__impresspressExecutorTrace;
   if (state === undefined) return undefined;
   if (memory.id === null) {

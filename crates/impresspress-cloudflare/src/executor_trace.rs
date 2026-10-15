@@ -300,6 +300,46 @@ fn set_field(target: &Object, field: &str, value: &JsValue) {
     }
 }
 
+/// The test binary's real global as an isolate that has served no traced
+/// request: [`take`](Self::take) removes the shared state, and dropping the
+/// guard puts back whatever was there. Tests share one global, so without it
+/// a traced test that ran first would leave state behind and an untraced
+/// test could not tell whether its own path created any.
+#[cfg(test)]
+pub(crate) struct NoSharedState {
+    previous: Option<Object>,
+}
+
+#[cfg(test)]
+impl NoSharedState {
+    pub(crate) fn take() -> Self {
+        let global = js_sys::global();
+        let previous = existing_state(&global);
+        Reflect::delete_property(&global, &JsValue::from_str(STATE_GLOBAL))
+            .expect("delete a property of the global object");
+        Self { previous }
+    }
+
+    /// Whether a traced request has created the shared state since
+    /// [`take`](Self::take).
+    pub(crate) fn created_since() -> bool {
+        existing_state(&js_sys::global()).is_some()
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoSharedState {
+    fn drop(&mut self) {
+        let global = js_sys::global();
+        let key = JsValue::from_str(STATE_GLOBAL);
+        match &self.previous {
+            Some(state) => Reflect::set(&global, &key, state).map(drop),
+            None => Reflect::delete_property(&global, &key).map(drop),
+        }
+        .expect("restore the global object's shared state");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -347,13 +387,12 @@ mod tests {
     /// JS global the entry module and the Rust side share is never created.
     #[wasm_bindgen_test]
     fn off_it_touches_no_global_and_yields_no_trace() {
-        let had_state = Reflect::has(&js_sys::global(), &STATE_GLOBAL.into()).unwrap();
+        let _clean = NoSharedState::take();
         let request = worker::Request::new("https://example.test/", worker::Method::Get).unwrap();
 
         assert_eq!(on_first_poll(&empty_environment(), &request), None);
-        assert_eq!(
-            Reflect::has(&js_sys::global(), &STATE_GLOBAL.into()).unwrap(),
-            had_state,
+        assert!(
+            !NoSharedState::created_since(),
             "an untraced request must not create the shared state",
         );
     }

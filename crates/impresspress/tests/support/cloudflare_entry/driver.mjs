@@ -1,8 +1,10 @@
 // Serves four requests through a Worker's default export the way workerd
-// does (a new entrypoint instance per request, then `fetch`), the second one
-// trapping, and prints everything that happened as a JSON array of lines.
+// does (a new entrypoint instance per request, then `fetch`), and prints
+// everything that happened as a JSON array of lines. In `on` and `off` mode
+// the second request traps in `fetch`; in `probe-trap` mode (traced) it is
+// the executor probe that traps on that request instead.
 //
-// usage: node driver.mjs <module> <on|off>
+// usage: node driver.mjs <module> <on|off|probe-trap>
 const [modulePath, mode] = process.argv.slice(2);
 const lines = [];
 for (const level of ['log', 'error']) {
@@ -12,8 +14,10 @@ for (const level of ['log', 'error']) {
 globalThis.addEventListener = () => {};
 
 const { default: Worker } = await import(modulePath);
-const env = mode === 'on' ? { IMPRESSPRESS_EXECUTOR_TRACE: '1' } : {};
-for (const path of ['/a', '/trap', '/c', '/d']) {
+const env = mode === 'off' ? {} : { IMPRESSPRESS_EXECUTOR_TRACE: '1' };
+if (mode === 'probe-trap') globalThis.__stubProbeTrapsOnCall = 2;
+const second = mode === 'probe-trap' ? '/b' : '/trap';
+for (const path of ['/a', second, '/c', '/d']) {
   const request = { url: `https://example.test${path}` };
   const ctx = { env };
   try {

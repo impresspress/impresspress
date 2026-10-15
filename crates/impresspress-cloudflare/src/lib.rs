@@ -2008,6 +2008,8 @@ mod executor_trace_wiring_tests {
 
     #[wasm_bindgen_test]
     async fn a_traced_request_is_polled_through_the_trace_and_stamped() {
+        // Starts with no shared state and leaves the global as it found it.
+        let _clean = executor_trace::NoSharedState::take();
         let response = serve(&[(environment::EXECUTOR_TRACE_KEY, "1")]).await;
 
         let instance = response
@@ -2022,15 +2024,20 @@ mod executor_trace_wiring_tests {
             .parse::<u32>()
             .is_ok_and(|generation| generation >= 1));
         assert!(
-            js_sys::Reflect::has(&js_sys::global(), &executor_trace::STATE_GLOBAL.into()).unwrap(),
+            executor_trace::NoSharedState::created_since(),
             "the first poll ran the trace, which created the shared state"
         );
     }
 
     #[wasm_bindgen_test]
     async fn an_untraced_request_carries_no_instance_header() {
+        let _clean = executor_trace::NoSharedState::take();
         let response = serve(&[]).await;
 
+        assert!(
+            !executor_trace::NoSharedState::created_since(),
+            "an untraced request must not create the shared state"
+        );
         assert_eq!(
             response
                 .headers()
