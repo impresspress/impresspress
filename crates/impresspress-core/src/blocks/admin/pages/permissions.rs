@@ -5,7 +5,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     platform_state::wrap_grants,
     ui::{
-        components::{self, badge, Badge, BadgeVariant},
+        components::{self, badge, Badge, BadgeVariant, Card},
         icons,
     },
 };
@@ -101,54 +101,50 @@ fn access_verb(write: GrantWrite) -> &'static str {
 fn grants_code_tab(ctx: &dyn Context) -> Markup {
     let blocks = ctx.registered_blocks();
 
-    html! {
-        div .card .mt-4 {
-            header .card__head {
-                div {
-                    h3 .card__title { "Grants Declared in Code" }
-                    p .card__subtitle {
-                        "These grants are declared in block source code via BlockInfo.grants and cannot be modified here."
-                    }
-                }
-            }
-            div .card__body {
-                @let rows: Vec<Vec<Markup>> = blocks.iter().flat_map(|block| {
-                    block.grants.iter().map(move |grant| vec![
-                        Badge::new(BadgeVariant::Info).render(components::breakable_id(&block.name)),
-                        html! {
-                            @if grant.grantee == "*" {
-                                (badge(BadgeVariant::Secondary, "* (all blocks)"))
-                            } @else {
-                                code { (components::breakable_id(&grant.grantee)) }
-                            }
-                        },
-                        html! {
-                            @if let Some(ref rt) = grant.resource_type {
-                                (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { (rt) }))
-                            } @else {
-                                (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { "all" }))
-                            }
-                        },
-                        html! { code .text-xs { (components::breakable_id(&grant.resource)) } },
-                        html! {
-                            (access_badge(grant.write))
-                        },
-                    ])
-                }).collect();
-
-                (components::data_table::<fn(usize) -> Option<String>>(
-                    &CODE_GRANT_COLUMNS,
-                    rows,
-                    None,
-                    // The raw table this replaced rendered its header over an
-                    // empty body when no block declared a grant, which read as
-                    // a broken table. The component renders the empty slot in
-                    // place of the whole table, so the slot has to say it.
-                    html! { p .text-center .text-muted { "No grants are declared in block source code." } },
-                ))
-            }
-        }
-    }
+    let rows: Vec<Vec<Markup>> = blocks
+        .iter()
+        .flat_map(|block| {
+            block.grants.iter().map(move |grant| {
+                vec![
+                    Badge::new(BadgeVariant::Info).render(components::breakable_id(&block.name)),
+                    html! {
+                        @if grant.grantee == "*" {
+                            (badge(BadgeVariant::Secondary, "* (all blocks)"))
+                        } @else {
+                            code { (components::breakable_id(&grant.grantee)) }
+                        }
+                    },
+                    html! {
+                        @if let Some(ref rt) = grant.resource_type {
+                            (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { (rt) }))
+                        } @else {
+                            (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { "all" }))
+                        }
+                    },
+                    html! { code .text-xs { (components::breakable_id(&grant.resource)) } },
+                    access_badge(grant.write),
+                ]
+            })
+        })
+        .collect();
+    let has_rows = !rows.is_empty();
+    let table = components::data_table::<fn(usize) -> Option<String>>(
+        &CODE_GRANT_COLUMNS,
+        rows,
+        None,
+        // The raw table this replaced rendered its header over an empty body
+        // when no block declared a grant, which read as a broken table. The
+        // component renders the empty slot in place of the whole table, so
+        // the slot has to say it.
+        html! { p .text-center .text-muted { "No grants are declared in block source code." } },
+    );
+    // A card holding a table is flush, so the table's frame is the card's
+    // (layout rule 2); a card holding the empty sentence keeps its padding.
+    let card = Card::titled("Grants declared in code", table).subtitle(
+        "These grants are declared in block source code via BlockInfo.grants and cannot be \
+         modified here.",
+    );
+    if has_rows { card.flush() } else { card }.render()
 }
 
 pub(crate) async fn grants_custom_tab(
@@ -510,41 +506,43 @@ async fn permissions_all_tab(
             .then_with(|| a.sort_key.cmp(&b.sort_key))
     });
 
-    Ok(html! {
-        div .card .mt-4 {
-            div .card__body {
-                @if all_rows.is_empty() {
-                    p .text-muted .p-8 .text-center {
-                        "No permissions configured yet."
-                    }
-                } @else {
-                    // The type is a category, not a status: one neutral
-                    // badge for all of them (D5) — status colours (amber,
-                    // green) read as "warning" and "OK".
-                    @let rows: Vec<Vec<Markup>> = all_rows.iter().map(|row| {
-                        vec![
-                            Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { (row.type_label) }),
-                            html! { span .text-13 { (row.sentence) } },
-                            html! {
-                                @if row.origin == "code" {
-                                    (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "code" }))
-                                } @else {
-                                    (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "custom" }))
-                                }
-                            },
-                        ]
-                    }).collect();
-
-                    (components::data_table::<fn(usize) -> Option<String>>(
-                        &PERMISSION_COLUMNS,
-                        rows,
-                        None,
-                        html! {},
-                    ))
-                }
+    if all_rows.is_empty() {
+        return Ok(Card::plain(html! {
+            p .text-muted .p-8 .text-center {
+                "No permissions configured yet."
             }
-        }
-    })
+        })
+        .render());
+    }
+    // The type is a category, not a status: one neutral badge for all of
+    // them (D5) — status colours (amber, green) read as "warning" and "OK".
+    let rows: Vec<Vec<Markup>> = all_rows
+        .iter()
+        .map(|row| {
+            vec![
+                Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { (row.type_label) }),
+                html! { span .text-13 { (row.sentence) } },
+                html! {
+                    @if row.origin == "code" {
+                        (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "code" }))
+                    } @else {
+                        (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "custom" }))
+                    }
+                },
+            ]
+        })
+        .collect();
+    // The table is the card's whole body: flush, so its frame is the card's.
+    Ok(
+        Card::plain(components::data_table::<fn(usize) -> Option<String>>(
+            &PERMISSION_COLUMNS,
+            rows,
+            None,
+            html! {},
+        ))
+        .flush()
+        .render(),
+    )
 }
 
 /// "Database & Config" tab: wraps the existing grants_code_tab and grants_custom_tab.
@@ -658,5 +656,44 @@ mod wording_tests {
             "{html}"
         );
         assert!(!html.contains("impresspress/admin' "), "{html}");
+    }
+
+    /// Both tabs' grant tables are flush cards, so the table's frame is the
+    /// card's and no framed table sits inside a card (layout rule 2). The
+    /// code-declared grants card is an h2 under the page's h1.
+    #[tokio::test]
+    async fn the_grant_tables_are_flush_cards() {
+        use wafer_run::Block;
+
+        use crate::test_support::dom;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.register_block_info(
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::AdminBlock::new().info(),
+        );
+
+        let msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        let all = output_html(settings_page(&ctx, &msg, "permissions").await).await;
+        assert!(all.contains(r#"<div class="card card--flush">"#), "{all}");
+        assert!(dom::card_level_inside_card(&all).is_empty(), "{all}");
+
+        let mut msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        msg.set_meta("req.query.subtab", "database");
+        let database = output_html(settings_page(&ctx, &msg, "permissions").await).await;
+        assert!(
+            database.contains(r#"<section class="card card--flush">"#),
+            "{database}"
+        );
+        assert!(
+            dom::heading_outline(&database).contains(&(2, "Grants declared in code".to_string())),
+            "{database}"
+        );
+        assert!(
+            dom::card_level_inside_card(&database).is_empty(),
+            "{database}"
+        );
     }
 }

@@ -101,7 +101,7 @@
    the LLM page's client-side thread switcher (llm-chat.js toggles the same
    attribute; it previously painted inline styles via a nonexistent
    `--primary-light` token whose blue fallback always won). */
-.chat-threads .card[data-active="true"] { border-color: var(--primary-color); background: #fff1e6; }
+.chat-threads .thread-card[data-active="true"] { border-color: var(--primary-color); background: #fff1e6; }
 .chat-main { display: flex; flex-direction: column; min-height: 0; }
 .chat-messages { flex: 1; overflow-y: auto; padding: var(--space-4) var(--space-6); }
 .chat-composer { border-top: 1px solid var(--border-light); padding: var(--space-4); background: var(--surface-1); }

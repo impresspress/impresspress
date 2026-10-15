@@ -424,10 +424,8 @@
 }
 
 /* ===== Messages page (Contexts list) =====
-   The `messages_page` template uses BEM classes but had no CSS. Without
-   these rules the New context form lays out as inline-block fragments and
-   the context list looks like raw anchor tags. */
-.messages-new { margin-bottom: var(--space-4); }
+   The New context card's form on one row, and the context list as rows
+   rather than raw anchor tags. */
 .messages-new__form {
 	display: grid;
 	grid-template-columns: 1fr 2fr auto;
@@ -496,10 +494,20 @@
    person's own turns, a slate tint with a slate rule, set apart from the
    machine's without the brand red, which on a bordered card reads as an
    error. #fefce8/#eab308 (warning) have no matching design token and are
-   carried over unchanged from the original inline styles. */
-.message-card--neutral { margin-bottom: var(--space-3); background: var(--surface-3); border-left: 3px solid var(--border-color); }
-.message-card--warning { margin-bottom: var(--space-3); background: #fefce8; border-left: 3px solid #eab308; }
-.message-card--user { margin-bottom: var(--space-3); background: var(--bg-hover); border-left: 3px solid var(--text-muted); }
+   carried over unchanged from the original inline styles.
+   An entry is not a `components::Card`: it is an item in a list, often
+   inside a chat pane, so it draws its own light frame rather than the
+   page-level card surface (`llm-chat.js` builds the same markup). */
+.message-card {
+	border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+	padding: var(--space-5); margin-bottom: var(--space-3);
+}
+@media (max-width: 720px) {
+	.message-card { padding: var(--space-4); }
+}
+.message-card--neutral { background: var(--surface-3); border-left: 3px solid var(--border-color); }
+.message-card--warning { background: #fefce8; border-left: 3px solid #eab308; }
+.message-card--user { background: var(--bg-hover); border-left: 3px solid var(--text-muted); }
 .message-card__content { margin: 0; white-space: pre-wrap; word-break: break-word; }
 /* An assistant turn is markdown rendered to HTML (`llm-chat.js`), whose own
    paragraphs and lists carry the line breaks; pre-wrap would double them. */
@@ -553,9 +561,12 @@
 }
 .thread-pane__scroll { overflow-y: auto; flex: 1; }
 .thread-pane__empty { padding: var(--space-4); font-size: var(--text-sm); }
+/* A thread is a link in the list, not a `components::Card`: it draws its
+   own frame, and the active one takes the brand tint (layouts/page.css). */
 .thread-card {
 	display: block; text-decoration: none; color: inherit;
-	margin-bottom: var(--space-2); padding: var(--space-3) var(--space-3);
+	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+	margin-bottom: var(--space-2); padding: var(--space-3);
 	transition: box-shadow 0.15s;
 }
 /* Was `onmouseover`/`onmouseout="this.style.boxShadow='…'"` in
@@ -588,9 +599,14 @@
 
 /* ===== Model load progress (llm chat right rail) =====
    `.model-progress-fill`'s width starts at 0% and is updated at runtime by
-   `bar.style.width = pct + '%'` in ui/assets/llm-chat.js — a
+   `bar.style.width = pct + '%'` in blocks/llm/assets/llm-chat.js — a
    template-interpolated JS assignment, not a literal one, so it stays (see
-   task-12b report / task-12e scope note). */
+   task-12b report / task-12e scope note). `.model-progress` is the box
+   around the bar in the rail: a framed panel of its own, not a card. */
+.model-progress {
+	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+	padding: var(--space-3);
+}
 .model-progress-track { background: var(--bg-secondary); border-radius: 0.25rem; height: 6px; overflow: hidden; }
 .model-progress-fill { height: 100%; background: var(--primary-color); width: 0%; transition: width 0.3s; }
 
@@ -697,7 +713,6 @@
 .ticket-type-options legend { margin-bottom: 0; }
 
 /* ===== API key reveal card (blocks/auth_ui/api/api_keys.rs) ===== */
-.api-key-card { margin-bottom: var(--space-4); }
 .api-key-copy-hint { margin: 0 0 var(--space-2); color: var(--text-secondary); }
 .api-key-reveal-row { display: flex; gap: var(--space-2); align-items: stretch; }
 .api-key-value { flex: 1 1 auto; padding: var(--space-2); background: var(--bg-secondary); border-radius: var(--radius-md); font-family: ui-monospace, Menlo, monospace; word-break: break-all; user-select: all; }

@@ -289,7 +289,7 @@ fn thread_list_items(threads: &[ContextView], active_id: Option<&str>) -> Markup
                 @let date = updated_at.get(..10).unwrap_or(updated_at);
                 @let is_active = active_id == Some(id);
                 a
-                    .card .thread-card
+                    .thread-card
                     href={"/b/llm/threads/" (id)}
                     data-thread-id=(id)
                     data-active=(if is_active { "true" } else { "false" })
@@ -415,7 +415,7 @@ fn render_right_rail(
             span #model-status .text-muted .text-xs .chat-options__status {}
 
             div #model-progress-container .hidden .chat-options__progress {
-                div .card .p-3 {
+                div .model-progress {
                     div .flex .items-center .gap-2 .mb-2 {
                         span .text-sm .font-medium { "Loading model..." }
                         button #model-unload-btn .btn.btn--sm.btn--ghost type="button" data-action="llm-unload-model" .ml-auto {
@@ -888,6 +888,24 @@ mod tests {
             html.contains("data-active=\"true\"") || html.contains("aria-current"),
             "active thread should be marked: {html}"
         );
+    }
+
+    /// A thread is a link in the list and the model-load box is a panel in
+    /// the rail; neither is a `Card`, which is a page-level surface, so
+    /// neither carries `.card`.
+    #[test]
+    fn the_thread_list_and_the_rail_draw_no_card() {
+        let t = make_thread("thread-42", "My chat", "2026-05-05T10:00:00Z");
+        let list = render_thread_list_pane(&[t], Some("thread-42")).into_string();
+        assert!(
+            list.contains(r#"<a class="thread-card" href="/b/llm/threads/thread-42""#),
+            "{list}"
+        );
+        let rail = render_right_rail(&[], false, "").into_string();
+        assert!(rail.contains(r#"<div class="model-progress">"#), "{rail}");
+        for html in [&list, &rail] {
+            assert!(!html.contains(r#"class="card"#), "{html}");
+        }
     }
 
     #[test]

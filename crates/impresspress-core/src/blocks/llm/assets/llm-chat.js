@@ -53,7 +53,7 @@
 
   // The card classes are the ones `entry_card` in blocks/messages/pages.rs
   // renders for the same cards server-side (components/card.css): user =
-  // brand tint, assistant = neutral, system = warning yellow. Built with the
+  // slate tint, assistant = neutral, system = warning yellow. Built with the
   // DOM API, so nothing here carries an inline style or concatenates text
   // into markup; only an assistant turn's sanitized markdown is HTML.
   var CARD_VARIANT = {
@@ -72,7 +72,7 @@
   function messageCard(role, content, date, opts) {
     opts = opts || {};
     var card = document.createElement('div');
-    card.className = 'card ' + (CARD_VARIANT[role] || 'message-card--neutral');
+    card.className = 'message-card ' + (CARD_VARIANT[role] || 'message-card--neutral');
     if (opts.id) card.id = opts.id;
 
     var head = document.createElement('div');
@@ -420,7 +420,7 @@
           // with inline styles and three `on*` attributes, one of them
           // duplicating the delegated `[data-thread-id]` handler below.
           var card = document.createElement('a');
-          card.className = 'card thread-card';
+          card.className = 'thread-card';
           card.href = threadUrl(id);
           card.dataset.threadId = id;
           card.dataset.active = 'false';
@@ -501,7 +501,7 @@
 
     // Toggle the same attributes the server renders: `data-active`, whose
     // highlight colors live in one CSS rule (`.chat-threads
-    // .card[data-active="true"]`), so SSR and client-side switching can't
+    // .thread-card[data-active="true"]`), so SSR and client-side switching can't
     // drift, and the `aria-current` that names the open thread to a screen
     // reader.
     document.querySelectorAll('[data-thread-id]').forEach(function (el) {

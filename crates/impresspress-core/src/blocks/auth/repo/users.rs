@@ -927,7 +927,7 @@ pub async fn daily_signups(
 }
 
 /// The `limit` most recently created live accounts, newest first — the
-/// admin dashboard's "Recent Users" card. `skip_count: true`: the card
+/// admin dashboard's "Recent users" card. `skip_count: true`: the card
 /// shows rows, never a total.
 pub async fn list_recent_active(ctx: &dyn Context, limit: u32) -> Result<Vec<UserRow>, WaferError> {
     let opts = ListOptions {
