@@ -30,7 +30,7 @@ const DEPLOYMENTS_ROOT: &str = ".impresspress/deployments/v1";
 /// concurrency burst. Chosen below `call_deploy_verify`'s own ~61 s retry
 /// tolerance for the same lag, and paid once per deploy.
 pub const KV_PROPAGATION_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
-const CONCURRENT_SMOKE_TOTAL_REQUESTS: usize = 160;
+pub const CONCURRENT_SMOKE_TOTAL_REQUESTS: usize = 160;
 const CONCURRENT_SMOKE_MAX_IN_FLIGHT: usize = 32;
 const CONCURRENT_SMOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_REPORTED_SMOKE_FAILURES: usize = 8;
