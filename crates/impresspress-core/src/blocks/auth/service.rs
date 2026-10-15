@@ -20,8 +20,6 @@
 //! [`auth_grants`] enumerates every OTHER block allowed to touch this block's
 //! `wafer_run__auth__*` tables and `WAFER_RUN__AUTH__*` config keys.
 
-use std::sync::{Arc, OnceLock};
-
 use wafer_core::interfaces::auth::service::{
     AuthError, AuthService, Role, TokenScope, UserId, UserProfile,
 };
@@ -39,21 +37,25 @@ use crate::blocks::crud::{classify_db_error, DbFailure};
 /// error goes through the database-error classifier every block uses
 /// ([`classify_db_error`]): a refusal arrives as `Backend(PermissionDenied
 /// "Access denied")`, `Backend(ResourceExhausted)` or, for a duplicate key,
-/// `Backend(AlreadyExists)`, with its detail logged under `context`. Of the
-/// rest, an unreachable or timed-out backend (`Unavailable`,
-/// `DeadlineExceeded`) is [`AuthError::ProviderDown`], which
-/// the auth handler answers `Unavailable` (503) so the client keeps its
-/// retry signal; any other failure is a genuine fault, logged here and sent
-/// on as a generic `Internal`.
+/// `Backend(AlreadyExists)`, with its detail logged under `context`.
+///
+/// A call the runtime refused because the request it serves was cancelled or
+/// ran out of time keeps its code ([`super::request_ended`]): `Cancelled`
+/// (499) or `DeadlineExceeded` (504). The service runs in the request's own
+/// frame, so these are the request's fate, not a verdict on its credential —
+/// never `Unauthorized`, and not the 503 of a backend that is down.
+///
+/// Of the rest, an unreachable backend (`Unavailable`) is
+/// [`AuthError::ProviderDown`], which the auth handler answers `Unavailable`
+/// (503) so the client keeps its retry signal; any other failure is a
+/// genuine fault, logged here and sent on as a generic `Internal`.
 fn backend_error(error: WaferError, context: &str) -> AuthError {
+    if let Some(ended) = super::request_ended(&error, context) {
+        return AuthError::Backend(ended);
+    }
     match classify_db_error(error, None, context) {
         DbFailure::Refused(refusal) => AuthError::Backend(refusal.into_error()),
-        DbFailure::Internal(fault)
-            if matches!(
-                fault.code(),
-                ErrorCode::Unavailable | ErrorCode::DeadlineExceeded
-            ) =>
-        {
+        DbFailure::Internal(fault) if fault.code() == ErrorCode::Unavailable => {
             tracing::warn!(context = %context, error = %fault, "auth backend unavailable");
             AuthError::ProviderDown("Authentication is temporarily unavailable".to_string())
         }
@@ -67,71 +69,16 @@ fn backend_error(error: WaferError, context: &str) -> AuthError {
     }
 }
 
-/// Per-block state. Holds a lazy [`Context`] handle so service methods can
-/// dispatch messages to `wafer-run/database` etc.
-///
-/// `ctx` is populated lazily because `AuthServiceImpl` is constructed at
-/// block-registration time (when no `Context` exists yet) and the framework
-/// `AuthBlock::lifecycle(Init)` later passes one in via
-/// [`AuthService::init`]. The Init hook calls `ctx.clone_arc()` (wafer-run
-/// #46) and stores the resulting `Arc<dyn Context>` in the cell.
-#[derive(Clone)]
-pub struct BlockState {
-    /// Lazy auth context handle. Populated by [`AuthServiceImpl::init`] from
-    /// the framework AuthBlock's `lifecycle(Init)` hook; tests pre-populate
-    /// via [`BlockState::for_test`].
-    pub ctx: Arc<OnceLock<Arc<dyn Context>>>,
-}
-
-impl BlockState {
-    /// Production constructor — context cell starts empty and is populated
-    /// later by [`AuthServiceImpl::init`] when the framework AuthBlock fires
-    /// its `Init` lifecycle event.
-    pub fn new() -> Self {
-        Self {
-            ctx: Arc::new(OnceLock::new()),
-        }
-    }
-
-    /// Test-only constructor. Pre-populates the context cell so service
-    /// methods can run without going through the full `init` lifecycle.
-    pub fn for_test(ctx: Arc<dyn Context>) -> Self {
-        let cell = OnceLock::new();
-        let _ = cell.set(ctx);
-        Self {
-            ctx: Arc::new(cell),
-        }
-    }
-}
-
-impl Default for BlockState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// `AuthService` implementation backed by the auth block's repo layer.
-pub struct AuthServiceImpl {
-    state: BlockState,
-}
-
-impl AuthServiceImpl {
-    pub fn new(state: BlockState) -> Self {
-        Self { state }
-    }
-
-    /// Borrow the lazy context handle. Returns `Err(Internal)` if `init`
-    /// hasn't run yet — callers that hit this path are pre-init dispatches
-    /// (a `handle` arriving before the framework AuthBlock's
-    /// `lifecycle(Init)`), which would only happen on a runtime bug.
-    fn ctx(&self) -> Result<&dyn Context, AuthError> {
-        self.state
-            .ctx
-            .get()
-            .map(|arc| arc.as_ref())
-            .ok_or_else(|| AuthError::Internal("auth service ctx not initialized".to_string()))
-    }
-}
+///
+/// It holds nothing. Every method reaches the database through the `ctx` of
+/// the call it serves — the auth block's own frame for that message, with the
+/// request's deadline, cancellation and per-call config. A context kept here
+/// would own every registered block, the framework `AuthBlock` that owns this
+/// service among them: a reference cycle, and the runtime would never be
+/// freed (`Context::clone_arc`; `scripts/grep-guard-stored-context.sh`).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AuthServiceImpl;
 
 /// sha256 of a raw token string. Exposed so tests and the (future) session
 /// issuance helper in Plan A2 agree on the hash format. Thin wrapper over
@@ -211,10 +158,14 @@ enum Creds {
 /// request carries ([`presented_token`]). The `wafer_session` cookie this used
 /// to accept in a branch of its own was issued by nothing.
 ///
-/// The secret comes from the config snapshot (`ctx.config_get`, the pattern
-/// `csrf.rs` uses) and the issuer from `crypto::expected_issuer`, so this
-/// service applies exactly the deployment's own token policy — the same two
-/// values `pipeline.rs` passes to `extract_auth_meta`.
+/// The secret comes from `ctx.config_get` (the pattern `csrf.rs` uses) and
+/// the issuer from `crypto::expected_issuer`, so this service applies exactly
+/// the deployment's own token policy — the same two values `pipeline.rs`
+/// passes to `extract_auth_meta`. `ctx` is the frame of the call being
+/// served, so `config_get` reads the caller's per-call config layer over the
+/// runtime's config: a flow step whose `config` sets the JWT secret key
+/// changes the secret this check verifies against. Flow config is
+/// operator-authored, so that is the operator's choice, not a caller's.
 async fn extract_creds(ctx: &dyn Context, msg: &Message) -> Result<Creds, AuthError> {
     let Some(bearer) = presented_token(msg) else {
         return Err(AuthError::Unauthorized);
@@ -404,15 +355,6 @@ impl AuthService for AuthServiceImpl {
     /// startup. Mirrors the body of the custom impresspress `AuthBlock::lifecycle`
     /// so the framework block has a self-sufficient service to delegate to.
     async fn init(&self, ctx: &dyn Context) -> Result<(), AuthError> {
-        // Capture an owning `Arc<dyn Context>` so subsequent `require_*`
-        // calls have a context handle to dispatch repo lookups through.
-        // wafer-run #46 added `Context::clone_arc` for exactly this. `set`
-        // returns `Err` if the cell was already populated (e.g. test
-        // pre-populated via `for_test`, or a duplicate `Init` event); both
-        // cases are harmless — the existing handle keeps pointing at the
-        // same shared snapshots.
-        let _ = self.state.ctx.set(ctx.clone_arc());
-
         // Auth's migrations run here (not in a `Block::lifecycle`) because the
         // service `init` needs an `AuthError` return shape, not the
         // `WaferError` that `migration_helper::lifecycle_init` produces — so
@@ -447,8 +389,7 @@ impl AuthService for AuthServiceImpl {
         auth_grants()
     }
 
-    async fn require_user(&self, msg: &Message) -> Result<UserId, AuthError> {
-        let ctx = self.ctx()?;
+    async fn require_user(&self, ctx: &dyn Context, msg: &Message) -> Result<UserId, AuthError> {
         match extract_creds(ctx, msg).await? {
             // The token's own expiry, issuer, blocklist status and
             // `auth_version` were checked by `verify_access_token`; what is
@@ -476,8 +417,12 @@ impl AuthService for AuthServiceImpl {
         }
     }
 
-    async fn require_token(&self, msg: &Message, scope: TokenScope) -> Result<UserId, AuthError> {
-        let ctx = self.ctx()?;
+    async fn require_token(
+        &self,
+        ctx: &dyn Context,
+        msg: &Message,
+        scope: TokenScope,
+    ) -> Result<UserId, AuthError> {
         let creds = extract_creds(ctx, msg).await?;
         // Scopes live exclusively on PATs. A session access JWT presented here
         // is a category error — treat it as Forbidden so the caller knows the
@@ -508,9 +453,12 @@ impl AuthService for AuthServiceImpl {
         Ok(UserId(row.user_id))
     }
 
-    async fn require_role(&self, msg: &Message, role: Role) -> Result<UserId, AuthError> {
-        let ctx = self.ctx()?;
-
+    async fn require_role(
+        &self,
+        ctx: &dyn Context,
+        msg: &Message,
+        role: Role,
+    ) -> Result<UserId, AuthError> {
         // Bootstrap-token fast path: if the caller presents a Bearer token
         // that matches an unexpired row in `bootstrap_tokens`, grant Admin.
         // Bootstrap tokens are not tied to a user — use a sentinel id.
@@ -529,7 +477,7 @@ impl AuthService for AuthServiceImpl {
             }
         }
 
-        let uid = self.require_user(msg).await?;
+        let uid = self.require_user(ctx, msg).await?;
         // Admin is determined by the SAME merged role resolution the HTTP
         // `is_admin` path uses — `get_user_roles` merges the inline `users.role`
         // with `user_roles::TABLE` rows. So a user granted admin via the roles
@@ -550,8 +498,11 @@ impl AuthService for AuthServiceImpl {
         }
     }
 
-    async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError> {
-        let ctx = self.ctx()?;
+    async fn user_profile(
+        &self,
+        ctx: &dyn Context,
+        user: UserId,
+    ) -> Result<UserProfile, AuthError> {
         let row = users::find_by_id(ctx, &user.0)
             .await
             .map_err(|e| backend_error(e, "auth: profile lookup"))?
@@ -602,6 +553,35 @@ mod tests {
         ctx
     }
 
+    /// `ctx` with the framework `wafer-run/auth` block over [`AuthServiceImpl`]
+    /// registered, as the runtime registers it: a caller reaches it through
+    /// `call_block`, and the service reaches the database through the callee
+    /// frame the dispatch builds — so a database refusal the test installs
+    /// with `TestContext::refuse_database_op` is what the service meets.
+    fn refused_under_auth(mut ctx: TestContext) -> TestContext {
+        ctx.register_block(
+            "wafer-run/auth",
+            Arc::new(wafer_core::service_blocks::auth::AuthBlock::new(Arc::new(
+                AuthServiceImpl,
+            ))),
+        );
+        ctx
+    }
+
+    /// The response a caller route renders for `require_user` on `request`:
+    /// the typed client's error handed straight back, through the HTTP
+    /// boundary's `collect_http_response` — the shape every `auth@v1`
+    /// consumer has.
+    async fn require_user_response(ctx: &TestContext, request: &Message) -> (u16, String) {
+        let out = match wafer_core::clients::auth::require_user(ctx, request).await {
+            Ok(id) => panic!("a failed credential check must not authenticate {id}"),
+            Err(e) => wafer_run::OutputStream::error(e),
+        };
+        let response = wafer_block::http_codec::collect_http_response(out).await;
+        let body = String::from_utf8(response.body).expect("UTF-8 body");
+        (response.status, body)
+    }
+
     #[tokio::test]
     async fn init_applies_migrations_and_runs_bootstrap_on_fresh_ctx() {
         // Admin migrations are pre-applied so the `block_settings` tracking
@@ -613,7 +593,7 @@ mod tests {
                 .await
                 .running_as(crate::blocks::auth::AUTH_BLOCK_ID),
         );
-        let service = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+        let service = AuthServiceImpl;
 
         service
             .init(&*ctx)
@@ -640,7 +620,7 @@ mod tests {
                 .await
                 .running_as(crate::blocks::auth::AUTH_BLOCK_ID),
         );
-        let service = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+        let service = AuthServiceImpl;
 
         service.init(&*ctx).await.expect("first init");
         service
@@ -651,19 +631,8 @@ mod tests {
 
     #[test]
     fn grants_declares_expected_consumers() {
-        // We don't need a context for grants(); construct the service with
-        // a stub ctx and inspect the returned vec directly.
-        let rt = tokio::runtime::Runtime::new().expect("tokio rt");
-        let ctx = rt.block_on(async {
-            Arc::new(
-                TestContext::new()
-                    .await
-                    .running_as(crate::blocks::auth::AUTH_BLOCK_ID),
-            )
-        });
-        let service = AuthServiceImpl::new(BlockState::for_test(ctx));
-
-        let grants = service.grants();
+        // grants() needs no context: the service holds none.
+        let grants = AuthServiceImpl.grants();
 
         // The grant struct exposes grantee + resource as public fields;
         // we just check coverage of the four consumers.
@@ -709,7 +678,7 @@ mod tests {
                 .running_as(crate::blocks::auth::AUTH_BLOCK_ID),
         );
         // Apply auth migrations so the `users` table exists.
-        AuthServiceImpl::new(BlockState::for_test(ctx.clone()))
+        AuthServiceImpl
             .init(&*ctx)
             .await
             .expect("auth init applies user-table migrations");
@@ -758,7 +727,7 @@ mod tests {
         use crate::platform_state::user_roles;
 
         let ctx = Arc::new(with_admin_and_jwt_secret().await);
-        let service = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+        let service = AuthServiceImpl;
         service
             .init(&*ctx)
             .await
@@ -800,7 +769,11 @@ mod tests {
         // The token claims no roles at all; the inline column is what has to
         // carry the grant.
         let got = service
-            .require_role(&bearer_msg(&access_token_for(&user.id, &[])), Role::Admin)
+            .require_role(
+                &*ctx,
+                &bearer_msg(&access_token_for(&user.id, &[])),
+                Role::Admin,
+            )
             .await
             .expect("an inline-role admin must satisfy Role::Admin with no user_roles row");
         assert_eq!(got.0, user.id);
@@ -815,7 +788,7 @@ mod tests {
         use crate::platform_state::user_roles;
 
         let ctx = Arc::new(with_admin_and_jwt_secret().await);
-        let service = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+        let service = AuthServiceImpl;
         service
             .init(&*ctx)
             .await
@@ -840,7 +813,11 @@ mod tests {
             .expect("assign admin via roles table");
 
         let got = service
-            .require_role(&bearer_msg(&access_token_for(&user.id, &[])), Role::Admin)
+            .require_role(
+                &*ctx,
+                &bearer_msg(&access_token_for(&user.id, &[])),
+                Role::Admin,
+            )
             .await
             .expect("roles-table-only admin must satisfy Role::Admin");
         assert_eq!(got.0, user.id);
@@ -900,24 +877,16 @@ mod tests {
         const REFUSAL: &str =
             "WRAP: impresspress/probe may not read wafer_run__auth__personal_access_tokens";
 
-        let mut ctx = with_admin_and_jwt_secret().await;
-        AuthServiceImpl::new(BlockState::for_test(Arc::new(ctx.clone())))
+        let ctx = with_admin_and_jwt_secret().await;
+        AuthServiceImpl
             .init(&ctx)
             .await
             .expect("auth init applies the auth migrations");
-
-        let refused = crate::test_support::FailingDbOpContext::failing_with(
-            ctx.clone(),
-            vec![("database.list", pats::TABLE)],
+        let ctx = refused_under_auth(ctx.refuse_database_op(
+            "database.list",
+            pats::TABLE,
             WaferError::new(ErrorCode::PermissionDenied, REFUSAL),
-        );
-        let service = AuthServiceImpl::new(BlockState::for_test(Arc::new(refused)));
-        ctx.register_block(
-            "wafer-run/auth",
-            Arc::new(wafer_core::service_blocks::auth::AuthBlock::new(Arc::new(
-                service,
-            ))),
-        );
+        ));
 
         let mut request = Message::new("retrieve");
         request.set_meta("http.header.authorization", "Bearer wafer_pat_refused");
@@ -941,35 +910,26 @@ mod tests {
         );
     }
 
-    /// An unreachable or timed-out backend under the same PAT lookup reaches
-    /// the caller route as a 503 — the retry signal — with a generic message,
-    /// while any other fault stays a 500. Neither carries the backend's text.
+    /// An unreachable backend under the same PAT lookup reaches the caller
+    /// route as a 503 — the retry signal — with a generic message, while any
+    /// other fault stays a 500. Neither carries the backend's text. (A call
+    /// refused because the request was cancelled or timed out keeps its own
+    /// code; see `a_request_that_ends_under_an_auth_check_keeps_its_code`.)
     #[tokio::test]
     async fn an_unavailable_token_lookup_reaches_the_caller_route_as_503() {
         const DETAIL: &str = "d1 unreachable while reading wafer_run__auth__personal_access_tokens";
 
-        for (code, want_status) in [
-            (ErrorCode::Unavailable, 503),
-            (ErrorCode::DeadlineExceeded, 503),
-            (ErrorCode::Internal, 500),
-        ] {
-            let mut ctx = with_admin_and_jwt_secret().await;
-            AuthServiceImpl::new(BlockState::for_test(Arc::new(ctx.clone())))
+        for (code, want_status) in [(ErrorCode::Unavailable, 503), (ErrorCode::Internal, 500)] {
+            let ctx = with_admin_and_jwt_secret().await;
+            AuthServiceImpl
                 .init(&ctx)
                 .await
                 .expect("auth init applies the auth migrations");
-            let failing = crate::test_support::FailingDbOpContext::failing_with(
-                ctx.clone(),
-                vec![("database.list", pats::TABLE)],
+            let ctx = refused_under_auth(ctx.refuse_database_op(
+                "database.list",
+                pats::TABLE,
                 WaferError::new(code, DETAIL),
-            );
-            let service = AuthServiceImpl::new(BlockState::for_test(Arc::new(failing)));
-            ctx.register_block(
-                "wafer-run/auth",
-                Arc::new(wafer_core::service_blocks::auth::AuthBlock::new(Arc::new(
-                    service,
-                ))),
-            );
+            ));
 
             let mut request = Message::new("retrieve");
             request.set_meta("http.header.authorization", "Bearer wafer_pat_down");
@@ -995,8 +955,8 @@ mod tests {
     /// caller as signed out for as long as the database was down.
     #[tokio::test]
     async fn a_failed_auth_version_read_reaches_the_caller_route_as_503() {
-        let mut ctx = with_admin_and_jwt_secret().await;
-        AuthServiceImpl::new(BlockState::for_test(Arc::new(ctx.clone())))
+        let ctx = with_admin_and_jwt_secret().await;
+        AuthServiceImpl
             .init(&ctx)
             .await
             .expect("auth init applies the auth migrations");
@@ -1015,17 +975,11 @@ mod tests {
         )
         .await
         .expect("insert user");
-        let down = crate::test_support::FailingDbOpContext::new(
-            ctx.clone(),
-            vec![("database.get", users::TABLE)],
-        );
-        let service = AuthServiceImpl::new(BlockState::for_test(Arc::new(down)));
-        ctx.register_block(
-            "wafer-run/auth",
-            Arc::new(wafer_core::service_blocks::auth::AuthBlock::new(Arc::new(
-                service,
-            ))),
-        );
+        let ctx = refused_under_auth(ctx.refuse_database_op(
+            "database.get",
+            users::TABLE,
+            WaferError::new(ErrorCode::Internal, "simulated database outage"),
+        ));
 
         let mut request = Message::new("retrieve");
         request.set_meta(
@@ -1047,5 +1001,80 @@ mod tests {
             !body.contains("simulated database outage"),
             "the fault's own text must not reach the body: {body}"
         );
+    }
+
+    /// A request that is cancelled or runs out of time while its credential
+    /// is being checked keeps that fate: `Cancelled` (499) or
+    /// `DeadlineExceeded` (504), with a message of impresspress's own —
+    /// never the 401 that tells a signed-in client it has been signed out,
+    /// and not the 503 of a backend that is down.
+    ///
+    /// The service reaches the database through the request's own frame, so
+    /// the runtime refuses its calls with exactly these codes once the request
+    /// is cancelled or late (`call_gates::admit_call`). Both credential paths
+    /// are covered: a personal access token, whose lookup goes through
+    /// `backend_error`, and an access JWT, whose `auth_version` read goes
+    /// through `credential_check_failed`.
+    #[tokio::test]
+    async fn a_request_that_ends_under_an_auth_check_keeps_its_code() {
+        const DETAIL: &str = "admit_call refused wafer_run__auth__users for impresspress/probe";
+
+        for (code, want_status) in [
+            (ErrorCode::Cancelled, 499),
+            (ErrorCode::DeadlineExceeded, 504),
+        ] {
+            // PAT: the token lookup is the refused call.
+            let ctx = with_admin_and_jwt_secret().await;
+            AuthServiceImpl
+                .init(&ctx)
+                .await
+                .expect("auth init applies the auth migrations");
+            let ctx = refused_under_auth(ctx.refuse_database_op(
+                "database.list",
+                pats::TABLE,
+                WaferError::new(code, DETAIL),
+            ));
+            let mut request = Message::new("retrieve");
+            request.set_meta("http.header.authorization", "Bearer wafer_pat_ended");
+            let (status, body) = require_user_response(&ctx, &request).await;
+            assert_eq!(status, want_status, "PAT, {code:?}: {body}");
+            assert!(!body.contains(DETAIL), "PAT, {code:?}: {body}");
+
+            // Access JWT: the `auth_version` read is the refused call.
+            let ctx = with_admin_and_jwt_secret().await;
+            AuthServiceImpl
+                .init(&ctx)
+                .await
+                .expect("auth init applies the auth migrations");
+            let user = users::insert(
+                &ctx,
+                users::NewUser {
+                    email: format!("ended-{status}@e.co"),
+                    display_name: "Ended".into(),
+                    avatar_url: None,
+                    role: "user".into(),
+                    email_verified: true,
+                    verification_token_hash: None,
+                },
+            )
+            .await
+            .expect("insert user");
+            let ctx = refused_under_auth(ctx.refuse_database_op(
+                "database.get",
+                users::TABLE,
+                WaferError::new(code, DETAIL),
+            ));
+            let mut request = Message::new("retrieve");
+            request.set_meta(
+                "http.header.authorization",
+                format!(
+                    "Bearer {}",
+                    crate::test_support::access_token_for(&user.id, &["user"])
+                ),
+            );
+            let (status, body) = require_user_response(&ctx, &request).await;
+            assert_eq!(status, want_status, "JWT, {code:?}: {body}");
+            assert!(!body.contains(DETAIL), "JWT, {code:?}: {body}");
+        }
     }
 }

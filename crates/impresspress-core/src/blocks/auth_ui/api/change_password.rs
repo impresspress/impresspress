@@ -218,7 +218,8 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     // deployment's fault, not the caller's: the caller is already signed in
     // as this account, so there is nothing to hide from them, and telling
     // them their correct password is wrong would send them round in circles.
-    // A comparison that could not run is the classified 403/429/503.
+    // A comparison that could not run is the answer `credential_check_failed`
+    // classifies: 403/429, 499/504 for a cancelled or late request, else 503.
     match check_password(ctx, user_id, &body.current_password, &cred.password_hash).await {
         Ok(PasswordCheck::Matches) => {}
         Ok(PasswordCheck::DoesNotMatch) => {

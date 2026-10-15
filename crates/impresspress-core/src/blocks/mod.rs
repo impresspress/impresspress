@@ -338,14 +338,10 @@ pub fn register_llm(
 /// `ImpresspressBuilder::build` (both targets) to install both the block and the
 /// service.
 ///
-/// The `AuthServiceImpl`'s context cell starts empty here; it gets populated
-/// when the runtime fires the framework AuthBlock's `lifecycle(Init)` event,
-/// which calls into `AuthService::init` and stashes `ctx.clone_arc()` for
-/// later `require_*` dispatches.
+/// The service holds no context: the framework block hands it the `ctx` of
+/// each message it serves, and the database calls it makes go through that.
 pub fn register_auth(wafer: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
-    use std::sync::Arc;
-    let state = auth::service::BlockState::new();
-    let svc = Arc::new(auth::service::AuthServiceImpl::new(state));
+    let svc = std::sync::Arc::new(auth::service::AuthServiceImpl);
     wafer_core::service_blocks::auth::register_with(wafer, svc)
 }
 

@@ -7,7 +7,7 @@ use impresspress_core::{
     blocks::auth::{
         migrations,
         repo::bootstrap_tokens,
-        service::{hash_token, AuthServiceImpl, BlockState},
+        service::{hash_token, AuthServiceImpl},
     },
     test_support::seed_user,
 };
@@ -46,20 +46,20 @@ async fn require_role_user_admin_and_bootstrap_token() {
         .mint_access_token(&plain.id, &[], Duration::from_secs(3600))
         .await;
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
 
     // Admin's token meets Role::Admin. The role comes from the merged role
     // resolution (`users.role` plus the roles table), not from the token's
     // own `roles` claim, so a stale claim cannot grant admin.
     let got = svc
-        .require_role(&bearer(&admin_jwt), Role::Admin)
+        .require_role(&*ctx, &bearer(&admin_jwt), Role::Admin)
         .await
         .expect("admin jwt");
     assert_eq!(got.0, admin.id);
 
     // Plain user does not.
     let err = svc
-        .require_role(&bearer(&user_jwt), Role::Admin)
+        .require_role(&*ctx, &bearer(&user_jwt), Role::Admin)
         .await
         .expect_err("plain user");
     assert!(
@@ -69,7 +69,7 @@ async fn require_role_user_admin_and_bootstrap_token() {
 
     // Any authenticated user meets Role::User.
     let got = svc
-        .require_role(&bearer(&user_jwt), Role::User)
+        .require_role(&*ctx, &bearer(&user_jwt), Role::User)
         .await
         .expect("user jwt");
     assert_eq!(got.0, plain.id);
@@ -79,7 +79,7 @@ async fn require_role_user_admin_and_bootstrap_token() {
     bootstrap_tokens::insert(ctx.as_ref(), hash_token(bt_raw), "9999-01-01T00:00:00Z")
         .await
         .expect("seed bootstrap token");
-    svc.require_role(&bearer(bt_raw), Role::Admin)
+    svc.require_role(&*ctx, &bearer(bt_raw), Role::Admin)
         .await
         .expect("bootstrap-token grants admin");
 
@@ -94,7 +94,7 @@ async fn require_role_user_admin_and_bootstrap_token() {
     .await
     .expect("seed expired bootstrap");
     let err = svc
-        .require_role(&bearer(expired_raw), Role::Admin)
+        .require_role(&*ctx, &bearer(expired_raw), Role::Admin)
         .await
         .expect_err("expired bootstrap should fail");
     assert!(
@@ -129,9 +129,9 @@ async fn require_role_admin_comes_from_the_roles_table_not_the_token_claim() {
         )
         .await;
 
-    let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
+    let svc = AuthServiceImpl;
     let err = svc
-        .require_role(&bearer(&lying), Role::Admin)
+        .require_role(&*ctx, &bearer(&lying), Role::Admin)
         .await
         .expect_err("an `admin` roles claim must not grant admin on its own");
     assert!(matches!(err, AuthError::Forbidden), "got {err:?}");
@@ -141,7 +141,7 @@ async fn require_role_admin_comes_from_the_roles_table_not_the_token_claim() {
         .await
         .expect("grant admin through the roles table");
     let got = svc
-        .require_role(&bearer(&lying), Role::Admin)
+        .require_role(&*ctx, &bearer(&lying), Role::Admin)
         .await
         .expect("roles-table admin");
     assert_eq!(got.0, u.id);

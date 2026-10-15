@@ -124,7 +124,8 @@ pub struct AccessClaims {
 /// pages to the login form, so a database blip would sign every user out of
 /// the UI. So a failed read is `Err`, already classified
 /// for the client by `blocks::auth::credential_check_failed` (a WRAP refusal
-/// keeps its 403 or 429, anything else is a 503), and the caller answers the
+/// keeps its 403 or 429, a cancelled or late request keeps its 499 or 504,
+/// anything else is a 503), and the caller answers the
 /// request with it instead of treating the caller as anonymous.
 ///
 /// Both consumers call this and nothing else: [`extract_auth_meta`] (the

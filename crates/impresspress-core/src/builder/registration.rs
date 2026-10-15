@@ -293,8 +293,7 @@ impl ImpresspressBuilder {
 
         // 6. Register the framework AuthBlock — not in the feature-block
         //    manifest because its constructor takes `Arc<dyn AuthService>`. The
-        //    wrapped AuthServiceImpl picks up its Context handle when the
-        //    runtime fires the block's lifecycle(Init) event.
+        //    wrapped AuthServiceImpl holds no Context: each call hands it one.
         crate::blocks::register_auth(&mut wafer)?;
 
         // 6b. Register LlmBlock — not in the feature-block manifest because its

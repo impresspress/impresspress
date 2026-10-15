@@ -53,8 +53,10 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     // Only `Unauthenticated` is the crypto service judging the token. Any
     // other error means the check did not run (WRAP refusal, service down),
     // and "invalid refresh token" would tell the client its credential is
-    // finished when nothing about it was judged, so it is the classified
-    // 403/429/503 instead — the same rule the token-row read below follows.
+    // finished when nothing about it was judged, so it is the answer
+    // `credential_check_failed` classifies (403/429, 499/504 for a cancelled
+    // or late request, else 503) instead — the same rule the token-row read
+    // below follows.
     let claims = match crypto::verify(ctx, &body.refresh_token).await {
         Ok(claims) => claims,
         Err(e) if e.code == wafer_run::ErrorCode::Unauthenticated => {
