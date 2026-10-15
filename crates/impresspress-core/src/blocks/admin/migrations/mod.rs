@@ -186,6 +186,84 @@ const SQL_008_SQLITE: &str = include_str!("008_request_logs_block.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_008_POSTGRES: &str = include_str!("008_request_logs_block.postgres.sql");
 
+// 009 empties `block_settings.blessed_hash` on every row, so a build from
+// before the column was retired that is still serving reports schema drift
+// instead of silently re-applying its own migrations.
+//
+// Builds before #145 gated a pending list with `should_apply = is_fresh ||
+// run_requested || blessed_hash == code_hash`, and on success wrote
+// `current_hash = blessed_hash = code_hash`. This build neither reads nor
+// writes the column, so it kept the value the last pre-#145 deploy left. On
+// Cloudflare the version being replaced keeps serving until the new one is
+// promoted — and for good when a deploy fails — and once this build has
+// recorded a list of its own, the old version's next cold build re-applies
+// its whole list for every block whose stale `blessed_hash` still equals its
+// own code hash: it overwrites the new version's `current_hash` records,
+// bumps the KV config-version stamp (which leaves the candidate's prepared
+// plan stale mid-deploy) and re-runs old data repairs; had auth's list
+// changed, it would drop the refresh-token and session tables and sign every
+// user out. That happens once per divergence when the re-apply succeeds (it
+// re-records the block), and on every cold build while it keeps failing part
+// way, as products' did at the D1 statement budget. With the column empty,
+// the same old gate finds `blessed_hash != code_hash`, logs `schema drift;
+// redeploy with --run-migrations` and boots on the schema it finds.
+//
+// Every row, not one block's: any block whose list a pre-#145 version ships
+// is exposed. The column is emptied, not dropped: the old `write_state`
+// names it in its upsert, so without it the old version's every `Init` would
+// fail. It is added where it is missing, because #145 removed it from 001: a
+// database created since never had it, and an `UPDATE` naming it would fail
+// there. On SQLite/D1 that `ADD COLUMN` is swallowed as a duplicate column
+// where the column exists; the PostgreSQL file says `ADD COLUMN IF NOT
+// EXISTS`. Every database ends with the same schema, holding a column
+// nothing in this build reads.
+//
+// **How the cleared rows reach the old version's KV row cache.** The old
+// version reads its migration state from `cfg:v1:block_settings:__all__`,
+// the cached whole table (24 h TTL, not version-scoped). On Cloudflare
+// `db::ddl` reaches `KvCachedD1DatabaseService::exec_raw`, which passes this
+// `UPDATE` straight to D1 and invalidates nothing. Two later steps of the
+// deploy funnel bring the key in line with D1, and either alone would:
+//
+// - admin's own `record_applied`, which `migration_helper::apply_pending`
+//   runs right after the list, is a typed write to this table, and drops the
+//   key (`cache_key::invalidate_keys` emits the all-rows key for it);
+// - the funnel reads the table back through the cache in read-through mode —
+//   `CfDeployBootHooks`' `block_settings::load_and_seed` right after admin's
+//   `Init` (`builder::boot` step 4), and `/_deploy/prepare`'s closing
+//   `block_settings::load` — and each read rewrites the key from D1 whenever
+//   it differs.
+//
+// `kv_cached_db`'s
+// `admin_migration_009_tests::applying_admins_list_drops_the_all_rows_key_after_009`
+// holds the first; `boot_hooks`'
+// `the_deploy_funnel_leaves_the_all_rows_key_holding_the_cleared_rows` holds
+// the outcome: after admin's `Init` and the seed step, the cached table has
+// every `blessed_hash` empty.
+//
+// What it does not do: it changes admin's list hash, so the next deploy or
+// boot re-runs admin's 001-009 (re-runnable, see 004's note). It protects
+// against an old version only once a build carrying it has applied it — a
+// live old version serving before that keeps re-applying. A rollback with
+// migrations to a pre-#145 version re-blesses rows, but its own re-run of
+// admin's list rewrites admin's `current_hash`, so the next roll-forward
+// re-runs admin's list and this file empties them again. One narrow case
+// escapes that: an old version whose cold build reads the rows from before
+// 009 ran (D1 mid-prepare, or a colo's KV copy, which is eventually
+// consistent) can re-bless a non-admin block after 009 has run, and admin's
+// record, still this build's, does not make 009 run again. Keeping traffic
+// off the old version during a deploy closes it.
+//
+// Re-runnable: the `ADD COLUMN` is a duplicate after the first run and the
+// `UPDATE` matches no row. Covered on both dialects by
+// `impresspress-native/tests/admin_blessed_hash.rs`.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_009_SQLITE: &str = include_str!("009_block_settings_clear_blessed_hash.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_009_POSTGRES: &str = include_str!("009_block_settings_clear_blessed_hash.postgres.sql");
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 /// Order here is the apply order.
@@ -198,6 +276,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("006_storage_access_logs_duration", SQL_006_SQLITE),
     (REQUEST_LOGS_HTTP_METHOD, SQL_007_SQLITE),
     (REQUEST_LOGS_BLOCK, SQL_008_SQLITE),
+    (BLOCK_SETTINGS_CLEAR_BLESSED_HASH, SQL_009_SQLITE),
 ];
 
 /// Basename of the request-log method rewrite, named once so the migration
@@ -207,6 +286,10 @@ pub(crate) const REQUEST_LOGS_HTTP_METHOD: &str = "007_request_logs_http_method"
 /// Basename of the request-log `block` column, named once for the same
 /// reason.
 pub(crate) const REQUEST_LOGS_BLOCK: &str = "008_request_logs_block";
+
+/// Basename of the `blessed_hash` clear, named once so the migration list and
+/// the tests that slice it — here and in other crates — cannot drift apart.
+pub const BLOCK_SETTINGS_CLEAR_BLESSED_HASH: &str = "009_block_settings_clear_blessed_hash";
 
 /// Basename of the `variables.block` column + backfill, named once so the
 /// migration list and the test that slices it cannot drift apart.
@@ -235,6 +318,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     ("006_storage_access_logs_duration", SQL_006_POSTGRES),
     (REQUEST_LOGS_HTTP_METHOD, SQL_007_POSTGRES),
     (REQUEST_LOGS_BLOCK, SQL_008_POSTGRES),
+    (BLOCK_SETTINGS_CLEAR_BLESSED_HASH, SQL_009_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

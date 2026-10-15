@@ -1269,3 +1269,104 @@ mod tests {
         );
     }
 }
+
+/// Admin's migration 009 empties `blessed_hash` on every `block_settings` row
+/// by a raw `UPDATE`, and a raw statement reaches D1 through
+/// [`KvCachedD1DatabaseService::exec_raw`], which invalidates nothing. Two
+/// later steps of the deploy funnel bring `cfg:v1:block_settings:__all__` —
+/// the cached whole table an older version's cold build reads — in line with
+/// D1: the typed write `migration_helper::apply_pending` makes right after the
+/// list has run, when it records the list as applied, drops the key; and the
+/// funnel's read-through `block_settings` reads after admin's `Init` rewrite
+/// it from D1 (`boot_hooks`'s
+/// `the_deploy_funnel_leaves_the_all_rows_key_holding_the_cleared_rows` holds
+/// the value that results). This module holds the first: the record follows
+/// the list and its write drops the key.
+#[cfg(test)]
+mod admin_migration_009_tests {
+    use std::{collections::HashMap, rc::Rc, sync::Arc};
+
+    use impresspress_core::{blocks::admin::ADMIN_BLOCK_ID, platform_state::block_settings};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{CacheMode, KvCachedD1DatabaseService};
+    use crate::test_fakes::{
+        admin_009_clear_statement, blessed_row, deploy_admin_runtime, BlockSettingsD1, Log,
+        MemoryKv,
+    };
+
+    /// The KV key holding every `block_settings` row: what an older version's
+    /// cold build reads, for up to the row cache's 24 h TTL. Spelled out
+    /// rather than derived, because the old version reads this exact key.
+    const ALL_ROWS_KEY: &str = "cfg:v1:block_settings:__all__";
+
+    const OLDER_LIST: &str = "an-older-admin-list";
+
+    /// **Admin's `Init`, applying a list that holds 009, records the list
+    /// right after 009's `UPDATE` reached D1, and that record drops the
+    /// all-rows key.** The wiring is the deploy funnel's (`/_deploy/prepare`
+    /// and `/_deploy/init`): the KV row cache in front of D1, reading through,
+    /// with the per-write config stamp off, and `IMPRESSPRESS_RUN_MIGRATIONS`
+    /// set. Admin's row records an older list, so the list runs, as it does on
+    /// every deployment that applied 001-008.
+    ///
+    /// Fails if `apply_pending` records the list before running it, or if the
+    /// record stops being a typed write the row cache invalidates on.
+    #[wasm_bindgen_test]
+    async fn applying_admins_list_drops_the_all_rows_key_after_009() {
+        let log = Log::default();
+        let db = KvCachedD1DatabaseService::with_mode(
+            Arc::new(BlockSettingsD1::new(
+                Rc::clone(&log),
+                vec![blessed_row(
+                    "bs_admin",
+                    ADMIN_BLOCK_ID,
+                    OLDER_LIST,
+                    OLDER_LIST,
+                )],
+            )),
+            Arc::new(MemoryKv::new(Rc::clone(&log), HashMap::new())),
+            CacheMode {
+                read_through: true,
+                bump_on_write: false,
+            },
+        );
+
+        let wafer = deploy_admin_runtime(Arc::new(db), OLDER_LIST).await;
+
+        wafer
+            .init_block(ADMIN_BLOCK_ID)
+            .await
+            .expect("admin's Init applies its list");
+
+        let log = log.borrow();
+        let clear = format!("d1 exec {}", admin_009_clear_statement());
+        let cleared_at = log
+            .iter()
+            .position(|entry| *entry == clear)
+            .unwrap_or_else(|| panic!("009's UPDATE reached D1: {log:#?}"));
+        // Admin's `Init` goes on to seed, and a seed that stamps its hash
+        // writes `block_settings` too — on a deployment whose seed is
+        // unchanged it does not. So the claim is about the write that comes
+        // first: the next thing to reach D1 is the record of the list, and the
+        // all-rows key leaves KV before anything else reaches D1.
+        let after = &log[cleared_at + 1..];
+        let d1_at = |from: usize| {
+            after[from..]
+                .iter()
+                .position(|entry| entry.starts_with("d1 "))
+                .map(|at| from + at)
+        };
+        let record_at = d1_at(0).unwrap_or_else(|| panic!("a write follows 009: {log:#?}"));
+        assert_eq!(
+            after[record_at],
+            format!("d1 update {}/bs_admin", block_settings::TABLE),
+            "the first write after 009 records admin's list: {log:#?}"
+        );
+        let next_d1 = d1_at(record_at + 1).unwrap_or(after.len());
+        assert!(
+            after[record_at + 1..next_d1].contains(&format!("kv delete {ALL_ROWS_KEY}")),
+            "recording the list drops the all-rows key before anything else reaches D1: {log:#?}"
+        );
+    }
+}

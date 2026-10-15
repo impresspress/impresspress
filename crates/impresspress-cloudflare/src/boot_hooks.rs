@@ -721,4 +721,119 @@ mod boot_hook_tests {
             kv.puts.borrow(),
         );
     }
+
+    /// **After the deploy funnel's admin `Init` and seed step, the cached
+    /// whole `block_settings` table holds every row with an empty
+    /// `blessed_hash`.** That cached table, `cfg:v1:block_settings:__all__`,
+    /// is what an older version's cold build reads its migration state from;
+    /// were it left holding the old hashes, admin migration 009 would not
+    /// reach that version for up to the row cache's 24 h TTL.
+    ///
+    /// The run is the funnel's, in its order (`builder::boot` steps 3 and 4):
+    /// the real admin block's `Init` applies its list, 009 included, over the
+    /// KV row cache in deploy mode (reading through, no per-write stamp); then
+    /// [`CfDeployBootHooks::seed_and_load`] reads and seeds `block_settings`
+    /// through the same service, and `/_deploy/prepare`'s closing
+    /// `block_settings::load` reads it once more. The database is one an
+    /// older version migrated: three blessed rows, and KV already holding
+    /// them as that version cached them.
+    ///
+    /// Asserted on the value KV holds at the end, which is what the older
+    /// version reads, not on which step wrote it: the record's write drops the
+    /// key and the read-through reads write it back from D1, and either alone
+    /// would do.
+    #[wasm_bindgen_test]
+    async fn the_deploy_funnel_leaves_the_all_rows_key_holding_the_cleared_rows() {
+        use std::rc::Rc;
+
+        use impresspress_core::{blocks::admin::ADMIN_BLOCK_ID, platform_state::block_settings};
+
+        use crate::test_fakes::{
+            blessed_row, deploy_admin_runtime, BlockSettingsD1, Log, MemoryKv,
+        };
+
+        const ALL_ROWS_KEY: &str = "cfg:v1:block_settings:__all__";
+        const OLD_ADMIN: &str = "admin-list-blessed-by-an-old-build";
+
+        let rows = vec![
+            blessed_row("bs_admin", ADMIN_BLOCK_ID, OLD_ADMIN, OLD_ADMIN),
+            blessed_row(
+                "bs_products",
+                "impresspress/products",
+                "products-list-main",
+                "products-list-old",
+            ),
+            blessed_row("bs_auth", "wafer-run/auth", "auth-list", "auth-list"),
+        ];
+        let mut cached = HashMap::new();
+        cached.insert(
+            ALL_ROWS_KEY.to_string(),
+            serde_json::to_string(&rows).expect("serialize the cached rows"),
+        );
+        let log = Log::default();
+        let kv = Arc::new(MemoryKv::new(Rc::clone(&log), cached));
+        let db: Arc<dyn DatabaseService> =
+            Arc::new(kv_cached_db::KvCachedD1DatabaseService::with_mode(
+                Arc::new(BlockSettingsD1::new(Rc::clone(&log), rows)),
+                kv.clone() as Arc<dyn KvBackend>,
+                kv_cached_db::CacheMode {
+                    read_through: true,
+                    bump_on_write: false,
+                },
+            ));
+
+        let wafer = deploy_admin_runtime(db.clone(), OLD_ADMIN).await;
+        wafer
+            .init_block(ADMIN_BLOCK_ID)
+            .await
+            .expect("admin's Init applies its list");
+        let deploy = CfDeployBootHooks {
+            db: db.clone(),
+            block_settings_handle: settings_handle(),
+            config: request_services::config_proxy(),
+            seed_defaults: seed_defaults_fixture(),
+        };
+        deploy.seed_and_load().await.expect("deploy seed");
+        block_settings::load(&db)
+            .await
+            .expect("prepare's closing read");
+
+        let cached = kv
+            .entries
+            .borrow()
+            .get(ALL_ROWS_KEY)
+            .cloned()
+            .unwrap_or_else(|| panic!("KV holds the whole table again: {:#?}", log.borrow()));
+        let cached: Vec<Record> =
+            serde_json::from_str(&cached).expect("the cached table is a list of rows");
+        let blessed: Vec<(String, serde_json::Value)> = cached
+            .iter()
+            .map(|row| {
+                (
+                    row.data["block_name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    row.data
+                        .get("blessed_hash")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+        for block in [ADMIN_BLOCK_ID, "impresspress/products", "wafer-run/auth"] {
+            assert!(
+                blessed
+                    .iter()
+                    .any(|(name, hash)| name == block && *hash == serde_json::json!("")),
+                "{block} is cached with an empty blessed_hash: {blessed:?}"
+            );
+        }
+        assert!(
+            blessed
+                .iter()
+                .all(|(_, hash)| *hash == serde_json::json!("")),
+            "no cached row keeps a blessed_hash: {blessed:?}"
+        );
+    }
 }
