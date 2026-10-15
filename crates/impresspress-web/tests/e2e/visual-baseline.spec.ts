@@ -176,14 +176,16 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   duration figures on the admin network page (`blocks/admin/pages/network.rs`).
 //   The mask covers the owning `<td>`, not the span: the span is as wide as
 //   its text, so "5ms" and "12ms" would paint different mask boxes. The
-//   admin dashboard's "Avg Response" tile is reached by its label instead,
-//   because `components::stat_card` takes its value as a plain `&str` with
+//   admin dashboard's "Avg response" stat is reached by its label instead,
+//   because `components::Stat` takes its value as a plain `&str` with
 //   nowhere to hang an attribute — a Rust test pins that label so a rename
-//   cannot silently unmask the tile.
+//   cannot silently unmask the stat.
 // - Counts of the requests the suite itself made, which change whenever a
-//   spec or a capture is added ahead of the page: the dashboard's "Requests
-//   Today" tile (reached by its label, pinned by the same Rust test) and the
-//   admin database page's rows for the two log tables every request feeds
+//   spec or a capture is added ahead of the page. On the dashboard: the
+//   "Requests today" stat and the "Requests" chart, each reached by its label
+//   (pinned by the same Rust test). The chart is masked whole, because both
+//   its bar height and its value axis scale with the count. On the admin
+//   database page: the rows for the two log tables every request feeds
 //   (`blocks/admin/pages/database.rs` names each row in `data-db-table`).
 //   The whole row is masked, not the count: the count is as wide as its
 //   digits, so "95" and "105" would paint different mask boxes. The admin
@@ -193,15 +195,14 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 // What stays unmasked, deliberately: the dashboard's server-error figure,
 // charts and "Recent server errors" card are zero and empty on a healthy run,
 // so an error there is a regression the capture should catch. The client
-// errors under "Requests Today" and in their chart count the refused requests
+// errors under "Requests today" and in their chart count the refused requests
 // the captures before the dashboard make (the anonymous 404 page among them):
-// fixed while the group's order is, so they are compared too. The request chart,
-// the request sparkline and the new-user chart plot everything on the last
-// day of the window whatever the count, and "Total Users" / "New Today" are
-// the one bootstrap admin, so none of them depends on what ran first. The
-// charts, the sparklines and "New Today" do depend on the UTC day: a run
-// whose server starts before midnight UTC and captures the dashboard after
-// it plots the traffic on two days and fails once; a rerun passes.
+// fixed while the group's order is, so they are compared too. The new-user
+// chart plots its one signup on the last day of the window, and "Total users"
+// / "New today" are the one bootstrap admin, so none of them depends on what
+// ran first. The charts and "New today" do depend on the UTC day: a run
+// whose server starts before midnight UTC and captures the dashboard after it
+// plots the traffic on two days and fails once; a rerun passes.
 function volatileMasks(page: Page) {
   return [
     page
@@ -211,8 +212,9 @@ function volatileMasks(page: Page) {
       .filter({ visible: true }),
     page.locator('.chart__range'),
     page.locator('td:has([data-volatile-id])'),
-    page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
-    page.locator('.stat-card:has-text("Requests Today") .stat-value'),
+    page.locator('td:has([data-volatile-metric]), .stat:has-text("Avg response") .stat__value'),
+    page.locator('.stat:has-text("Requests today") .stat__value'),
+    page.locator('section.card:has(h2.card__title:text-is("Requests")) .chart'),
     page.locator('li[data-db-table$="__request_logs"], li[data-db-table$="__storage_access_logs"]'),
   ];
 }

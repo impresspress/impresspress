@@ -26,14 +26,14 @@ pub use button::{
 };
 pub use callout::{callout, CalloutTone};
 pub use card::Card;
-pub use chart::{bar_chart_card, line_chart_card, sparkline, ChartHistory};
+pub use chart::{bar_chart_card, line_chart_card, ChartHistory};
 pub use empty::empty_state;
 pub use endpoints::endpoint_table;
 pub use form::{password_field, reveal_toggle, PasswordPurpose, SearchInput};
 pub use modal::{modal, modal_cancel, modal_footer, Modal, ModalSize};
 pub use pagination::pagination;
 pub use section::section_header;
-pub use stat::{stat_card, StatCard};
+pub use stat::{stat_row, Stat, MAX_STATS};
 pub(crate) use table::fnv1a;
 pub use table::{breakable_id, data_table, DataTable, TableCol, TableRow, NO_VALUE};
 pub use time::timestamp;

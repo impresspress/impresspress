@@ -1890,7 +1890,7 @@ mod tests {
             ".modal",
             ".toast",
             ".palette",
-            ".stat-",
+            ".stat-row",
             ".chart__plot",
             ".callout",
             ".auth-split",

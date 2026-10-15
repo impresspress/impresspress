@@ -1,58 +1,91 @@
-/* Stats -- the ONE definition of the tile grid (dashboard, products,
-   storage overview). As many 180px+ columns as fit; two on a phone, where
-   180px would leave a single column of very wide tiles. */
-.stats-grid {
+/* Stat row (`components::stat_row`): one compact row of headline figures.
+
+   The layout follows the width the row is given, not the viewport:
+   `.stat-row` is a size container and `.stat-row__grid` inside it picks one
+   of three layouts, so a row inside a card and a row on the page background
+   each fit their own width.
+   - One row of equal columns when every stat gets at least 11rem.
+   - Otherwise two columns, an odd last stat spanning both, so no stat sits
+     alone beside an empty column.
+   - One column when even two 11rem columns do not fit (a phone).
+
+   The 11rem floor leaves 142px for a value inside the stat's padding, at
+   the value size below (1.25rem/600). A value word that fits that width in
+   DejaVu Sans (the font CI renders) never breaks; anything wider breaks
+   mid-word. Today the widest word a page shows is the dashboard's outage
+   marker "Unavailable" (132.5px). So a marker must fit or wrap at a space
+   ("Not configured", not "Misconfigured"), and a figure must stay within
+   about ten characters: an eleven-character amount ("12345678.90") or a
+   ten-digit JPY amount would break. Raising the value size or the padding
+   means raising the floor and the thresholds with it.
+
+   One row of n stats needs n * 11rem + (n - 1) * 0.75rem (the gap); the
+   thresholds below are that sum for each n. Two stats need what two
+   columns need, and one stat always spans the row. The row sets no outer
+   margin: the page layout around it spaces it like any other block. */
+.stat-row { container: stat-row / inline-size; }
+
+.stat-row__grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-	gap: var(--space-4);
+	grid-template-columns: minmax(0, 1fr);
+	gap: var(--space-3);
 }
-@media (max-width: 720px) {
-	.stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+@container stat-row (min-width: 22.75rem) {
+	.stat-row__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.stat-row__grid > .stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
-
-.stat-card {
-	background: var(--surface-1); border-radius: 8px;
-	padding: var(--space-6); border: 1px solid var(--border-color);
+/* One row: the stat count picks its threshold. An odd last stat goes back
+   to its own column. */
+@container stat-row (min-width: 34.5rem) {
+	.stat-row__grid:has(> .stat:nth-child(3):last-child) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+	.stat-row__grid:has(> .stat:nth-child(3):last-child) > .stat:last-child { grid-column: auto; }
 }
-
-.stat-header {
-	display: flex; align-items: flex-start; justify-content: space-between;
-	margin-bottom: var(--space-4);
+@container stat-row (min-width: 46.25rem) {
+	.stat-row__grid:has(> .stat:nth-child(4):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
-
-.stat-icon {
-	width: 40px; height: 40px;
-	display: flex; align-items: center; justify-content: center;
-	border-radius: 8px; flex-shrink: 0;
+@container stat-row (min-width: 58rem) {
+	.stat-row__grid:has(> .stat:nth-child(5):last-child) { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+	.stat-row__grid:has(> .stat:nth-child(5):last-child) > .stat:last-child { grid-column: auto; }
 }
-
-.stat-spark { width: 4rem; height: 1.5rem; }
-
-.stat-label {
-	font-size: 0.75rem; text-transform: uppercase;
-	color: var(--text-muted); font-weight: 500;
-	letter-spacing: .06em; margin-bottom: var(--space-1);
+@container stat-row (min-width: 69.75rem) {
+	.stat-row__grid:has(> .stat:nth-child(6):last-child) { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 
-.stat-value {
-	font-size: 1.875rem; font-weight: 600;
-	color: var(--text-primary); line-height: 1;
+/* A stat is a card-level surface on the page background. */
+.stat {
+	min-width: 0;
+	background: var(--surface-1);
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-lg);
+	padding: var(--space-4);
 }
 
-.stat-description {
-	font-size: 0.875rem; color: var(--text-secondary); margin-top: var(--space-2);
+.stat__label {
+	font-size: var(--text-sm);
+	color: var(--text-secondary);
+	margin-bottom: var(--space-1);
+}
+
+/* Within the limit stated at the top, the floor keeps every word whole;
+   `break-word` only breaks a word wider than the stat (an email on order
+   detail, or a figure past the limit) rather than let it overflow. */
+.stat__value {
+	font-size: 1.25rem;
+	font-weight: 600;
+	line-height: 1.25;
+	color: var(--text-primary);
+	font-variant-numeric: tabular-nums;
+	overflow-wrap: break-word;
+}
+
+.stat__detail {
+	font-size: var(--text-sm);
+	color: var(--text-secondary);
+	margin-top: var(--space-1);
 	font-variant-numeric: tabular-nums;
 }
 
 /* A figure that is a problem whenever it is not zero (the dashboard's server
    errors). The label names what is counted; the tone only draws the eye.
    --accent-danger-text is the AA-safe red for text on white. */
-.stat-card--alert { border-color: var(--accent-danger); }
-.stat-card--alert .stat-value,
-.stat-card--alert .stat-icon { color: var(--accent-danger-text); }
-
-@media (max-width: 720px) {
-	.stat-card { padding: var(--space-4); min-width: 0; }
-	.stat-value { font-size: 1.5rem; }
-}
-
+.stat--alert .stat__value { color: var(--accent-danger-text); }

@@ -71,8 +71,8 @@
 .form-section__body { padding-top: var(--space-2); }
 
 /* ===== Dashboard page ===== */
-/* `.stats-grid` and the tiles in it (`components::stat_card`) are defined
- * once, in components/stat.css. */
+/* The stat row (`.stat-row`, `components::stat_row`) is defined once, in
+ * components/stat.css. */
 
 .dashboard-charts { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
 @media (min-width: 1024px) { .dashboard-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -96,18 +96,19 @@ pub struct AdminStats {
     pub quotas_count: i64,
 }
 
-/// Render the 4 stat cards (Buckets, Files, Total Size, Active Shares)
-/// for the admin storage overview. Designed for the `list_page` template's
-/// `filters` slot. Pure helper — no `Context` access.
+/// The admin storage overview's stat row: Buckets, Files, Total size and
+/// Active shares. Pure helper — no `Context` access.
 pub fn render_admin_overview_stats(stats: &AdminStats) -> Markup {
-    html! {
-        div .stats-grid {
-            (components::stat_card("Buckets", &stats.buckets.to_string(), icons::folder(), None))
-            (components::stat_card("Files", &stats.files.to_string(), icons::file_text(), None))
-            (components::stat_card("Total Size", &format_bytes(stats.total_size_bytes), icons::hard_drive(), None))
-            (components::stat_card("Active Shares", &stats.shares.to_string(), icons::globe(), None))
-        }
-    }
+    let buckets = stats.buckets.to_string();
+    let files = stats.files.to_string();
+    let total_size = format_bytes(stats.total_size_bytes);
+    let shares = stats.shares.to_string();
+    components::stat_row(vec![
+        components::Stat::new("Buckets", &buckets),
+        components::Stat::new("Files", &files),
+        components::Stat::new("Total size", &total_size),
+        components::Stat::new("Active shares", &shares),
+    ])
 }
 
 /// Render the "create your first bucket" CTA for the empty admin storage
@@ -496,7 +497,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_admin_overview_stats_renders_four_stat_cards() {
+    fn render_admin_overview_stats_renders_a_row_of_four_stats() {
         let stats = AdminStats {
             buckets: 3,
             files: 42,
@@ -505,9 +506,24 @@ mod tests {
             quotas_count: 1,
         };
         let html = render_admin_overview_stats(&stats).into_string();
-        assert!(html.contains(">3<"), "buckets count missing: {html}");
-        assert!(html.contains(">42<"), "files count missing: {html}");
-        assert!(html.contains(">5<"), "shares count missing: {html}");
+        assert!(
+            html.starts_with(r#"<div class="stat-row"><div class="stat-row__grid">"#),
+            "{html}"
+        );
+        for (label, value) in [
+            ("Buckets", "3"),
+            ("Files", "42"),
+            ("Total size", &format_bytes(2_500_000_000)),
+            ("Active shares", "5"),
+        ] {
+            assert!(
+                html.contains(&format!(
+                    r#"<div class="stat__label">{label}</div><div class="stat__value">{value}</div>"#
+                )),
+                "{label} {value} missing: {html}"
+            );
+        }
+        assert_eq!(html.matches(r#"<div class="stat">"#).count(), 4, "{html}");
         // total_size_bytes 2.5 GB → "2.3 GB" via format_bytes (or close).
         assert!(html.contains("GB"), "size humanization missing: {html}");
     }
