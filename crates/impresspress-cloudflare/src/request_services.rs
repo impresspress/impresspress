@@ -25,30 +25,42 @@
 //! runs, and the dead request's bundle stays current. So what a poll puts back
 //! when it ends is decided by the constructor, at the call site:
 //!
-//! - [`scope_root`] puts back nothing. It is the outermost scope of a future
-//!   the adapter hands the executor, and nothing else:
-//!   - the `fetch` future: `dispatch`'s scope (`lib.rs`);
-//!   - each deferred task, which runs in the `ctx.wait_until` future that
-//!     carries the request's after-response work (`dispatch`);
-//!   - the `scheduled` future's sweep (`run_sweep`, `lib.rs`);
-//!   - each spawned producer ([`wrap_spawned`]).
+//! - Roots put back nothing. A root is the outermost scope of a future the
+//!   adapter hands the executor, and nothing else, and it roots **both**
+//!   request cells: this one and `impresspress_core::after_response`'s.
+//!   - The `fetch` future: `dispatch` (`lib.rs`) enters [`scope_root`] with
+//!     `after_response::scope_root` inside it, installing the request's
+//!     bundle and its after-response work.
+//!   - Every other root runs no dispatch, so it takes
+//!     [`scope_root_outside_dispatch`]: the bundle, and no after-response
+//!     work, so what it defers or guards is refused rather than queued into
+//!     a request. These are each deferred task, which runs in the
+//!     `ctx.wait_until` future that carries the request's after-response
+//!     work (`dispatch`); the `scheduled` future's sweep (`run_sweep`,
+//!     `lib.rs`); and each spawned producer ([`wrap_spawned`]).
 //!
 //!   The executor never polls one task inside another's poll, so nothing a
-//!   root's poll is nested in has a bundle current. A root that finds one has
-//!   found a hard-stopped request, logs `ip-root-found-stale` (see
-//!   [`report_root_found_stale`]), and clears it when its poll ends.
-//! - [`scope`] and [`scope_sync`] put back what they found, so they nest: the
-//!   runtime build's scopes (`runtime_build`), which today run on the `fetch`
-//!   and `scheduled` futures before their root and so find nothing. A nested
-//!   scope where a root belongs only delays the clearing to the next root; a
-//!   root where a nested scope belongs would empty the outer scope's bundle
-//!   in the middle of its poll. When in doubt, nest.
+//!   root's poll is nested in has a request current. A root that finds one
+//!   has found a hard-stopped request, logs `ip-root-found-stale` (see
+//!   [`report_root_found_stale`]), and clears the slot when its poll ends.
+//!   It does not free the request: the stopped task's future still owns it,
+//!   and that task is never dropped.
+//! - [`scope`] and [`scope_sync`] put back what they found, so they nest.
+//!   The runtime build's scopes (`runtime_build`) are nested although they
+//!   sit in root position, on the `fetch` and `scheduled` futures before
+//!   their root: a misplaced root is worse than a misplaced nested scope.
+//!   After a stop they find the dead bundle and put it back between their
+//!   polls until the next root clears it. A build stopped mid-Init, the
+//!   likeliest stop on a CPU-limited plan, leaves exactly that.
+//!   `/_deploy/init` and `/_deploy/prepare` reach no root on their own
+//!   future at all. A root where a nested scope belongs would empty the
+//!   outer scope's bundle in the middle of its poll. When in doubt, nest.
 //!
 //! Nesting cannot be counted at run time instead: a depth counter would be
 //! stranded by the same stop. The `ctx.wait_until` futures other than the
 //! deferred tasks hold no scope: the audit-row write uses a D1 handle of its
 //! own, and the final-write wait and the config-version retry reach no
-//! request service.
+//! request service and defer nothing.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -462,9 +474,14 @@ const REQUEST_SERVICES_CELL: &str = "request-services";
 /// `impresspress_core::after_response`'s current request.
 const AFTER_RESPONSE_CELL: &str = "after-response";
 
-/// `ip-root-found-stale <cell> <marker>`: a root scope found `cell` holding a
-/// request on entry. The marker is the dead [`RequestServices`] bundle's, or
-/// `-` for a cell whose value carries none.
+/// `ip-root-found-stale <cell> <marker> <instance>`: a root scope found
+/// `cell` holding a request on entry. The marker is the dead
+/// [`RequestServices`] bundle's, or `-` for a cell whose value carries none.
+/// The instance is `<isolate>/<wasm>/<generation>`, as the `x-ip-instance`
+/// header carries it, once this Wasm instance has served a traced request
+/// (`executor_trace`), and `-` otherwise; it makes the line self-attributing
+/// where the tail's grouping of lines by invocation is unclear (a spawned
+/// producer's task, the untraced `scheduled` path).
 ///
 /// The Worker's executor diagnostic lines share one shape: an `ip-` event
 /// name, then space-separated fields, `-` for a field not known. This one is
@@ -473,14 +490,19 @@ const AFTER_RESPONSE_CELL: &str = "after-response";
 /// which an operator needs to see on any deployment, and it costs nothing
 /// otherwise. It lands in the log of the invocation whose root found it,
 /// beside that invocation's own lines.
-fn root_found_stale_line(cell: &str, marker: Option<usize>) -> String {
+fn root_found_stale_line(cell: &str, marker: Option<usize>, instance: Option<&str>) -> String {
     let marker = marker.map_or_else(|| "-".to_string(), |marker| marker.to_string());
-    format!("ip-root-found-stale {cell} {marker}")
+    let instance = instance.unwrap_or("-");
+    format!("ip-root-found-stale {cell} {marker} {instance}")
 }
 
 /// Log [`root_found_stale_line`].
 pub(crate) fn report_root_found_stale(cell: &str, marker: Option<usize>) {
-    worker::console_log!("{}", root_found_stale_line(cell, marker));
+    let instance = crate::executor_trace::traced_instance();
+    worker::console_log!(
+        "{}",
+        root_found_stale_line(cell, marker, instance.as_deref())
+    );
 }
 
 /// The `found_stale` hook of the adapter's
@@ -547,6 +569,23 @@ pub(crate) fn scope_root<F: Future>(services: Rc<RequestServices>, future: F) ->
     }
 }
 
+/// The root of a future the adapter hands the executor that runs no
+/// request's dispatch (see the module doc): `services` current, and no
+/// after-response work, in both cells as roots. The services root is the
+/// outer one, so each cell is reported once, by its own root.
+pub(crate) fn scope_root_outside_dispatch<F: Future>(
+    services: Rc<RequestServices>,
+    future: F,
+) -> ScopedFuture<impresspress_core::after_response::Scoped<F>> {
+    scope_root(
+        services,
+        impresspress_core::after_response::scope_root_outside_request(
+            future,
+            after_response_found_stale,
+        ),
+    )
+}
+
 /// Leave `services` current as a request hard-stopped mid-poll leaves its
 /// bundle: a scope guard whose `Drop` never runs.
 #[cfg(test)]
@@ -575,9 +614,9 @@ pub(crate) fn clear_for_test() {
 /// request (nothing current) is passed through bare, so a proxy call from it
 /// is still refused loudly.
 ///
-/// The scope is a root ([`scope_root`]): `spawn_producer` always hands the
-/// task to `spawn_local`, so it is a task of its own and nothing else's poll
-/// encloses it.
+/// The scope is a root ([`scope_root_outside_dispatch`]): `spawn_producer`
+/// always hands the task to `spawn_local`, so it is a task of its own and
+/// nothing else's poll encloses it.
 ///
 /// Only the services scope is carried. A producer's
 /// `impresspress_core::deferred::defer` stays refused, and a final-write
@@ -592,11 +631,7 @@ pub(crate) fn wrap_spawned(
     task: wafer_block::spawn::SpawnedTask,
 ) -> wafer_block::spawn::SpawnedTask {
     match current() {
-        Some(services) => Box::pin(ScopedFuture {
-            services,
-            kind: ScopeKind::Root,
-            inner: task,
-        }),
+        Some(services) => Box::pin(scope_root_outside_dispatch(services, task)),
         None => task,
     }
 }

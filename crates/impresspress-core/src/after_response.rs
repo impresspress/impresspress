@@ -295,9 +295,11 @@ enum ScopeKind {
 }
 
 /// A future that makes its request's [`AfterResponse`] current on every
-/// poll. See [`scope`] and [`scope_root`].
+/// poll, or no request at all. See [`scope`], [`scope_root`] and
+/// [`scope_root_outside_request`].
 pub struct Scoped<F> {
-    after: Rc<AfterResponse>,
+    /// `None` only for [`scope_root_outside_request`].
+    after: Option<Rc<AfterResponse>>,
     kind: ScopeKind,
     inner: Pin<Box<F>>,
 }
@@ -306,14 +308,16 @@ impl<F: Future> Future for Scoped<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        let found = CURRENT.with(|slot| slot.replace(Some(Rc::clone(&self.after))));
+        let found = CURRENT.with(|slot| slot.replace(self.after.clone()));
         let _guard = match self.kind {
             ScopeKind::Nested => ScopeGuard { restore: found },
             ScopeKind::Root { found_stale } => {
                 // Nothing a root's poll can be nested in has a request
                 // current, so `found` is a request whose own guard never
-                // ran: it was hard-stopped mid-poll. Dropping it here frees
-                // that request's work.
+                // ran: it was hard-stopped mid-poll. Dropping it here
+                // releases the slot's reference only. The stopped task's
+                // future still owns that request, and is never dropped:
+                // the request is leaked with its task.
                 if found.is_some() {
                     found_stale();
                 }
@@ -329,20 +333,21 @@ impl<F: Future> Future for Scoped<F> {
 /// guards it takes registered on `after` for the host to wait on.
 ///
 /// Each poll restores what it found current, so this nests inside another
-/// request scope. A host's outermost scope, on a future it hands its
-/// executor, is [`scope_root`] instead.
+/// request scope. The outermost scope of a future a host hands its executor
+/// is a root instead: [`scope_root`], or [`scope_root_outside_request`] for a
+/// future that runs no request's dispatch.
 pub fn scope<F: Future>(after: Rc<AfterResponse>, future: F) -> Scoped<F> {
     Scoped {
-        after,
+        after: Some(after),
         kind: ScopeKind::Nested,
         inner: Box::pin(future),
     }
 }
 
 /// [`scope`] for the outermost after-response scope of a future the host
-/// hands its executor (the Cloudflare adapter's `dispatch`, polled from the
-/// Worker's `fetch` future). Each poll leaves no request current when it
-/// ends, rather than restoring what it found.
+/// hands its executor (a request's dispatch, polled from the host's `fetch`
+/// future). Each poll leaves no request current when it ends, rather than
+/// restoring what it found.
 ///
 /// # Why roots exist
 ///
@@ -361,12 +366,34 @@ pub fn scope<F: Future>(after: Rc<AfterResponse>, future: F) -> Scoped<F> {
 /// root's first poll. Nesting is decided by the call site, not counted at
 /// run time: a depth counter would be stranded by the same hard stop.
 ///
+/// Every future a host hands its executor needs a root, not only the one
+/// that dispatches a request: a host task that runs no dispatch (a deferred
+/// task, a spawned producer, a scheduled job) takes
+/// [`scope_root_outside_request`].
+///
 /// A root that finds a request current on entry calls `found_stale`: a
 /// request was hard-stopped in this isolate. The host owns the log line,
 /// since only it knows where its logs go.
+///
+/// A root does not free the stopped request. It drops the slot's reference;
+/// the stopped task's future holds its own, and that task is never dropped.
 pub fn scope_root<F: Future>(after: Rc<AfterResponse>, future: F, found_stale: fn()) -> Scoped<F> {
     Scoped {
-        after,
+        after: Some(after),
+        kind: ScopeKind::Root { found_stale },
+        inner: Box::pin(future),
+    }
+}
+
+/// The root of a future a host hands its executor that runs no request's
+/// dispatch: a deferred task, a spawned producer, a scheduled job. Each
+/// poll runs with no request current, and leaves none, so what the future
+/// defers, queues or guards is refused as outside a request scope, as the
+/// rest of this module documents. A request found current on entry is
+/// reported through `found_stale`, as [`scope_root`] does.
+pub fn scope_root_outside_request<F: Future>(future: F, found_stale: fn()) -> Scoped<F> {
+    Scoped {
+        after: None,
         kind: ScopeKind::Root { found_stale },
         inner: Box::pin(future),
     }
@@ -502,8 +529,34 @@ mod tests {
         assert_eq!(
             Rc::strong_count(&dead),
             1,
-            "the slot's reference was dropped"
+            "the slot's reference was dropped (a stopped task's own reference is not)"
         );
+    }
+
+    /// A root outside any request clears a dead request and reports it, and
+    /// what its future queues is refused rather than handed to the dead one.
+    #[tokio::test]
+    async fn a_root_outside_a_request_refuses_work_a_stopped_request_would_take() {
+        let dead = AfterResponse::new();
+        enter_for_test(Rc::clone(&dead));
+        let reported = found_stale();
+
+        scope_root_outside_request(
+            async {
+                assert!(current_for_test().is_none(), "no request is in scope");
+                assert!(queue_audit_row(row("orphan")).is_err());
+                yield_once().await;
+                let task: DeferredTask = Box::pin(async {});
+                assert!(queue_task(task).is_err());
+            },
+            count_found_stale,
+        )
+        .await;
+
+        assert_eq!(found_stale() - reported, 1);
+        assert!(current_for_test().is_none());
+        assert!(dead.take_audit_row().is_none());
+        assert!(dead.take_tasks().is_empty());
     }
 
     /// A root that finds nothing current reports nothing.

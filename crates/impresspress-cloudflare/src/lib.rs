@@ -796,13 +796,13 @@ where
     run_sweep(&rt.wafer, services).await
 }
 
-/// The scheduled invocation's one dispatch, under its root request scope
+/// The scheduled invocation's one dispatch, under its root scopes
 /// (`request_services`'s module doc).
 async fn run_sweep(
     wafer: &wafer_run::Wafer,
     services: std::rc::Rc<request_services::RequestServices>,
 ) -> Result<impresspress_core::blocks::auth::maintenance::SweepResult, Box<dyn std::error::Error>> {
-    request_services::scope_root(services, async {
+    request_services::scope_root_outside_dispatch(services, async {
         let output = wafer
             .run_block(
                 impresspress_core::blocks::auth_ui::AUTH_UI_BLOCK_ID,
@@ -912,10 +912,11 @@ async fn dispatch(
     );
     let response = request_services::scope_root(services, dispatched).await;
     // This request's deferred tasks, and only its: they run under its own
-    // services and so its own D1 budget. Each scope is a root: the task runs
-    // in a `ctx.wait_until` future, outside every other scope.
+    // services and so its own D1 budget. Each scope is a root, of both
+    // cells: the task runs in a `ctx.wait_until` future, outside every other
+    // scope, and outside this request's dispatch.
     for task in after.take_tasks() {
-        defer(Box::pin(request_services::scope_root(
+        defer(Box::pin(request_services::scope_root_outside_dispatch(
             std::rc::Rc::clone(&deferred_services),
             task,
         )));

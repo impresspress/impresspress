@@ -94,6 +94,12 @@ rusqlite = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+# `test-hooks`: `after_response::{enter_for_test, current_for_test}`, which
+# `runtime`'s root-scope test uses to stand in for a request stopped
+# mid-poll. Dev-only, so the shipped bundle never sees them.
+impresspress-core = { path = "../impresspress-core", default-features = false, features = [
+    "test-hooks",
+] }
 # `RequestInit` is test-only: the adapter reads the `Request` the Service
 # Worker hands it and never builds one. The request-side wasm tests do build
 # one (a real `web_sys::Request` driven through `request_to_message`), so the

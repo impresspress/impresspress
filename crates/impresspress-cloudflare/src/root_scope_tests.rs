@@ -9,8 +9,11 @@
 //! under test and read what it left current and what it logged.
 //!
 //! The call-site tests drive the real `dispatch`, a real deferred task, the
-//! real scheduled sweep and the real spawn wrapper. Each fails if its site
-//! takes the nested constructor: a nested scope puts the dead request back.
+//! real scheduled sweep and the real spawn wrapper, each with both request
+//! cells stranded. Each fails if its site takes a nested constructor in
+//! either cell: a nested scope puts the dead request back. A root does not
+//! free the stopped request (its task's future still owns it); these tests
+//! check the slot, which is what later polls read.
 
 use std::{
     cell::Cell,
@@ -58,13 +61,25 @@ impl ConsoleCapture {
         }
     }
 
-    /// The `ip-root-found-stale` lines logged since [`Self::start`].
+    /// The `ip-root-found-stale` lines logged since [`Self::start`], sorted,
+    /// without their last field, the instance. That field is checked here:
+    /// it is this instance's traced identity once an earlier test in this
+    /// binary ran a traced request, and `-` before.
     fn found_stale(&self) -> Vec<String> {
-        self.lines
+        let instance = crate::executor_trace::traced_instance().unwrap_or_else(|| "-".into());
+        let mut lines: Vec<String> = self
+            .lines
             .iter()
             .filter_map(|line| line.as_string())
             .filter(|line| line.starts_with("ip-root-found-stale"))
-            .collect()
+            .map(|line| {
+                let (rest, last) = line.rsplit_once(' ').expect("an instance field");
+                assert_eq!(last, instance, "the instance field of {line:?}");
+                rest.to_string()
+            })
+            .collect();
+        lines.sort();
+        lines
     }
 }
 
@@ -181,15 +196,17 @@ async fn an_after_response_root_clears_and_logs_a_stale_request() {
     assert_eq!(
         Rc::strong_count(&dead),
         1,
-        "the slot's reference was dropped"
+        "the slot's reference was dropped (a stopped task's own reference is not)"
     );
 }
 
 // --- The call sites ---
 
 /// Records the request-services marker its `handle` ran under, then answers
-/// 200. With `defers`, it first defers a task that records the marker the
-/// task ran under.
+/// 200. With `deferred`, it first defers a task that records the marker the
+/// task ran under and then defers again: outside its request's dispatch
+/// nothing would run that second task, so it must be refused, not queued
+/// into whichever request the after-response slot holds.
 struct Records {
     handled: Arc<AtomicUsize>,
     deferred: Option<Arc<AtomicUsize>>,
@@ -222,6 +239,7 @@ impl Block for Records {
                     request_services::current_marker().unwrap_or(0),
                     Ordering::SeqCst,
                 );
+                impresspress_core::deferred::defer(async {});
             });
         }
         impresspress_core::http::ok_json(&serde_json::json!({ "ok": true }))
@@ -249,6 +267,29 @@ fn get() -> worker::Request {
     worker::Request::new("https://example.test/anything", worker::Method::Get).expect("request")
 }
 
+/// Stand in for a request stopped mid-poll in both cells: its bundle, marked
+/// `marker`, and its after-response work stay current. Returns the work, so
+/// a test can show nothing more reached it.
+fn strand_both(marker: usize) -> Rc<AfterResponse> {
+    request_services::strand_for_test(RequestServices::marker(marker));
+    let dead = AfterResponse::new();
+    after_response::enter_for_test(Rc::clone(&dead));
+    dead
+}
+
+/// Both cells empty, as every root leaves them.
+fn assert_both_cleared() {
+    assert_eq!(request_services::current_marker(), None, "request-services");
+    assert!(after_response_current().is_none(), "after-response");
+}
+
+fn both_reported(marker: usize) -> [String; 2] {
+    [
+        "ip-root-found-stale after-response -".to_string(),
+        format!("ip-root-found-stale request-services {marker}"),
+    ]
+}
+
 /// The `fetch` future's roots: `dispatch` enters both cells as roots, so a
 /// request dispatched after a hard stop runs under its own bundle and
 /// clears both of the dead request's.
@@ -262,9 +303,7 @@ async fn dispatch_is_the_root_of_both_cells() {
     })
     .await;
     let console = ConsoleCapture::start();
-    request_services::strand_for_test(RequestServices::marker(81));
-    let dead = AfterResponse::new();
-    after_response::enter_for_test(Rc::clone(&dead));
+    strand_both(81);
 
     let response = crate::dispatch(
         &wafer,
@@ -282,29 +321,14 @@ async fn dispatch_is_the_root_of_both_cells() {
         7,
         "handled under its own bundle"
     );
-    assert_eq!(
-        request_services::current_marker(),
-        None,
-        "dispatch's request-services scope is a root"
-    );
-    assert!(
-        after_response_current().is_none(),
-        "dispatch's after-response scope is a root"
-    );
-    let mut lines = console.found_stale();
-    lines.sort();
-    assert_eq!(
-        lines,
-        [
-            "ip-root-found-stale after-response -",
-            "ip-root-found-stale request-services 81",
-        ]
-    );
+    assert_both_cleared();
+    assert_eq!(console.found_stale(), both_reported(81));
 }
 
-/// A deferred task is the root of the `wait_until` future it runs in: a
-/// request stopped after this one's dispatch, before its task ran, is
-/// cleared by the task.
+/// A deferred task is the root of both cells in the `wait_until` future it
+/// runs in. A request stopped after this one's dispatch, before its task
+/// ran, is cleared by the task, and the task's own `defer` is refused
+/// rather than queued into the stopped request.
 #[wasm_bindgen_test]
 async fn a_deferred_task_is_a_root() {
     crate::init_isolate();
@@ -329,7 +353,7 @@ async fn a_deferred_task_is_a_root() {
     assert_eq!(tasks.len(), 1, "the handler deferred one task");
 
     let console = ConsoleCapture::start();
-    request_services::strand_for_test(RequestServices::marker(82));
+    let dead = strand_both(82);
     for task in tasks {
         task.await;
     }
@@ -339,48 +363,52 @@ async fn a_deferred_task_is_a_root() {
         7,
         "it ran under its request's bundle"
     );
-    assert_eq!(request_services::current_marker(), None);
-    assert_eq!(
-        console.found_stale(),
-        ["ip-root-found-stale request-services 82"]
+    assert!(
+        dead.take_tasks().is_empty(),
+        "the task's own defer did not land in the stopped request"
     );
+    assert_both_cleared();
+    assert_eq!(console.found_stale(), both_reported(82));
 }
 
-/// The `scheduled` future's root: the sweep's scope. The bare `Wafer` has no
-/// auth-ui block, so the sweep itself fails; its scope is what is under test.
+/// The `scheduled` future's roots: the sweep's scopes. The bare `Wafer` has
+/// no auth-ui block, so the sweep itself fails; its scopes are what is under
+/// test.
 #[wasm_bindgen_test]
 async fn the_scheduled_sweep_is_a_root() {
     let wafer = wafer_run::Wafer::new(Arc::new(wafer_run::StaticConfigSource::default()))
         .expect("Wafer::new");
     let console = ConsoleCapture::start();
-    request_services::strand_for_test(RequestServices::marker(83));
+    strand_both(83);
 
     let swept = crate::run_sweep(&wafer, RequestServices::marker(9)).await;
 
     assert!(swept.is_err(), "no auth-ui block to sweep with");
-    assert_eq!(request_services::current_marker(), None);
-    assert_eq!(
-        console.found_stale(),
-        ["ip-root-found-stale request-services 83"]
-    );
+    assert_both_cleared();
+    assert_eq!(console.found_stale(), both_reported(83));
 }
 
-/// A spawned producer is a task of its own, so its scope is a root: it runs
-/// under the bundle current when it was spawned, and clears a request
-/// stopped since.
+/// A spawned producer is a task of its own, so its scopes are roots: it runs
+/// under the bundle current when it was spawned and outside every request's
+/// after-response work, and clears a request stopped since. Its final-write
+/// guard is a no-op and its `defer` is refused, as `wrap_spawned` documents,
+/// rather than landing in the stopped request.
 #[wasm_bindgen_test]
 async fn a_spawned_producer_is_a_root() {
+    crate::init_isolate();
     let seen = Rc::new(Cell::new(None));
     let observed = Rc::clone(&seen);
     let task: wafer_block::spawn::SpawnedTask = Box::pin(async move {
         yield_once().await;
         observed.set(request_services::current_marker());
+        drop(after_response::final_write());
+        impresspress_core::deferred::defer(async {});
     });
     let wrapped = request_services::scope_sync(RequestServices::marker(10), || {
         request_services::wrap_spawned(task)
     });
     let console = ConsoleCapture::start();
-    request_services::strand_for_test(RequestServices::marker(84));
+    let dead = strand_both(84);
 
     wrapped.await;
 
@@ -389,9 +417,14 @@ async fn a_spawned_producer_is_a_root() {
         Some(10),
         "it ran under its spawning request's bundle"
     );
-    assert_eq!(request_services::current_marker(), None);
-    assert_eq!(
-        console.found_stale(),
-        ["ip-root-found-stale request-services 84"]
+    assert!(
+        dead.take_final_writes().is_empty(),
+        "no guard on the stopped request"
     );
+    assert!(
+        dead.take_tasks().is_empty(),
+        "no task queued into the stopped request"
+    );
+    assert_both_cleared();
+    assert_eq!(console.found_stale(), both_reported(84));
 }

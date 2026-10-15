@@ -148,6 +148,14 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// Both scopes are re-entered on every poll, so requests interleaved on the
 /// service worker's one thread each flush their own mutations at their own
 /// end and each queue their own after-response work.
+///
+/// The after-response scope is a root
+/// ([`scope_root`](impresspress_core::after_response::scope_root)): this is
+/// the outermost scope of the service worker's fetch future (the consumer's
+/// `handle_request` export, [`dispatch_fetch`]), so each poll leaves no
+/// request current when it ends. A wasm trap mid-poll (`panic = "abort"`)
+/// runs no destructor and would otherwise leave this request's work current
+/// for every later poll on an instance that keeps serving.
 pub async fn dispatch_request(
     request: web_sys::Request,
 ) -> Result<(web_sys::Response, js_sys::Promise), JsValue> {
@@ -159,13 +167,16 @@ pub async fn dispatch_request(
         return Ok((response, js_sys::Promise::resolve(&JsValue::UNDEFINED)));
     };
     let after = AfterResponse::new();
-    let (result, flush) =
-        crate::flush_scope::run(after_response::scope(Rc::clone(&after), async move {
+    let (result, flush) = crate::flush_scope::run(after_response::scope_root(
+        Rc::clone(&after),
+        async move {
             let (msg, input) = convert::request_to_message(&request).await?;
             let output = wafer.run("site-main", msg, input).await;
             convert::output_to_response(output).await
-        }))
-        .await;
+        },
+        after_response_found_stale,
+    ))
+    .await;
     let work = after_response_work(&after);
     if let Err(error) = flush {
         tracing::error!(
@@ -208,41 +219,65 @@ pub async fn dispatch_fetch(request: web_sys::Request) -> Result<JsValue, JsValu
 /// it: a stream whose guard is still held when the row is due does not
 /// delay the row. Each final write flushes itself, outside every flush
 /// scope, as any write a producer makes does (`flush_scope`).
+///
+/// The promise's future is a task of its own and runs no request's
+/// dispatch, so its root is
+/// [`scope_root_outside_request`](after_response::scope_root_outside_request):
+/// what its tasks defer is refused, not queued into a request.
 fn after_response_work(after: &AfterResponse) -> js_sys::Promise {
     let audit_row = after.take_audit_row();
     let tasks = after.take_tasks();
     let final_writes = after.take_final_writes();
-    wasm_bindgen_futures::future_to_promise(async move {
-        if audit_row.is_none() && tasks.is_empty() && final_writes.is_empty() {
-            return Ok(JsValue::UNDEFINED);
+    wasm_bindgen_futures::future_to_promise(after_response::scope_root_outside_request(
+        after_response_work_future(audit_row, tasks, final_writes),
+        after_response_found_stale,
+    ))
+}
+
+/// The `found_stale` hook of this host's after-response roots: a request's
+/// work was found current where none can be, so a request was stopped
+/// mid-poll (a trap) on an instance that kept serving.
+fn after_response_found_stale() {
+    tracing::warn!(
+        cell = "after-response",
+        "ip-root-found-stale: a request stopped mid-poll left its after-response work current; cleared"
+    );
+}
+
+/// [`after_response_work`]'s future.
+async fn after_response_work_future(
+    audit_row: Option<after_response::QueuedRequestLog>,
+    tasks: Vec<impresspress_core::deferred::DeferredTask>,
+    final_writes: after_response::FinalWrites,
+) -> Result<JsValue, JsValue> {
+    if audit_row.is_none() && tasks.is_empty() && final_writes.is_empty() {
+        return Ok(JsValue::UNDEFINED);
+    }
+    let row_and_tasks = async move {
+        if audit_row.is_none() && tasks.is_empty() {
+            return;
         }
-        let row_and_tasks = async move {
-            if audit_row.is_none() && tasks.is_empty() {
-                return;
-            }
-            next_task().await;
-            let ((), flush) = crate::flush_scope::run(async move {
-                if let Some(row) = audit_row {
-                    let db = crate::make_database_service();
-                    if let Err(failure) = after_response::persist_audit_row(db.as_ref(), row).await
-                    {
-                        tracing::warn!(
-                            table = failure.table,
-                            error = %failure.error,
-                            "request audit row not written"
-                        );
-                    }
+        next_task().await;
+        let ((), flush) = crate::flush_scope::run(async move {
+            if let Some(row) = audit_row {
+                let db = crate::make_database_service();
+                if let Err(failure) = after_response::persist_audit_row(db.as_ref(), row).await {
+                    tracing::warn!(
+                        table = failure.table,
+                        error = %failure.error,
+                        "request audit row not written"
+                    );
                 }
-                futures::future::join_all(tasks).await;
-            })
-            .await;
-            if let Err(error) = flush {
-                tracing::warn!(%error, "after-response work was not written to OPFS");
             }
-        };
-        futures::future::join(row_and_tasks, final_writes.released()).await;
-        Ok(JsValue::UNDEFINED)
-    })
+            futures::future::join_all(tasks).await;
+        })
+        .await;
+        if let Err(error) = flush {
+            tracing::warn!(%error, "after-response work was not written to OPFS");
+        }
+    };
+    futures::future::join(row_and_tasks, final_writes.released()).await;
+    Ok(JsValue::UNDEFINED)
 }
 
 #[wasm_bindgen]
@@ -584,6 +619,42 @@ mod tests {
             crate::db_init().await.expect("reopen from OPFS");
             assert_eq!(written(&db).await, 2, "the request's rows are on disk");
             assert_eq!(logged(&db).await, 1, "and so is the audit row");
+        }
+
+        /// **Both after-response scopes are roots.** A request stopped
+        /// mid-poll leaves its work current (stood in for by a scope whose
+        /// guard never ran). The next request's dispatch clears it, and none
+        /// of that request's work reaches it; the after-response promise's
+        /// own root clears one found when it starts. Fails if either scope
+        /// restores what it found.
+        #[wasm_bindgen_test]
+        async fn the_dispatch_and_its_after_response_work_are_roots() {
+            let _db = install("all").await;
+            let dead = AfterResponse::new();
+            after_response::enter_for_test(Rc::clone(&dead));
+
+            let (response, after) = dispatch_request(post("/b/a2test/write"))
+                .await
+                .expect("dispatch");
+
+            assert_eq!(response.status(), 200);
+            assert!(
+                after_response::current_for_test().is_none(),
+                "the dispatch's scope is a root"
+            );
+            assert!(
+                dead.take_audit_row().is_none(),
+                "the request's audit row went to its own work"
+            );
+
+            after_response::enter_for_test(Rc::clone(&dead));
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
+            assert!(
+                after_response::current_for_test().is_none(),
+                "the after-response work's scope is a root"
+            );
         }
 
         /// **A reply never claims durability it does not have**: a mutating
