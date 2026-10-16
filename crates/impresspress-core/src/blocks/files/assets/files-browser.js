@@ -27,7 +27,7 @@
   }
 
   // Upload `files` (a FileList or array of File) to `bucket`/`prefix`.
-  // Shared by drag-drop and every "+ Upload" button. The listing is then
+  // Shared by drag-drop and every "Upload" button. The listing is then
   // re-fetched in place rather than the page reloaded, so the outcome stays
   // on screen: the toast, and the bar's live region, say how many went up
   // and name the ones that did not.
@@ -156,7 +156,7 @@
       await uploadFiles(e.dataTransfer.files, bucket, prefix);
     });
 
-    // Every "+ Upload" trigger (the topbar's, an empty folder's — which a
+    // Every "Upload" trigger (the topbar's, an empty folder's — which a
     // refresh swaps in) opens the hidden file picker, then uploads what was
     // picked.
     const fileInput = document.getElementById('file-upload-input');

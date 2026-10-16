@@ -25,12 +25,18 @@
  *
  * The base carries `--md`'s padding so a bare `.btn` (no size modifier) is a
  * medium button rather than an unpadded one.
+ *
+ * Every button is a rounded rectangle (`--radius-md`, 8px), not a pill. The
+ * variants are the five emphases `components::Action` draws -- primary,
+ * secondary, quiet (`--ghost`), quiet danger (`--ghost-danger`) and danger.
+ * `.btn--primary` is meant to have `Action` as its only writer; pages that
+ * still hand-write it move to `Action` as each one is redesigned.
  */
 .btn {
 	display: inline-flex; align-items: center; justify-content: center;
 	gap: var(--space-2);
 	padding: var(--space-2) var(--space-4);
-	border: 1px solid transparent; border-radius: var(--radius-full);
+	border: 1px solid transparent; border-radius: var(--radius-md);
 	font-size: var(--text-base); font-weight: 400; line-height: 1;
 	cursor: pointer;
 	transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
@@ -44,12 +50,6 @@
 /* ── Sizes ─────────────────────────────────────────────── */
 .btn--sm { min-height: var(--control-height-sm); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
 .btn--md { min-height: var(--control-height); padding: var(--space-2) var(--space-4); font-size: var(--text-base); }
-/* Vertical padding snaps to --space-3, not the nearer --space-2 (0.6rem is
-   9.6px, 1.6px from --space-2's 8px vs 2.4px from --space-3's 12px) --
-   nearest-neighbour would tie .btn--lg's vertical padding with .btn--md's
-   (both 8px), erasing the sm<md<lg size progression the three variants are
-   meant to express. */
-.btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
    vertical rather than the text-button ratio. It has no words to make it
    wide, so it is as wide as its size is tall; it always carries an
@@ -83,12 +83,6 @@
    white and on --bg-hover. */
 .btn--ghost-danger { background: transparent; color: var(--accent-danger-text); }
 .btn--ghost-danger:hover:not(:disabled) { background: var(--bg-hover); }
-
-/* --accent-success (#10b981) under white text is 2.54:1 -- below AA, and
-   below even the 3:1 non-text floor. --accent-success-text (7.13:1, computed)
-   serves this role too, exactly as --accent-danger-text does above. */
-.btn--success { background: var(--accent-success-text); color: #fff; }
-.btn--success:hover:not(:disabled) { filter: brightness(0.92); }
 
 /* ── Quick actions card ────────────────────────────────── */
 .dashboard-top { margin-bottom: var(--space-4); }

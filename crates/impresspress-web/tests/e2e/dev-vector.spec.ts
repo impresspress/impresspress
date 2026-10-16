@@ -25,7 +25,7 @@ test('an index created from the admin page opens on its detail page', async ({ p
   await loginAdmin(page);
 
   await page.goto('/b/vector/', { waitUntil: 'commit' });
-  await page.locator('.topbar__actions').getByRole('button', { name: '+ Create index' }).click();
+  await page.locator('.topbar__actions').getByRole('button', { name: 'Create index' }).click();
   const form = page.locator('#create-vector-index form');
   await form.locator('input[name="name"]').fill(NAME);
   await form.locator('input[name="keyword_search"]').check();

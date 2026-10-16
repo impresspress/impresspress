@@ -1,8 +1,6 @@
-//! Tab navigation and the canonical button (Phase 1).
+//! Tab navigation and list filters. Buttons are [`super::Action`].
 
 use maud::{html, Markup};
-
-use super::avatar::CtrlSize;
 
 // ---------------------------------------------------------------------------
 // Tab Navigation
@@ -189,80 +187,9 @@ pub fn filter_links(label: &str, links: Vec<Tab<'_>>) -> Markup {
     FilterLinks::new(label, links).render()
 }
 
-// ---------------------------------------------------------------------------
-// Canonical button (Phase 1)
-// ---------------------------------------------------------------------------
-
-/// Visual variant for buttons.
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub enum BtnVariant {
-    Primary,
-    Secondary,
-    Ghost,
-    Danger,
-}
-
-impl BtnVariant {
-    fn class(self) -> &'static str {
-        match self {
-            BtnVariant::Primary => "btn btn--primary",
-            BtnVariant::Secondary => "btn btn--secondary",
-            BtnVariant::Ghost => "btn btn--ghost",
-            BtnVariant::Danger => "btn btn--danger",
-        }
-    }
-}
-
-impl CtrlSize {
-    fn class(self) -> &'static str {
-        match self {
-            CtrlSize::Sm => "btn--sm",
-            CtrlSize::Md => "btn--md",
-            CtrlSize::Lg => "btn--lg",
-        }
-    }
-}
-
-/// Canonical button. Use for every button on every new page.
-///
-/// `extra_attrs` is a maud `PreEscaped` block of additional attributes
-/// (e.g. `hx-post=...`, `type="submit"`, `disabled`). Pass
-/// `maud::PreEscaped(String::new())` if none.
-pub fn button(
-    variant: BtnVariant,
-    size: CtrlSize,
-    label: &str,
-    extra_attrs: maud::PreEscaped<String>,
-) -> maud::Markup {
-    use maud::PreEscaped;
-    let class = format!("{} {}", variant.class(), size.class());
-    let extra = extra_attrs.0;
-    let label_escaped = maud::html! { (label) }.into_string();
-    PreEscaped(format!(
-        r#"<button class="{class}" {extra}>{label_escaped}</button>"#,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
-    use maud::PreEscaped;
-
     use super::*;
-
-    #[test]
-    fn button_primary_md() {
-        let m = button(
-            BtnVariant::Primary,
-            CtrlSize::Md,
-            "Save",
-            PreEscaped(String::new()),
-        );
-        let s = m.into_string();
-        assert!(s.contains("btn--primary"), "missing variant class: {s}");
-        assert!(s.contains("btn--md"), "missing size class: {s}");
-        assert!(s.contains(">Save</button>"), "missing label: {s}");
-    }
 
     #[test]
     fn filter_links_are_labelled_links_with_the_current_one_marked() {
@@ -315,21 +242,5 @@ mod tests {
             s.starts_with(r##"<nav class="filter-toggles" aria-labelledby="network-sort-label"><span class="text-sm text-muted" id="network-sort-label">Sort by</span><a class="btn btn--secondary filter-toggle" href="/b/admin/settings/network?sort=errors" hx-get="/b/admin/settings/network?sort=errors" hx-target="#content" hx-push-url="true" aria-current="true">"##),
             "{s}"
         );
-    }
-
-    #[test]
-    fn button_extra_attrs_pass_through() {
-        let m = button(
-            BtnVariant::Danger,
-            CtrlSize::Sm,
-            "Delete",
-            PreEscaped(r#"hx-delete="/users/1" type="button""#.to_string()),
-        );
-        let s = m.into_string();
-        assert!(
-            s.contains(r#"hx-delete="/users/1""#),
-            "extra attrs missing: {s}"
-        );
-        assert!(s.contains("btn--danger"), "variant missing: {s}");
     }
 }

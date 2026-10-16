@@ -48,7 +48,7 @@ pub enum ModalSize {
 ///         /* fields */
 ///         (modal_footer(html! {
 ///             (modal_cancel())
-///             button .btn .btn--primary .btn--block type="submit" { "Create" }
+///             (Action::primary("Create", ActionTarget::Submit { form: None }).render())
 ///         }))
 ///     }
 /// })
@@ -132,9 +132,10 @@ pub fn modal(id: &str, title: &str, body: Markup) -> Markup {
 /// the submit button submits it and an htmx re-render of the form (a field
 /// error) re-renders the actions with it.
 ///
-/// The buttons in it carry `.btn--block`, so on a phone they share the row in
-/// full-width halves; on a wide screen they sit right-aligned at their own
-/// width.
+/// A button in it that carries `.btn--block` ([`modal_cancel`] does) takes
+/// an equal share of the row on a phone; on a wide screen the buttons sit
+/// right-aligned at their own width. An [`Action`](super::Action) has no
+/// block form, so a submit `Action` keeps its own width on a phone too.
 pub fn modal_footer(actions: Markup) -> Markup {
     html! {
         div .modal__footer { (actions) }

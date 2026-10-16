@@ -23,11 +23,13 @@
 @media (max-width: 720px) {
 	.card { padding: var(--space-4); }
 }
-/* Title block, then the head link (`Card::link`) at the end, on the
-   title's first baseline: the link is a taller box than its text (the
-   44px target on touch), so top alignment would sit its label below the
-   title's. It wraps rather than overflow: on a phone the link drops under
-   the title. */
+/* Title block, then the head link (`Card::link`) and head action
+   (`Card::action`) at the end, on the title's first baseline: both are
+   taller boxes than their text (the link's 44px target on touch, the
+   button's control height), so top alignment would sit their labels below
+   the title's. They wrap rather than overflow: on a phone they drop under
+   the title, and the action drops under the link rather than squeezing it
+   onto two lines. */
 .card__head {
 	display: flex; flex-wrap: wrap; align-items: first baseline;
 	gap: var(--space-2) var(--space-4);
@@ -35,7 +37,7 @@
 }
 .card__title { margin: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
 .card__subtitle { margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--text-secondary); }
-.card__actions { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+.card__actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 /* A text link, not a button: --primary-button is the text-safe red (4.99:1
    on white; --primary-color is 3.66:1). Held to the target floor on touch. */
 .card__link {

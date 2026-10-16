@@ -8,7 +8,7 @@ use crate::{
     blocks::files::repo,
     ui::{
         self,
-        components::{self, DataTable, TableCol, TableRow},
+        components::{self, Action, ActionTarget, DataTable, TableCol, TableRow},
         icons,
         shell::Crumb,
         templates::list_page,
@@ -101,16 +101,13 @@ const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Actions").actions(),
 ];
 
-/// The "+ Upload" trigger: it opens the hidden file picker
+/// The "Upload" trigger: it opens the hidden file picker
 /// (`files-browser.js` binds every `[data-action="open-upload"]`). The topbar
 /// action and the empty folder's call to action both render it.
 pub(crate) fn upload_button() -> Markup {
-    components::button(
-        components::BtnVariant::Primary,
-        components::CtrlSize::Md,
-        "+ Upload",
-        maud::PreEscaped(r#"type="button" data-action="open-upload""#.to_string()),
-    )
+    Action::primary("Upload", ActionTarget::Delegated("open-upload"))
+        .icon(icons::plus())
+        .render()
 }
 
 /// A file row's "more actions" trigger: the shared `.btn--icon` button, named
@@ -362,7 +359,7 @@ pub async fn object_list_page(
     let table = render_objects_table(bucket, current_prefix, &listing);
     let body = html! {
         (render_breadcrumbs(bucket, current_prefix))
-        // Hidden file input that every "+ Upload" trigger opens. Multi-select
+        // Hidden file input that every "Upload" trigger opens. Multi-select
         // so users can pick many files at once. Same upload endpoint as
         // drag-drop.
         input #file-upload-input type="file" multiple hidden;

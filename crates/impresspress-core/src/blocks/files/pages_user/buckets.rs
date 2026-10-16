@@ -1,7 +1,7 @@
 //! Bucket-list domain: the `/b/storage/` page showing a user's buckets
-//! with live object counts, and the "+ New bucket" creation modal.
+//! with live object counts, and the "New bucket" creation modal.
 
-use maud::{html, Markup, PreEscaped};
+use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
@@ -9,9 +9,7 @@ use crate::{
     db_read::CappedList,
     ui::{
         self,
-        components::{
-            self, button, BadgeVariant, BtnVariant, CtrlSize, DataTable, TableCol, TableRow,
-        },
+        components::{self, Action, ActionTarget, BadgeVariant, DataTable, TableCol, TableRow},
         icons,
         templates::list_page,
     },
@@ -55,19 +53,17 @@ pub(crate) fn visibility_badge(public: bool) -> Markup {
     }
 }
 
-/// The "+ New bucket" trigger, as the topbar action and the empty state's
-/// call to action both render it.
+/// The "New bucket" trigger, as the topbar action and the empty state's
+/// call to action both render it: it opens the modal through chrome.js's
+/// `modal-open` verb.
 pub(crate) fn new_bucket_button() -> Markup {
-    button(
-        BtnVariant::Primary,
-        CtrlSize::Md,
-        "+ New bucket",
-        new_bucket_trigger_attrs(),
-    )
+    Action::primary("New bucket", ActionTarget::Modal(NEW_BUCKET_MODAL_ID))
+        .icon(icons::plus())
+        .render()
 }
 
 /// The empty state a bucket list shows before any bucket exists, with the
-/// "+ New bucket" trigger as its call to action. One wording for the user's
+/// "New bucket" trigger as its call to action. One wording for the user's
 /// list and administration's.
 pub(crate) fn no_buckets_empty_state() -> Markup {
     components::empty_state(
@@ -104,19 +100,11 @@ pub fn render_buckets_table(rows: &[BucketRow]) -> Markup {
         .render()
 }
 
-/// The "+ New bucket" modal's element id, which its triggers name in
+/// The "New bucket" modal's element id, which its triggers name in
 /// `data-modal-target`.
 pub const NEW_BUCKET_MODAL_ID: &str = "new-bucket";
 
-/// The attributes of a "+ New bucket" trigger: it opens the modal through
-/// chrome.js's `modal-open` verb.
-pub fn new_bucket_trigger_attrs() -> PreEscaped<String> {
-    PreEscaped(format!(
-        r#"type="button" data-action="modal-open" data-modal-target="{NEW_BUCKET_MODAL_ID}""#
-    ))
-}
-
-/// Render the "+ New bucket" modal: the shared `components::modal` dialog,
+/// Render the "New bucket" modal: the shared `components::modal` dialog,
 /// which chrome.js opens and closes. The form is wired by
 /// `bucketCreateForm()` in `files-browser.js`: it intercepts submit, checks
 /// the name, POSTs to `/b/storage/api/buckets`, and on success redirects to
@@ -400,12 +388,14 @@ mod integration_tests {
             "topbar action slot missing: {body}"
         );
         assert!(
-            body.contains("+ New bucket"),
-            "new-bucket button label missing: {body}"
+            body.contains(
+                r#"<button class="btn btn--primary" type="button" data-action="modal-open" data-modal-target="new-bucket"><svg"#
+            ),
+            "new-bucket trigger missing: {body}"
         );
         assert!(
-            body.contains(r#"data-action="modal-open" data-modal-target="new-bucket""#),
-            "new-bucket trigger attribute missing: {body}"
+            body.contains("</svg>New bucket</button>"),
+            "new-bucket button label missing: {body}"
         );
     }
 
