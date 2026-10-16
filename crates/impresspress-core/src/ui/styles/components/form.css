@@ -516,7 +516,10 @@
  * the summary holds the section's h2 (inline, so it sits beside the
  * disclosure marker). */
 .settings-section--collapsible > summary {
-	display: list-item; min-height: var(--target-min);
+	display: list-item; line-height: 1.5rem;
+	/* The 1.5rem title line centred in a target-floor-tall row (44px under a
+	 * finger), rather than sitting at the top of it. */
+	padding-block: max(0px, calc((var(--target-min) - 1.5rem) / 2));
 }
 .settings-section--collapsible > summary > .section-header__title { display: inline; font-size: var(--text-base); font-weight: 600; }
 .settings-section--collapsible[open] > summary { margin-bottom: var(--space-1); }
