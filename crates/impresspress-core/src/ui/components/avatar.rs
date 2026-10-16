@@ -3,7 +3,7 @@
 /// An [`avatar`]'s size.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub enum CtrlSize {
+pub enum AvatarSize {
     Sm,
     Md,
     Lg,
@@ -14,13 +14,13 @@ pub enum CtrlSize {
 /// color across every avatar is calmer to scan than a wall of per-hash
 /// hues, and the colored variants previously made the admin lists feel
 /// like distinct personas instead of rows of the same shape.
-pub fn avatar(seed: &str, size: CtrlSize) -> maud::Markup {
+pub fn avatar(seed: &str, size: AvatarSize) -> maud::Markup {
     use maud::html;
     let initial = seed.chars().next().unwrap_or('?').to_ascii_uppercase();
     let size_class = match size {
-        CtrlSize::Sm => "avatar--sm",
-        CtrlSize::Md => "avatar--md",
-        CtrlSize::Lg => "avatar--lg",
+        AvatarSize::Sm => "avatar--sm",
+        AvatarSize::Md => "avatar--md",
+        AvatarSize::Lg => "avatar--lg",
     };
     html! {
         span class={ "avatar " (size_class) } { (initial) }
@@ -36,8 +36,8 @@ mod tests {
         // Background lives in CSS (`.avatar { background: var(--primary-color) }`),
         // so the rendered markup carries no inline gradient/hue style — every
         // avatar is the same flat brand-orange circle, only the initial varies.
-        let a = avatar("alice@example.com", CtrlSize::Md).into_string();
-        let b = avatar("bob@example.com", CtrlSize::Md).into_string();
+        let a = avatar("alice@example.com", AvatarSize::Md).into_string();
+        let b = avatar("bob@example.com", AvatarSize::Md).into_string();
         for s in [&a, &b] {
             assert!(!s.contains("linear-gradient"), "no gradient in markup: {s}");
             assert!(!s.contains("hsl("), "no inline hue in markup: {s}");
@@ -50,8 +50,8 @@ mod tests {
     #[test]
     fn avatar_is_deterministic_per_seed() {
         // Two calls with the same seed render identical markup.
-        let a = avatar("alice@example.com", CtrlSize::Md).into_string();
-        let b = avatar("alice@example.com", CtrlSize::Md).into_string();
+        let a = avatar("alice@example.com", AvatarSize::Md).into_string();
+        let b = avatar("alice@example.com", AvatarSize::Md).into_string();
         assert_eq!(a, b);
     }
 }

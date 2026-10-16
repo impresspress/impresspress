@@ -131,11 +131,20 @@ test.describe('buttons and a card head action', () => {
       }
     });
   }
+});
+
+// The real phone: 375×812 with touch, where `--control-height` and
+// `--target-min` grow to 44px (PLAN S11), so the head's link and action are
+// at their tallest.
+test.describe('a card head action on a touch phone', () => {
+  test.use({ storageState: ADMIN_STATE_PATH, hasTouch: true });
 
   test('on a phone the head link and action drop under the title, one per line', async ({ page }) => {
     await page.setViewportSize(PHONE);
     await mountFixture(page);
     const l = await layout(page);
+    // Touch is on: the full-size buttons are the 44px touch height.
+    expect(l.controlHeight).toBe(44);
     expectButtonsAndHeads(l);
     const defaults = l.cards[1];
     const [link, action] = defaults.items;

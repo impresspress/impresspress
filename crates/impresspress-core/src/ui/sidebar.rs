@@ -181,7 +181,7 @@ pub fn sidebar_grouped(
             @if let Some(SignedIn { user: u, account_links }) = signed_in {
                 div .sidebar__user-container {
                     button .sidebar__user id="user-menu-btn" type="button" data-action="profile-menu-toggle" {
-                        (crate::ui::components::avatar(&u.email, crate::ui::components::CtrlSize::Sm))
+                        (crate::ui::components::avatar(&u.email, crate::ui::components::AvatarSize::Sm))
                         div .sidebar__user-text {
                             div .sidebar__user-email { (u.email) }
                             div .sidebar__user-role { (u.role_label()) }

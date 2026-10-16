@@ -50,12 +50,6 @@
 /* ── Sizes ─────────────────────────────────────────────── */
 .btn--sm { min-height: var(--control-height-sm); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
 .btn--md { min-height: var(--control-height); padding: var(--space-2) var(--space-4); font-size: var(--text-base); }
-/* Vertical padding snaps to --space-3, not the nearer --space-2 (0.6rem is
-   9.6px, 1.6px from --space-2's 8px vs 2.4px from --space-3's 12px) --
-   nearest-neighbour would tie .btn--lg's vertical padding with .btn--md's
-   (both 8px), erasing the sm<md<lg size progression the three variants are
-   meant to express. */
-.btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
    vertical rather than the text-button ratio. It has no words to make it
    wide, so it is as wide as its size is tall; it always carries an
