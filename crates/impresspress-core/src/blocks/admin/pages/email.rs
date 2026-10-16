@@ -37,16 +37,17 @@ fn mailgun_vars() -> Vec<ConfigVar> {
 }
 
 /// Render the email settings tab body. The parent `settings_page` handler
-/// wraps this in the form-LESS `tabbed_page` shell, so this tab owns its
+/// puts this beside the rail in the form-LESS `tabbed_page` shell, so this tab owns its
 /// `<form>` outright: the full self-contained `settings_form` (its own
-/// `<form class="settings-form" id="settings-form">` + "Save settings" button), posting JSON via
+/// `<form class="settings-form form--aligned" id="settings-form">` + "Save settings" button), posting JSON via
 /// fetch to `POST /b/admin/email` — the `SaveEmailSettings` route that
 /// [`handle_save_email_settings`] serves. Same pattern as every other
 /// block's admin settings page (products / userportal / legalpages /
 /// auth_ui). `Err` when the current values could not be read.
 pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, WaferError> {
     let vars = mailgun_vars();
-    let section = SettingsSection::new("Mailgun Configuration", &vars);
+    let section = SettingsSection::new("Mailgun configuration", &vars)
+        .description("Configure email delivery via Mailgun.");
     settings_form::settings_form(ctx, "/b/admin/email", &[section], maud::html! {}).await
 }
 

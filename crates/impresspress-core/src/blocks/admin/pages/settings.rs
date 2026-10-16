@@ -1,5 +1,5 @@
-//! Consolidated settings page — wraps each tab's body in the form-LESS
-//! `tabbed_page` shell (tab rail + section chrome, no outer `<form>`).
+//! Consolidated settings page — puts each tab's body beside the settings
+//! rail in the form-LESS `tabbed_page` shell (no outer `<form>`).
 //!
 //! Each tab owns its submission story: email renders the self-contained
 //! `settings_form` (posts JSON to `POST /b/admin/email`), variables and
@@ -23,10 +23,7 @@ use wafer_run::{context::Context, Message, OutputStream, WaferError};
 use super::{
     admin_document, authentication, branding, crumb, email, network, permissions, variables,
 };
-use crate::ui::{
-    shell::Topbar,
-    templates::{tabbed_page, FormSection},
-};
+use crate::ui::{shell::Topbar, templates::tabbed_page};
 
 /// Render the settings page for the given tab. `tab` is one of
 /// "email" / "network" / "variables" / "permissions"; unknown values
@@ -221,14 +218,16 @@ async fn render_document(
     };
     let body_markup = body_markup?;
 
-    let form_body = tabbed_page(
-        tabs,
-        vec![FormSection {
-            title: tab_title(active),
-            description: tab_description(active),
-            body: body_markup,
-        }],
-    );
+    // A read-only tab opens with the one line that says what it shows. A
+    // form tab needs none: each of its section cards carries its own.
+    let body_markup = match tab_description(active) {
+        Some(description) => maud::html! {
+            p .settings-lead { (description) }
+            (body_markup)
+        },
+        None => body_markup,
+    };
+    let form_body = tabbed_page(tabs, body_markup);
 
     admin_document(
         ctx,
@@ -257,11 +256,11 @@ fn tab_title(active: &str) -> &'static str {
     }
 }
 
+/// The lead line of a tab that is not a settings form. A form tab
+/// (email, authentication, branding) describes itself in its section cards'
+/// subtitles instead.
 fn tab_description(active: &str) -> Option<&'static str> {
     match active {
-        "email" => Some("Configure email delivery via Mailgun."),
-        "authentication" => Some("Registration, the bootstrap admin, and OAuth sign-in."),
-        "branding" => Some("The app name, logos, favicon and accent colour."),
         "network" => Some("Inbound requests by path, grouped by the block that serves them."),
         "variables" => Some("Configure environment variables and shared config."),
         "permissions" => {
@@ -420,6 +419,31 @@ mod tests {
         assert!(
             html.contains("hx-post=\"/b/admin/grants/rules\""),
             "Add Grant modal form must target the CreateWrapGrant route: {html}"
+        );
+    }
+
+    /// The topbar subtitle names the open tab; the body never repeats it as
+    /// a heading. A form tab's text is its section cards' subtitles; a
+    /// read-only tab opens with a lead line.
+    #[tokio::test]
+    async fn the_tab_is_named_once_and_described_where_it_is_read() {
+        let html = render_tab("email").await;
+        assert!(
+            html.contains(r#"<nav class="form-tabs" aria-label="Settings sections">"#),
+            "{html}"
+        );
+        assert!(!html.contains(">Email</h2>"), "{html}");
+        assert!(
+            html.contains(r#"<h2 class="card__title">Mailgun configuration</h2><p class="card__subtitle">Configure email delivery via Mailgun.</p>"#),
+            "{html}"
+        );
+        assert!(!html.contains("settings-lead"), "{html}");
+
+        let html = render_tab("permissions").await;
+        assert!(!html.contains(">Permissions</h2>"), "{html}");
+        assert!(
+            html.contains(r#"<div class="form-grid__body"><p class="settings-lead">Control which blocks can access"#),
+            "{html}"
         );
     }
 

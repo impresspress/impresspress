@@ -102,23 +102,28 @@ pub fn detail_page(
     }
 }
 
-/// One section of a form — a labeled group of fields.
-pub struct FormSection<'a> {
-    pub title: &'a str,
-    pub description: Option<&'a str>,
-    pub body: Markup,
-}
-
-/// The tab-rail + sections chrome behind [`tabbed_page`] — the `.form-grid`,
-/// its `.form-tabs` left rail and the `.form-sections` column.
+/// `tabbed_page` template: the settings rail beside one tab's body.
 ///
-/// The rail is not optional, and this signature is why: `form_page`, the
-/// single-column template that passed no tabs, had no callers and is gone, so
-/// `.form-grid` without `.form-grid--with-tabs` reached no page.
-fn form_grid(tabs: Vec<(String, String, bool)>, sections: Vec<FormSection<'_>>) -> Markup {
+/// The rail (`nav.form-tabs`) is its own card-level surface on a wide screen,
+/// beside the body; below 720px it is a scrolling row of underline tabs above
+/// it, with no card. The body is the tab's own markup (a `settings_form` of
+/// section `Card`s, or a read-only view). The page names the open tab in its
+/// topbar subtitle, so nothing here repeats it as a heading.
+///
+/// Form-LESS on purpose: the page wraps the body in no `<form>` and carries
+/// no save bar of its own. HTML forms cannot nest, so a shell that wrapped
+/// tab bodies in a `<form>` would silently break any `<form>` a tab renders —
+/// the browser drops the inner form's start tag, its `action`/`hx-*`
+/// attributes vanish, and its inputs (and submit button) join the outer form.
+/// With this shell each tab renders its own complete `<form>` + submit
+/// control (or none, for read-only tabs). Used by the admin Settings page.
+pub fn tabbed_page(
+    tabs: Vec<(String, String, bool)>, // (label, href, is_active)
+    body: Markup,
+) -> Markup {
     html! {
-        div .form-grid .form-grid--with-tabs {
-            nav .form-tabs aria-label="Form sections" {
+        div .form-grid {
+            nav .form-tabs aria-label="Settings sections" {
                 ul {
                     @for (label, href, active) in tabs {
                         li .(if active { "is-active" } else { "" }) {
@@ -127,41 +132,7 @@ fn form_grid(tabs: Vec<(String, String, bool)>, sections: Vec<FormSection<'_>>) 
                     }
                 }
             }
-            div .form-sections {
-                @for sec in sections {
-                    section .form-section {
-                        header .form-section__head {
-                            h2 .form-section__title { (sec.title) }
-                            @if let Some(d) = sec.description {
-                                p .form-section__desc { (d) }
-                            }
-                        }
-                        div .form-section__body { (sec.body) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// `tabbed_page` template — a tab rail over section bodies, form-LESS: the
-/// `div.page--form` groups the sections but is not itself a `<form>`, and the
-/// page carries no save bar of its own.
-///
-/// For tabbed shells whose tab bodies own their submission story. HTML forms
-/// cannot nest, so a shell that wraps tab bodies in a `<form>` silently
-/// breaks any `<form>` a tab renders — the browser drops the inner form's
-/// start tag, its `action`/`hx-*` attributes vanish, and its inputs (and
-/// submit button) join the outer form. With this shell each tab renders its
-/// own complete `<form>` + submit control (or none, for read-only tabs).
-/// Used by the admin Settings page.
-pub fn tabbed_page(
-    tabs: Vec<(String, String, bool)>, // (label, href, is_active)
-    sections: Vec<FormSection<'_>>,
-) -> Markup {
-    html! {
-        div .page .page--form {
-            (form_grid(tabs, sections))
+            div .form-grid__body { (body) }
         }
     }
 }
@@ -549,17 +520,21 @@ mod tests {
                 true,
             ),
         ];
-        let sections = vec![FormSection {
-            title: "Network",
-            description: Some("Outbound requests"),
-            body: html! { form action="/b/admin/settings/network" { "..." } },
-        }];
-        let s = tabbed_page(tabs, sections).into_string();
-        assert!(s.contains("form-grid--with-tabs"));
-        assert!(s.contains(r#"aria-current="page""#));
-        assert!(s.contains("is-active"));
-        assert!(s.contains("Network"));
-        assert!(s.contains("Outbound requests"));
+        let body = html! { form action="/b/admin/settings/network" { "..." } };
+        let s = tabbed_page(tabs, body).into_string();
+        assert!(
+            s.starts_with(
+                r#"<div class="form-grid"><nav class="form-tabs" aria-label="Settings sections">"#
+            ),
+            "{s}"
+        );
+        assert!(s.contains(r#"<li class="is-active"><a href="/b/admin/settings/network" aria-current="page">Network</a></li>"#), "{s}");
+        assert!(
+            s.contains(r#"<div class="form-grid__body"><form action="/b/admin/settings/network">"#),
+            "{s}"
+        );
+        // The topbar subtitle names the tab: the body adds no heading of its own.
+        assert!(!s.contains("<h2"), "{s}");
         // Form-LESS by construction: the tab body owns the only <form>.
         assert_eq!(s.matches("<form").count(), 1);
     }

@@ -3318,12 +3318,10 @@ mod tests {
             "dashboard-grid__secondary",
             "db-table-list__count",
             "detail-body__main",
-            "form-section__head",
             "messages-new__title",
             "messages-new__type",
             "page--dashboard",
             "page--detail",
-            "page--form",
             "page--list",
             "sidebar__brand--text",
         ];

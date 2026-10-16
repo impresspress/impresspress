@@ -1829,6 +1829,35 @@ mod tests {
         assert_eq!(listed, ROUTES.len(), "every route is listed once");
         assert!(!s.contains("HTML content"), "content is Markdown");
     }
+
+    /// The settings page is one aligned settings form: the Appearance card,
+    /// then the Preview card, then the Save row with the page's one primary.
+    #[tokio::test]
+    async fn the_settings_page_puts_the_preview_card_between_the_form_and_save() {
+        use crate::test_support::{admin_msg, output_html};
+
+        let ctx = test_ctx().await;
+        let html = output_html(
+            pages::settings_page(&ctx, &admin_msg("retrieve", "/b/legalpages/admin/settings"))
+                .await,
+        )
+        .await;
+        let appearance = html
+            .find(r#"<h2 class="card__title">Appearance</h2>"#)
+            .expect("the Appearance card");
+        let preview = html
+            .find(r#"<h2 class="card__title">Preview</h2><p class="card__subtitle">See how your changes look on the public pages.</p>"#)
+            .expect("the Preview card");
+        let save = html
+            .find(r#"<div class="form-actions"><button class="btn btn--primary" type="submit">Save settings</button></div></form>"#)
+            .expect("the Save row ends the form");
+        assert!(appearance < preview && preview < save, "{html}");
+        assert!(
+            html.contains(r#"<a class="btn btn--ghost" href="/b/legalpages/terms" target="_blank" rel="noopener">"#),
+            "{html}"
+        );
+        assert_eq!(html.matches("btn--primary").count(), 1, "{html}");
+    }
 }
 
 #[cfg(test)]

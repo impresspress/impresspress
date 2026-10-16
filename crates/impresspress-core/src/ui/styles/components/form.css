@@ -149,7 +149,7 @@
 
 .form-hint {
 	display: block; margin-top: var(--space-2);
-	font-size: var(--text-sm); color: #6b7280;
+	font-size: var(--text-sm); color: var(--text-muted);
 }
 
 /* Literal #ef4444 = --accent-danger's own value, 3.76:1 on white -- below
@@ -208,11 +208,6 @@
 .input-group { display: flex; gap: var(--space-2); }
 .input-group .form-input { flex: 1; }
 
-.form-actions {
-	display: flex; justify-content: flex-end;
-	gap: var(--space-3); margin-top: var(--space-6);
-	padding-top: var(--space-6); border-top: 1px solid #e5e7eb;
-}
 
 /* ===== htmx indicators ===== */
 .htmx-indicator { display: none; }
@@ -481,32 +476,47 @@
 .details-heading { font-size: 1rem; margin-top: 0; }
 
 /* ===== Settings form (ui/settings_form.rs) =====
- * A readable measure: label, hint and a 40rem box read as one field; a
- * 1,100px box for a six-character value read as broken. Narrower screens
- * are unaffected. */
-.settings-form { max-width: 40rem; }
-/* One `<section>` per `SettingsSection`, headed by the shared
- * `.section-header` (h2); consecutive sections are divided by a rule. */
-.settings-section + .settings-section {
-	margin-top: var(--space-8); padding-top: var(--space-6);
-	border-top: 1px solid var(--border-color);
+ * One card per section, then the Save row, on the page background; each
+ * card's own bottom margin spaces them. The cap
+ * is a readable measure that still fits a 13rem label column, a gap and a
+ * control column of about 32rem; a 1,100px box for a six-character value
+ * read as broken. Narrower screens are unaffected. */
+.settings-form { max-width: 52rem; }
+/* The Save row: the form's one primary, at its own width. */
+.form-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+
+/* Aligned rows (`.form--aligned`): once the form is 40rem wide, each label
+ * sits left of its control in a fixed 13rem track, and the hint under the
+ * control. A switch (`label.form-switch`), the password wrapper and the
+ * colour pair are single children, so they land in the control column. The
+ * Save row sits on the same grid, inset by a card's padding and border, so
+ * Save lines up with the controls. Narrower, every field stacks. */
+.form--aligned { container-type: inline-size; }
+@container (min-width: 40rem) {
+	.form--aligned .form-group,
+	.form--aligned .form-actions {
+		display: grid; grid-template-columns: 13rem minmax(0, 1fr);
+		column-gap: var(--space-6); align-items: start;
+	}
+	.form--aligned .form-group > .form-label {
+		grid-column: 1; margin: 0;
+		padding-top: calc((var(--control-height) - 1.25em) / 2);
+	}
+	.form--aligned .form-group > :not(.form-label),
+	.form--aligned .form-actions > * { grid-column: 2; }
+	.form--aligned .form-actions { padding-inline: calc(var(--space-5) + 1px); }
+	.form--aligned .form-actions > * { justify-self: start; }
 }
-/* One-line explanation under a section heading -- it introduces a group of
- * fields, so it sits tight under the heading and above them. */
-.section-header:has(+ .settings-section-desc) { margin-bottom: var(--space-1); }
-.settings-section-desc { color: var(--text-muted); font-size: var(--text-sm); margin: 0 0 var(--space-4); }
-/* `SettingsSection::collapsible`: a bordered disclosure whose summary holds
- * the section's h2 (inline, so it sits beside the disclosure marker). */
-.settings-section--collapsible,
-.settings-section + .settings-section--collapsible {
-	margin-top: var(--space-4); padding: 0 var(--space-4);
-	border: 1px solid var(--border-color); border-radius: var(--radius-lg);
-}
+
+/* `SettingsSection::collapsible`: a plain card whose body is a disclosure;
+ * the summary holds the section's h2 (inline, so it sits beside the
+ * disclosure marker). */
 .settings-section--collapsible > summary {
-	display: list-item; min-height: var(--target-min); padding: var(--space-3) 0;
+	display: list-item; min-height: var(--target-min);
 }
-.settings-section--collapsible > summary > .section-header__title { display: inline; font-size: var(--text-base); }
-.settings-section--collapsible[open] { padding-bottom: var(--space-4); }
+.settings-section--collapsible > summary > .section-header__title { display: inline; font-size: var(--text-base); font-weight: 600; }
+.settings-section--collapsible[open] > summary { margin-bottom: var(--space-1); }
+.settings-section-desc { color: var(--text-secondary); font-size: var(--text-sm); margin: 0 0 var(--space-4); }
 /* `SettingsSection::gated_by`: the fields after the gating switch show only
  * while it is on. The switch is the only field group directly in the
  * section; the rest live in `.settings-section__gated`. A save with the
@@ -514,6 +524,9 @@
  * the region), so the stored values are kept and never validated. */
 .settings-section--gated:has(> .form-group [role="switch"]:not(:checked)) > .settings-section__gated { display: none; }
 .settings-section__gated { margin-top: var(--space-5); }
+/* The region's margin is the gap under the switch, so a switched-off card
+ * ends at the switch. */
+.settings-section--gated > .form-group { margin-bottom: 0; }
 
 /* The Color widget: the hex box and its swatch side by side, the swatch a
  * square as tall as the box. */

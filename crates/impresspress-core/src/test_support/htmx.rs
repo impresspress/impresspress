@@ -273,7 +273,7 @@ pub fn serialize_form(inner: &str) -> Vec<Field> {
 /// [`fire_every_control`] never sees it — which is how every save on the
 /// auth and branding settings pages could answer 500 with the guard green.
 pub fn settings_form_submission(html: &str) -> Option<(String, serde_json::Value)> {
-    const FORM: &str = r#"<form class="settings-form" id="settings-form">"#;
+    const FORM: &str = r#"<form class="settings-form form--aligned" id="settings-form">"#;
     let start = html.find(FORM)? + FORM.len();
     let inner = &html[start..start + html[start..].find("</form>")?];
     let script = &html[start..];

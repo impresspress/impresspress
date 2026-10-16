@@ -101,7 +101,7 @@ async fn the_admin_email_settings_page_renders_its_form_on_the_real_runtime() {
         // The whole start tag `ui::settings_form::settings_form` renders
         // (maud writes `class` before `id`), so a page that merely mentions
         // the id cannot pass for the form.
-        html.contains(r#"<form class="settings-form" id="settings-form">"#),
+        html.contains(r#"<form class="settings-form form--aligned" id="settings-form">"#),
         "the settings form must render: {html}"
     );
     assert!(
