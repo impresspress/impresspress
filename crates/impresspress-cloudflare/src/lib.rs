@@ -97,6 +97,8 @@ pub mod kv_cached_db;
 pub mod logger_service;
 pub mod network_service;
 mod request_services;
+#[cfg(all(test, target_arch = "wasm32"))]
+mod root_scope_tests;
 mod runner;
 mod runtime_build;
 mod runtime_cache;
@@ -791,9 +793,17 @@ where
         request_config,
     )?;
 
-    request_services::scope(services, async {
-        let output = rt
-            .wafer
+    run_sweep(&rt.wafer, services).await
+}
+
+/// The scheduled invocation's one dispatch, under its root scopes
+/// (`request_services`'s module doc).
+async fn run_sweep(
+    wafer: &wafer_run::Wafer,
+    services: std::rc::Rc<request_services::RequestServices>,
+) -> Result<impresspress_core::blocks::auth::maintenance::SweepResult, Box<dyn std::error::Error>> {
+    request_services::scope_root_outside_dispatch(services, async {
+        let output = wafer
             .run_block(
                 impresspress_core::blocks::auth_ui::AUTH_UI_BLOCK_ID,
                 impresspress_core::blocks::auth_ui::maintenance_message(),
@@ -879,8 +889,10 @@ async fn dispatch(
     let deferred_services = std::rc::Rc::clone(&services);
     // Both scopes are re-entered on every poll, so a request interleaved with
     // this one neither uses its services nor queues its audit row or
-    // deferred tasks into this one's.
-    let dispatched = after_response::scope(std::rc::Rc::clone(after), async move {
+    // deferred tasks into this one's. Both are roots: this is the outermost
+    // scope of each cell on the `fetch` future (`request_services`'s module
+    // doc).
+    let request = async move {
         // 7. Convert request → message; preserve auth header in meta.
         let auth_header = req.headers().get("authorization")?;
         let (mut msg, input) = convert::worker_request_to_message(&req).await?;
@@ -892,12 +904,19 @@ async fn dispatch(
         // poll scope also covers lazily consumed service-backed streams.
         let output = wafer.run("site-main", msg, input).await;
         Ok(convert::output_to_response(output).await?)
-    });
-    let response = request_services::scope(services, dispatched).await;
+    };
+    let dispatched = after_response::scope_root(
+        std::rc::Rc::clone(after),
+        request,
+        request_services::after_response_found_stale,
+    );
+    let response = request_services::scope_root(services, dispatched).await;
     // This request's deferred tasks, and only its: they run under its own
-    // services and so its own D1 budget.
+    // services and so its own D1 budget. Each scope is a root, of both
+    // cells: the task runs in a `ctx.wait_until` future, outside every other
+    // scope, and outside this request's dispatch.
     for task in after.take_tasks() {
-        defer(Box::pin(request_services::scope(
+        defer(Box::pin(request_services::scope_root_outside_dispatch(
             std::rc::Rc::clone(&deferred_services),
             task,
         )));

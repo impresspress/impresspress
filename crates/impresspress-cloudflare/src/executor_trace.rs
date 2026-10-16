@@ -197,6 +197,31 @@ pub(crate) fn on_first_poll(
     Some(trace)
 }
 
+/// This Wasm instance's `<isolate>/<wasm>/<generation>`, as
+/// [`RequestTrace::instance`] spells it, once a traced request or the entry
+/// module's probe has drawn its identity. `None`, having touched no JS
+/// global, on an instance that has not: with the var off that is every
+/// instance. For lines logged outside a request's first poll
+/// (`request_services`'s `ip-root-found-stale`).
+pub(crate) fn traced_instance() -> Option<String> {
+    WASM_INSTANCE.with(|instance| traced_instance_in(&js_sys::global(), instance))
+}
+
+/// [`traced_instance`]'s work against an explicit global object and instance
+/// cell, like [`trace_request`].
+fn traced_instance_in(global: &Object, instance: &OnceCell<WasmInstance>) -> Option<String> {
+    let instance = instance.get()?;
+    let isolate = existing_state(global)
+        .and_then(|state| Reflect::get(&state, &JsValue::from_str(ISOLATE_ID_FIELD)).ok())
+        .and_then(|value| value.as_string());
+    Some(format!(
+        "{}/{}/{}",
+        isolate.as_deref().unwrap_or("-"),
+        instance.id,
+        instance.generation,
+    ))
+}
+
 /// The identity of the Wasm instance serving the current request, for the
 /// entry module's `ip-entry` line: `{ wasm, generation, stack }`, or
 /// `undefined` when no traced request has run in this isolate.
@@ -580,6 +605,24 @@ mod tests {
         assert_eq!(
             response.headers().get(INSTANCE_HEADER).unwrap().as_deref(),
             Some("i/w/3")
+        );
+    }
+
+    /// An instance no traced request has reached has no instance field, and
+    /// one that has carries exactly the header's value.
+    #[wasm_bindgen_test]
+    fn the_traced_instance_is_known_only_once_a_traced_request_drew_it() {
+        let global = Object::new();
+        let request = Object::new();
+        state_as_entry_module_leaves_it(&global, "isolate-t", &request, 1);
+        let instance = OnceCell::new();
+        assert_eq!(traced_instance_in(&global, &instance), None);
+
+        let trace = trace_request(&global, &instance, &request);
+
+        assert_eq!(
+            traced_instance_in(&global, &instance),
+            Some(trace.instance())
         );
     }
 
