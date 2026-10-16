@@ -6,21 +6,18 @@ use maud::{html, Markup};
 // Tab Navigation
 // ---------------------------------------------------------------------------
 
-/// One tab in a [`tab_navigation`] bar.
-///
-/// `icon` is pre-rendered [`Markup`] (e.g. `icons::users()`) so each call site
-/// references the icon function directly — no name-string lookup, no silent
-/// fallback. `href` is borrowed; the same URL feeds both the `href` and the
-/// `hx-get` so the htmx swap and a no-JS click navigate identically.
+/// One tab in a [`tab_navigation`] bar, a [`subnav`] or a [`FilterLinks`]
+/// set. A tab is its text label alone, in sentence case: tabs and filter
+/// links carry no icon.
 pub struct Tab<'a> {
-    /// Whether this tab is the active one (renders the `active` class).
+    /// Whether this tab is the current one: `.active` on a tab, plus
+    /// `aria-current` in a [`subnav`]; `aria-current` on a filter link.
     pub active: bool,
-    /// Destination URL — used for both `href` and `hx-get`.
+    /// Destination URL. [`tab_navigation`] also swaps it in through `hx-get`,
+    /// so the htmx swap and a no-JS click navigate identically.
     pub href: &'a str,
-    /// Visible label.
+    /// Visible label, in sentence case ("API keys", "Audit logs").
     pub label: &'a str,
-    /// Optional leading icon markup.
-    pub icon: Option<Markup>,
 }
 
 /// Render an htmx tab bar: each tab swaps `#content` and pushes its URL.
@@ -31,18 +28,12 @@ pub fn tab_navigation(tabs: Vec<Tab<'_>>) -> Markup {
     html! {
         div .tabs {
             @for tab in tabs {
-                a .tab
-                    .(if tab.active { "active" } else { "" })
+                a .tab .active[tab.active]
                     href=(tab.href)
                     hx-get=(tab.href)
                     hx-target="#content"
                     hx-push-url="true"
-                {
-                    @if let Some(icon) = tab.icon {
-                        (icon) " "
-                    }
-                    (tab.label)
-                }
+                { (tab.label) }
             }
         }
     }
@@ -87,15 +78,10 @@ pub fn subnav(label: &str, tabs: Vec<Tab<'_>>) -> Markup {
         nav .subnav aria-label=(label) {
             div .tabs {
                 @for tab in tabs {
-                    a .tab .(if tab.active { "active" } else { "" })
+                    a .tab .active[tab.active]
                         href=(tab.href)
                         aria-current=[tab.active.then_some("page")]
-                    {
-                        @if let Some(icon) = tab.icon {
-                            (icon) " "
-                        }
-                        (tab.label)
-                    }
+                    { (tab.label) }
                 }
             }
         }
@@ -171,9 +157,6 @@ impl<'a> FilterLinks<'a> {
                         aria-current=[link.active.then_some("true")]
                     {
                         span .filter-toggle__check aria-hidden="true" { (crate::ui::icons::check()) }
-                        @if let Some(icon) = link.icon {
-                            (icon)
-                        }
                         (link.label)
                     }
                 }
@@ -191,6 +174,51 @@ pub fn filter_links(label: &str, links: Vec<Tab<'_>>) -> Markup {
 mod tests {
     use super::*;
 
+    fn two_tabs() -> Vec<Tab<'static>> {
+        vec![
+            Tab {
+                active: true,
+                href: "/b/admin/users",
+                label: "Users",
+            },
+            Tab {
+                active: false,
+                href: "/b/admin/users?tab=api-keys",
+                label: "API keys",
+            },
+        ]
+    }
+
+    /// An htmx tab bar: text-only tabs, the current one `.active`, each
+    /// swapping `#content` for its URL and pushing it.
+    #[test]
+    fn tab_navigation_draws_text_tabs_that_swap_the_content() {
+        assert_eq!(
+            tab_navigation(two_tabs()).into_string(),
+            concat!(
+                r##"<div class="tabs">"##,
+                r##"<a class="tab active" href="/b/admin/users" hx-get="/b/admin/users" hx-target="#content" hx-push-url="true">Users</a>"##,
+                r##"<a class="tab" href="/b/admin/users?tab=api-keys" hx-get="/b/admin/users?tab=api-keys" hx-target="#content" hx-push-url="true">API keys</a>"##,
+                r##"</div>"##,
+            )
+        );
+    }
+
+    /// Section links: the same text-only tabs as plain links in a labelled
+    /// `nav`, the current one `aria-current="page"`.
+    #[test]
+    fn subnav_draws_text_tabs_as_plain_links() {
+        assert_eq!(
+            subnav("Admin sections", two_tabs()).into_string(),
+            concat!(
+                r#"<nav class="subnav" aria-label="Admin sections"><div class="tabs">"#,
+                r#"<a class="tab active" href="/b/admin/users" aria-current="page">Users</a>"#,
+                r#"<a class="tab" href="/b/admin/users?tab=api-keys">API keys</a>"#,
+                r#"</div></nav>"#,
+            )
+        );
+    }
+
     #[test]
     fn filter_links_are_labelled_links_with_the_current_one_marked() {
         let s = filter_links(
@@ -200,13 +228,11 @@ mod tests {
                     active: true,
                     href: "/b/products/admin/manage",
                     label: "Active",
-                    icon: None,
                 },
                 Tab {
                     active: false,
                     href: "/b/products/admin/manage?view=deleted",
                     label: "Deleted",
-                    icon: None,
                 },
             ],
         )
@@ -231,7 +257,6 @@ mod tests {
                 active: true,
                 href: "/b/admin/settings/network?sort=errors",
                 label: "Errors",
-                icon: None,
             }],
         )
         .visible_label("network-sort-label")

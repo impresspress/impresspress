@@ -205,7 +205,7 @@ test.describe('htmx history', () => {
   test('Back to an htmx-pushed page loads it whole, and nothing is cached', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/logs', { waitUntil: 'networkidle' });
-    await page.getByRole('link', { name: 'Audit Logs' }).click();
+    await page.getByRole('link', { name: 'Audit logs' }).click();
     await expect(page).toHaveURL(/tab=audit/);
     await expect(page.getByRole('searchbox', { name: 'Search by resource...' })).toBeVisible();
 

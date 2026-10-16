@@ -147,6 +147,23 @@ pub fn header_items(html: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every tab's label (`.tabs > .tab`: a `tab_navigation` bar, a `subnav`,
+/// the legal editor's Edit / Preview), in document order: `Ok(text)` for a
+/// tab that is its text alone, `Err` naming the tab by [`describe`] when it
+/// holds an element (an icon, a wrapper), which a tab never does.
+pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
+    let doc = Html::parse_document(html);
+    doc.select(&selector(".tabs > .tab"))
+        .map(|tab| {
+            if tab.children().any(|child| child.value().is_element()) {
+                Err(describe(tab))
+            } else {
+                Ok(text_of(tab))
+            }
+        })
+        .collect()
+}
+
 /// How a guard names an element: `button.btn.btn--primary "Save"`.
 pub fn describe(el: ElementRef<'_>) -> String {
     let mut out = el.value().name().to_string();
@@ -206,6 +223,26 @@ mod tests {
 
     fn primary(label: &str) -> String {
         format!("button.btn.btn--primary {label:?}")
+    }
+
+    // ── tab_labels ───────────────────────────────────────────────────────
+
+    #[test]
+    fn tab_labels_report_a_tab_that_holds_an_element() {
+        let html = concat!(
+            r#"<div class="tabs"><a class="tab active" href="/a">API  keys</a>"#,
+            r#"<button class="tab" role="tab">Preview</button>"#,
+            r#"<a class="tab" href="/c"><svg></svg> Roles</a></div>"#,
+            r#"<a class="tab" href="/d">Outside a strip</a>"#,
+        );
+        assert_eq!(
+            tab_labels(html),
+            [
+                Ok("API keys".to_string()),
+                Ok("Preview".to_string()),
+                Err(r#"a.tab "Roles""#.to_string()),
+            ]
+        );
     }
 
     // ── header_items ─────────────────────────────────────────────────────

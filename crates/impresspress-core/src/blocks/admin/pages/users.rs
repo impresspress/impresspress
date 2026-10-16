@@ -41,19 +41,16 @@ pub async fn users_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             active: active_tab == "users",
             href: "/b/admin/users",
             label: "Users",
-            icon: Some(icons::users()),
         },
         components::Tab {
             active: active_tab == "roles",
             href: "/b/admin/users?tab=roles",
             label: "Roles",
-            icon: Some(icons::shield()),
         },
         components::Tab {
             active: active_tab == "api-keys",
             href: "/b/admin/users?tab=api-keys",
-            label: "API Keys",
-            icon: Some(icons::key()),
+            label: "API keys",
         },
     ]);
 
@@ -575,7 +572,7 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let now = chrono::Utc::now();
 
     Ok(html! {
-        (components::section_header("API Keys", Some(html! {
+        (components::section_header("API keys", Some(html! {
             button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-api-key" {
                 (icons::plus()) " Create API Key"
             }

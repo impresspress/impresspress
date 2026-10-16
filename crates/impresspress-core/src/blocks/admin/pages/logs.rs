@@ -16,7 +16,7 @@ use crate::{
     util::{urlencode, RecordExt},
 };
 
-/// The query parameters the System Logs tab's two error filters set, and the
+/// The query parameters the System logs tab's two error filters set, and the
 /// one value that turns each on. The rows each selects are a
 /// [`request_logs::StatusClass`] — a `status_code` filter. The stored
 /// `status` label is a display column no reader selects on, so neither
@@ -33,7 +33,7 @@ fn error_filter(msg: &Message) -> ErrorFilter {
     }
 }
 
-/// `/b/admin/logs` carrying the System Logs tab's active filters, so a
+/// `/b/admin/logs` carrying the System logs tab's active filters, so a
 /// refresh, a search, a page step or a filter toggle keeps the rest of the
 /// filter. `search` is omitted where the link's own control supplies it (the
 /// search box appends its field to the URL it is given).
@@ -101,20 +101,17 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             components::Tab {
                 active: active_tab == "system",
                 href: "/b/admin/logs",
-                label: "System Logs",
-                icon: Some(icons::server()),
+                label: "System logs",
             },
             components::Tab {
                 active: active_tab == "audit",
                 href: "/b/admin/logs?tab=audit",
-                label: "Audit Logs",
-                icon: Some(icons::file_text()),
+                label: "Audit logs",
             },
             components::Tab {
                 active: active_tab == "storage",
                 href: STORAGE_LOGS_HREF,
-                label: "Storage Access",
-                icon: Some(icons::hard_drive()),
+                label: "Storage access",
             },
         ]))
 

@@ -247,13 +247,11 @@ fn right_pane_tabs(selected: Option<&str>, tab: Tab) -> Markup {
             active: tab == Tab::Schema,
             href: &schema_href,
             label: "Schema",
-            icon: None,
         },
         NavTab {
             active: tab == Tab::Sql,
             href: &sql_href,
             label: "SQL editor",
-            icon: None,
         },
     ])
 }

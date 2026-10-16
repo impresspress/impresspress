@@ -146,25 +146,21 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 active: active_tab == "features",
                 href: "/b/admin/blocks",
                 label: "Features",
-                icon: Some(icons::package()),
             },
             Tab {
                 active: active_tab == "services",
                 href: "/b/admin/blocks?tab=services",
                 label: "Services",
-                icon: Some(icons::server()),
             },
             Tab {
                 active: active_tab == "infrastructure",
                 href: "/b/admin/blocks?tab=infrastructure",
                 label: "Infrastructure",
-                icon: Some(icons::settings()),
             },
             Tab {
                 active: active_tab == "custom",
                 href: "/b/admin/blocks?tab=custom",
                 label: "Custom",
-                icon: Some(icons::package()),
             },
         ]))
 

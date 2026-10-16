@@ -38,7 +38,6 @@ fn section_links(active: &str) -> Markup {
         active: active == key,
         href,
         label,
-        icon: None,
     };
     components::subnav(
         "Legal pages sections",
@@ -255,19 +254,21 @@ pub(super) fn editor_view<'a>(
                 p #title-input-hint .form-hint { "The heading of the public page." }
             }
 
-            div .legal-editor__content-head {
-                label .form-label for="editor" { "Content" }
-                div .editor-tabs role="tablist" aria-label="Content view" {
-                    button #editor-tab-edit .editor-tab .editor-tab--active type="button"
-                        role="tab" aria-selected="true" aria-controls="editor-edit-pane"
-                        data-tab="edit" data-action="legalpages-editor-tab"
-                    { "Edit" }
-                    button #editor-tab-preview .editor-tab type="button"
-                        role="tab" aria-selected="false" aria-controls="editor-preview-pane"
-                        tabindex="-1"
-                        data-tab="preview" data-action="legalpages-editor-tab"
-                    { "Preview" }
-                }
+            label .form-label for="editor" { "Content" }
+            // The `.tabs` strip, as buttons: Edit and Preview are two views
+            // of one field, switched in place by `editor.js` (no request),
+            // so they are a WAI-ARIA tablist rather than `tab_navigation`'s
+            // htmx links.
+            div .tabs role="tablist" aria-label="Content view" {
+                button #editor-tab-edit .tab .active type="button"
+                    role="tab" aria-selected="true" aria-controls="editor-edit-pane"
+                    data-tab="edit" data-action="legalpages-editor-tab"
+                { "Edit" }
+                button #editor-tab-preview .tab type="button"
+                    role="tab" aria-selected="false" aria-controls="editor-preview-pane"
+                    tabindex="-1"
+                    data-tab="preview" data-action="legalpages-editor-tab"
+                { "Preview" }
             }
 
             div #editor-edit-pane .editor-pane role="tabpanel" aria-labelledby="editor-tab-edit" {
