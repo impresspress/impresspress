@@ -9,7 +9,7 @@
 /* A collapsed-border table ignores border-radius; the hand-written form
    keeps separate borders so its rounded frame still shows. */
 table.data-table { border-collapse: separate; border-spacing: 0; }
-.data-table thead th { position: sticky; top: 0; background: var(--surface-3); text-align: left; padding: var(--space-2) var(--space-3); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); border-bottom: 1px solid var(--border-color); font-weight: 500; }
+.data-table thead th { position: sticky; top: 0; background: var(--surface-3); text-align: left; padding: var(--space-2) var(--space-3); font-size: var(--text-sm); color: var(--text-muted); border-bottom: 1px solid var(--border-color); font-weight: 500; }
 .data-table tbody td { padding: var(--space-2) var(--space-3); font-size: var(--text-sm); border-bottom: 1px dashed var(--border-light); color: var(--text-primary); vertical-align: middle; }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table__row--linked:hover { background: var(--bg-hover); cursor: pointer; }
@@ -96,8 +96,8 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    names stay on one line; values wrap only past a readable width. */
 .data-table--scroll { overflow-x: scroll; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
 .data-table--scroll table { width: max-content; min-width: 100%; }
-/* Query column names are identifiers: shown as written, on one line. */
-.data-table--scroll thead th { white-space: nowrap; text-transform: none; letter-spacing: 0; }
+/* Query column names are identifiers: one line each. */
+.data-table--scroll thead th { white-space: nowrap; }
 .data-table--scroll tbody td { max-width: 40ch; overflow-wrap: anywhere; }
 
 /* A date-time (`components::timestamp`): tabular figures so a column of
@@ -174,7 +174,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
   width: 100%;
   min-height: var(--target-min);
   padding: var(--space-2) var(--space-3);
-  font-size: 13px;
+  font-size: var(--text-sm);
   border: 1px solid var(--border-color);
   border-radius: 6px;
 }
@@ -188,7 +188,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
   border-radius: 4px;
   text-decoration: none;
   color: inherit;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 .db-table-list__item:hover { background: var(--bg-secondary, #f8f9fa); }
 .db-table-list__item.is-active { background: var(--bg-hover); box-shadow: inset 3px 0 0 var(--primary-color); font-weight: 600; }
@@ -237,27 +237,26 @@ a.pagination__link:hover { background: var(--bg-hover); }
 }
 .db-table-group__title {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--text-primary, #0f172a);
   word-break: break-all;
 }
 .db-table-group__org {
-  font-size: 11px;
-  letter-spacing: 0.01em;
+  font-size: var(--text-sm);
 }
 .db-table-group__count {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 22px;
-  height: 20px;
+  min-width: 24px;
+  height: 22px;
   padding: 0 var(--space-2);
   border-radius: 999px;
   /* A count, not a call to action: neutral, like `.badge`. */
   background: var(--border-color);
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -325,9 +324,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 		display: block;
 		margin-bottom: 2px;
 		color: var(--text-muted);
-		font-size: var(--text-xs);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
+		font-size: var(--text-sm);
 	}
 	.data-table:not(.data-table--scroll) td.data-table__cell--empty { display: none; }
 	/* The header row: no labels. */
@@ -369,7 +366,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 .network-group__totals { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .network-row__toggle svg { transition: transform 150ms ease-out; }
 .network-row__toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
-.network-route__method { font-weight: 600; font-size: var(--text-xs); letter-spacing: 0.02em; }
+.network-route__method { font-weight: 600; letter-spacing: 0.02em; }
 .network-route__meta { display: none; }
 .network-detail-row td { background: var(--surface-2); padding: var(--space-3); }
 /* Card mode lays every row out as a grid, which would override `hidden`. */
@@ -384,7 +381,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.network-row td:not(.data-table__cell--primary):not(.data-table__cell--actions) { display: none; }
 	.network-route__meta {
 		display: block; margin-top: var(--space-1);
-		font-size: var(--text-xs); font-weight: 400; color: var(--text-secondary);
+		font-weight: 400; color: var(--text-secondary);
 		font-variant-numeric: tabular-nums;
 	}
 }

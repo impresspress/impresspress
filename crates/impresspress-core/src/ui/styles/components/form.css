@@ -149,7 +149,7 @@
 
 .form-hint {
 	display: block; margin-top: var(--space-2);
-	font-size: 0.75rem; color: #6b7280;
+	font-size: var(--text-sm); color: #6b7280;
 }
 
 /* Literal #ef4444 = --accent-danger's own value, 3.76:1 on white -- below
@@ -157,7 +157,7 @@
    computed) replaces it. */
 .form-error {
 	display: block; margin-top: var(--space-2);
-	font-size: 0.75rem; color: var(--accent-danger-text);
+	font-size: var(--text-sm); color: var(--accent-danger-text);
 }
 
 /* The label is the hit area of the 16px box it wraps, so it is the one
@@ -239,7 +239,7 @@
 .products-choice:has(input:checked) { border-color: var(--primary-color); background: color-mix(in srgb, var(--primary-color) 5%, var(--surface-1)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 10%, transparent); }
 .products-choice input { margin-top: var(--space-1); flex: none; }
 .products-choice strong { display: block; font-size: .92rem; }
-.products-choice small { display: block; margin-top: .15rem; line-height: 1.45; }
+.products-choice small { display: block; margin-top: .15rem; font-size: var(--text-sm); line-height: 1.45; }
 .products-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 /* A products form's submit row: set off from the collapsible section above
    it, which otherwise sat flush against the button. */
@@ -250,8 +250,7 @@
 .products-advanced[open] > summary { border-bottom: 1px solid var(--border-color); }
 .products-advanced__body { padding: var(--space-4); }
 .products-plain-details { margin-top: var(--space-3); }
-.products-plain-details > summary { cursor: pointer; color: var(--text-muted); font-size: .875rem; font-weight: 600; }
-.products-filter-label { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin-right: .15rem; }
+.products-plain-details > summary { cursor: pointer; color: var(--text-muted); font-size: var(--text-sm); font-weight: 600; }
 .products-checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); }
 .products-checklist__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); }
 .products-checklist__item p { margin: var(--space-1) 0 0; }
@@ -270,7 +269,9 @@
 .products-code-block { display: block; width: 100%; padding: var(--space-3) var(--space-3); border: 1px solid var(--border-color); border-radius: 10px; background: var(--surface-2); overflow-wrap: anywhere; }
 .product-wizard-progress { margin: 0 0 var(--space-5); }
 .product-wizard-progress ol { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); list-style: none; padding: 0; margin: 0; }
-.product-wizard-progress li { position: relative; min-height: 2.25rem; border-radius: 999px; gap: var(--space-1); }
+/* Each step is a `.badge`; its name is running text, so it takes 14px, not
+ * the badge's 12px. */
+.product-wizard-progress li { position: relative; min-height: 2.25rem; border-radius: 999px; gap: var(--space-1); font-size: var(--text-sm); }
 .wizard-step__number::after { content: "."; }
 .wizard-step-check { display: inline-flex; }
 .wizard-step-check svg { width: .75rem; height: .75rem; }
@@ -317,7 +318,7 @@
 /* Status row, then Title, then the Content label over the Edit / Preview
  * tabs (`.tabs`, nav.css) and the pane they switch. */
 .legal-editor__status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-5); }
-.legal-editor__meta { font-size: 0.8125rem; color: var(--text-muted); }
+.legal-editor__meta { font-size: var(--text-sm); color: var(--text-muted); }
 /* The textarea fills the viewport below the editor's header rows (at least
  * 20rem) at every width -- it is a field of its own, not a `.form-input`,
  * whose target-floor minimum would otherwise win the cascade over this

@@ -84,10 +84,7 @@ fn sign_in_method(auth_method: &str) -> String {
         "password" => "Password".to_string(),
         "bootstrap" => "Setup link".to_string(),
         other => match other.strip_prefix("oauth.") {
-            Some("github") => "GitHub".to_string(),
-            Some("google") => "Google".to_string(),
-            Some("microsoft") => "Microsoft".to_string(),
-            Some(provider) => provider.to_string(),
+            Some(provider) => super::provider_label(provider).to_string(),
             None => other.to_string(),
         },
     }
@@ -262,6 +259,15 @@ mod tests {
         tokens::insert(ctx, user_id, family, family, 0, "2099-01-01T00:00:00Z")
             .await
             .expect("seed refresh row");
+    }
+
+    /// A session started through a provider names it as people read it.
+    #[test]
+    fn sign_in_method_names_the_oauth_provider() {
+        assert_eq!(super::sign_in_method("oauth.github"), "GitHub");
+        assert_eq!(super::sign_in_method("oauth.microsoft"), "Microsoft");
+        assert_eq!(super::sign_in_method("oauth.unknown"), "unknown");
+        assert_eq!(super::sign_in_method("password"), "Password");
     }
 
     #[tokio::test]

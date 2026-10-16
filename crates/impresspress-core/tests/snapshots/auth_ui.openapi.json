@@ -707,8 +707,8 @@
             "schema": {
               "description": "OAuth provider to start the flow with",
               "enum": [
-                "google",
                 "github",
+                "google",
                 "microsoft"
               ],
               "type": "string"

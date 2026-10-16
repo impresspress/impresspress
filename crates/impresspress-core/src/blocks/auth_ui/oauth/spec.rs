@@ -63,6 +63,10 @@ pub struct OAuthProviderSpec {
     /// (`IMPRESSPRESS__AUTH_UI__OAUTH_{NAME}_CLIENT_ID`) and the
     /// `provider_links.provider` column.
     pub name: &'static str,
+    /// The provider's name as people read it ("GitHub"): the sign-in button,
+    /// a linked account and a session's sign-in method all show this, never
+    /// [`name`](Self::name).
+    pub label: &'static str,
     /// Authorization endpoint (the user-facing redirect target).
     pub authorize_url: &'static str,
     /// Token-exchange endpoint.
@@ -149,24 +153,13 @@ impl OAuthProviderSpec {
     }
 }
 
-/// All supported OAuth providers. The enabled-provider list endpoint and the
-/// login/callback flow both iterate or look up against this table.
+/// All supported OAuth providers, in the order the sign-in page draws their
+/// buttons. The sign-in page, the enabled-provider list endpoint and the
+/// login/callback flow all iterate or look up against this table.
 pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
     OAuthProviderSpec {
-        name: "google",
-        authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
-        token_url: "https://oauth2.googleapis.com/token",
-        userinfo_url: "https://www.googleapis.com/oauth2/v2/userinfo",
-        scope: "openid%20email%20profile",
-        uses_pkce: true,
-        userinfo_auth: UserinfoAuth::Bearer,
-        // The v2 userinfo endpoint spells the OIDC `email_verified` claim
-        // `verified_email`. Google sets it for every address it issues a token
-        // for, including Workspace addresses an administrator provisioned.
-        email_assertion: EmailAssertion::Claim("verified_email"),
-    },
-    OAuthProviderSpec {
         name: "github",
+        label: "GitHub",
         authorize_url: "https://github.com/login/oauth/authorize",
         token_url: "https://github.com/login/oauth/access_token",
         userinfo_url: "https://api.github.com/user",
@@ -181,7 +174,22 @@ pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
         email_assertion: EmailAssertion::AddressList("https://api.github.com/user/emails"),
     },
     OAuthProviderSpec {
+        name: "google",
+        label: "Google",
+        authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_url: "https://oauth2.googleapis.com/token",
+        userinfo_url: "https://www.googleapis.com/oauth2/v2/userinfo",
+        scope: "openid%20email%20profile",
+        uses_pkce: true,
+        userinfo_auth: UserinfoAuth::Bearer,
+        // The v2 userinfo endpoint spells the OIDC `email_verified` claim
+        // `verified_email`. Google sets it for every address it issues a token
+        // for, including Workspace addresses an administrator provisioned.
+        email_assertion: EmailAssertion::Claim("verified_email"),
+    },
+    OAuthProviderSpec {
         name: "microsoft",
+        label: "Microsoft",
         authorize_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
         // The OIDC userinfo endpoint, not Graph `/v1.0/me`: `/me` answers with
@@ -218,6 +226,14 @@ mod tests {
 
     fn spec(name: &str) -> &'static OAuthProviderSpec {
         lookup(name).expect("provider exists")
+    }
+
+    /// The sign-in page draws a button per configured provider in this
+    /// order, GitHub first.
+    #[test]
+    fn providers_are_listed_in_sign_in_button_order() {
+        let names: Vec<&str> = OAUTH_PROVIDERS.iter().map(|p| p.name).collect();
+        assert_eq!(names, ["github", "google", "microsoft"]);
     }
 
     #[test]

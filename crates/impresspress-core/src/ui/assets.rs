@@ -1725,6 +1725,155 @@ mod tests {
         );
     }
 
+    /// Design rule 4: case is the source's, never the stylesheet's. A label
+    /// set in capitals by CSS hides a Title Case string (and reads as
+    /// shouting); the content column writes sentence case and shows it as
+    /// written. The sidebar's group labels are the one exception: the
+    /// sidebar is outside the redesign. Covers the shared bundle and every
+    /// block stylesheet.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn only_the_sidebar_sets_text_in_capitals() {
+        let mut wrong = Vec::new();
+        for (sheet, css) in all_stylesheets() {
+            for (selector, body) in css_leaf_blocks(&css) {
+                let capitals = body.split(';').any(|decl| {
+                    decl.split_once(':').is_some_and(|(prop, value)| {
+                        // `uppercase !important` (or `! important`) is
+                        // still uppercase: the value is what precedes `!`.
+                        let value = value
+                            .split('!')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_lowercase();
+                        prop.trim().eq_ignore_ascii_case("text-transform") && value == "uppercase"
+                    })
+                });
+                let sidebar = selector
+                    .split(',')
+                    .all(|part| part.trim().starts_with(".sidebar__"));
+                if capitals && !sidebar {
+                    wrong.push(format!("{sheet}: {selector}"));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "text-transform: uppercase outside the sidebar:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The running-text rules design rule 5 raised to 14px (`--text-sm`), and
+    /// the rule each one takes its size from: `None` when it states its own,
+    /// or the ancestor rule it inherits from. Badges, `kbd`, chart ticks, code
+    /// chips, `.share-token` and `.db-sql__input` are the exemptions and are
+    /// not here.
+    #[cfg(feature = "embed-assets")]
+    const RUNNING_TEXT_RULES: &[(&str, Option<&str>)] = &[
+        // Tables and forms.
+        (".data-table thead th", None),
+        (".data-table:not(.data-table--scroll) td::before", None),
+        (".chart__table thead th", Some(".chart__values")),
+        (".chart__table caption", Some(".chart__values")),
+        (".chart__values summary", Some(".chart__values")),
+        (".chart__note", None),
+        (".chart__col::after", None),
+        (".card__subtitle", None),
+        (".form-hint", None),
+        (".form-error", None),
+        // Dates. A `components::timestamp` sets no size of its own, so these
+        // are where one shown outside a table cell gets it.
+        (".linked-provider__date", None),
+        (".messages-list__date", None),
+        (".message-card__date", None),
+        (".thread-card__date", None),
+        (".legal-editor__meta", None),
+        (".ticket-event__head", None),
+        (".network-group__totals", None),
+        (".data-table tbody td", None),
+        // Named rules.
+        (".network-route__method", Some(".data-table tbody td")),
+        (
+            ".network-route__meta",
+            Some(".data-table:not(.data-table--scroll) td.data-table__cell--primary"),
+        ),
+        (".var-warning-note", None),
+        (".var-warning-banner", None),
+        (".product-wizard-progress li", None),
+        (".products-plain-details > summary", None),
+        (".products-choice small", None),
+        (".db-pane__head input", None),
+        (".db-table-group__title", None),
+        (".db-table-group__org", None),
+        (".db-table-group__count", None),
+        (".db-table-list__name", Some(".db-table-list__item")),
+        (".block-card__runtime", Some(".block-card__meta")),
+        (".block-card__version", Some(".block-card__meta")),
+        (".var-cell__key", None),
+        (".var-cell__name", None),
+        (".var-cell__note", None),
+        (".linked-provider__name", None),
+        (".thread-pane__title", None),
+        (".api-key-name-hint", None),
+        (".ticket-ref", None),
+        (".palette__hint", None),
+        (".modal-tech", None),
+    ];
+
+    /// Design rule 5 for every rule in [`RUNNING_TEXT_RULES`]: wherever the
+    /// bundle sets its `font-size` (in any rule naming exactly that selector,
+    /// `@media` included), it resolves to 14px or more, and the rule it
+    /// inherits from, if any, states 14px or more. A rule that states its own
+    /// size must state one, so a deleted declaration is not a silent pass.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn running_text_is_at_least_14px() {
+        let tokens = parse_root_tokens(super::css());
+        let blocks = css_leaf_blocks(super::css());
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let px = |value: &str| -> Option<f64> {
+            let value = value.trim();
+            match value.strip_prefix("var(").and_then(|v| v.strip_suffix(')')) {
+                Some(name) => css_length_px(tokens.get(name.trim())?),
+                None => css_length_px(value),
+            }
+        };
+        // Every font-size declared by a rule whose selector list names `selector`.
+        let sizes = |selector: &str| -> Vec<String> {
+            blocks
+                .iter()
+                .filter(|(list, _)| list.split(',').any(|part| normalise(part) == selector))
+                .flat_map(|(_, body)| body.split(';'))
+                .filter_map(|decl| {
+                    let (prop, value) = decl.split_once(':')?;
+                    (prop.trim() == "font-size").then(|| value.trim().to_string())
+                })
+                .collect()
+        };
+        let mut wrong = Vec::new();
+        for (selector, inherits) in RUNNING_TEXT_RULES {
+            let own = sizes(selector);
+            let source = inherits.unwrap_or(selector);
+            let stated = sizes(source);
+            if stated.is_empty() {
+                wrong.push(format!("{source} (for {selector}) states no font-size"));
+            }
+            let mut checked = own.clone();
+            if inherits.is_some() {
+                checked.extend(stated);
+            }
+            for value in &checked {
+                match px(value) {
+                    Some(size) if size >= 14.0 => {}
+                    _ => wrong.push(format!("{selector}: font-size {value} is under 14px")),
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     #[cfg(feature = "embed-assets")]
     #[test]
     fn chrome_js_carries_the_palette_section() {
