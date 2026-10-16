@@ -11,7 +11,10 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::repo::{local_credentials, provider_links, users},
-        auth_ui::api::change_password::{FORM_ID, RESULT_ID},
+        auth_ui::{
+            api::change_password::{FORM_ID, RESULT_ID},
+            oauth,
+        },
         crud,
     },
     http::{redirect, ResponseBuilder},
@@ -206,9 +209,10 @@ fn change_password_form(min_length: usize) -> Markup {
 /// in place of itself: htmx does not swap a non-2xx response, so a refusal has
 /// to come back as the row it declined to remove, carrying the reason.
 fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>) -> Markup {
+    let provider = oauth::spec::label_of(&link.provider);
     html! {
         li .linked-provider {
-            span .linked-provider__name { (link.provider) }
+            span .linked-provider__name { (provider) }
             span .linked-provider__login { (link.provider_login) }
             span .linked-provider__date { "linked " (timestamp(&link.linked_at)) }
             button .btn .btn--ghost .btn--sm
@@ -217,8 +221,7 @@ fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>)
                 hx-target="closest li"
                 hx-swap="outerHTML"
                 hx-confirm=(format!(
-                    "Unlink {}? You will no longer be able to sign in with it.",
-                    link.provider
+                    "Unlink {provider}? You will no longer be able to sign in with it."
                 ))
             { "Unlink" }
             @if let Some(message) = error {
@@ -591,7 +594,11 @@ mod tests {
         let msg = auth_msg("retrieve", "/b/userportal/security", "user-a");
         let resp = security_page(&ctx, &msg).await;
         let html = output_html(resp).await;
-        assert!(html.contains("github"));
+        // The provider as people read it, not its stored key.
+        assert!(
+            html.contains(r#"<span class="linked-provider__name">GitHub</span>"#),
+            "{html}"
+        );
         assert!(html.contains("alice"));
     }
 

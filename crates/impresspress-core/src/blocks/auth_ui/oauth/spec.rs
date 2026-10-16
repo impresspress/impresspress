@@ -63,6 +63,10 @@ pub struct OAuthProviderSpec {
     /// (`IMPRESSPRESS__AUTH_UI__OAUTH_{NAME}_CLIENT_ID`) and the
     /// `provider_links.provider` column.
     pub name: &'static str,
+    /// The provider's name as people read it ("GitHub"): the sign-in button,
+    /// a linked account and a session's sign-in method all show this, never
+    /// [`name`](Self::name).
+    pub label: &'static str,
     /// Authorization endpoint (the user-facing redirect target).
     pub authorize_url: &'static str,
     /// Token-exchange endpoint.
@@ -154,6 +158,7 @@ impl OAuthProviderSpec {
 pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
     OAuthProviderSpec {
         name: "google",
+        label: "Google",
         authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
         userinfo_url: "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -167,6 +172,7 @@ pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
     },
     OAuthProviderSpec {
         name: "github",
+        label: "GitHub",
         authorize_url: "https://github.com/login/oauth/authorize",
         token_url: "https://github.com/login/oauth/access_token",
         userinfo_url: "https://api.github.com/user",
@@ -182,6 +188,7 @@ pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
     },
     OAuthProviderSpec {
         name: "microsoft",
+        label: "Microsoft",
         authorize_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
         // The OIDC userinfo endpoint, not Graph `/v1.0/me`: `/me` answers with
@@ -212,12 +219,27 @@ pub fn lookup(name: &str) -> Option<&'static OAuthProviderSpec> {
     OAUTH_PROVIDERS.iter().find(|p| p.name == name)
 }
 
+/// The provider `name` as people read it: its [`label`](OAuthProviderSpec::label),
+/// or `name` itself for a provider this build no longer supports (a stored
+/// link or session can outlive one).
+pub fn label_of(name: &str) -> &str {
+    lookup(name).map_or(name, |p| p.label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn spec(name: &str) -> &'static OAuthProviderSpec {
         lookup(name).expect("provider exists")
+    }
+
+    #[test]
+    fn label_of_names_a_known_provider_and_passes_an_unknown_one_through() {
+        assert_eq!(label_of("github"), "GitHub");
+        assert_eq!(label_of("google"), "Google");
+        assert_eq!(label_of("microsoft"), "Microsoft");
+        assert_eq!(label_of("twitter"), "twitter");
     }
 
     #[test]

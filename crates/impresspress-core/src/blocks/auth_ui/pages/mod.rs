@@ -76,16 +76,6 @@ pub(in crate::blocks::auth_ui) async fn oauth_provider_configured(
         .is_empty())
 }
 
-/// Display label for an OAuth provider button.
-pub(super) fn oauth_provider_label(provider: &str) -> &'static str {
-    match provider {
-        "github" => "GitHub",
-        "google" => "Google",
-        "microsoft" => "Microsoft",
-        _ => "OAuth",
-    }
-}
-
 /// Inline SVG glyph for an OAuth provider button. Sized to sit beside text.
 pub(super) fn oauth_provider_icon(provider: &str) -> Markup {
     match provider {

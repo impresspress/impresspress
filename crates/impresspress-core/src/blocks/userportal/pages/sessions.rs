@@ -16,6 +16,7 @@ use crate::{
             helpers::{build_auth_cookie, end_presented_access_token},
             repo::{sessions, tokens},
         },
+        auth_ui::oauth,
         crud,
     },
     crypto::META_AUTH_FAMILY,
@@ -84,10 +85,7 @@ fn sign_in_method(auth_method: &str) -> String {
         "password" => "Password".to_string(),
         "bootstrap" => "Setup link".to_string(),
         other => match other.strip_prefix("oauth.") {
-            Some("github") => "GitHub".to_string(),
-            Some("google") => "Google".to_string(),
-            Some("microsoft") => "Microsoft".to_string(),
-            Some(provider) => provider.to_string(),
+            Some(provider) => oauth::spec::label_of(provider).to_string(),
             None => other.to_string(),
         },
     }

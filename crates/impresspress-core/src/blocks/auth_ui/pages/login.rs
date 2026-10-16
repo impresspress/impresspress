@@ -5,10 +5,10 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
     api_post_script, login_script, oauth_button_script, oauth_provider_configured,
-    oauth_provider_icon, oauth_provider_label, site_config,
+    oauth_provider_icon, site_config,
 };
 use crate::{
-    blocks::auth_ui::redirect::is_safe_local_redirect,
+    blocks::auth_ui::{oauth, redirect::is_safe_local_redirect},
     config_vars::{ALLOW_SIGNUP_KEY, ENABLE_OAUTH_KEY},
     ui::{
         self,
@@ -107,7 +107,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     @if !oauth_providers.is_empty() {
                         div .oauth-buttons {
                             @for provider in &oauth_providers {
-                                (oauth_button(provider, oauth_provider_label(provider), oauth_provider_icon(provider)))
+                                (oauth_button(provider, oauth::spec::label_of(provider), oauth_provider_icon(provider)))
                             }
                         }
                         div .auth-divider { "or" }
