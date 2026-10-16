@@ -1156,7 +1156,7 @@ export interface paths {
         get: {
             parameters: {
                 query: {
-                    provider: "google" | "github" | "microsoft";
+                    provider: "github" | "google" | "microsoft";
                 };
                 header?: never;
                 path?: never;
