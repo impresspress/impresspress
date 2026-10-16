@@ -2511,7 +2511,7 @@ async fn manage_products_page_links_to_product_wizard() {
     // The page's one primary action, in the topbar — not a body header
     // repeating the title — with a plus icon rather than a typed "+".
     assert!(
-        html.contains(r#"<div class="topbar__actions"><a class="btn btn--sm btn--primary" href="/b/products/admin/new"><svg"#),
+        html.contains(r#"<div class="topbar__actions"><a class="btn btn--primary" href="/b/products/admin/new"><svg"#),
         "manage page should link to the full product wizard from the topbar: {html}"
     );
     assert!(html.contains("New product</a>"), "{html}");

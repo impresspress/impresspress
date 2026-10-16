@@ -5,7 +5,7 @@
 //! page HTML outside this module.
 //!
 //! None of these templates renders a page header. The shell's topbar owns the
-//! page's `h1` (`ui::shell::render_topbar`); a body-level heading is an `h2`
+//! page's `h1` (`ui::shell::Topbar::render`); a body-level heading is an `h2`
 //! (a `components::Card` title or a `components::section_header`), rendered
 //! by the page into the template's body.
 

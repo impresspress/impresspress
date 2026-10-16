@@ -96,9 +96,8 @@ pub async fn users_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Users",
         Topbar {
             crumbs: crumb("Users"),
-            actions: Vec::new(),
             subtitle: Some("Manage accounts, roles, and API keys"),
-            show_palette: true,
+            ..Topbar::default()
         },
         body,
     )

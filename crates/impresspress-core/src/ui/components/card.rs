@@ -15,7 +15,7 @@ use crate::ui::icons;
 ///
 /// - [`Card::titled`] renders `section.card > header.card__head + div.card__body`.
 ///   The title is an `h2`: the shell's topbar owns the page's one `h1`
-///   (`ui::shell::render_topbar`), so a card is a section under it.
+///   (`ui::shell::Topbar::render`), so a card is a section under it.
 /// - [`Card::plain`] renders `div.card > div.card__body`, with no heading.
 #[must_use = "a Card renders nothing until `render` is called"]
 pub struct Card<'a> {
@@ -180,9 +180,16 @@ impl<'a> Card<'a> {
 /// hyphen. (HTML forbids uppercase there; the tighter alphabet keeps every
 /// name a literal a spec can select on.) A tail that itself starts `data-`
 /// is the full name passed by mistake, and would render `data-data-…`.
-fn is_data_name(name: &str) -> bool {
+/// An `hx-` tail is refused too: htmx reads `data-hx-get`, `data-hx-post`
+/// and the rest exactly as their `hx-` twins, so a `data()` call would give
+/// the element a request (or an event handler) its builder never declared.
+///
+/// Shared with [`super::action::Action::data`], the other builder that takes
+/// caller-named `data-*` attributes.
+pub(super) fn is_data_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with("data-")
+        && !name.starts_with("hx-")
         && !name.starts_with('-')
         && !name.ends_with('-')
         && name
@@ -190,22 +197,23 @@ fn is_data_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// Insert the `data-*` attributes into the card's opening tag.
+/// Insert the `data-*` attributes into the opening tag of `element` (a card,
+/// or an [`super::action::Action`]'s `a` / `button`).
 ///
 /// maud spells every attribute name as a literal, so a name chosen by the
-/// caller cannot be written inside `html!`. The rest of the card stays in
+/// caller cannot be written inside `html!`. The rest of the element stays in
 /// `html!` (where the stylesheet guards read its classes); this adds the
 /// attributes after the tag name, which is the first run of ASCII letters
 /// after the `<`. Each name passed [`is_data_name`] and each value is
 /// escaped, so the result is as well-formed as maud's own output.
-fn with_data_attributes(card: Markup, data: &[(&'static str, &str)]) -> Markup {
+pub(super) fn with_data_attributes(element: Markup, data: &[(&'static str, &str)]) -> Markup {
     if data.is_empty() {
-        return card;
+        return element;
     }
-    let html = card.into_string();
+    let html = element.into_string();
     let tag_end = 1 + html[1..]
         .find(|c: char| !c.is_ascii_alphabetic())
-        .expect("a card's opening tag has attributes");
+        .expect("the element's opening tag has attributes");
     let mut attrs = String::new();
     for (name, value) in data {
         attrs.push_str(" data-");
@@ -514,6 +522,7 @@ mod tests {
         for bad in [
             "",
             "data-x",
+            "hx-post",
             "-x",
             "x-",
             "Step",

@@ -1619,7 +1619,7 @@ mod tests {
         }
     }
 
-    fn editor(current: Option<documents::DocumentRow>) -> super::pages::EditorView {
+    fn editor(current: Option<documents::DocumentRow>) -> super::pages::EditorView<'static> {
         super::pages::editor_view(
             DocumentType::Terms,
             &super::pages::EditorState {
@@ -1627,27 +1627,54 @@ mod tests {
                 live_version: Some(3),
                 next_version: 4,
             },
+            "/b/legalpages/terms",
         )
     }
 
-    fn actions_html(view: &super::pages::EditorView) -> String {
-        view.actions
-            .iter()
-            .map(|a| a.clone().into_string())
-            .collect()
+    /// The view's header, rendered by the topbar as the shell renders it,
+    /// and its body.
+    fn split(view: super::pages::EditorView<'_>) -> (String, String) {
+        let header = crate::ui::shell::Topbar {
+            secondary_actions: view.secondary_actions,
+            primary_action: Some(view.primary_action),
+            show_palette: false,
+            ..crate::ui::shell::Topbar::default()
+        }
+        .render()
+        .into_string();
+        (header, view.body.into_string())
     }
 
     #[test]
     fn editor_page_uses_textarea_not_contenteditable() {
         let view = editor(Some(draft_row("Terms of Service", "## Use\n\nbody")));
-        let actions = actions_html(&view);
-        let s = view.body.into_string();
+        let (actions, s) = split(view);
         assert!(s.contains("<textarea"), "editor must use <textarea>");
         assert!(!s.contains("contenteditable"), "no contenteditable allowed");
         assert!(s.contains("/b/legalpages/admin/render-preview"));
         // The page actions ride in the topbar, not in a body header row.
         assert!(actions.contains(r#"id="btn-save""#) && actions.contains(r#"id="btn-publish""#));
         assert!(!s.contains(r#"id="btn-publish""#));
+    }
+
+    /// The header's three actions, in the topbar's slots: the public page and
+    /// Save draft are secondaries, Publish the one primary, last. Each keeps
+    /// what `editor.js` and a keyboard user rely on: the ids the script
+    /// finds, the `data-legal-editor-action` marker it reveals, Save's
+    /// shortcut, and the new-tab link saying it opens one.
+    #[test]
+    fn the_editor_header_is_two_secondaries_then_publish() {
+        let (actions, _) = split(editor(Some(draft_row("Terms", "body"))));
+        assert_eq!(
+            actions,
+            concat!(
+                r#"<header class="topbar"><div class="topbar__heading"></div><div class="topbar__actions">"#,
+                r#"<a class="btn btn--secondary" href="/b/legalpages/terms" target="_blank" rel="noopener">Open public page<span class="sr-only"> (opens in a new tab)</span></a>"#,
+                r#"<button data-legal-editor-action="" class="btn btn--secondary" id="btn-save" title="Save draft (Ctrl+S)" aria-keyshortcuts="Control+S Meta+S" type="button" data-action="legalpages-save">Save draft</button>"#,
+                r#"<button data-legal-editor-action="" class="btn btn--primary" id="btn-publish" type="button" data-action="legalpages-publish">Publish</button>"#,
+                r#"</div></header>"#,
+            )
+        );
     }
 
     /// Every editor control has a visible `<label for>`; none relies on a
@@ -1733,9 +1760,9 @@ mod tests {
                 live_version: None,
                 next_version: 1,
             },
+            "/b/legalpages/privacy",
         );
-        let actions = actions_html(&view);
-        let s = view.body.into_string();
+        let (actions, s) = split(view);
         assert!(
             s.contains(r#"<h2 class="empty__title">No privacy policy yet</h2>"#),
             "{s}"
@@ -1759,8 +1786,7 @@ mod tests {
     #[test]
     fn an_existing_document_skips_the_empty_state() {
         let view = editor(Some(draft_row("Terms", "body")));
-        let actions = actions_html(&view);
-        let s = view.body.into_string();
+        let (actions, s) = split(view);
         assert!(!s.contains(r#"id="legal-editor-empty""#));
         assert!(
             s.contains(r#"id="legal-editor" data-doc-type="terms" data-doc-id="doc-123""#),

@@ -442,8 +442,12 @@ pub struct Shell<'a> {
     crumbs: Vec<shell::Crumb<'a>>,
     /// One-line page description, on its own line under the title.
     subtitle: Option<&'a str>,
-    /// Page-level actions in the topbar, left to right — primary action last.
-    actions: Vec<maud::Markup>,
+    /// The topbar's status badges. See [`shell::Topbar::status`].
+    status: Vec<components::HeaderStatus>,
+    /// The topbar's secondary actions, left to right.
+    secondary_actions: Vec<components::HeaderAction<'a>>,
+    /// The topbar's one primary action, rendered last.
+    primary_action: Option<components::HeaderAction<'a>>,
 }
 
 impl<'a> Shell<'a> {
@@ -468,7 +472,9 @@ impl<'a> Shell<'a> {
                 href: None,
             }],
             subtitle: None,
-            actions: Vec::new(),
+            status: Vec::new(),
+            secondary_actions: Vec::new(),
+            primary_action: None,
         }
     }
 
@@ -486,9 +492,29 @@ impl<'a> Shell<'a> {
         }
     }
 
-    /// The page's topbar actions, primary last.
-    pub fn actions(self, actions: Vec<maud::Markup>) -> Self {
-        Self { actions, ..self }
+    /// A status badge in the topbar, after any added before it.
+    pub fn status(mut self, status: components::HeaderStatus) -> Self {
+        self.status.push(status);
+        self
+    }
+
+    /// A secondary action in the topbar, after any added before it.
+    pub fn secondary_action(mut self, action: components::HeaderAction<'a>) -> Self {
+        self.secondary_actions.push(action);
+        self
+    }
+
+    /// The page's one primary action, rendered last in the topbar. A page
+    /// has one: a second call panics rather than replace the first.
+    pub fn primary_action(self, action: components::HeaderAction<'a>) -> Self {
+        assert!(
+            self.primary_action.is_none(),
+            "Shell::primary_action: a page has one primary action"
+        );
+        Self {
+            primary_action: Some(action),
+            ..self
+        }
     }
 }
 
@@ -581,7 +607,9 @@ pub async fn shell_document(
         topbar: shell::Topbar {
             crumbs: shell.crumbs,
             subtitle: shell.subtitle,
-            actions: shell.actions,
+            status: shell.status,
+            secondary_actions: shell.secondary_actions,
+            primary_action: shell.primary_action,
             show_palette: true,
         },
         body: body.into(),
@@ -1329,12 +1357,22 @@ mod tests {
                     label: "Dashboard",
                     href: None,
                 }],
-                actions: Vec::new(),
                 subtitle: None,
-                show_palette: true,
+                ..Topbar::default()
             },
             body: body.into(),
         }
+    }
+
+    /// The header has one primary: a second `primary_action` is refused,
+    /// not quietly swapped for the first.
+    #[test]
+    #[should_panic(expected = "a page has one primary action")]
+    fn a_shell_refuses_a_second_primary_action() {
+        use components::{ActionTarget, HeaderAction};
+        let _ = Shell::admin("X", "X")
+            .primary_action(HeaderAction::new("One", ActionTarget::Link("/1")))
+            .primary_action(HeaderAction::new("Two", ActionTarget::Link("/2")));
     }
 
     #[test]

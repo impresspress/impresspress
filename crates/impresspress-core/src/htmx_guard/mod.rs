@@ -592,3 +592,165 @@ async fn every_admin_page_renders_the_admin_sidebar() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     assert!(checked > 20, "only {checked} admin pages were checked");
 }
+
+/// What every page's header holds, read off the pages the crawl renders:
+/// its status badges, secondaries and primary, in order (see
+/// `test_support::dom::header_items`). The header is typed
+/// (`ui::shell::Topbar`), so this cannot hold a misplaced or mis-emphasised
+/// action; it pins that each page's header still offers what it offers, so
+/// an action that drops out of a header — or a new one nobody named — fails
+/// here by page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_page_header_holds_exactly_the_actions_it_names() {
+    let mut found: Vec<String> = Vec::new();
+    for entry in entries() {
+        let Some(make) = entry.fixture else {
+            continue;
+        };
+        let fixture = make().await;
+        for view in crawl(&fixture).await {
+            let page = view.page(&fixture);
+            let html = crate::test_support::htmx::render(&fixture, &page).await;
+            if !crate::ui::layout::is_document(&html) {
+                continue;
+            }
+            let items = crate::test_support::dom::header_items(&html);
+            if !items.is_empty() {
+                found.push(format!(
+                    "{} => {}",
+                    stable_url(&page.url()),
+                    items
+                        .iter()
+                        .map(|item| stable_status(item))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    let missing: Vec<&str> = EXPECTED_HEADERS
+        .iter()
+        .copied()
+        .filter(|row| !found.iter().any(|f| f == row))
+        .collect();
+    let unexpected: Vec<&str> = found
+        .iter()
+        .map(String::as_str)
+        .filter(|row| !EXPECTED_HEADERS.contains(row))
+        .collect();
+    assert!(
+        missing.is_empty() && unexpected.is_empty(),
+        "{}",
+        header_table_mismatch(&missing, &unexpected, &found)
+    );
+}
+
+/// The guard's failure, by page: each row named but not rendered, each row
+/// rendered but not named, one per line, then the rendered table ready to
+/// paste over `EXPECTED_HEADERS` once the change is the intended one.
+fn header_table_mismatch(missing: &[&str], unexpected: &[&str], found: &[String]) -> String {
+    let mut out = String::from("the page headers the crawl rendered are not the ones named\n");
+    for row in missing {
+        out.push_str(&format!("missing:    {row}\n"));
+    }
+    for row in unexpected {
+        out.push_str(&format!("unexpected: {row}\n"));
+    }
+    out.push_str("\nrendered (paste-ready):\n");
+    for row in found {
+        out.push_str(&format!("    r#\"{row}\"#,\n"));
+    }
+    out
+}
+
+#[test]
+fn the_header_table_mismatch_names_each_row_by_page() {
+    let found = vec!["/a => primary \"New\"".to_string()];
+    let out = header_table_mismatch(
+        &["/b => secondary \"Refresh\""],
+        &["/a => primary \"New\""],
+        &found,
+    );
+    assert!(
+        out.contains("missing:    /b => secondary \"Refresh\"\n"),
+        "{out}"
+    );
+    assert!(out.contains("unexpected: /a => primary \"New\"\n"), "{out}");
+    assert!(out.contains("    r#\"/a => primary \"New\"\"#,\n"), "{out}");
+}
+
+/// `url` with each generated id segment (a UUID) written `{id}`, so the
+/// table below does not depend on the fixture's random ids.
+fn stable_url(url: &str) -> String {
+    url.split('/')
+        .map(|segment| {
+            if segment.len() == 36 && segment.matches('-').count() == 4 {
+                "{id}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A status item with its counts written `N` ("SQLite · N tables"): the
+/// count follows the schema, the badge being there is what is pinned.
+fn stable_status(item: &str) -> String {
+    if !item.starts_with("status ") {
+        return item.to_string();
+    }
+    let mut out = String::new();
+    for c in item.chars() {
+        if c.is_ascii_digit() {
+            if !out.ends_with('N') {
+                out.push('N');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Each crawled page with anything in its header, sorted by URL.
+const EXPECTED_HEADERS: &[&str] = &[
+    r#"/b/admin/blocks => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks?tab=custom => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks?tab=infrastructure => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks?tab=services => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
+    r#"/b/admin/database => status "SQLite · N tables""#,
+    r#"/b/admin/database?tab=schema => status "SQLite · N tables""#,
+    r#"/b/admin/database?tab=sql => status "SQLite · N tables""#,
+    r#"/b/admin/logs => secondary "Refresh""#,
+    r#"/b/admin/logs?errors=1 => secondary "Refresh""#,
+    r#"/b/admin/logs?tab=audit => secondary "Refresh""#,
+    r#"/b/admin/logs?tab=storage => secondary "Refresh""#,
+    r#"/b/legalpages/admin => secondary "Open public page (opens in a new tab)" | secondary "Save draft" | primary "Publish""#,
+    r#"/b/legalpages/admin/privacy => secondary "Open public page (opens in a new tab)" | secondary "Save draft" | primary "Publish""#,
+    r#"/b/legalpages/admin/terms => secondary "Open public page (opens in a new tab)" | secondary "Save draft" | primary "Publish""#,
+    r#"/b/llm/providers => primary "Add provider""#,
+    r#"/b/messages/contexts/{id} => status "task" | status "active""#,
+    r#"/b/products/admin => primary "Create product""#,
+    r#"/b/products/admin/ => primary "Create product""#,
+    r#"/b/products/admin/groups => primary "New group""#,
+    r#"/b/products/admin/manage => primary "New product""#,
+    r#"/b/products/admin/new => secondary "Cancel""#,
+    r#"/b/products/admin/products/live => secondary "Duplicate product" | secondary "Archive product" | secondary "View storefront (opens in a new tab)""#,
+    r#"/b/products/admin/purchases/pur_1 => status "completed" | status "test""#,
+    r#"/b/products/admin/stripe => primary "Configure Stripe""#,
+    r#"/b/products/my-products => primary "New product""#,
+    r#"/b/products/my-products/mine => secondary "Duplicate product" | secondary "Archive product" | secondary "View storefront (opens in a new tab)""#,
+    r#"/b/products/my-products/new => secondary "Cancel""#,
+    r#"/b/products/my-purchases/pur_1 => status "completed" | status "test""#,
+    r#"/b/products/selling/orders/pur_1 => status "completed" | status "test""#,
+    r#"/b/storage/ => primary "New bucket""#,
+    r#"/b/storage/admin/buckets => primary "New bucket""#,
+    r#"/b/storage/photos/ => primary "Upload""#,
+    r#"/b/storage/photos/nested/ => primary "Upload""#,
+    r#"/b/tickets/admin/tickets => primary "New ticket""#,
+    r#"/b/tickets/admin/types => primary "New type""#,
+    r#"/b/vector/ => primary "Create index""#,
+];

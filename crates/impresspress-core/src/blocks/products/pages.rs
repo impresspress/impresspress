@@ -144,7 +144,12 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
 }
 use crate::{
     config_vars,
-    ui::{self, components, icons, settings_form, settings_form::SettingsSection},
+    ui::{
+        self,
+        components::{self, ActionTarget, HeaderAction, HeaderStatus},
+        icons, settings_form,
+        settings_form::SettingsSection,
+    },
     util::{self, RecordExt},
 };
 
@@ -361,6 +366,12 @@ fn count_noun(count: i64, noun: &str) -> String {
     }
 }
 
+/// A page's new-product primary action in the topbar: a link to the
+/// product wizard at `href`, named `label`.
+fn new_product_action<'a>(href: &'a str, label: &'a str) -> HeaderAction<'a> {
+    HeaderAction::new(label, ActionTarget::Link(href)).icon(icons::plus())
+}
+
 /// The "+" create action: a plus icon beside `label`, never a typed "+".
 fn create_link(href: &str, label: &str, class: &str) -> Markup {
     html! {
@@ -503,11 +514,10 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
         msg,
         ui::Shell::admin("Products", "Products")
             .subtitle("Everything you need to set up your catalog and start taking payments")
-            .actions(vec![create_link(
+            .primary_action(new_product_action(
                 "/b/products/admin/new",
                 "Create product",
-                "btn--primary",
-            )]),
+            )),
         Sections::Admin(AdminSection::Overview),
         content,
     )
@@ -710,11 +720,7 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Create, publish, and share the things you sell"
     });
     if !deleted_view {
-        shell = shell.actions(vec![create_link(
-            "/b/products/admin/new",
-            "New product",
-            "btn--primary",
-        )]);
+        shell = shell.primary_action(new_product_action("/b/products/admin/new", "New product"));
     }
     products_page(
         ctx,
@@ -1735,9 +1741,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
             },
         ])
         .subtitle("Choose a starting point, add the essentials, and publish when you are ready")
-        .actions(vec![
-            html! { a .btn .btn--secondary .btn--sm href=(back_href) { "Cancel" } },
-        ]);
+        .secondary_action(HeaderAction::new("Cancel", ActionTarget::Link(back_href)));
     products_page(ctx, msg, shell, sections, content).await
 }
 
@@ -2291,32 +2295,48 @@ pub async fn product_manager(
     // topbar, the primary one (publish, or approve a listing under review)
     // last. The details card below keeps one primary of its own, Save.
     let owned_by_seller = product.str_field("owner_kind") == "user";
-    let mut actions = vec![html! {
-        button .btn .btn--secondary .btn--sm type="button" data-action="pm-duplicate" { "Duplicate product" }
-    }];
+    let storefront_href = format!("/b/products/catalog/{product_id}");
+    let mut secondary_actions = vec![HeaderAction::new(
+        "Duplicate product",
+        ActionTarget::Delegated("pm-duplicate"),
+    )];
     if !archived {
-        actions.push(html! {
-            button .btn .btn--secondary .btn--sm type="button" data-action="pm-set-status" data-product-status="archived" { "Archive product" }
-        });
+        secondary_actions.push(
+            HeaderAction::new("Archive product", ActionTarget::Delegated("pm-set-status"))
+                .data("product-status", "archived"),
+        );
     }
     if live {
-        actions.push(html! {
-            a .btn .btn--secondary .btn--sm href=(format!("/b/products/catalog/{product_id}")) target="_blank" rel="noopener" { "View storefront" }
-        });
+        secondary_actions.push(HeaderAction::new(
+            "View storefront",
+            ActionTarget::NewTab(&storefront_href),
+        ));
     }
     let moderating = admin && owned_by_seller && awaiting_moderation;
-    if moderating {
-        actions.push(html! {
-            button .btn .btn--secondary .btn--sm type="button" data-moderation-action="reject" data-action="pm-moderate" { "Return to seller" }
-        });
-        actions.push(html! {
-            button .btn .btn--primary .btn--sm type="button" data-moderation-action="approve" data-action="pm-moderate" { "Approve listing" }
-        });
+    let primary_action = if moderating {
+        secondary_actions.push(
+            HeaderAction::new("Return to seller", ActionTarget::Delegated("pm-moderate"))
+                .data("moderation-action", "reject"),
+        );
+        Some(
+            HeaderAction::new("Approve listing", ActionTarget::Delegated("pm-moderate"))
+                .data("moderation-action", "approve"),
+        )
     } else if publishable {
-        actions.push(html! {
-            button .btn .btn--primary .btn--sm type="button" data-action="pm-set-status" data-product-status="active" { @if admin { "Publish product" } @else { "Submit for publication" } }
-        });
-    }
+        Some(
+            HeaderAction::new(
+                if admin {
+                    "Publish product"
+                } else {
+                    "Submit for publication"
+                },
+                ActionTarget::Delegated("pm-set-status"),
+            )
+            .data("product-status", "active"),
+        )
+    } else {
+        None
+    };
     let content = html! {
         p #product-manager-error .login-error role="alert" aria-live="assertive" hidden {}
         section .card {
@@ -2456,8 +2476,14 @@ pub async fn product_manager(
                 href: None,
             },
         ])
-        .subtitle("Update what customers see, manage pricing, and share checkout")
-        .actions(actions);
+        .subtitle("Update what customers see, manage pricing, and share checkout");
+    let shell = secondary_actions
+        .into_iter()
+        .fold(shell, |shell, action| shell.secondary_action(action));
+    let shell = match primary_action {
+        Some(action) => shell.primary_action(action),
+        None => shell,
+    };
     products_page(ctx, msg, shell, sections, content).await
 }
 
@@ -2605,13 +2631,14 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     products_page(
-ctx,
+        ctx,
         msg,
         ui::Shell::admin("Groups", "Groups")
             .subtitle("Keep related products together so your catalog is easier to browse")
-            .actions(vec![html! {
-                button .btn .btn--primary .btn--sm type="button" data-action="pc-new" { (icons::plus()) " New group" }
-            }]),
+            .primary_action(
+                HeaderAction::new("New group", ActionTarget::Delegated("pc-new"))
+                    .icon(icons::plus()),
+            ),
         Sections::Admin(AdminSection::Groups),
         content,
     )
@@ -2979,19 +3006,22 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     // One way to the Stripe settings: the primary action while Stripe is
     // not configured, a secondary one once it is.
-    let configure_class = if status.state == StripeConnectionState::NotConfigured {
-        "btn--primary"
+    let configure = HeaderAction::new(
+        "Configure Stripe",
+        ActionTarget::Link("/b/products/admin/settings"),
+    );
+    let shell = ui::Shell::admin("Stripe setup", "Stripe setup").subtitle(
+        "Connect Stripe, confirm payment readiness, and review anything that needs attention",
+    );
+    let shell = if status.state == StripeConnectionState::NotConfigured {
+        shell.primary_action(configure)
     } else {
-        "btn--secondary"
+        shell.secondary_action(configure)
     };
     products_page(
-ctx,
+        ctx,
         msg,
-        ui::Shell::admin("Stripe setup", "Stripe setup")
-            .subtitle("Connect Stripe, confirm payment readiness, and review anything that needs attention")
-            .actions(vec![html! {
-                a class={ "btn btn--sm " (configure_class) } href="/b/products/admin/settings" { "Configure Stripe" }
-            }]),
+        shell,
         Sections::Admin(AdminSection::Stripe),
         content,
     )
@@ -3850,10 +3880,8 @@ async fn order_detail(
                 href: None,
             },
         ])
-        .actions(vec![
-            components::status_badge(purchase.str_field("status")),
-            components::status_badge(livemode),
-        ]);
+        .status(HeaderStatus::status(purchase.str_field("status")))
+        .status(HeaderStatus::status(livemode));
     products_page(ctx, msg, shell, sections, content).await
 }
 
@@ -3995,11 +4023,10 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Create products and manage their offers, checkout links, and publication status"
     });
     if !deleted_view {
-        shell = shell.actions(vec![create_link(
+        shell = shell.primary_action(new_product_action(
             "/b/products/my-products/new",
             "New product",
-            "btn--primary",
-        )]);
+        ));
     }
     products_page(
         ctx,

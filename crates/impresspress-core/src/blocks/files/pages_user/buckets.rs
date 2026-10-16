@@ -9,7 +9,9 @@ use crate::{
     db_read::CappedList,
     ui::{
         self,
-        components::{self, Action, ActionTarget, BadgeVariant, DataTable, TableCol, TableRow},
+        components::{
+            self, Action, ActionTarget, BadgeVariant, DataTable, HeaderAction, TableCol, TableRow,
+        },
         icons,
         templates::list_page,
     },
@@ -53,13 +55,18 @@ pub(crate) fn visibility_badge(public: bool) -> Markup {
     }
 }
 
-/// The "New bucket" trigger, as the topbar action and the empty state's
-/// call to action both render it: it opens the modal through chrome.js's
-/// `modal-open` verb.
+/// The "New bucket" trigger as the empty state's call to action: it opens
+/// the modal through chrome.js's `modal-open` verb.
 pub(crate) fn new_bucket_button() -> Markup {
     Action::primary("New bucket", ActionTarget::Modal(NEW_BUCKET_MODAL_ID))
         .icon(icons::plus())
         .render()
+}
+
+/// The same trigger as the topbar's primary action, on the user's bucket
+/// list and administration's.
+pub(crate) fn new_bucket_action() -> HeaderAction<'static> {
+    HeaderAction::new("New bucket", ActionTarget::Modal(NEW_BUCKET_MODAL_ID)).icon(icons::plus())
 }
 
 /// The empty state a bucket list shows before any bucket exists, with the
@@ -228,7 +235,7 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
         msg,
         ui::Shell::portal("Files", "Files")
             .subtitle("Your buckets and their object counts.")
-            .actions(vec![new_bucket_button()]),
+            .primary_action(new_bucket_action()),
         body,
     )
     .await

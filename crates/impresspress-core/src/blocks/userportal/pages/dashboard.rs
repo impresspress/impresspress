@@ -13,7 +13,13 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::crud,
     http::redirect,
-    ui::{self, components::section_header, icons, sidebar::nav_icon, Shell, UserInfo},
+    ui::{
+        self,
+        components::{section_header, ActionTarget, HeaderAction},
+        icons,
+        sidebar::nav_icon,
+        Shell, UserInfo,
+    },
     util::RecordExt,
 };
 
@@ -65,26 +71,17 @@ pub async fn dashboard_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
-    let actions = if is_admin {
-        vec![html! {
-            a .btn .btn--secondary href="/b/admin/" {
-                (icons::layout_dashboard())
-                span { "Open admin panel" }
-            }
-        }]
+    let shell = Shell::portal("Overview", "Overview").subtitle("Your account and apps.");
+    let shell = if is_admin {
+        shell.secondary_action(
+            HeaderAction::new("Open admin panel", ActionTarget::Link("/b/admin/"))
+                .icon(icons::layout_dashboard()),
+        )
     } else {
-        Vec::new()
+        shell
     };
 
-    ui::shell_page(
-        ctx,
-        msg,
-        Shell::portal("Overview", "Overview")
-            .subtitle("Your account and apps.")
-            .actions(actions),
-        body,
-    )
-    .await
+    ui::shell_page(ctx, msg, shell, body).await
 }
 
 fn nav_link(href: &str, icon: Markup, label: &str, description: Option<&str>) -> Markup {

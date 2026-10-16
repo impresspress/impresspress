@@ -236,9 +236,8 @@ async fn render_document(
         "Settings",
         Topbar {
             crumbs: crumb("Settings"),
-            actions: Vec::new(),
             subtitle: Some(tab_title(active)),
-            show_palette: true,
+            ..Topbar::default()
         },
         form_body,
     )

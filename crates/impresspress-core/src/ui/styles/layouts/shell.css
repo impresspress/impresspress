@@ -373,11 +373,6 @@
 }
 .topbar__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: 0; }
 .topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
-/* The actions stand in one row with the palette button, so a small one
-   takes the row's height (and an icon one its width) -- its text stays
-   small. */
-.topbar__actions .btn--sm { min-height: var(--control-height); }
-.topbar__actions .btn--icon.btn--sm { min-width: var(--control-height); }
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
 	min-height: var(--control-height);

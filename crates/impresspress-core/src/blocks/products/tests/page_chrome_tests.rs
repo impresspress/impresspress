@@ -193,6 +193,16 @@ async fn product_detail_has_one_primary_per_section() {
     let actions = topbar_actions(&html);
     assert_eq!(actions.matches("btn--primary").count(), 1, "{actions}");
     assert!(actions.contains("Publish product"), "{actions}");
+    // `products-manager.js` reads the status each lifecycle action sets off
+    // the button that carries it.
+    assert!(
+        actions.contains(r#"<button data-product-status="archived" class="btn btn--secondary" type="button" data-action="pm-set-status">Archive product</button>"#),
+        "{actions}"
+    );
+    assert!(
+        actions.contains(r#"<button data-product-status="active" class="btn btn--primary" type="button" data-action="pm-set-status">Publish product</button>"#),
+        "{actions}"
+    );
     // The details card: everything before the (hidden) pricing editor, a
     // section with its own Save.
     let card = body(&html)
@@ -332,7 +342,9 @@ async fn stripe_page_states_are_badges_and_settings_have_one_way_in() {
     assert!(!html.contains("Edit Stripe settings"), "{html}");
     // Not configured, so configuring is the page's primary action.
     assert!(
-        topbar_actions(&html).contains(r#"<a class="btn btn--sm btn--primary" href="/b/products/admin/settings">Configure Stripe</a>"#),
+        topbar_actions(&html).contains(
+            r#"<a class="btn btn--primary" href="/b/products/admin/settings">Configure Stripe</a>"#
+        ),
         "{html}"
     );
     assert!(

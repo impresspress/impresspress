@@ -18,7 +18,10 @@ use crate::{
     endpoint_match,
     ui::{
         self,
-        components::{self, BadgeVariant, CalloutTone, DataTable, Modal, TableCol, TableRow},
+        components::{
+            self, ActionTarget, BadgeVariant, CalloutTone, DataTable, HeaderAction, Modal,
+            TableCol, TableRow,
+        },
         icons,
         shell::Crumb,
         templates::{self, DetailHero, DetailMeta},
@@ -99,7 +102,10 @@ pub async fn inbox(ctx: &dyn Context, msg: &Message) -> OutputStream {
         msg,
         ui::Shell::admin("Tickets", "Tickets")
             .subtitle("Public reports and internal work items")
-            .actions(vec![new_ticket_button()]),
+            .primary_action(
+                HeaderAction::new("New ticket", ActionTarget::Modal(CREATE_TICKET_MODAL))
+                    .icon(icons::plus()),
+            ),
         Section::Inbox,
         content,
     )
@@ -168,7 +174,10 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
         msg,
         ui::Shell::admin("Ticket types", "Tickets")
             .subtitle("The categories every ticket is filed under")
-            .actions(vec![new_type_button()]),
+            .primary_action(
+                HeaderAction::new("New type", ActionTarget::Modal(CREATE_TYPE_MODAL))
+                    .icon(icons::plus()),
+            ),
         Section::Types,
         content,
     )

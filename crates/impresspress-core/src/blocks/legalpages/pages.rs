@@ -19,7 +19,9 @@ use crate::{
     http::{err_bad_request, ok_json, ResponseBuilder},
     ui::{
         self,
-        components::{self, BadgeVariant, DataTable, TableCol, TableRow},
+        components::{
+            self, ActionTarget, BadgeVariant, DataTable, HeaderAction, TableCol, TableRow,
+        },
         icons, settings_form,
     },
     util::wire_str,
@@ -129,20 +131,27 @@ pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentTyp
             .await
         }
     };
-    let view = editor_view(doc_type, &state);
+    let wire = wire_str(&doc_type);
+    let public_href = format!("/b/legalpages/{wire}");
+    let view = editor_view(doc_type, &state, &public_href);
+    let mut shell = ui::Shell::admin(doc_type.title(), doc_type.title());
+    for action in view.secondary_actions {
+        shell = shell.secondary_action(action);
+    }
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin(doc_type.title(), doc_type.title()).actions(view.actions),
-        ui::PageBody::from(view.body).with_subnav(section_links(wire_str(&doc_type).as_str())),
+        shell.primary_action(view.primary_action),
+        ui::PageBody::from(view.body).with_subnav(section_links(wire.as_str())),
     )
     .await
 }
 
 /// The editor page's two halves: the page-level actions (open, save,
 /// publish), which ride in the shell topbar, and the body.
-pub(super) struct EditorView {
-    pub actions: Vec<Markup>,
+pub(super) struct EditorView<'a> {
+    pub secondary_actions: Vec<HeaderAction<'a>>,
+    pub primary_action: HeaderAction<'a>,
     pub body: Markup,
 }
 
@@ -156,7 +165,12 @@ const EDITOR_JS: &str = include_str!("assets/editor.js");
 /// The document's name is the topbar's `h1` and the Title field's value, and
 /// nowhere else: the status row says what state the document is in, not what
 /// it is called.
-pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> EditorView {
+/// `public_href` is the document's public page, which the header opens.
+pub(super) fn editor_view<'a>(
+    doc_type: DocumentType,
+    state: &EditorState,
+    public_href: &'a str,
+) -> EditorView<'a> {
     let doc = state.current.as_ref();
     let started = doc.is_some();
     let name = doc_type.title();
@@ -176,34 +190,21 @@ pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> Editor
     // The page's actions live in the topbar (the page header); the delegated
     // listener in EDITOR_JS finds them by id wherever they render. Save and
     // Publish wait for the empty state's "Write …" — there is nothing to
-    // save before it. Primary action last.
-    let actions = vec![
-        html! {
-            a .btn .btn--sm .btn--ghost
-                href={"/b/legalpages/" (wire_str(&doc_type))}
-                target="_blank" rel="noopener"
-            {
-                "Open public page"
-                span .sr-only { " (opens in a new tab)" }
-            }
-        },
-        html! {
-            button #btn-save .btn .btn--sm .btn--secondary type="button"
-                data-action="legalpages-save"
-                data-legal-editor-action
-                hidden[!started]
-                aria-keyshortcuts="Control+S Meta+S"
-                title="Save draft (Ctrl+S)"
-            { "Save draft" }
-        },
-        html! {
-            button #btn-publish .btn .btn--sm .btn--primary type="button"
-                data-action="legalpages-publish"
-                data-legal-editor-action
-                hidden[!started]
-            { "Publish" }
-        },
+    // save before it.
+    let secondary_actions = vec![
+        HeaderAction::new("Open public page", ActionTarget::NewTab(public_href)),
+        HeaderAction::new("Save draft", ActionTarget::Delegated("legalpages-save"))
+            .id("btn-save")
+            .data("legal-editor-action", "")
+            .hidden(!started)
+            .keyshortcuts("Control+S Meta+S")
+            .title("Save draft (Ctrl+S)"),
     ];
+    let primary_action =
+        HeaderAction::new("Publish", ActionTarget::Delegated("legalpages-publish"))
+            .id("btn-publish")
+            .data("legal-editor-action", "")
+            .hidden(!started);
 
     let body = html! {
         @if !started {
@@ -288,7 +289,11 @@ pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> Editor
 
         script { (PreEscaped(EDITOR_JS)) }
     };
-    EditorView { actions, body }
+    EditorView {
+        secondary_actions,
+        primary_action,
+        body,
+    }
 }
 
 /// The editor textarea's text: the current version's Markdown, or nothing.

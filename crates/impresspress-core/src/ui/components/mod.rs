@@ -19,10 +19,10 @@ mod stat;
 mod table;
 mod time;
 
-pub use action::{Action, ActionTarget};
+pub use action::{Action, ActionTarget, HeaderAction};
 pub use auth::{alert, alert_message, auth_panel, oauth_button, AlertVariant};
 pub use avatar::{avatar, AvatarSize};
-pub use badge::{badge, status_badge, Badge, BadgeVariant};
+pub use badge::{badge, status_badge, Badge, BadgeVariant, HeaderStatus};
 pub use button::{filter_links, filter_toggle, subnav, tab_navigation, FilterLinks, Tab};
 pub use callout::{callout, CalloutTone};
 pub use card::Card;

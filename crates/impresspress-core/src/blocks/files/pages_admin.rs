@@ -7,7 +7,7 @@ use super::{models::QuotaConfig, repo};
 use crate::{
     ui::{
         self,
-        components::{self, DataTable, TableCol, TableRow},
+        components::{self, DataTable, HeaderAction, TableCol, TableRow},
         icons,
     },
     util::format_bytes,
@@ -38,13 +38,13 @@ pub(crate) fn admin_sections(active: &str) -> Markup {
 }
 
 /// Admin storage shell: the admin nav, the page's one crumb, its subtitle and
-/// actions, and the storage sections above the body.
+/// primary action, and the storage sections above the body.
 async fn files_page(
     ctx: &dyn Context,
     msg: &Message,
     section: &str,
     subtitle: &str,
-    actions: Vec<Markup>,
+    primary_action: Option<HeaderAction<'_>>,
     content: Markup,
 ) -> OutputStream {
     let title = if section == "Overview" {
@@ -52,12 +52,14 @@ async fn files_page(
     } else {
         section
     };
+    let mut shell = ui::Shell::admin(title, title).subtitle(subtitle);
+    if let Some(action) = primary_action {
+        shell = shell.primary_action(action);
+    }
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin(title, title)
-            .subtitle(subtitle)
-            .actions(actions),
+        shell,
         ui::PageBody::from(content).with_subnav(admin_sections(section)),
     )
     .await
@@ -159,15 +161,7 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
         (render_admin_overview_quotas_hint(stats.quotas_count))
     };
 
-    files_page(
-        ctx,
-        msg,
-        "Overview",
-        "File storage statistics",
-        Vec::new(),
-        body,
-    )
-    .await
+    files_page(ctx, msg, "Overview", "File storage statistics", None, body).await
 }
 
 /// The five overview figures, or the failure that stopped us reading one.
@@ -287,7 +281,7 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
         msg,
         "Buckets",
         "All storage buckets",
-        vec![super::pages_user::buckets::new_bucket_button()],
+        Some(super::pages_user::buckets::new_bucket_action()),
         body,
     )
     .await
@@ -378,7 +372,7 @@ pub async fn shares(ctx: &dyn Context, msg: &Message) -> OutputStream {
         msg,
         "Shares",
         "Public file share links",
-        Vec::new(),
+        None,
         render_admin_shares_table(&rows),
     )
     .await
@@ -486,7 +480,7 @@ pub async fn quotas(ctx: &dyn Context, msg: &Message) -> OutputStream {
         msg,
         "Quotas",
         "Per-user storage limits",
-        Vec::new(),
+        None,
         render_admin_quotas_table(&rows),
     )
     .await

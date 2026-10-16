@@ -11,7 +11,8 @@ use crate::{
     ui::{
         self,
         components::{
-            self, empty_state, tab_navigation, Badge, BadgeVariant, Card, Modal, ModalSize, Tab,
+            self, empty_state, tab_navigation, ActionTarget, Badge, BadgeVariant, Card,
+            HeaderAction, Modal, ModalSize, Tab,
         },
         icons,
         shell::Topbar,
@@ -130,17 +131,13 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // Two separate topbar actions, so the topbar can wrap them one per row
     // on a narrow screen.
     let page_actions = vec![
-        html! {
-            a .btn .btn--sm .btn--secondary .gap-1 href="https://wafer.run/registry" target="_blank"
-            {
-                (icons::arrow_up_right()) " Explore WASM blocks"
-            }
-        },
-        html! {
-            a .btn .btn--secondary .btn--sm href="/b/inspector/ui" target="_blank" {
-                (icons::globe()) " Open Inspector"
-            }
-        },
+        HeaderAction::new(
+            "Explore WASM blocks",
+            ActionTarget::NewTab("https://wafer.run/registry"),
+        )
+        .icon(icons::arrow_up_right()),
+        HeaderAction::new("Open Inspector", ActionTarget::NewTab("/b/inspector/ui"))
+            .icon(icons::globe()),
     ];
 
     let tabs_and_body = html! {
@@ -281,9 +278,9 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Blocks",
         Topbar {
             crumbs: crumb("Blocks"),
-            actions: page_actions,
             subtitle: Some("Registered WAFER blocks"),
-            show_palette: true,
+            secondary_actions: page_actions,
+            ..Topbar::default()
         },
         body,
     )

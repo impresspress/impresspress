@@ -11,6 +11,8 @@
 
 use maud::{html, Markup};
 
+use super::card::{is_data_name, with_data_attributes};
+
 /// Where an action sits in the page's hierarchy, and so how it looks.
 ///
 /// | Emphasis | Class | Look | For |
@@ -51,6 +53,8 @@ pub enum ActionTarget<'a> {
     /// `a href`: go to a page.
     Link(&'a str),
     /// `a href target="_blank" rel="noopener"`: open a page in a new tab.
+    /// The link tells a screen reader so ("(opens in a new tab)", visually
+    /// hidden), since nothing else on it does.
     NewTab(&'a str),
     /// Open the `components::modal` with this id (`chrome.js` binds every
     /// `data-action="modal-open"` trigger).
@@ -80,6 +84,9 @@ pub struct Action<'a> {
     small: bool,
     id: Option<&'a str>,
     hidden: bool,
+    title: Option<&'a str>,
+    keyshortcuts: Option<&'a str>,
+    data: Vec<(&'static str, &'a str)>,
 }
 
 impl<'a> Action<'a> {
@@ -92,6 +99,9 @@ impl<'a> Action<'a> {
             small: false,
             id: None,
             hidden: false,
+            title: None,
+            keyshortcuts: None,
+            data: Vec::new(),
         }
     }
 
@@ -146,6 +156,40 @@ impl<'a> Action<'a> {
         self
     }
 
+    /// The `title` tooltip (`"Save draft (Ctrl+S)"`). It is a hint only:
+    /// the label stays the accessible name.
+    pub fn title(mut self, title: &'a str) -> Self {
+        self.title = Some(title);
+        self
+    }
+
+    /// The `aria-keyshortcuts` the page's script binds to this action
+    /// (`"Control+S Meta+S"`).
+    pub fn keyshortcuts(mut self, keys: &'a str) -> Self {
+        self.keyshortcuts = Some(keys);
+        self
+    }
+
+    /// A `data-{name}` attribute: a parameter the page's script reads off
+    /// the action (`.data("product-status", "archived")` beside
+    /// `ActionTarget::Delegated("pm-set-status")`), or a marker it selects
+    /// on. `name` is the part after `data-`, as for `Card::data`. The two
+    /// names a target writes, `action` and `modal-target`, are refused: the
+    /// target owns them.
+    pub fn data(mut self, name: &'static str, value: &'a str) -> Self {
+        assert!(
+            is_data_name(name),
+            "Action::data takes the part after `data-`, in lowercase ASCII letters, digits and \
+             inner hyphens; got {name:?}"
+        );
+        assert!(
+            !matches!(name, "action" | "modal-target"),
+            "Action::data({name:?}) would repeat the attribute the ActionTarget writes"
+        );
+        self.data.push((name, value));
+        self
+    }
+
     pub(super) fn emphasis(&self) -> Emphasis {
         self.emphasis
     }
@@ -156,34 +200,113 @@ impl<'a> Action<'a> {
         } else {
             format!("btn {}", self.emphasis.class())
         };
+        let new_tab = matches!(self.target, ActionTarget::NewTab(_));
         let content = html! {
             @if let Some(icon) = self.icon { (icon) }
             (self.label)
+            @if new_tab { span .sr-only { " (opens in a new tab)" } }
         };
-        let (id, hidden) = (self.id, self.hidden);
-        match self.target {
+        let (id, hidden, title, keys) = (self.id, self.hidden, self.title, self.keyshortcuts);
+        let element = match self.target {
             ActionTarget::Link(href) => html! {
-                a class=(class) id=[id] hidden[hidden] href=(href) { (content) }
+                a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                    href=(href)
+                { (content) }
             },
             ActionTarget::NewTab(href) => html! {
-                a class=(class) id=[id] hidden[hidden] href=(href) target="_blank" rel="noopener" { (content) }
+                a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                    href=(href) target="_blank" rel="noopener"
+                { (content) }
             },
             ActionTarget::Modal(modal) => html! {
-                button class=(class) id=[id] hidden[hidden] type="button"
-                    data-action="modal-open" data-modal-target=(modal)
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                    type="button" data-action="modal-open" data-modal-target=(modal)
                 { (content) }
             },
             ActionTarget::Delegated(verb) => html! {
-                button class=(class) id=[id] hidden[hidden] type="button" data-action=(verb) { (content) }
-            },
-            ActionTarget::Submit { form } => html! {
-                button class=(class) id=[id] hidden[hidden] type="submit" form=[form] { (content) }
-            },
-            ActionTarget::HxGet { url, target } => html! {
-                button class=(class) id=[id] hidden[hidden] type="button" hx-get=(url) hx-target=(target)
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                    type="button" data-action=(verb)
                 { (content) }
             },
+            ActionTarget::Submit { form } => html! {
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                    type="submit" form=[form]
+                { (content) }
+            },
+            ActionTarget::HxGet { url, target } => html! {
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                    type="button" hx-get=(url) hx-target=(target)
+                { (content) }
+            },
+        };
+        with_data_attributes(element, &self.data)
+    }
+}
+
+/// One action in the page header (`ui::shell::Topbar`): a label, an
+/// optional icon and an [`ActionTarget`], plus the attributes a page script
+/// needs (`id`, `hidden`, `data-*`, a shortcut).
+///
+/// It carries no emphasis and no size. The header's slot picks the emphasis
+/// (`Topbar::secondary_actions` render as secondaries, `primary_action` as
+/// the one primary, after them) and every header action keeps the control
+/// height. So the header states the slot rules out cannot be written: two
+/// header primaries, a primary that is not last, a quiet, destructive or
+/// small header button.
+#[must_use = "a HeaderAction renders nothing until it is put in a Topbar"]
+pub struct HeaderAction<'a>(Action<'a>);
+
+impl<'a> HeaderAction<'a> {
+    pub fn new(label: &'a str, target: ActionTarget<'a>) -> Self {
+        // The emphasis is a placeholder: the slot sets it when it renders.
+        Self(Action::secondary(label, target))
+    }
+
+    /// A leading icon, as [`Action::icon`].
+    pub fn icon(self, icon: Markup) -> Self {
+        Self(self.0.icon(icon))
+    }
+
+    pub fn id(self, id: &'a str) -> Self {
+        Self(self.0.id(id))
+    }
+
+    /// Render with the `hidden` attribute, for an action a script reveals.
+    pub fn hidden(self, hidden: bool) -> Self {
+        Self(self.0.hidden(hidden))
+    }
+
+    /// As [`Action::title`].
+    pub fn title(self, title: &'a str) -> Self {
+        Self(self.0.title(title))
+    }
+
+    /// As [`Action::keyshortcuts`].
+    pub fn keyshortcuts(self, keys: &'a str) -> Self {
+        Self(self.0.keyshortcuts(keys))
+    }
+
+    /// As [`Action::data`].
+    pub fn data(self, name: &'static str, value: &'a str) -> Self {
+        Self(self.0.data(name, value))
+    }
+
+    /// Render in the header's secondary slot.
+    pub(in crate::ui) fn render_secondary(self) -> Markup {
+        Action {
+            emphasis: Emphasis::Secondary,
+            ..self.0
         }
+        .render()
+    }
+
+    /// Render as the header's one primary.
+    pub(in crate::ui) fn render_primary(self) -> Markup {
+        Action {
+            emphasis: Emphasis::Primary,
+            ..self.0
+        }
+        .render()
     }
 }
 
@@ -237,7 +360,7 @@ mod tests {
         );
         assert_eq!(
             s(ActionTarget::NewTab("/b/legalpages/privacy")),
-            r#"<a class="btn btn--secondary" href="/b/legalpages/privacy" target="_blank" rel="noopener">Do</a>"#
+            r#"<a class="btn btn--secondary" href="/b/legalpages/privacy" target="_blank" rel="noopener">Do<span class="sr-only"> (opens in a new tab)</span></a>"#
         );
         assert_eq!(
             s(ActionTarget::Modal("new-bucket")),
@@ -283,6 +406,73 @@ mod tests {
         );
         assert!(s.ends_with("</svg>Remove</button>"), "{s}");
         assert!(!render(Action::secondary("x", ActionTarget::Link("/"))).contains("hidden"));
+    }
+
+    #[test]
+    fn title_keyshortcuts_and_data_attributes_go_on_the_element() {
+        let s = render(
+            Action::secondary("Save draft", ActionTarget::Delegated("save"))
+                .title("Save draft (Ctrl+S)")
+                .keyshortcuts("Control+S Meta+S")
+                .data("product-status", "a\"b")
+                .data("marker", ""),
+        );
+        assert_eq!(
+            s,
+            r#"<button data-product-status="a&quot;b" data-marker="" class="btn btn--secondary" title="Save draft (Ctrl+S)" aria-keyshortcuts="Control+S Meta+S" type="button" data-action="save">Save draft</button>"#
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Action::data takes the part after `data-`")]
+    fn data_names_are_the_tail_of_a_data_attribute() {
+        let _ = Action::secondary("x", ActionTarget::Link("/")).data("data-x", "1");
+    }
+
+    /// htmx reads `data-hx-post` as `hx-post`: a request goes through
+    /// `ActionTarget::HxGet`, never through `data()`.
+    #[test]
+    #[should_panic(expected = "Action::data takes the part after `data-`")]
+    fn data_refuses_an_htmx_attribute() {
+        let _ = Action::secondary("x", ActionTarget::Link("/")).data("hx-post", "/b/x");
+    }
+
+    /// The target writes `data-action` / `data-modal-target`; a second copy
+    /// from `data()` would be a duplicate attribute the browser ignores.
+    #[test]
+    fn data_refuses_the_names_a_target_writes() {
+        for name in ["action", "modal-target"] {
+            let refused = std::panic::catch_unwind(|| {
+                Action::secondary("x", ActionTarget::Modal("m")).data(name, "y")
+            });
+            assert!(refused.is_err(), "{name} must be refused");
+        }
+    }
+
+    /// A header action takes its emphasis from the slot it renders in, and
+    /// keeps every attribute it was given.
+    #[test]
+    fn a_header_action_renders_as_its_slot_says() {
+        let action = || {
+            HeaderAction::new("Approve", ActionTarget::Delegated("moderate"))
+                .icon(icons::plus())
+                .id("approve")
+                .hidden(true)
+                .data("moderation-action", "approve")
+        };
+        let plus = icons::plus().into_string();
+        assert_eq!(
+            action().render_primary().into_string(),
+            format!(
+                r#"<button data-moderation-action="approve" class="btn btn--primary" id="approve" hidden type="button" data-action="moderate">{plus}Approve</button>"#
+            )
+        );
+        assert_eq!(
+            action().render_secondary().into_string(),
+            format!(
+                r#"<button data-moderation-action="approve" class="btn btn--secondary" id="approve" hidden type="button" data-action="moderate">{plus}Approve</button>"#
+            )
+        );
     }
 
     #[test]

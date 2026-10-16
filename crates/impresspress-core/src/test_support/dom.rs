@@ -123,6 +123,30 @@ pub fn heading_outline(html: &str) -> Vec<(u8, String)> {
         .collect()
 }
 
+/// The page header's status and actions (`ui::shell::Topbar`), in order, as
+/// one line each: `status "SQLite · 9 tables"`, `secondary "Refresh"`,
+/// `primary "New bucket"`, with ` hidden` after one the markup conceals.
+/// An item that is neither a badge nor a secondary or primary `.btn` is
+/// reported by [`describe`], so a guard sees it rather than skips it.
+pub fn header_items(html: &str) -> Vec<String> {
+    let doc = Html::parse_document(html);
+    doc.select(&selector("header.topbar > .topbar__actions > *"))
+        .map(|item| {
+            let kind = if has_class(item, "badge") {
+                "status"
+            } else if has_class(item, "btn") && has_class(item, PRIMARY) {
+                "primary"
+            } else if has_class(item, "btn") && has_class(item, "btn--secondary") {
+                "secondary"
+            } else {
+                return describe(item);
+            };
+            let hidden = if concealed(item) { " hidden" } else { "" };
+            format!("{kind} {:?}{hidden}", text_of(item))
+        })
+        .collect()
+}
+
 /// How a guard names an element: `button.btn.btn--primary "Save"`.
 pub fn describe(el: ElementRef<'_>) -> String {
     let mut out = el.value().name().to_string();
@@ -182,6 +206,33 @@ mod tests {
 
     fn primary(label: &str) -> String {
         format!("button.btn.btn--primary {label:?}")
+    }
+
+    // ── header_items ─────────────────────────────────────────────────────
+
+    #[test]
+    fn header_items_name_each_slot_in_order() {
+        let html = concat!(
+            r#"<header class="topbar"><div class="topbar__heading"><h1>T</h1></div>"#,
+            r#"<div class="topbar__actions">"#,
+            r#"<span class="badge badge-info">SQLite · 3 tables</span>"#,
+            r#"<a class="btn btn--secondary" href="/x">Open <span class="sr-only">(new tab)</span></a>"#,
+            r#"<button class="btn btn--secondary" hidden>Save</button>"#,
+            r#"<button class="btn btn--ghost">Quiet</button>"#,
+            r#"<button class="btn btn--primary">Publish</button>"#,
+            r#"</div></header><main><button class="btn btn--primary">Body</button></main>"#,
+        );
+        assert_eq!(
+            header_items(html),
+            [
+                r#"status "SQLite · 3 tables""#,
+                r#"secondary "Open (new tab)""#,
+                r#"secondary "Save" hidden"#,
+                r#"button.btn.btn--ghost "Quiet""#,
+                r#"primary "Publish""#,
+            ]
+        );
+        assert!(header_items("<main><p>no header</p></main>").is_empty());
     }
 
     // ── visible_primaries ────────────────────────────────────────────────
