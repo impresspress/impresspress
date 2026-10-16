@@ -2066,3 +2066,188 @@ mod executor_trace_wiring_tests {
         );
     }
 }
+
+/// The isolate's Rust executor must survive a request the platform
+/// hard-stops (CF-LOGIN-HANG, 2026-10-15).
+///
+/// Every future in this Worker — each request's `fetch` future
+/// (`#[event(fetch)]` drives it with `future_to_promise`), every
+/// `ctx.wait_until` task, every spawned producer — is polled by js-sys's one
+/// per-instance task queue. Stock js-sys 0.3.99 queues ONE
+/// `queueMicrotask(run_all)` per batch and remembers it in
+/// `QueueState::is_scheduled`, which only `run_all` itself clears.
+///
+/// When Workers terminates a request for exceeding a limit (CPU on the Free
+/// plan: `exceededResources` at 10–99 ms in the 2026-10-15 analytics), V8
+/// abandons the microtask checkpoint and DISCARDS every pending microtask
+/// (`MicrotaskQueue::RunMicrotasks` on `is_execution_terminating()`; checked
+/// against Node's V8 with `vm.runInContext(…, {timeout})`: a microtask pending
+/// at termination never runs, one queued afterwards does). If a wake in that
+/// checkpoint had already queued the next `run_all`, it goes with them and
+/// `is_scheduled` stays `true`: no later wake queues a microtask again, so
+/// every later request in the instance is pushed onto the queue and never
+/// polled. Workers reports each as "code had hung" at ~0 ms CPU with no logs.
+///
+/// The workspace `Cargo.toml` patches js-sys with the backport of
+/// wasm-bindgen/wasm-bindgen#5379, which gives every scheduled task a `run_all`
+/// microtask of its own, bound to a sequence number, so the next task
+/// scheduled after a loss is polled and its `run_all` also runs the tasks left
+/// behind. That fix also covers the two other states a termination strands —
+/// `run_all`'s `FnMut` closure glue and the interrupted task's `RefCell`
+/// borrow — which this test does not exercise; upstream's tests terminate a
+/// real `run_all` under Node for those.
+///
+/// The test drops one `queueMicrotask` call, as the termination does, then
+/// starts a request the way the `fetch` export does, and asserts the request
+/// still gets a microtask of its own. It fails on stock js-sys 0.3.99 and
+/// passes on the patched one. wasm-bindgen-test drives the whole run from one
+/// `future_to_promise` (`wasm-bindgen-test-0.3.72/src/rt/mod.rs:435`), so this
+/// body is itself polled inside `run_all`, which has just cleared
+/// `is_scheduled`: the test's first wake is the one that queues the
+/// executor's next microtask, and the hook loses it — the stranded
+/// configuration. The lost callback is queued for real before anything is
+/// asserted, so the queue is healthy again and later tests are unaffected.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod isolate_executor_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// `globalThis.queueMicrotask` replaced by one that discards its next
+    /// call (keeping the callback, where V8 keeps nothing) and passes later
+    /// ones through, counting them.
+    ///
+    /// [`Self::heal`] puts the real function back and queues the discarded
+    /// callbacks on it. `Drop` heals too, so a test that leaves before its
+    /// explicit heal — its future dropped, say — cannot leave the global
+    /// replaced or the executor's microtask lost for the rest of the test
+    /// binary. (On wasm32 a panic aborts without running destructors; the
+    /// test asserts nothing before it heals.)
+    struct LostMicrotask {
+        dropped: js_sys::Array,
+        passed: JsValue,
+        restore: js_sys::Function,
+        healed: bool,
+    }
+
+    impl LostMicrotask {
+        fn install() -> Self {
+            let hook: js_sys::Array = js_sys::Function::new_no_args(
+                "const real = globalThis.queueMicrotask; \
+                 const dropped = []; const passed = { n: 0 }; let armed = true; \
+                 globalThis.queueMicrotask = (cb) => { \
+                     if (armed) { armed = false; dropped.push(cb); return; } \
+                     passed.n += 1; real(cb); \
+                 }; \
+                 return [dropped, passed, () => { globalThis.queueMicrotask = real; }];",
+            )
+            .call0(&JsValue::NULL)
+            .expect("install the queueMicrotask hook")
+            .unchecked_into();
+            Self {
+                dropped: hook.get(0).unchecked_into(),
+                passed: hook.get(1),
+                restore: hook.get(2).unchecked_into(),
+                healed: false,
+            }
+        }
+
+        /// How many microtasks were discarded.
+        fn lost(&self) -> u32 {
+            self.dropped.length()
+        }
+
+        /// How many microtasks were queued after the discarded one, or `None`
+        /// if the hook's counter could not be read.
+        fn passed(&self) -> Option<f64> {
+            js_sys::Reflect::get(&self.passed, &"n".into())
+                .ok()
+                .and_then(|n| n.as_f64())
+        }
+
+        /// Put the real `queueMicrotask` back and hand it the discarded
+        /// callbacks. Idempotent. It must not run inside this hook's own
+        /// window: the test is polled from inside `run_all`, so the stranded
+        /// `run_all` can only be queued, not called.
+        fn heal(&mut self) {
+            if std::mem::replace(&mut self.healed, true) {
+                return;
+            }
+            // Neither call can fail: `restore` assigns a global, and the
+            // real `queueMicrotask` accepts any function.
+            let _ = self.restore.call0(&JsValue::NULL);
+            let requeue = js_sys::Function::new_with_args("cb", "queueMicrotask(cb)");
+            for callback in self.dropped.iter() {
+                let _ = requeue.call1(&JsValue::NULL, &callback);
+            }
+        }
+    }
+
+    impl Drop for LostMicrotask {
+        fn drop(&mut self) {
+            self.heal();
+        }
+    }
+
+    #[wasm_bindgen_test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "drives the executor exactly as workers-rs's `#[event(fetch)]` export does \
+                  (`future_to_promise`) and as any spawned task reaches it (`spawn_local`); \
+                  no request service is called"
+    )]
+    async fn a_request_starts_after_another_request_was_hard_stopped() {
+        let mut hook = LostMicrotask::install();
+
+        // Request A: its last wake queues the executor's microtask, and the
+        // platform's termination discards it.
+        worker::wasm_bindgen_futures::spawn_local(async {});
+        let lost_microtasks = hook.lost();
+
+        // Request B arrives, started the way the `fetch` export starts it.
+        let b_polled = Rc::new(Cell::new(false));
+        let b = Rc::clone(&b_polled);
+        let _b_response = worker::wasm_bindgen_futures::future_to_promise(async move {
+            b.set(true);
+            Ok(JsValue::UNDEFINED)
+        });
+        let microtasks_for_b = hook.passed();
+        let b_polled_before_heal = b_polled.get();
+
+        // Heal the isolate before asserting or awaiting: on stock js-sys this
+        // test's own wake would otherwise wait on the lost microtask too. The
+        // stranded `run_all` clears the flag and polls whatever it was
+        // holding — B included — and then this test, once its timer fires.
+        hook.heal();
+        let tick: js_sys::Promise =
+            js_sys::Function::new_no_args("return new Promise((done) => setTimeout(done, 5));")
+                .call0(&JsValue::NULL)
+                .expect("arm a timer")
+                .unchecked_into();
+        worker::wasm_bindgen_futures::JsFuture::from(tick)
+            .await
+            .expect("the timer fires");
+        let b_polled_after_heal = b_polled.get();
+
+        assert_eq!(
+            lost_microtasks, 1,
+            "precondition: request A's wake queued the executor's microtask, and it was lost"
+        );
+        assert!(
+            microtasks_for_b.is_some(),
+            "precondition: the hook's counter of microtasks queued after the lost one is readable"
+        );
+        assert!(
+            b_polled_after_heal,
+            "precondition: B was runnable; only the lost microtask stood between it and a poll"
+        );
+        assert!(
+            microtasks_for_b.is_some_and(|n| n >= 1.0) || b_polled_before_heal,
+            "request B was queued behind the microtask request A's termination discarded, and \
+             no microtask of its own was scheduled: it would never be polled (Workers: \"code had \
+             hung\", ~0 ms CPU). The executor's `is_scheduled` flag is stranded until the isolate \
+             is retired."
+        );
+    }
+}
