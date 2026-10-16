@@ -1699,9 +1699,9 @@ mod tests {
         assert!(!s.contains("prompt("), "no prompt() version control");
     }
 
-    /// The Edit/Preview strip is a WAI-ARIA tablist: each tab names the panel
-    /// it controls, the panels name their tab, and only the selected tab is
-    /// in the tab order.
+    /// The Edit/Preview strip is a WAI-ARIA tablist drawn as the shared
+    /// `.tabs` strip: each tab names the panel it controls, the panels name
+    /// their tab, and only the selected tab is in the tab order.
     #[test]
     fn editor_tabs_follow_the_tabs_pattern() {
         let s = editor(Some(draft_row("Terms of Service", "body")))
@@ -1709,10 +1709,10 @@ mod tests {
             .into_string();
         assert!(s.contains(r#"role="tablist" aria-label="Content view""#));
         assert!(s.contains(
-            r#"class="editor-tab editor-tab--active" id="editor-tab-edit" type="button" role="tab" aria-selected="true" aria-controls="editor-edit-pane""#
+            r#"<div class="tabs" role="tablist" aria-label="Content view"><button class="tab active" id="editor-tab-edit" type="button" role="tab" aria-selected="true" aria-controls="editor-edit-pane" data-tab="edit" data-action="legalpages-editor-tab">Edit</button>"#
         ));
         assert!(s.contains(
-            r#"class="editor-tab" id="editor-tab-preview" type="button" role="tab" aria-selected="false" aria-controls="editor-preview-pane" tabindex="-1""#
+            r#"<button class="tab" id="editor-tab-preview" type="button" role="tab" aria-selected="false" aria-controls="editor-preview-pane" tabindex="-1" data-tab="preview" data-action="legalpages-editor-tab">Preview</button></div>"#
         ));
         assert!(s.contains(
             r#"class="editor-pane" id="editor-edit-pane" role="tabpanel" aria-labelledby="editor-tab-edit""#

@@ -173,7 +173,6 @@ fn admin_sections(active: AdminSection) -> Markup {
         active: section == active,
         href,
         label,
-        icon: None,
     };
     components::subnav(
         "Products sections",
@@ -222,7 +221,6 @@ fn portal_sections(active: PortalSection, seller_enabled: bool) -> Markup {
         active: section == active,
         href,
         label,
-        icon: None,
     };
     let mut tabs = vec![
         tab(PortalSection::Home, "/b/products/", "Commerce"),
@@ -743,13 +741,11 @@ fn product_views(base: &str, deleted_view: bool) -> Markup {
                 active: !deleted_view,
                 href: base,
                 label: "Active",
-                icon: None,
             },
             components::Tab {
                 active: deleted_view,
                 href: &deleted,
                 label: "Deleted",
-                icon: Some(icons::trash()),
             },
         ],
     )
@@ -2752,7 +2748,6 @@ fn order_status_chips(base: &str, current: &str) -> Markup {
                 active: (current.is_empty() && *value == "all") || current == *value,
                 href,
                 label,
-                icon: None,
             })
             .collect(),
     )

@@ -35,7 +35,7 @@
             var selected = t === tab;
             t.setAttribute('aria-selected', selected ? 'true' : 'false');
             t.tabIndex = selected ? 0 : -1;
-            t.classList.toggle('editor-tab--active', selected);
+            t.classList.toggle('active', selected);
             document.getElementById(t.getAttribute('aria-controls')).hidden = !selected;
         });
         if (focus) tab.focus();

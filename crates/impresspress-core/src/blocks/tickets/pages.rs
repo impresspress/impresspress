@@ -1161,7 +1161,6 @@ fn sections(active: Section) -> Markup {
         active: section == active,
         href,
         label,
-        icon: None,
     };
     components::subnav(
         "Tickets sections",

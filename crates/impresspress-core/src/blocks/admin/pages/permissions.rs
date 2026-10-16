@@ -12,7 +12,7 @@ use crate::{
 
 /// Render JUST the permissions settings body. The parent `settings_page`
 /// handler wraps this in the form-less `tabbed_page` shell — the
-/// "Database & Config" subtab's Add-Grant modal renders its own
+/// "Database & config" subtab's Add-Grant modal renders its own
 /// `<form hx-post="/b/admin/grants/rules">`, which is only valid because
 /// the shell contributes no outer `<form>` to nest in.
 ///
@@ -45,13 +45,11 @@ pub async fn settings_body(
                 active: active_subtab == "all",
                 href: "/b/admin/settings/permissions",
                 label: "All",
-                icon: Some(icons::shield()),
             },
             components::Tab {
                 active: active_subtab == "database",
                 href: "/b/admin/settings/permissions?subtab=database",
-                label: "Database & Config",
-                icon: Some(icons::database()),
+                label: "Database & config",
             },
         ]))
 
@@ -545,7 +543,7 @@ async fn permissions_all_tab(
     )
 }
 
-/// "Database & Config" tab: wraps the existing grants_code_tab and grants_custom_tab.
+/// "Database & config" tab: wraps the existing grants_code_tab and grants_custom_tab.
 async fn permissions_database_tab(
     ctx: &dyn Context,
     msg: &Message,

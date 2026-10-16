@@ -42,7 +42,11 @@
 	box-shadow: none;
 }
 
-/* Tabs */
+/* ===== Tabs =====
+ * The one tab look: text-only labels over a rule, the current tab
+ * underlined. Drawn by `components::tab_navigation` (htmx views of a page),
+ * `components::subnav` (a block's section links) and the legal editor's
+ * Edit / Preview tablist, whose `.tab`s are buttons. */
 .tabs {
 	display: flex;
 	border-bottom: 1px solid var(--border-color);
@@ -51,7 +55,7 @@
 
 .tab {
 	padding: var(--space-3) var(--space-4); border: none; background: none;
-	color: var(--text-secondary); font-size: 0.875rem;
+	color: var(--text-secondary); font-size: var(--text-sm);
 	font-weight: 500; cursor: pointer; position: relative;
 	transition: color 0.2s; text-decoration: none;
 	display: inline-flex; align-items: center; gap: var(--space-2);
@@ -92,22 +96,6 @@
 .subnav::-webkit-scrollbar { display: none; }
 .subnav .tabs { margin-bottom: 0; min-width: max-content; overflow-x: visible; }
 .subnav .tab { flex-shrink: 0; }
-
-/* ===== Editor tab strip (blocks/legalpages/pages.rs) =====
- * Migrated from that file's page-local `EDITOR_CSS` `<style>` block (task
- * 12e). Pill-style tabs, visually distinct from `.tabs`/`.tab` above --
- * kept as its own component rather than reusing those, matching the
- * original CSS 1:1 in shape. Every color in the original page-local styles
- * was an exact match for an existing token (`#e2e8f0` = --border-color,
- * `#64748b` = --text-muted (that token has since been darkened to
- * `#5d6b7f` for AA headroom on tinted surfaces -- these rules follow the
- * token, not the original literal), `#f1f5f9` = --bg-hover, `#1e293b` =
- * --text-primary, `white` = --surface-1) -- re-typed onto the tokens rather
- * than carried over as literals. */
-.editor-tabs { display: flex; gap: var(--space-2); margin-bottom: -1px; border-bottom: 1px solid var(--border-color); }
-.editor-tab { min-height: var(--target-min); min-width: var(--target-min); background: none; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: var(--space-2) var(--space-4); cursor: pointer; font-size: 0.875rem; color: var(--text-muted); }
-.editor-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
-.editor-tab--active { background: var(--surface-1); border-color: var(--border-color); color: var(--text-primary); font-weight: 600; }
 
 /* ===== Portal overview links (userportal dashboard) =====
    One bordered list per section (Account, Apps): each item a full-width

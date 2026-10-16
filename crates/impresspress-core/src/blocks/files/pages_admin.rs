@@ -31,7 +31,6 @@ pub(crate) fn admin_sections(active: &str) -> Markup {
                 active: *label == active,
                 href,
                 label,
-                icon: None,
             })
             .collect(),
     )

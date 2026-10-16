@@ -68,6 +68,10 @@ test.describe('legal editor', () => {
     await previewTab.click();
     await expect(previewTab).toHaveAttribute('aria-selected', 'true');
     await expect(editTab).toHaveAttribute('aria-selected', 'false');
+    // The shared `.tabs` strip draws the underline on `.tab.active`, which
+    // the script moves with the selection.
+    await expect(previewTab).toHaveClass(/\bactive\b/);
+    await expect(editTab).not.toHaveClass(/\bactive\b/);
     await expect(page.locator('#editor-edit-pane')).toBeHidden();
     await expect(page.locator('#editor-preview strong')).toHaveText('in bold');
 

@@ -156,7 +156,6 @@ pub async fn settings_body(
                 active: query.sort == *sort,
                 href,
                 label,
-                icon: None,
             })
             .collect(),
     )
