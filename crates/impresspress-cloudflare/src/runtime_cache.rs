@@ -6,8 +6,8 @@
 //! runtime alive across a swap. Every cell here is a `Cell`/`IsolateCell`,
 //! never a `RefCell`: wasm32 is single-threaded so a borrow would never be
 //! *contended*, but Cloudflare can hard-stop a request without running its
-//! destructors, and a borrow flag stranded that way wedges the isolate for
-//! good (see the `thread_local!` block's comment).
+//! destructors, and a borrow flag stranded that way traps the next request
+//! that touches it (see the `thread_local!` block's comment).
 //!
 //! Request-path runtime construction is single-flight per isolate. One
 //! request owns the build slot ([`BuildGuard`]); a cold request that finds the
@@ -185,15 +185,21 @@ impl ReadyRuntime {
 // Every cell below is `Cell`/`IsolateCell`, never `RefCell`, and that is a
 // requirement rather than a preference. `BUILD_LEASE_MS`'s doc already states
 // the premise: Cloudflare can hard-stop a request without running its
-// destructors. A `RefCell` borrow stranded by such a stop stays set for the
-// life of the isolate, and — under this workspace's `panic = "abort"` wasm
-// profile — every later request that touches the same cell traps inside
-// `poll`, leaving a response promise that is never settled. Cloudflare reports
-// that as "your Worker's code had hung and would never generate a response",
-// at ~zero recorded CPU. `IsolateCell` has no borrow flag to strand; the worst
-// an interrupted holder can do is drop the cached value, which is
-// indistinguishable from a cold isolate and self-heals. See
-// `impresspress_core::isolate_cell`.
+// destructors: a hard stop can strand state, and a `RefCell`'s borrow flag is
+// one such state. Under this workspace's `panic = "abort"` wasm profile a
+// stranded `RefCell` traps the next request that touches it inside `poll`,
+// leaving a response promise that is never settled. Cloudflare reports that
+// as "your Worker's code had hung and would never generate a response", at
+// ~zero recorded CPU. Whether the wasm instance is then re-instantiated, the
+// cached runtime with it, is up to worker-build's shim: its panic hook marks
+// the instance for that. No reset on Cloudflare has been confirmed by a
+// trace, but the 2026-10-15 analytics have failing rows whose memory figures
+// look like re-instantiated instances. The
+// executor's own task queue was the other isolate-wide state a hard stop
+// could strand; the workspace `Cargo.toml` patches js-sys for it.
+// `IsolateCell` has no borrow flag to strand; the worst an interrupted holder
+// can do is drop the cached value, which is indistinguishable from a cold
+// isolate and self-heals. See `impresspress_core::isolate_cell`.
 thread_local! {
     static RUNTIME: IsolateCell<Rc<ReadyRuntime>> = const { IsolateCell::new() };
     /// Per-isolate cumulative count of runtime builds (cold + rebuild).

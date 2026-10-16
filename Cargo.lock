@@ -2969,8 +2969,7 @@ dependencies = [
 [[package]]
 name = "js-sys"
 version = "0.3.99"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "142bc4740e452c1e57ade0cbc129f139c9093e354346f0872ef985f4f5cf5f11"
+source = "git+https://github.com/impresspress/js-sys?rev=d2b218e824a36e260b924a3b4f39cef0d87b0328#d2b218e824a36e260b924a3b4f39cef0d87b0328"
 dependencies = [
  "cfg-if",
  "futures-util",

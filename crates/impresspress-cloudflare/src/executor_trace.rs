@@ -7,8 +7,10 @@
 //!
 //! - the runtime never ran the Worker's JavaScript: no `ip-entry` line;
 //! - the JavaScript ran and created the Rust `fetch` future, but the executor
-//!   never polled it (js-sys's task queue stranded by the kill): `ip-entry`
-//!   and no `ip-poll`, on a wasm id that has served traced requests before;
+//!   never polled it (js-sys 0.3.99's task queue stranded by the kill, which
+//!   the js-sys the workspace `Cargo.toml` patches in no longer allows):
+//!   `ip-entry` and no `ip-poll`, on a wasm id that has served traced
+//!   requests before;
 //! - worker-build's shim re-instantiated the Wasm module after a
 //!   `WebAssembly.RuntimeError`: the `ip-entry` of the first request the new
 //!   instance serves carries a new wasm id and the next generation, whether or

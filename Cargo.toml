@@ -86,6 +86,22 @@ worker = { version = "0.7.5", features = ["d1"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 maud = "0.27"
+
+# Interim fork of js-sys 0.3.99 carrying wasm-bindgen/wasm-bindgen#5379, the
+# futures-executor fix: in stock 0.3.99 a request that Cloudflare stops for a
+# CPU limit in the middle of a poll can leave the executor shared by every
+# request in the wasm instance never polling anything again ("code had hung"
+# at ~0 ms CPU). The fork is the published 0.3.99 crate plus that one change;
+# it pins `wasm-bindgen = "=0.2.122"` from crates.io, so it patches alone and
+# the `wasm-bindgen-cli` pin in `ci-shared.yml` stays 0.2.122. The test is
+# `isolate_executor_tests` in `impresspress-cloudflare/src/lib.rs`.
+#
+# Remove this `[patch]` once a wasm-bindgen release includes #5379: bump
+# wasm-bindgen, js-sys and the CI `wasm-bindgen-cli` pin to that release
+# (worker-build picks its CLI from `Cargo.lock`), and re-resolve the lock.
+[patch.crates-io]
+js-sys = { git = "https://github.com/impresspress/js-sys", rev = "d2b218e824a36e260b924a3b4f39cef0d87b0328" }
+
 [profile.release]
 # Size-first wasm profile (CF Worker + browser both ship from `release`).
 opt-level = "z"

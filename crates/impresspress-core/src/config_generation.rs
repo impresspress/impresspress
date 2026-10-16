@@ -43,7 +43,7 @@
 //!
 //! [`std::sync::atomic::AtomicU64`], never a `RefCell`: Cloudflare can
 //! hard-stop a request without running destructors, and a stranded borrow flag
-//! wedges the isolate for the rest of its life (see
+//! traps the next request that touches it (see
 //! `impresspress_core::isolate_cell`). An atomic has no borrow flag and no
 //! guard to strand, so it satisfies that constraint exactly as `Cell` did. On
 //! wasm32 an isolate is single-threaded, so the atomic is never contended and

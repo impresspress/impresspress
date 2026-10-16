@@ -260,8 +260,8 @@ thread_local! {
     /// path and comfortably past the throttle window.
     ///
     /// `IsolateCell` rather than `RefCell` — a borrow flag stranded by a
-    /// Cloudflare hard-stop would trap every later request in the isolate.
-    /// See `impresspress_core::isolate_cell`.
+    /// Cloudflare hard-stop would trap the next request that touches it. See
+    /// `impresspress_core::isolate_cell`.
     static PENDING_VERSION_RETRY: impresspress_core::IsolateCell<String> =
         const { impresspress_core::IsolateCell::new() };
 }
