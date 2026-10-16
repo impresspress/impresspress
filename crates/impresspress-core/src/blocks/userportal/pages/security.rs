@@ -11,10 +11,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::repo::{local_credentials, provider_links, users},
-        auth_ui::{
-            api::change_password::{FORM_ID, RESULT_ID},
-            oauth,
-        },
+        auth_ui::api::change_password::{FORM_ID, RESULT_ID},
         crud,
     },
     http::{redirect, ResponseBuilder},
@@ -209,7 +206,7 @@ fn change_password_form(min_length: usize) -> Markup {
 /// in place of itself: htmx does not swap a non-2xx response, so a refusal has
 /// to come back as the row it declined to remove, carrying the reason.
 fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>) -> Markup {
-    let provider = oauth::spec::label_of(&link.provider);
+    let provider = super::provider_label(&link.provider);
     html! {
         li .linked-provider {
             span .linked-provider__name { (provider) }

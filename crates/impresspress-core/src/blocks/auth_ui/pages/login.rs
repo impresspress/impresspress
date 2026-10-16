@@ -68,10 +68,10 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     // A loop rather than `.filter()`: the predicate reads config through the
     // async client now, and an async predicate has no place in `Iterator`.
-    let mut oauth_providers: Vec<&'static str> = Vec::new();
+    let mut oauth_providers: Vec<&'static oauth::spec::OAuthProviderSpec> = Vec::new();
     if oauth_enabled {
-        for provider in ["github", "google", "microsoft"] {
-            match oauth_provider_configured(ctx, provider).await {
+        for provider in oauth::spec::OAUTH_PROVIDERS {
+            match oauth_provider_configured(ctx, provider.name).await {
                 Ok(true) => oauth_providers.push(provider),
                 Ok(false) => {}
                 Err(e) => {
@@ -107,7 +107,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     @if !oauth_providers.is_empty() {
                         div .oauth-buttons {
                             @for provider in &oauth_providers {
-                                (oauth_button(provider, oauth::spec::label_of(provider), oauth_provider_icon(provider)))
+                                (oauth_button(provider.name, provider.label, oauth_provider_icon(provider.name)))
                             }
                         }
                         div .auth-divider { "or" }
@@ -162,7 +162,8 @@ mod tests {
     use super::handle;
     use crate::{
         blocks::auth_ui::{
-            OAUTH_GITHUB_CLIENT_ID_KEY, OAUTH_GITHUB_CLIENT_SECRET_KEY, OAUTH_REDIRECT_URI_KEY,
+            OAUTH_GITHUB_CLIENT_ID_KEY, OAUTH_GITHUB_CLIENT_SECRET_KEY, OAUTH_GOOGLE_CLIENT_ID_KEY,
+            OAUTH_GOOGLE_CLIENT_SECRET_KEY, OAUTH_REDIRECT_URI_KEY,
         },
         config_vars::{ALLOW_SIGNUP_KEY, ENABLE_OAUTH_KEY},
         test_support::{output_html, TestContext},
@@ -227,6 +228,31 @@ mod tests {
         assert!(
             html.contains(r#"data-provider="github""#),
             "ENABLE_OAUTH=1 must render the provider button the start handler accepts: {html}"
+        );
+    }
+
+    /// Each configured provider's button names it as people read it (the
+    /// spec's `label`, not its stored key), in the spec's order: GitHub
+    /// before Google.
+    #[tokio::test]
+    async fn oauth_buttons_name_each_provider_in_spec_order() {
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(ENABLE_OAUTH_KEY, "true");
+        ctx.set_config(OAUTH_GOOGLE_CLIENT_ID_KEY, "g_id");
+        ctx.set_config(OAUTH_GOOGLE_CLIENT_SECRET_KEY, "g_secret");
+        ctx.set_config(OAUTH_GITHUB_CLIENT_ID_KEY, "gh_id");
+        ctx.set_config(OAUTH_GITHUB_CLIENT_SECRET_KEY, "gh_secret");
+        ctx.set_config(OAUTH_REDIRECT_URI_KEY, "https://app/cb");
+        let html = output_html(handle(&ctx, &login_msg(&[])).await).await;
+        let github = html.find("Continue with GitHub</button>");
+        let google = html.find("Continue with Google</button>");
+        assert!(github.is_some() && google.is_some(), "{html}");
+        assert!(github < google, "GitHub's button comes first: {html}");
+        assert!(
+            !html.contains(r#"data-provider="microsoft""#),
+            "an unconfigured provider has no button: {html}"
         );
     }
 

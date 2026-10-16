@@ -1739,7 +1739,15 @@ mod tests {
             for (selector, body) in css_leaf_blocks(&css) {
                 let capitals = body.split(';').any(|decl| {
                     decl.split_once(':').is_some_and(|(prop, value)| {
-                        prop.trim() == "text-transform" && value.trim() == "uppercase"
+                        // `uppercase !important` (or `! important`) is
+                        // still uppercase: the value is what precedes `!`.
+                        let value = value
+                            .split('!')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_lowercase();
+                        prop.trim().eq_ignore_ascii_case("text-transform") && value == "uppercase"
                     })
                 });
                 let sidebar = selector
