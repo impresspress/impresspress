@@ -23,7 +23,7 @@ use crate::{
         },
     },
     ui::{
-        components::{self, empty_note, Badge, BadgeVariant},
+        components::{self, empty_note, Badge, BadgeVariant, HeaderStatus},
         html_response, icons,
         shell::Topbar,
         templates::list_page,
@@ -53,15 +53,17 @@ impl Tab {
     }
 }
 
-fn backend_badge(backend: wafer_sql_utils::Backend, table_count: usize) -> Markup {
+fn backend_badge(backend: wafer_sql_utils::Backend, table_count: usize) -> HeaderStatus {
     let label = match backend {
         wafer_sql_utils::Backend::Sqlite => "SQLite",
         wafer_sql_utils::Backend::Postgres => "PostgreSQL",
     };
-    Badge::new(BadgeVariant::Info)
-        .classes("text-xs")
-        .title("Database backend")
-        .render(html! { (label) " · " (table_count) " tables" })
+    HeaderStatus::badge(
+        Badge::new(BadgeVariant::Info)
+            .classes("text-xs")
+            .title("Database backend"),
+        html! { (label) " · " (table_count) " tables" },
+    )
 }
 
 fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Markup {
@@ -504,9 +506,9 @@ pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Database",
         Topbar {
             crumbs: crumb("Database"),
-            actions: vec![backend_badge(backend, tables.len())],
             subtitle: Some("Browse tables, view schema, run read-only SQL"),
-            show_palette: true,
+            status: vec![backend_badge(backend, tables.len())],
+            ..Topbar::default()
         },
         body,
     )

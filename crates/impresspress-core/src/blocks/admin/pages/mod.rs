@@ -53,18 +53,25 @@ use crate::{
 
 /// The admin [`Shell`] a page's [`Topbar`] describes.
 fn admin_shell<'a>(title: &'a str, topbar: Topbar<'a>) -> Shell<'a> {
-    let shell = Shell::admin(title, title)
-        .trail(topbar.crumbs)
-        .actions(topbar.actions);
-    match topbar.subtitle {
-        Some(subtitle) => shell.subtitle(subtitle),
-        None => shell,
+    let mut shell = Shell::admin(title, title).trail(topbar.crumbs);
+    if let Some(subtitle) = topbar.subtitle {
+        shell = shell.subtitle(subtitle);
     }
+    for status in topbar.status {
+        shell = shell.status(status);
+    }
+    for action in topbar.secondary_actions {
+        shell = shell.secondary_action(action);
+    }
+    if let Some(action) = topbar.primary_action {
+        shell = shell.primary_action(action);
+    }
+    shell
 }
 
 /// Wrap content in the admin shell: the shared [`ui::shell_page`] with the
 /// admin sidebar. The caller passes a `Topbar` describing the page's
-/// breadcrumbs, subtitle and optional primary action; site config, the
+/// breadcrumbs, subtitle, status and actions; site config, the
 /// signed-in user and the current path come from `ctx` / `msg` like every
 /// other shelled page, and nav entries for blocks that aren't registered on
 /// this target are hidden rather than linking into a 404.

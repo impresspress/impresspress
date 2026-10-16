@@ -4,6 +4,7 @@
 use maud::{html, Markup};
 
 use super::{
+    components::{HeaderAction, HeaderStatus},
     icons,
     sidebar::{sidebar_grouped, NavGroup, SignedIn},
     NavKind,
@@ -29,17 +30,26 @@ pub struct Crumb<'a> {
 /// - **Subtitle** — one short sentence describing the page, on its own line
 ///   under the title. Hidden below 720px, so it must never carry anything
 ///   the page needs to be usable.
-/// - **Actions** — the page's own buttons (create, upload, refresh, a status
-///   badge), rendered right-aligned in order, so put the primary action LAST.
-///   They wrap onto their own row below 720px, so any number fits.
+/// - **Status and actions** — typed slots, rendered right-aligned in one
+///   row: the `status` badges, then the `secondary_actions`, then the
+///   `primary_action` last. A [`HeaderAction`] has no emphasis or size of its
+///   own (the slot gives it both), and a [`HeaderStatus`] is only ever a
+///   badge, so a second header primary, a primary that is not last, a quiet,
+///   destructive or small header button, and a badge posing as an action
+///   cannot be written. The row wraps onto its own line below 720px, so any
+///   number fits.
 /// - **Palette** — the ⌘K / Ctrl+K command-palette trigger.
 pub struct Topbar<'a> {
     /// The trail; the last crumb is the page title (the `h1`).
     pub crumbs: Vec<Crumb<'a>>,
     /// One-line page description under the title (hidden below 720px).
     pub subtitle: Option<&'a str>,
-    /// Page-level actions, left to right — primary action last.
-    pub actions: Vec<Markup>,
+    /// The page subject's state, left to right, before the actions.
+    pub status: Vec<HeaderStatus>,
+    /// The page's other actions, left to right, rendered as secondaries.
+    pub secondary_actions: Vec<HeaderAction<'a>>,
+    /// The page's one primary action, rendered last.
+    pub primary_action: Option<HeaderAction<'a>>,
     /// Whether to render the ⌘K palette trigger (every shelled page = true).
     pub show_palette: bool,
 }
@@ -49,7 +59,9 @@ impl<'a> Default for Topbar<'a> {
         Self {
             crumbs: Vec::new(),
             subtitle: None,
-            actions: Vec::new(),
+            status: Vec::new(),
+            secondary_actions: Vec::new(),
+            primary_action: None,
             show_palette: true,
         }
     }
@@ -66,61 +78,69 @@ pub enum BodyLayout {
     Flush,
 }
 
-fn render_topbar(t: &Topbar<'_>) -> Markup {
-    // Skip rendering entirely when nothing was declared — avoids an empty
-    // stripe on pages that don't need a topbar.
-    if t.crumbs.is_empty() && t.subtitle.is_none() && t.actions.is_empty() && !t.show_palette {
-        return html! {};
-    }
-    // The current page (last crumb) renders as the page's single `h1` AFTER
-    // the breadcrumb nav — an h1 inside a breadcrumb nav is semantically
-    // wrong, and the ancestors stay ordinary breadcrumb `li`s.
-    let (current, ancestors) = match t.crumbs.split_last() {
-        Some((last, rest)) => (Some(last), rest),
-        None => (None, &[][..]),
-    };
-    html! {
-        header .topbar {
-            div .topbar__heading {
-                @if !ancestors.is_empty() {
-                    nav .topbar__crumbs aria-label="Breadcrumb" {
-                        ol {
-                            @for c in ancestors {
-                                li {
-                                    @match c.href {
-                                        Some(h) => a href=(h) { (c.label) },
-                                        None => span { (c.label) },
+impl Topbar<'_> {
+    /// The `header.topbar`; empty when the page declared nothing for it.
+    pub(crate) fn render(self) -> Markup {
+        let t = self;
+        // Skip rendering entirely when nothing was declared — avoids an empty
+        // stripe on pages that don't need a topbar.
+        let has_actions =
+            !t.status.is_empty() || !t.secondary_actions.is_empty() || t.primary_action.is_some();
+        if t.crumbs.is_empty() && t.subtitle.is_none() && !has_actions && !t.show_palette {
+            return html! {};
+        }
+        // The current page (last crumb) renders as the page's single `h1` AFTER
+        // the breadcrumb nav — an h1 inside a breadcrumb nav is semantically
+        // wrong, and the ancestors stay ordinary breadcrumb `li`s.
+        let (current, ancestors) = match t.crumbs.split_last() {
+            Some((last, rest)) => (Some(last), rest),
+            None => (None, &[][..]),
+        };
+        html! {
+            header .topbar {
+                div .topbar__heading {
+                    @if !ancestors.is_empty() {
+                        nav .topbar__crumbs aria-label="Breadcrumb" {
+                            ol {
+                                @for c in ancestors {
+                                    li {
+                                        @match c.href {
+                                            Some(h) => a href=(h) { (c.label) },
+                                            None => span { (c.label) },
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    @if let Some(c) = current {
+                        h1 .topbar__title { (c.label) }
+                    }
+                    @if let Some(s) = t.subtitle {
+                        p .topbar__subtitle { (s) }
+                    }
                 }
-                @if let Some(c) = current {
-                    h1 .topbar__title { (c.label) }
+                @if has_actions {
+                    div .topbar__actions {
+                        @for s in t.status { (s.render()) }
+                        @for a in t.secondary_actions { (a.render_secondary()) }
+                        @if let Some(a) = t.primary_action { (a.render_primary()) }
+                    }
                 }
-                @if let Some(s) = t.subtitle {
-                    p .topbar__subtitle { (s) }
-                }
-            }
-            @if !t.actions.is_empty() {
-                div .topbar__actions {
-                    @for a in &t.actions { (a.clone()) }
-                }
-            }
-            @if t.show_palette {
-                // The visible label is platform-neutral; the platform's
-                // shortcut is in the `kbd` (swapped to Ctrl off-Mac by
-                // chrome.js) and in `aria-keyshortcuts`.
-                button .topbar__palette type="button"
-                    data-action="palette-open"
-                    aria-keyshortcuts="Meta+K Control+K"
-                    aria-label="Search pages (command palette)" {
-                    (icons::search())
-                    span { "Search" }
-                    kbd aria-hidden="true" {
-                        span .topbar__palette-cmd { "⌘" }
-                        span { "K" }
+                @if t.show_palette {
+                    // The visible label is platform-neutral; the platform's
+                    // shortcut is in the `kbd` (swapped to Ctrl off-Mac by
+                    // chrome.js) and in `aria-keyshortcuts`.
+                    button .topbar__palette type="button"
+                        data-action="palette-open"
+                        aria-keyshortcuts="Meta+K Control+K"
+                        aria-label="Search pages (command palette)" {
+                        (icons::search())
+                        span { "Search" }
+                        kbd aria-hidden="true" {
+                            span .topbar__palette-cmd { "⌘" }
+                            span { "K" }
+                        }
                     }
                 }
             }
@@ -182,7 +202,7 @@ pub fn shell(
             div .shell__overlay data-action="drawer-close" {}
             (sidebar_grouped(nav_kind, nav_groups, signed_in, current_path, logo_url, logo_icon_url, app_name))
             div .shell__main {
-                (render_topbar(&topbar))
+                (topbar.render())
                 // A block's own sections (`PageBody::with_subnav`): a row of
                 // links between the page header and the content card, so it
                 // frames a full-bleed body as well as a padded one.
@@ -236,9 +256,7 @@ mod tests {
                     href: None,
                 },
             ],
-            actions: Vec::new(),
-            subtitle: None,
-            show_palette: true,
+            ..Topbar::default()
         };
         let body = html! { p { "page body" } };
         let s = shell(
@@ -277,9 +295,7 @@ mod tests {
                     href: None,
                 },
             ],
-            actions: Vec::new(),
-            subtitle: None,
-            show_palette: true,
+            ..Topbar::default()
         };
         let s = shell(
             NavKind::Admin,
@@ -562,10 +578,14 @@ mod tests {
         assert!(flush.contains(r#"<main class="shell__body shell__body--flush" id="content""#));
     }
 
-    /// The subtitle sits on its own line under the title (no "|" separator)
-    /// and every declared action renders, in order, in the actions slot.
+    /// The subtitle sits on its own line under the title (no "|" separator),
+    /// and the actions row renders its typed slots in order: the status
+    /// badges, then the secondaries, then the one primary, last. Each action
+    /// is a full-size `.btn`, whatever the slot: the header has no small
+    /// button to write.
     #[test]
-    fn topbar_renders_subtitle_line_and_every_action_in_order() {
+    fn topbar_renders_subtitle_line_then_status_secondaries_and_the_primary() {
+        use crate::ui::components::{ActionTarget, Badge, BadgeVariant};
         let groups = one_group(vec![item("X", "/x")]);
         let tb = Topbar {
             crumbs: vec![
@@ -579,7 +599,18 @@ mod tests {
                 },
             ],
             subtitle: Some("Edit the product"),
-            actions: vec![html! { a { "Preview" } }, html! { button { "Publish" } }],
+            status: vec![
+                HeaderStatus::badge(Badge::new(BadgeVariant::Info), html! { "Live" }),
+                HeaderStatus::status("pending"),
+            ],
+            secondary_actions: vec![
+                HeaderAction::new("Preview", ActionTarget::Link("/preview")),
+                HeaderAction::new("Duplicate", ActionTarget::Delegated("dup")).icon(icons::plus()),
+            ],
+            primary_action: Some(HeaderAction::new(
+                "Publish",
+                ActionTarget::Submit { form: None },
+            )),
             show_palette: true,
         };
         let s = shell(
@@ -598,11 +629,53 @@ mod tests {
         .into_string();
         assert!(s.contains(r#"<h1 class="topbar__title">Widget</h1><p class="topbar__subtitle">Edit the product</p>"#));
         assert!(!s.contains("topbar__sep"));
-        assert!(s.contains(
-            r#"<div class="topbar__actions"><a>Preview</a><button>Publish</button></div>"#
-        ));
+        let plus = icons::plus().into_string();
+        assert!(
+            s.contains(&format!(
+                concat!(
+                    r#"<div class="topbar__actions">"#,
+                    r#"<span class="badge badge-info">Live</span>"#,
+                    r#"<span class="badge badge-warning">pending</span>"#,
+                    r#"<a class="btn btn--secondary" href="/preview">Preview</a>"#,
+                    r#"<button class="btn btn--secondary" type="button" data-action="dup">{plus}Duplicate</button>"#,
+                    r#"<button class="btn btn--primary" type="submit">Publish</button>"#,
+                    r#"</div>"#,
+                ),
+                plus = plus
+            )),
+            "{s}"
+        );
+        assert!(!s.contains("btn--sm"), "no small header button: {s}");
         // The palette trigger is labelled by a platform-neutral name.
         assert!(s.contains(r#"aria-label="Search pages (command palette)""#));
         assert!(!s.contains("Ctrl K"));
+    }
+
+    /// A topbar that declares only a status still renders the actions row
+    /// (the Database page's backend badge); one that declares nothing has
+    /// no empty row.
+    #[test]
+    fn the_actions_row_renders_for_any_slot_and_only_then() {
+        let only_status = Topbar {
+            status: vec![HeaderStatus::status("active")],
+            show_palette: false,
+            ..Topbar::default()
+        }
+        .render()
+        .into_string();
+        assert!(
+            only_status.contains(r#"<div class="topbar__actions"><span class="badge badge-success">active</span></div>"#),
+            "{only_status}"
+        );
+        let nothing = Topbar {
+            crumbs: vec![Crumb {
+                label: "X",
+                href: None,
+            }],
+            ..Topbar::default()
+        }
+        .render()
+        .into_string();
+        assert!(!nothing.contains("topbar__actions"), "{nothing}");
     }
 }

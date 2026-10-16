@@ -8,7 +8,7 @@ use crate::{
     blocks::{admin::AUDIT_LOGS_TABLE as AUDIT_LOGS, auth::repo::users},
     platform_state::request_logs::{self, ErrorFilter},
     ui::{
-        components::{self, badge, pagination, Badge, BadgeVariant},
+        components::{self, badge, pagination, ActionTarget, Badge, BadgeVariant, HeaderAction},
         icons,
         shell::Topbar,
         templates::list_page,
@@ -71,12 +71,14 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "storage" => STORAGE_LOGS_HREF.to_string(),
         _ => system_logs_href(msg.query("search"), error_filter(msg)),
     };
-    let refresh_action = html! {
-        button .btn .btn--secondary .btn--sm
-            hx-get=(refresh_href)
-            hx-target="#content"
-        { (icons::refresh_cw()) " Refresh" }
-    };
+    let refresh_action = HeaderAction::new(
+        "Refresh",
+        ActionTarget::HxGet {
+            url: &refresh_href,
+            target: "#content",
+        },
+    )
+    .icon(icons::refresh_cw());
 
     // "No request logs yet" is what an untouched deployment renders; a log
     // that could not be read must not borrow it, nor print the failure's own
@@ -127,9 +129,9 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Logs",
         Topbar {
             crumbs: crumb("Logs"),
-            actions: vec![refresh_action],
             subtitle: Some("System telemetry, admin audit trail and storage access"),
-            show_palette: true,
+            secondary_actions: vec![refresh_action],
+            ..Topbar::default()
         },
         body,
     )

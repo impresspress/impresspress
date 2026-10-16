@@ -8,7 +8,7 @@ use crate::{
     blocks::files::repo,
     ui::{
         self,
-        components::{self, Action, ActionTarget, DataTable, TableCol, TableRow},
+        components::{self, Action, ActionTarget, DataTable, HeaderAction, TableCol, TableRow},
         icons,
         shell::Crumb,
         templates::list_page,
@@ -101,13 +101,18 @@ const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Actions").actions(),
 ];
 
-/// The "Upload" trigger: it opens the hidden file picker
-/// (`files-browser.js` binds every `[data-action="open-upload"]`). The topbar
-/// action and the empty folder's call to action both render it.
+/// The "Upload" trigger as the empty folder's call to action: it opens the
+/// hidden file picker (`files-browser.js` binds every
+/// `[data-action="open-upload"]`).
 pub(crate) fn upload_button() -> Markup {
     Action::primary("Upload", ActionTarget::Delegated("open-upload"))
         .icon(icons::plus())
         .render()
+}
+
+/// The same trigger as the topbar's primary action.
+fn upload_action() -> HeaderAction<'static> {
+    HeaderAction::new("Upload", ActionTarget::Delegated("open-upload")).icon(icons::plus())
 }
 
 /// A file row's "more actions" trigger: the shared `.btn--icon` button, named
@@ -384,7 +389,7 @@ pub async fn object_list_page(
                 },
             ])
             .subtitle("Drag files here to upload, or use the Upload button.")
-            .actions(vec![upload_button()]),
+            .primary_action(upload_action()),
         list_page(None, body, None),
     )
     .await

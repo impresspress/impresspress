@@ -11,7 +11,9 @@ use super::service::{display_index_name, vector_backend_available, IndexRow};
 use crate::{
     ui::{
         self,
-        components::{self, Action, ActionTarget, BadgeVariant, DataTable, TableCol, TableRow},
+        components::{
+            self, Action, ActionTarget, BadgeVariant, DataTable, HeaderAction, TableCol, TableRow,
+        },
         icons,
         shell::Crumb,
         templates::{detail_page, list_page, DetailMeta},
@@ -36,7 +38,7 @@ pub async fn render_index_list_fragment(ctx: &dyn Context) -> Result<Markup, Waf
 }
 
 /// Modal markup for creating a vector index. Always shipped pre-rendered
-/// next to the index list; the topbar action button opens it by declaring
+/// next to the index list; the topbar's primary action opens it by declaring
 /// `data-action="modal-open" data-modal-target="create-vector-index"`, which
 /// the delegated listener in `ui/assets/chrome.js` reads.
 pub fn render_create_index_modal() -> Markup {
@@ -76,8 +78,8 @@ const INDEX_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Keyword search"),
 ];
 
-/// The topbar's "Create index" trigger, which the empty list's call to
-/// action repeats.
+/// The empty list's "Create index" call to action, which repeats the
+/// topbar's primary action.
 fn create_index_button() -> Markup {
     Action::primary("Create index", ActionTarget::Modal("create-vector-index"))
         .icon(icons::plus())
@@ -214,7 +216,7 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             return ui::shell_error_page(
                 ctx,
                 msg,
-                list_shell(Vec::new()),
+                list_shell(),
                 None,
                 ui::BackLink::ADMIN_DASHBOARD,
                 e,
@@ -259,19 +261,22 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         None,
     );
 
-    let actions = if backend_available {
-        vec![create_index_button()]
+    let shell = list_shell();
+    let shell = if backend_available {
+        shell.primary_action(
+            HeaderAction::new("Create index", ActionTarget::Modal("create-vector-index"))
+                .icon(icons::plus()),
+        )
     } else {
-        Vec::new()
+        shell
     };
-    ui::shell_page(ctx, msg, list_shell(actions), body).await
+    ui::shell_page(ctx, msg, shell, body).await
 }
 
 /// The index list's chrome — its page and its error page share it.
-fn list_shell(actions: Vec<Markup>) -> ui::Shell<'static> {
+fn list_shell() -> ui::Shell<'static> {
     ui::Shell::admin("Vector indexes", "Vector indexes")
         .subtitle("Per-index counts, model, dimensions")
-        .actions(actions)
 }
 
 /// A detail page's chrome: the index's name under its list.

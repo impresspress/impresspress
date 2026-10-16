@@ -15,7 +15,7 @@ use super::{
 use crate::{
     ui::{
         self,
-        components::{self, Badge, BadgeVariant, Card},
+        components::{self, Badge, BadgeVariant, Card, HeaderStatus},
         icons,
         shell::Crumb,
     },
@@ -308,25 +308,18 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
 
     // A task or notification shows its type and status beside its title; a
     // conversation is a chat, and needs neither.
-    let actions = if context.str_field("type") == "conversation" {
-        Vec::new()
+    let shell = ui::Shell::admin(display_title, display_title).trail(detail_trail(display_title));
+    let shell = if context.str_field("type") == "conversation" {
+        shell
     } else {
-        vec![
-            Badge::new(BadgeVariant::Secondary)
-                .classes("text-capitalize")
-                .render(html! { (context.str_field("type")) }),
-            components::status_badge(context.str_field("status")),
-        ]
+        shell
+            .status(HeaderStatus::badge(
+                Badge::new(BadgeVariant::Secondary).classes("text-capitalize"),
+                html! { (context.str_field("type")) },
+            ))
+            .status(HeaderStatus::status(context.str_field("status")))
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::admin(display_title, display_title)
-            .trail(detail_trail(display_title))
-            .actions(actions),
-        body,
-    )
-    .await
+    ui::shell_page(ctx, msg, shell, body).await
 }
 
 /// Pure render helper: branches on `context.type`. Conversation contexts

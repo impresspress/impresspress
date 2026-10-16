@@ -109,7 +109,13 @@ pub(super) async fn providers_page(
         "Read-only on this deployment"
     });
     let shell = if manages {
-        shell.actions(vec![add_provider_button()])
+        shell.primary_action(
+            components::HeaderAction::new(
+                "Add provider",
+                components::ActionTarget::Modal(ADD_PROVIDER_MODAL_ID),
+            )
+            .icon(icons::plus()),
+        )
     } else {
         shell
     };
@@ -132,7 +138,7 @@ fn edit_modal_id(id: &str) -> String {
     format!("edit-provider-{id}")
 }
 
-/// The page's primary action: opens the Add provider modal.
+/// The empty provider list's call to action: opens the Add provider modal.
 fn add_provider_button() -> Markup {
     html! {
         button .btn.btn--primary type="button"

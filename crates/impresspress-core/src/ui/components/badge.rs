@@ -169,6 +169,28 @@ impl<'a> Badge<'a> {
     }
 }
 
+/// One status badge in the page header (`ui::shell::Topbar::status`): what
+/// state the page's subject is in ("SQLite · 62 tables", an order's status,
+/// live or test mode). Built only from a badge, so nothing that acts can sit
+/// in the status slot, and no badge can pose as a header action.
+pub struct HeaderStatus(Markup);
+
+impl HeaderStatus {
+    /// `badge` around `content`, as [`Badge::render`].
+    pub fn badge(badge: Badge<'_>, content: Markup) -> Self {
+        Self(badge.render(content))
+    }
+
+    /// A status string's badge, as [`status_badge`].
+    pub fn status(status: &str) -> Self {
+        Self(status_badge(status))
+    }
+
+    pub(in crate::ui) fn render(self) -> Markup {
+        self.0
+    }
+}
+
 /// Render a colored badge pill for an explicit variant. The plain-text
 /// shorthand for [`Badge`]; [`status_badge`] delegates here.
 pub fn badge(variant: BadgeVariant, label: &str) -> Markup {
