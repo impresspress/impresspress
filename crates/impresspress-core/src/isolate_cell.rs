@@ -37,13 +37,15 @@
 //! `setPanicHook`) that marks the instance critical, and its next call into
 //! the instance re-instantiates the wasm module (`__wbg_reset_state`): fresh
 //! linear memory, the stranded cell and every cached runtime gone. That is
-//! the code's account; no such reset has been observed on Cloudflare. A trap
-//! that is not a Rust panic reaches the same mark only through the shim's
-//! global `error` listener, and whether Workers delivers a trap thrown from
-//! an executor microtask there is not known. So one stranded borrow costs at
-//! least one more failed request, and then either the instance is replaced,
-//! losing its cached runtime, or every request that touches the cell fails
-//! for as long as it is not.
+//! the code's account. No reset on Cloudflare has been confirmed by a trace,
+//! but the 2026-10-15 analytics have failing rows whose memory figures look
+//! like re-instantiated instances. A trap inside a poll that is not a Rust
+//! panic reaches the same mark only through the shim's global `error`
+//! listener (polls run in later microtasks, outside the `try` around each
+//! handler call), and whether Workers delivers such a trap there is not
+//! known. So one stranded borrow costs at least one more failed request, and
+//! then either the instance is replaced, losing its cached runtime, or every
+//! request that touches the cell fails for as long as it is not.
 //!
 //! The executor that polls every request was the other isolate-wide state a
 //! hard stop could strand: js-sys 0.3.99's task queue, which the workspace

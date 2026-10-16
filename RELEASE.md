@@ -42,11 +42,12 @@ The fix does not make the Free plan's 10 ms CPU limit fit. When Cloudflare
 enforces that limit strictly, cold requests that build a runtime (300–700 ms)
 are still stopped.
 
-**Who has to act.** Nobody: the next `impresspress deploy --target cloudflare`
-picks it up. The password-hasher Worker is built from the same `Cargo.lock`
-and ships in the same deploy. A Worker built outside this repository's
-workspace does not inherit the `[patch]`. It needs the same entry until a
-wasm-bindgen release includes the fix.
+**Who has to act.** Nobody who deploys from this workspace: the next
+`impresspress deploy --target cloudflare` picks it up. The password-hasher
+Worker is built from the same `Cargo.lock` and ships in the same deploy. A
+Worker built outside this repository's workspace does not inherit the
+`[patch]`. It needs the same entry until a wasm-bindgen release includes the
+fix.
 
 ### Cloudflare: concurrent cold requests share one runtime build; new 503s, and a deploy step
 

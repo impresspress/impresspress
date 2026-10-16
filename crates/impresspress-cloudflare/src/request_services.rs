@@ -406,9 +406,9 @@ thread_local! {
     /// `IsolateCell` rather than `RefCell`: this is the single hottest piece
     /// of isolate state — entered and left on every poll of every request,
     /// and read by every service proxy — so a borrow flag stranded by a
-    /// Cloudflare hard-stop would trap the very next request, whichever it
-    /// is (see `impresspress_core::isolate_cell`). With
-    /// no borrow flag, a stop inside the cell's own `replace` leaves an empty
+    /// Cloudflare hard-stop would trap the very next scoped poll, of whichever
+    /// request or task it is (see `impresspress_core::isolate_cell`). With no
+    /// borrow flag, a stop inside the cell's own `replace` leaves an empty
     /// slot, which the proxies below report as "used outside request poll
     /// scope". A stop anywhere else in a scoped poll leaves the stopped
     /// request's bundle here, because its scope guard never runs; the next

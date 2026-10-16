@@ -101,6 +101,7 @@ maud = "0.27"
 # (worker-build picks its CLI from `Cargo.lock`), and re-resolve the lock.
 [patch.crates-io]
 js-sys = { git = "https://github.com/impresspress/js-sys", rev = "d2b218e824a36e260b924a3b4f39cef0d87b0328" }
+
 [profile.release]
 # Size-first wasm profile (CF Worker + browser both ship from `release`).
 opt-level = "z"

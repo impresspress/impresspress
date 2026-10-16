@@ -192,7 +192,9 @@ impl ReadyRuntime {
 // as "your Worker's code had hung and would never generate a response", at
 // ~zero recorded CPU. Whether the wasm instance is then re-instantiated, the
 // cached runtime with it, is up to worker-build's shim: its panic hook marks
-// the instance for that, but no reset has been observed on Cloudflare. The
+// the instance for that. No reset on Cloudflare has been confirmed by a
+// trace, but the 2026-10-15 analytics have failing rows whose memory figures
+// look like re-instantiated instances. The
 // executor's own task queue was the other isolate-wide state a hard stop
 // could strand; the workspace `Cargo.toml` patches js-sys for it.
 // `IsolateCell` has no borrow flag to strand; the worst an interrupted holder
