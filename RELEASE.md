@@ -19,6 +19,35 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: a request stopped at its CPU limit no longer stops the isolate's later requests
+
+**What changes.** Every request and every `wait_until` task in the Worker is
+polled by one task queue per wasm instance, js-sys's. With js-sys 0.3.99, a
+request that Cloudflare stopped in the middle of a poll for exceeding its CPU
+limit could leave that queue never polling anything again: every later request
+in the isolate then failed at once with error 1101 ("code had hung") at about
+0 ms of CPU, until Cloudflare retired the isolate. This build links an interim
+fork of js-sys 0.3.99 that carries the upstream fix,
+wasm-bindgen/wasm-bindgen#5379 (`[patch.crates-io]` in the workspace
+`Cargo.toml`).
+
+Now the stopped request fails on its own. Two costs remain:
+- A request in flight in the same isolate whose wake was pending when the stop
+  landed waits for the next wake of any task. If none comes first, Cloudflare
+  may report it as hung.
+- Each stop leaks the stopped request's task, and the part of the wasm shadow
+  stack it was using, for the rest of the instance's life.
+
+The fix does not make the Free plan's 10 ms CPU limit fit. When Cloudflare
+enforces that limit strictly, cold requests that build a runtime (300–700 ms)
+are still stopped.
+
+**Who has to act.** Nobody: the next `impresspress deploy --target cloudflare`
+picks it up. The password-hasher Worker is built from the same `Cargo.lock`
+and ships in the same deploy. A Worker built outside this repository's
+workspace does not inherit the `[patch]`. It needs the same entry until a
+wasm-bindgen release includes the fix.
+
 ### Cloudflare: concurrent cold requests share one runtime build; new 503s, and a deploy step
 
 **What changes.** A cold request on Cloudflare that finds another request in

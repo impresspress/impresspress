@@ -121,8 +121,8 @@ thread_local! {
     /// retained across requests.
     ///
     /// `IsolateCell` rather than `RefCell` — a borrow flag stranded by a
-    /// Cloudflare hard-stop would trap every later request in the isolate.
-    /// See `impresspress_core::isolate_cell`.
+    /// Cloudflare hard-stop would trap the next request that touches it. See
+    /// `impresspress_core::isolate_cell`.
     static RELEASE_IDENTITY_CACHE: IsolateCell<(String, Arc<ReleaseAssetIdentity>)> =
         const { IsolateCell::new() };
 }
@@ -406,7 +406,8 @@ thread_local! {
     /// `IsolateCell` rather than `RefCell`: this is the single hottest piece
     /// of isolate state — entered and left on every poll of every request,
     /// and read by every service proxy — so a borrow flag stranded by a
-    /// Cloudflare hard-stop would take the whole isolate down with it. With
+    /// Cloudflare hard-stop would trap the very next request, whichever it
+    /// is (see `impresspress_core::isolate_cell`). With
     /// no borrow flag, a stop inside the cell's own `replace` leaves an empty
     /// slot, which the proxies below report as "used outside request poll
     /// scope". A stop anywhere else in a scoped poll leaves the stopped

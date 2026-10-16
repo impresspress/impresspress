@@ -91,7 +91,7 @@ pub struct D1ConfigSource {
     /// (the common case on an established database) never re-fetches.
     ///
     /// `Cell` + `Rc` rather than `RefCell`: this crate treats a borrow flag
-    /// stranded by a Cloudflare hard-stop as a wedged-isolate hazard (see
+    /// stranded by a Cloudflare hard-stop as a hazard to later requests (see
     /// `runtime_cache`'s thread_local comment). `take`/`set` has no flag to
     /// strand, and no borrow is ever held across the fetch `await`.
     snapshot: Cell<Option<(u64, Rc<BlockVariables>)>>,

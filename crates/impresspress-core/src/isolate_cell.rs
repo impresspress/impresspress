@@ -17,8 +17,8 @@
 //! A [`RefCell`](std::cell::RefCell) is the same hazard with a far worse
 //! failure mode. Its borrow flag is released by `Ref`/`RefMut::drop`. If a
 //! request is hard-stopped between `borrow_mut()` and the end of that
-//! borrow's scope, **the flag stays set for the life of the isolate**, and
-//! every later request that touches the same cell panics. Under
+//! borrow's scope, **the flag stays set for the life of the wasm instance**,
+//! and the next request that touches the same cell panics. Under
 //! `panic = "abort"` (which every wasm32 build of this workspace uses) a
 //! panic is a `unreachable` trap taken *inside* the future's `poll`. The
 //! host's response promise is then never settled and never rejected, which
@@ -29,9 +29,25 @@
 //! Worker's code had hung and would never generate a response.
 //! ```
 //!
-//! with zero recorded CPU, because the victim request had barely started.
-//! One stranded borrow therefore converts a single recoverable CPU
-//! termination into an isolate that answers nothing until it is evicted.
+//! with almost no recorded CPU, because the victim request had barely
+//! started.
+//!
+//! What becomes of the instance after that is up to worker-build's JS shim,
+//! not this crate. The shim registers a Rust panic hook (worker's
+//! `setPanicHook`) that marks the instance critical, and its next call into
+//! the instance re-instantiates the wasm module (`__wbg_reset_state`): fresh
+//! linear memory, the stranded cell and every cached runtime gone. That is
+//! the code's account; no such reset has been observed on Cloudflare. A trap
+//! that is not a Rust panic reaches the same mark only through the shim's
+//! global `error` listener, and whether Workers delivers a trap thrown from
+//! an executor microtask there is not known. So one stranded borrow costs at
+//! least one more failed request, and then either the instance is replaced,
+//! losing its cached runtime, or every request that touches the cell fails
+//! for as long as it is not.
+//!
+//! The executor that polls every request was the other isolate-wide state a
+//! hard stop could strand: js-sys 0.3.99's task queue, which the workspace
+//! `Cargo.toml` patches (its `[patch.crates-io]` entry says why).
 //!
 //! # The rule
 //!
@@ -231,7 +247,7 @@ impl<T> IdentityCache<T> {
     /// decoding, digest verification, manifest parsing) are the most
     /// expensive synchronous work on a cold request, and therefore the
     /// likeliest place for the platform to hard-stop a request. Running them
-    /// inside a lock would make that stop wedge the isolate — see the module
+    /// inside a lock would let that stop strand the lock — see the module
     /// documentation.
     ///
     /// A `load` that itself consults this cache is therefore well-defined

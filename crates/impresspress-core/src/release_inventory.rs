@@ -295,7 +295,7 @@ thread_local! {
     /// isolate (thread-per-isolate) and per-thread in native tests. An
     /// `IsolateCell`, not a `RefCell`: a platform hard stop does not run
     /// destructors, and dropping the previous inventory inside a held borrow
-    /// is exactly the wedge `isolate_cell` exists to prevent.
+    /// is exactly the stranded borrow `isolate_cell` exists to prevent.
     static RELEASE_INVENTORY_CACHE: IsolateCell<(String, Arc<ReleaseInventory>)> =
         const { IsolateCell::new() };
 }
