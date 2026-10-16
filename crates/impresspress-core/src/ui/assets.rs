@@ -1725,7 +1725,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "embed-assets")]
     /// Design rule 4: case is the source's, never the stylesheet's. A label
     /// set in capitals by CSS hides a Title Case string (and reads as
     /// shouting); the content column writes sentence case and shows it as
@@ -1867,6 +1866,7 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    #[cfg(feature = "embed-assets")]
     #[test]
     fn chrome_js_carries_the_palette_section() {
         let js = super::chrome_js();
