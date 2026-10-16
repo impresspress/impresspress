@@ -482,8 +482,12 @@
  * control column of about 32rem; a 1,100px box for a six-character value
  * read as broken. Narrower screens are unaffected. */
 .settings-form { max-width: 52rem; }
-/* The Save row: the form's one primary, at its own width. */
+/* A form's submit row: its buttons at their own width, sharing the row
+ * equally on a phone. */
 .form-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+@media (max-width: 720px) {
+	.form-actions > .btn { flex: 1 1 0; }
+}
 
 /* Aligned rows (`.form--aligned`): once the form is 40rem wide, each label
  * sits left of its control in a fixed 13rem track, and the hint under the

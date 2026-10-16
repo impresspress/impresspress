@@ -496,8 +496,14 @@
 .account-form__result:not(:empty) { margin-top: var(--space-4); }
 .account-form__actions { margin-top: var(--space-5); }
 /* What replaces the change-password form once it succeeded: the success
-   alert above the "Sign in again" link. */
+   alert above the "Sign in again" link, which takes the submit row's place
+   and, like it, spans a phone. */
 .change-password-done { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-4); }
+@media (max-width: 720px) {
+	.account-form__actions { display: flex; }
+	.account-form__actions > .btn { flex: 1 1 0; }
+	.change-password-done > .btn { align-self: stretch; }
+}
 
 /* ===== Message card (Messages block entry_card) =====
    Three accent variants keyed off entry kind/role — neutral (default/
@@ -728,6 +734,11 @@
 @media (max-width: 960px) {
 	.admin-buttons-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.admin-buttons-form-grid__submit { grid-column: 1 / -1; }
+}
+/* The submit button spans a phone. */
+@media (max-width: 720px) {
+	.admin-buttons-form-grid__submit { display: flex; }
+	.admin-buttons-form-grid__submit > .btn { flex: 1 1 0; }
 }
 @media (max-width: 560px) {
 	.admin-buttons-form-grid { grid-template-columns: minmax(0, 1fr); }

@@ -1,8 +1,8 @@
 /* ===== Responsive ===== */
 /* Live mobile rules migrated from former (max-width: 767px) block — Phase 5c.
  * No rule here widens buttons: a button is as wide as its label at every
- * width, and a row that wants full-width buttons on a phone opts in with
- * `.btn--block` (components/button.css). */
+ * width, and a row whose buttons span a phone says so on the row
+ * (components/button.css). */
 @media (max-width: 720px) {
 	.tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
 	.tab { flex-shrink: 0; }

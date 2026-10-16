@@ -268,7 +268,7 @@ pub(crate) fn render_share_modal() -> Markup {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Create link" }
+                    button .btn .btn--primary type="submit" { "Create link" }
                 }))
             }
         },

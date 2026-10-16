@@ -96,14 +96,12 @@
 	.quick-actions__grid { grid-template-columns: repeat(2, 1fr); }
 }
 
-/* ── Block (opt-in full width on narrow screens) ───────── */
 /* A button is as wide as its label at every width; nothing widens buttons
-   globally. A row whose buttons should span the screen on a phone -- a form's
-   submit row, a modal's footer -- marks them `.btn--block`. Two block buttons
-   in one flex row share it equally. */
-@media (max-width: 720px) {
-	.btn--block { width: 100%; flex: 1 1 0; }
-}
+   globally. A row whose buttons span the screen on a phone says so on the
+   row -- `.modal__footer` (modal.css), `.form-actions` (form.css),
+   `.account-form__actions` and `.admin-buttons-form-grid__submit`
+   (card.css) -- so a button built by `components::Action`, which has no
+   width of its own, takes the row's layout. */
 
 /* ── Filter toggle (`components::filter_toggle`) ───────── */
 /* A list filter that is on or off. Off reads as a secondary button; on is

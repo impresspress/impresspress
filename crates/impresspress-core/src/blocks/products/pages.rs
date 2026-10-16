@@ -2432,9 +2432,9 @@ pub async fn product_manager(
                 // The editor's own outcome, next to the button that caused
                 // it, in both modes: what to fix, or why the server refused.
                 p #manager-visual-error .login-error .mt-4 role="alert" hidden {}
-                div .flex .gap-2 .mt-4 .flex-wrap {
-                    button #manager-visual-save .btn .btn--primary .btn--sm .btn--block type="button" data-action="pm-save-visual-offer" { "Save visual changes" }
-                    button .btn .btn--secondary .btn--sm .btn--block type="button" data-action="pm-close-visual-editor" { "Cancel" }
+                div .form-actions .mt-4 {
+                    button #manager-visual-save .btn .btn--primary .btn--sm type="button" data-action="pm-save-visual-offer" { "Save visual changes" }
+                    button .btn .btn--secondary .btn--sm type="button" data-action="pm-close-visual-editor" { "Cancel" }
                 }
             }
         }

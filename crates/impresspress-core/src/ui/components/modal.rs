@@ -132,10 +132,10 @@ pub fn modal(id: &str, title: &str, body: Markup) -> Markup {
 /// the submit button submits it and an htmx re-render of the form (a field
 /// error) re-renders the actions with it.
 ///
-/// A button in it that carries `.btn--block` ([`modal_cancel`] does) takes
-/// an equal share of the row on a phone; on a wide screen the buttons sit
-/// right-aligned at their own width. An [`Action`](super::Action) has no
-/// block form, so a submit `Action` keeps its own width on a phone too.
+/// On a phone its buttons share the row equally; on a wide screen they sit
+/// right-aligned at their own width. The row owns that layout
+/// (`.modal__footer` in `modal.css`), so a hand-written button and an
+/// [`Action`](super::Action) take it alike.
 pub fn modal_footer(actions: Markup) -> Markup {
     html! {
         div .modal__footer { (actions) }
@@ -145,7 +145,7 @@ pub fn modal_footer(actions: Markup) -> Markup {
 /// The Cancel button every form modal has: it closes the modal it sits in.
 pub fn modal_cancel() -> Markup {
     html! {
-        button .btn .btn--secondary .btn--block type="button" data-action="modal-close" { "Cancel" }
+        button .btn .btn--secondary type="button" data-action="modal-close" { "Cancel" }
     }
 }
 
@@ -213,7 +213,7 @@ mod tests {
         assert!(body < footer, "the footer is inside the body: {html}");
         assert!(
             html.contains(
-                r#"<button class="btn btn--secondary btn--block" type="button" data-action="modal-close">Cancel</button>"#
+                r#"<button class="btn btn--secondary" type="button" data-action="modal-close">Cancel</button>"#
             ),
             "{html}"
         );

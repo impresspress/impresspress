@@ -554,7 +554,7 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Create" }
+                    button .btn .btn--primary type="submit" { "Create" }
                 }))
             }
         }))
@@ -636,7 +636,7 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Create" }
+                    button .btn .btn--primary type="submit" { "Create" }
                 }))
             }
         }))

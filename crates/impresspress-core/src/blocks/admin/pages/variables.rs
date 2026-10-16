@@ -235,7 +235,7 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
             }
             (components::modal_footer(html! {
                 (components::modal_cancel())
-                button .btn .btn--primary .btn--block type="submit" { "Create" }
+                button .btn .btn--primary type="submit" { "Create" }
             }))
         }
     }
@@ -1122,7 +1122,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Save" }
+                    button .btn .btn--primary type="submit" { "Save" }
                 }))
             }
         },
