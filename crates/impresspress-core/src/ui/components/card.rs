@@ -15,7 +15,7 @@ use crate::ui::icons;
 ///
 /// - [`Card::titled`] renders `section.card > header.card__head + div.card__body`.
 ///   The title is an `h2`: the shell's topbar owns the page's one `h1`
-///   (`ui::shell::render_topbar`), so a card is a section under it.
+///   (`ui::shell::Topbar::render`), so a card is a section under it.
 /// - [`Card::plain`] renders `div.card > div.card__body`, with no heading.
 #[must_use = "a Card renders nothing until `render` is called"]
 pub struct Card<'a> {
@@ -180,12 +180,16 @@ impl<'a> Card<'a> {
 /// hyphen. (HTML forbids uppercase there; the tighter alphabet keeps every
 /// name a literal a spec can select on.) A tail that itself starts `data-`
 /// is the full name passed by mistake, and would render `data-data-…`.
+/// An `hx-` tail is refused too: htmx reads `data-hx-get`, `data-hx-post`
+/// and the rest exactly as their `hx-` twins, so a `data()` call would give
+/// the element a request (or an event handler) its builder never declared.
 ///
 /// Shared with [`super::action::Action::data`], the other builder that takes
 /// caller-named `data-*` attributes.
 pub(super) fn is_data_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with("data-")
+        && !name.starts_with("hx-")
         && !name.starts_with('-')
         && !name.ends_with('-')
         && name
@@ -518,6 +522,7 @@ mod tests {
         for bad in [
             "",
             "data-x",
+            "hx-post",
             "-x",
             "x-",
             "Step",

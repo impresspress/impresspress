@@ -62,7 +62,7 @@ fn backend_badge(backend: wafer_sql_utils::Backend, table_count: usize) -> Heade
         Badge::new(BadgeVariant::Info)
             .classes("text-xs")
             .title("Database backend"),
-        html! { (label) " · " (table_count) " tables" },
+        &format!("{label} · {table_count} tables"),
     )
 }
 

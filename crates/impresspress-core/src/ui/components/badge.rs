@@ -176,9 +176,10 @@ impl<'a> Badge<'a> {
 pub struct HeaderStatus(Markup);
 
 impl HeaderStatus {
-    /// `badge` around `content`, as [`Badge::render`].
-    pub fn badge(badge: Badge<'_>, content: Markup) -> Self {
-        Self(badge.render(content))
+    /// `badge` around the text `label`. Text only, so the badge cannot hold
+    /// a link or a button.
+    pub fn badge(badge: Badge<'_>, label: &str) -> Self {
+        Self(badge.render(html! { (label) }))
     }
 
     /// A status string's badge, as [`status_badge`].

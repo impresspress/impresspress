@@ -630,12 +630,55 @@ async fn every_page_header_holds_exactly_the_actions_it_names() {
     }
     found.sort();
     found.dedup();
-    let expected: Vec<&str> = EXPECTED_HEADERS.to_vec();
-    assert_eq!(
-        found.iter().map(String::as_str).collect::<Vec<_>>(),
-        expected,
-        "the headers the crawl rendered (left) are not the ones named (right)"
+    let missing: Vec<&str> = EXPECTED_HEADERS
+        .iter()
+        .copied()
+        .filter(|row| !found.iter().any(|f| f == row))
+        .collect();
+    let unexpected: Vec<&str> = found
+        .iter()
+        .map(String::as_str)
+        .filter(|row| !EXPECTED_HEADERS.contains(row))
+        .collect();
+    assert!(
+        missing.is_empty() && unexpected.is_empty(),
+        "{}",
+        header_table_mismatch(&missing, &unexpected, &found)
     );
+}
+
+/// The guard's failure, by page: each row named but not rendered, each row
+/// rendered but not named, one per line, then the rendered table ready to
+/// paste over `EXPECTED_HEADERS` once the change is the intended one.
+fn header_table_mismatch(missing: &[&str], unexpected: &[&str], found: &[String]) -> String {
+    let mut out = String::from("the page headers the crawl rendered are not the ones named\n");
+    for row in missing {
+        out.push_str(&format!("missing:    {row}\n"));
+    }
+    for row in unexpected {
+        out.push_str(&format!("unexpected: {row}\n"));
+    }
+    out.push_str("\nrendered (paste-ready):\n");
+    for row in found {
+        out.push_str(&format!("    r#\"{row}\"#,\n"));
+    }
+    out
+}
+
+#[test]
+fn the_header_table_mismatch_names_each_row_by_page() {
+    let found = vec!["/a => primary \"New\"".to_string()];
+    let out = header_table_mismatch(
+        &["/b => secondary \"Refresh\""],
+        &["/a => primary \"New\""],
+        &found,
+    );
+    assert!(
+        out.contains("missing:    /b => secondary \"Refresh\"\n"),
+        "{out}"
+    );
+    assert!(out.contains("unexpected: /a => primary \"New\"\n"), "{out}");
+    assert!(out.contains("    r#\"/a => primary \"New\"\"#,\n"), "{out}");
 }
 
 /// `url` with each generated id segment (a UUID) written `{id}`, so the

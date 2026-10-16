@@ -429,6 +429,14 @@ mod tests {
         let _ = Action::secondary("x", ActionTarget::Link("/")).data("data-x", "1");
     }
 
+    /// htmx reads `data-hx-post` as `hx-post`: a request goes through
+    /// `ActionTarget::HxGet`, never through `data()`.
+    #[test]
+    #[should_panic(expected = "Action::data takes the part after `data-`")]
+    fn data_refuses_an_htmx_attribute() {
+        let _ = Action::secondary("x", ActionTarget::Link("/")).data("hx-post", "/b/x");
+    }
+
     /// The target writes `data-action` / `data-modal-target`; a second copy
     /// from `data()` would be a duplicate attribute the browser ignores.
     #[test]

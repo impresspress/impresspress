@@ -315,7 +315,7 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
         shell
             .status(HeaderStatus::badge(
                 Badge::new(BadgeVariant::Secondary).classes("text-capitalize"),
-                html! { (context.str_field("type")) },
+                context.str_field("type"),
             ))
             .status(HeaderStatus::status(context.str_field("status")))
     };

@@ -366,13 +366,13 @@ fn count_noun(count: i64, noun: &str) -> String {
     }
 }
 
-/// The "+" create action: a plus icon beside `label`, never a typed "+".
-/// A page's "New product" primary action in the topbar: a link to the
-/// product wizard at `href`.
+/// A page's new-product primary action in the topbar: a link to the
+/// product wizard at `href`, named `label`.
 fn new_product_action<'a>(href: &'a str, label: &'a str) -> HeaderAction<'a> {
     HeaderAction::new(label, ActionTarget::Link(href)).icon(icons::plus())
 }
 
+/// The "+" create action: a plus icon beside `label`, never a typed "+".
 fn create_link(href: &str, label: &str, class: &str) -> Markup {
     html! {
         a class={ "btn btn--sm " (class) } href=(href) { (icons::plus()) " " (label) }

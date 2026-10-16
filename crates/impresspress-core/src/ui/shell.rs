@@ -600,7 +600,7 @@ mod tests {
             ],
             subtitle: Some("Edit the product"),
             status: vec![
-                HeaderStatus::badge(Badge::new(BadgeVariant::Info), html! { "Live" }),
+                HeaderStatus::badge(Badge::new(BadgeVariant::Info), "Live"),
                 HeaderStatus::status("pending"),
             ],
             secondary_actions: vec![
