@@ -6,11 +6,24 @@ use std::path::Path;
 use anyhow::{bail, Result};
 
 use crate::cli::helpers::cloudflare::{
-    analytics, assets, build as cf_build, deploy as cf_deploy, env, first_create, password_hasher,
+    analytics, assets, build as cf_build, deploy as cf_deploy, env, first_create,
+    password_hasher::{self, PasswordHasherMode},
     profile_check, wrangler,
 };
 
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
+    build_artifacts(repo_root, release, PasswordHasherMode::Deploy).await
+}
+
+/// Build what a deploy uploads. Under [`PasswordHasherMode::Keep`] the
+/// password-hasher Worker is not built — nothing would deploy it — but its
+/// config is still generated: the deploy reads the hasher's secret names and
+/// deployment through it.
+async fn build_artifacts(
+    repo_root: &Path,
+    release: bool,
+    password_hasher: PasswordHasherMode,
+) -> Result<()> {
     let cfg = env::load(repo_root)?;
 
     // Inspect [profile.release] before we kick off the long cargo build.
@@ -37,13 +50,20 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
 
     // The password-hasher Worker the main Worker's crypto service calls: its
     // own crate, staged against the consumer's `impresspress-password`.
-    let hasher_wasm = password_hasher::build(repo_root).await?;
-    if let Ok(meta) = std::fs::metadata(&hasher_wasm) {
-        println!(
-            "-> password-hasher Worker {} ({:.1} KB)",
-            hasher_wasm.display(),
-            meta.len() as f64 / 1024.0
-        );
+    match password_hasher {
+        PasswordHasherMode::Deploy => {
+            let hasher_wasm = password_hasher::build(repo_root).await?;
+            if let Ok(meta) = std::fs::metadata(&hasher_wasm) {
+                println!(
+                    "-> password-hasher Worker {} ({:.1} KB)",
+                    hasher_wasm.display(),
+                    meta.len() as f64 / 1024.0
+                );
+            }
+        }
+        PasswordHasherMode::Keep => {
+            println!("-> password-hasher Worker not built (--password-hasher keep)")
+        }
     }
 
     // Post-build: measure the produced WASM. Warns if it's likely to
@@ -229,7 +249,11 @@ async fn wait_and_run_local_init(
     })))
 }
 
-pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
+pub async fn deploy(
+    repo_root: &Path,
+    release: bool,
+    password_hasher_mode: PasswordHasherMode,
+) -> Result<()> {
     let cfg = env::load(repo_root)?;
     let token_key = impresspress_core::config_vars::DEPLOY_TOKEN_KEY;
 
@@ -251,7 +275,7 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
         std::env::var(token_key).ok(),
     )?;
 
-    build(repo_root, release).await?;
+    build_artifacts(repo_root, release, password_hasher_mode).await?;
 
     let out_dir = repo_root.join("target/impresspress-cloudflare");
     // `build()` emits a developer config with a Wrangler build hook for
@@ -275,16 +299,35 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     // 0. The password-hasher Worker first. Every version of the main Worker
     //    this deploy uploads — the candidate `/_deploy/prepare` runs in, the
     //    final one verified below — hashes through whichever hasher is
-    //    deployed, so the one this build pairs with has to be live before
-    //    any of them runs. The live main Worker keeps working meanwhile:
-    //    the hasher answers the previous release's protocol version too.
+    //    deployed, so the one it will call has to be live before any of them
+    //    runs: this build's (`deploy`, the default), or the one already
+    //    deployed (`--password-hasher keep`). Either way the final version's
+    //    `/_deploy/verify` probes it before promotion. The live main Worker
+    //    keeps working meanwhile: the hasher answers the previous release's
+    //    protocol version too.
     let hasher_toml = out_dir.join(wrangler::PASSWORD_HASHER_CONFIG_FILE);
-    cf_deploy::wrangler_deploy_password_hasher(&hasher_toml)?;
-    deployment_gate.password_hasher_deployed()?;
-    println!(
-        "-> deployed password-hasher Worker {}",
-        cfg.password_hasher.worker_name
-    );
+    match password_hasher::release(
+        &wrangler_cli,
+        &hasher_toml,
+        password_hasher_mode,
+        &wrangler::password_hasher_vars(&cfg.password_hasher),
+    )? {
+        password_hasher::HasherRelease::Deployed => {
+            deployment_gate.password_hasher_deployed()?;
+            println!(
+                "-> deployed password-hasher Worker {}",
+                cfg.password_hasher.worker_name
+            );
+        }
+        password_hasher::HasherRelease::Kept { version_id } => {
+            deployment_gate.password_hasher_kept(&version_id)?;
+            println!(
+                "-> kept password-hasher Worker {} at version {version_id} (not built, not \
+                 deployed)",
+                cfg.password_hasher.worker_name
+            );
+        }
+    }
 
     // 0a. The main Worker. `wrangler versions upload` cannot create one, so
     //     a site's first deploy creates it here as a placeholder that answers
@@ -478,13 +521,18 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     // 5. The final version must prove it parsed/applied the packaged plan and
     //    can read an immutable representative asset, then serve a normal
     //    route. Neither request reruns migrations or seeds.
-    cf_deploy::call_deploy_verify(
+    let verified = cf_deploy::call_deploy_verify(
         &final_upload.preview_url,
         &deploy_token,
         &prepared_response.plan,
         &release_assets,
     )
     .await?;
+    println!(
+        "-> password-hasher Worker answered the final candidate's probe in protocol \
+         version {} ({:?})",
+        verified.password_hasher.protocol, verified.password_hasher.answer
+    );
     cf_deploy::smoke_preview_lockdown(&final_upload.preview_url).await?;
     cf_deploy::smoke_authenticated_get(&final_upload.preview_url, &deploy_token, "/health").await?;
     // The memory report below counts the smoke's requests only, so its window
@@ -540,7 +588,13 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     );
 
     println!();
-    println!("deploy complete");
+    match deployment_gate.kept_password_hasher() {
+        Some(version_id) => println!(
+            "deploy complete (password-hasher Worker {} kept at version {version_id})",
+            cfg.password_hasher.worker_name
+        ),
+        None => println!("deploy complete"),
+    }
     Ok(())
 }
 

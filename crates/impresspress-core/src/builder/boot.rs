@@ -78,7 +78,12 @@ pub enum GrantSource<'a> {
 /// json!` `1`s in the Worker's deploy endpoints and one bare `1` in the CLI's
 /// verify parser — plus a fourth constant in the CLI, with nothing tying any
 /// of them together.
-pub const DEPLOY_RESPONSE_SCHEMA_VERSION: u32 = 1;
+///
+/// A change to either response that the other side cannot read bumps it, so
+/// a mismatched CLI and Worker meet a schema refusal rather than a decode
+/// error. At 2, `/_deploy/verify` carries the password-hasher probe's
+/// required `password_hasher` field.
+pub const DEPLOY_RESPONSE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepOutcome {

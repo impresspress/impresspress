@@ -1,6 +1,7 @@
 //! The `/_deploy/*` control plane: the operator-driven funnel a deploy POSTs,
 //! and the two endpoints that report on (and deeply verify) a packaged prepared
-//! runtime plan.
+//! runtime plan. `/_deploy/verify` also asks the password-hasher Worker one
+//! probe question, so it is the one endpoint here that calls another Worker.
 //!
 //! Every endpoint here is gated on the deploy-token wrangler secret via
 //! [`deploy_token_authorized`]; an unset secret disables the funnel outright.
@@ -256,6 +257,18 @@ pub(crate) fn prepared_status_endpoint(
     }
 }
 
+/// Deep, mutation-free verification of the final candidate before
+/// promotion: the packaged plan against this version's identity and the
+/// current config generation, the release asset routing and one
+/// representative immutable asset, and then the password-hasher Worker.
+///
+/// The hasher check is not local to this Worker: it sends the deployed
+/// hasher one probe request ([`impresspress_password::probe`]) through the
+/// crypto service's own client, the way a sign-in reaches it, and reports the
+/// answer as the response's `password_hasher` field. It writes nothing,
+/// touches no rate limiter and creates no session: it never enters the auth
+/// block. A hasher that does not answer this build's protocol fails the
+/// request with a 503 naming why, so the version is never promoted.
 pub(crate) async fn prepared_verify_endpoint(
     req: &worker::Request,
     env: &worker::Env,
@@ -413,11 +426,101 @@ pub(crate) async fn prepared_verify_endpoint(
     }
     .await;
 
-    match result {
-        Ok(report) => worker::Response::ok(serde_json::to_string_pretty(&report)?),
+    let report = match result {
+        Ok(report) => report,
         Err(error) => {
             worker::console_log!("prepared runtime deep verification failed: {error}");
-            worker::Response::error("prepared runtime deep verification failed", 500)
+            return worker::Response::error("prepared runtime deep verification failed", 500);
         }
+    };
+    let probe = probe_password_hasher(env, environment).await;
+    if let Err(error) = &probe {
+        worker::console_log!("password-hasher probe failed: {error}");
+    }
+    match impresspress_password::probe::verify_reply(report, probe) {
+        (200, body) => worker::Response::ok(body),
+        (status, body) => worker::Response::error(body, status),
+    }
+}
+
+/// Ask the deployed password-hasher Worker the deploy probe through this
+/// Worker's binding, spread over the shard count its vars name, exactly as
+/// the request path's crypto service is built.
+async fn probe_password_hasher(
+    env: &worker::Env,
+    environment: &CfEnvironment,
+) -> Result<impresspress_password::probe::Report, String> {
+    crate::crypto_service::PasswordHasher::from_env(env, environment.password_hasher_shards()?)
+        .probe()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use std::rc::Rc;
+
+    use impresspress_password::protocol::{self, Outcome};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::probe_password_hasher;
+    use crate::{
+        crypto_service::test_support::FakeHasher, environment::test_support::empty_environment,
+    };
+
+    /// The probe reaches the hasher through the binding, one request to one
+    /// of the shards, and through nothing else (that the shard count is the
+    /// configured one is pinned by the bad-count case below): the `Env` here binds only the
+    /// hasher — no D1, no KV, no R2, no rate limiter — so a probe that wrote
+    /// an audit row, counted against a limiter or created a session would
+    /// fail here rather than pass.
+    #[wasm_bindgen_test]
+    async fn the_probe_asks_only_the_hasher_through_one_shard() {
+        let fake = FakeHasher::running(Default::default());
+        let mut environment = empty_environment();
+        environment.set_password_hasher_shards_for_test("3");
+        let report = probe_password_hasher(&fake.env, &environment)
+            .await
+            .expect("the probe passes against the real hasher");
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::json!({
+                "protocol": protocol::PROTOCOL_VERSION,
+                "answer": "malformed_hash",
+            })
+        );
+        let shards = fake.shards.borrow();
+        assert_eq!(shards.len(), 1, "one hasher call");
+        assert!(
+            ["shard-0", "shard-1", "shard-2"].contains(&shards[0].as_str()),
+            "{shards:?}"
+        );
+    }
+
+    /// A hasher that answers the right outcome in another protocol version
+    /// fails the probe, and so does a shard count that does not parse.
+    #[wasm_bindgen_test]
+    async fn the_probe_fails_on_another_version_or_a_bad_shard_count() {
+        let fake = FakeHasher::new(Rc::new(|_| {
+            let answer = protocol::Response {
+                version: protocol::PROTOCOL_VERSION + 1,
+                outcome: Outcome::MalformedHash {
+                    message: "m".into(),
+                },
+            };
+            (200, serde_json::to_string(&answer).expect("encode"))
+        }));
+        let environment = empty_environment();
+        let err = probe_password_hasher(&fake.env, &environment)
+            .await
+            .expect_err("an answer in another version refuses");
+        assert!(err.contains(protocol::UNAVAILABLE_PREFIX), "{err}");
+
+        let mut environment = empty_environment();
+        environment.set_password_hasher_shards_for_test("0");
+        let err = probe_password_hasher(&fake.env, &environment)
+            .await
+            .expect_err("a bad shard count refuses");
+        assert!(err.contains(protocol::SHARDS_VAR), "{err}");
     }
 }
