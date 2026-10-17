@@ -533,7 +533,9 @@ mod tests {
                     .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
                     .collect();
                 let has = |d: &str| decls.iter().any(|x| x == d);
-                if has("box-shadow: var(--focus-ring)") {
+                if has("box-shadow: var(--focus-ring)")
+                    || has("box-shadow: var(--focus-ring-inset)")
+                {
                     rings += 1;
                     assert!(
                         has("outline: 2px solid transparent") && has("outline-offset: -2px"),
@@ -1627,8 +1629,9 @@ mod tests {
         (".sidebar__", ".sidebar"),
         // The login page's left-hand brand panel (layouts/auth-split.css).
         (".auth-split__", ".auth-split__brand"),
-        // The "Sign up" / "Sign in" line under the auth form, on the form's
-        // own surface (layouts/auth-split.css).
+        // The "Sign up" / "Sign in" line under the auth form. It sits on
+        // `.auth-split__form` (login) or `.login-container` (signup, white);
+        // it is measured on `.auth-split__form`, the darker of the two.
         (".signup-link", ".auth-split__form"),
         // The page header and the body have no box of their own: they sit
         // on the shell's page background (layouts/shell.css). Every
@@ -1933,6 +1936,197 @@ mod tests {
                 "the chat draws its own frame: `.page--chat` lacks `{decl}`: {chat}"
             );
         }
+    }
+
+    /// The body is the scroller, so it clips whatever its children paint
+    /// outside it. It keeps room on every side: `--focus-reach` at the top
+    /// (taken from the gap above it, so nothing moves) and `--shell-inset`
+    /// at the sides and bottom. And the column's inset is ONE value: the
+    /// column's padding, the body's counter-margin and the body's padding
+    /// all read `--shell-inset` (redefined once for phones in tokens.css),
+    /// so the content cannot drift off the title's edge at either width.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_body_keeps_room_for_a_focus_ring_on_every_side() {
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let blocks = css_leaf_blocks(super::css());
+        // Every declaration of `props` on exactly `selector`, at any width.
+        let decls = |selector: &str, props: &[&str]| -> Vec<(String, String)> {
+            blocks
+                .iter()
+                .filter(|(s, _)| s == selector)
+                .flat_map(|(_, body)| body.split(';'))
+                .filter_map(|decl| decl.split_once(':'))
+                .map(|(prop, value)| (prop.trim().to_ascii_lowercase(), normalise(value)))
+                .filter(|(prop, _)| {
+                    props
+                        .iter()
+                        .any(|p| prop == p || prop.starts_with(&format!("{p}-")))
+                })
+                .collect()
+        };
+        assert_eq!(
+            decls(".shell__main", &["padding"]),
+            vec![(
+                "padding".to_string(),
+                "var(--shell-inset) var(--shell-inset) 0".to_string()
+            )],
+            "the column's inset is --shell-inset, set once"
+        );
+        assert_eq!(
+            decls(".shell__body", &["padding", "margin"]),
+            vec![
+                (
+                    "margin".to_string(),
+                    "calc(-1 * var(--focus-reach)) calc(-1 * var(--shell-inset)) 0".to_string()
+                ),
+                (
+                    "padding".to_string(),
+                    "var(--focus-reach) var(--shell-inset) var(--shell-inset)".to_string()
+                ),
+            ],
+            "the body spans the column's padding and the gap's top --focus-reach, \
+             and pads itself back by the same values"
+        );
+
+        // `--focus-reach` covers the shared keyboard ring: base.css's outline
+        // width plus its offset.
+        let tokens = parse_root_tokens(super::css());
+        let reach = tokens
+            .get("--focus-reach")
+            .and_then(|v| css_length_px(v))
+            .expect("tokens.css sets --focus-reach as a length");
+        let ring = blocks
+            .iter()
+            .find(|(s, _)| s.starts_with(":where(") && s.ends_with(":focus-visible"))
+            .map(|(_, body)| body.as_str())
+            .expect("base.css has the shared :where(..):focus-visible ring");
+        let px_of = |prop: &str| -> f64 {
+            ring.split(';')
+                .filter_map(|decl| decl.split_once(':'))
+                .find(|(p, _)| p.trim() == prop)
+                .and_then(|(_, v)| v.split_whitespace().find_map(css_length_px))
+                .unwrap_or_else(|| panic!("the shared ring sets no {prop} length: {ring}"))
+        };
+        let needed = px_of("outline") + px_of("outline-offset");
+        assert!(
+            reach >= needed && reach > 0.0,
+            "--focus-reach is {reach}px; the shared ring reaches {needed}px outside its element"
+        );
+    }
+
+    /// The fields a page can put straight on the page background, and the
+    /// palette trigger beside them. Each is the class itself, or the class
+    /// with a state or modifier (`:hover`, `.error`), never a descendant.
+    #[cfg(feature = "embed-assets")]
+    const FIELD_CLASSES: &[&str] = &[
+        ".form-input",
+        ".form-select",
+        ".form-textarea",
+        ".topbar__palette",
+    ];
+
+    /// WCAG 1.4.11: a field's edge is what shows where it is, so it needs
+    /// 3:1 against what surrounds it. The shell draws no white frame, so a
+    /// field sits on a card (`--surface-1`) or straight on the page
+    /// (`--surface-2`): every edge a field rule declares is measured on
+    /// both, and every fill it declares is opaque. Disabled fields are
+    /// exempt (1.4.11 excludes inactive components).
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn controls_are_visible_on_both_surfaces() {
+        let tokens = parse_root_tokens(super::css());
+        let surface = |name: &str| -> (u8, u8, u8) {
+            let c = resolve_color(tokens.get(name).expect("surface token"), &tokens, 0)
+                .expect("surface token resolves");
+            composite_over(c, (255, 255, 255))
+        };
+        let surfaces = [
+            ("--surface-1", surface("--surface-1")),
+            ("--surface-2", surface("--surface-2")),
+        ];
+        let is_field = |part: &str| {
+            FIELD_CLASSES.iter().any(|class| {
+                part.strip_prefix(class).is_some_and(|rest| {
+                    rest.is_empty()
+                        || rest.starts_with(':')
+                        || rest.starts_with('.')
+                        || rest.starts_with('[')
+                })
+            })
+        };
+        let disabled = |part: &str| part.replace(":not(:disabled)", "").contains(":disabled");
+        let mut wrong = Vec::new();
+        let (mut edges, mut fills) = (0, 0);
+        for (selector, body) in css_leaf_blocks(super::css()) {
+            let parts: Vec<&str> = selector.split(',').map(str::trim).collect();
+            if !parts.iter().all(|&p| is_field(p))
+                || parts.iter().any(|&p| disabled(p) || p.contains("::"))
+            {
+                continue;
+            }
+            for decl in body.split(';') {
+                let Some((prop, value)) = decl.split_once(':') else {
+                    continue;
+                };
+                match prop.trim() {
+                    "border" | "border-color" => {
+                        let Some(edge) = value
+                            .split_whitespace()
+                            .rev()
+                            .find_map(|t| resolve_color(t, &tokens, 0))
+                        else {
+                            wrong.push(format!("{selector}: cannot resolve `{}`", value.trim()));
+                            continue;
+                        };
+                        edges += 1;
+                        for (name, bg) in surfaces {
+                            let ratio = contrast(&hex_of(composite_over(edge, bg)), &hex_of(bg));
+                            if ratio < 3.0 {
+                                wrong.push(format!(
+                                    "{selector}: edge `{}` is {ratio:.2}:1 on {name}",
+                                    value.trim()
+                                ));
+                            }
+                        }
+                    }
+                    "background" | "background-color" => match resolve_color(value, &tokens, 0) {
+                        Some(fill) if fill.3 == 255 => fills += 1,
+                        Some(_) => wrong.push(format!(
+                            "{selector}: a translucent fill shows the surface through it"
+                        )),
+                        None => {
+                            wrong.push(format!("{selector}: cannot resolve `{}`", value.trim()))
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "fields that do not read on both surfaces:\n{}",
+            wrong.join("\n")
+        );
+        assert!(
+            edges >= 4 && fills >= 2,
+            "only {edges} field edges and {fills} fills were measured; the selector match has drifted"
+        );
+    }
+
+    /// The product wizard's footer is sticky over the scrolled steps, so it
+    /// is opaque, and it paints the page background it sits on: the white it
+    /// had matched the shell frame that is gone, and showed as a band.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_wizard_footer_paints_the_page_it_sticks_over() {
+        let footer = css_leaf_blocks(super::css())
+            .into_iter()
+            .find(|(s, _)| s == ".product-wizard-actions")
+            .map(|(_, body)| body.split_whitespace().collect::<Vec<_>>().join(" "))
+            .expect("components/form.css has `.product-wizard-actions`");
+        assert!(footer.contains("position: sticky"), "{footer}");
+        assert!(footer.contains("background: var(--surface-2)"), "{footer}");
     }
 
     /// Design rule 4: case is the source's, never the stylesheet's. A label

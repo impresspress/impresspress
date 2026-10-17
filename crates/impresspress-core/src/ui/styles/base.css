@@ -69,13 +69,14 @@ summary { cursor: pointer; }
    Contrast) drops every box-shadow, so each also carries a transparent
    outline: invisible normally, painted in the system colour there. One rule
    for all of them, so no component can take the shadow without the
-   outline. `.btn` covers every button variant (`.btn--icon`,
+   outline (the shell body's inset ring, `--focus-ring-inset`, has its own
+   rule in layouts/shell.css, held to the same outline by the same guard).
+   `.btn` covers every button variant (`.btn--icon`,
    `.btn--ghost-danger`, ...), which are modifiers on it. */
 .btn:focus-visible,
 .topbar__palette:focus-visible,
 .shell__drawer-toggle:focus-visible,
 .shell__palette-icon:focus-visible,
-.shell__body:focus-visible,
 .data-table__row-href a:focus-visible,
 .data-table--scroll:focus-visible,
 a.pagination__link:focus-visible,

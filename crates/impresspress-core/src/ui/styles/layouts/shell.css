@@ -337,23 +337,36 @@
 /* The content column. The shell draws no frame: the header, the section
    links and the body all sit on the page background (`.shell`'s
    `--surface-2`), so a card a page draws is the first level of card, never a
-   card inside the shell's. The column's inset is this padding, so the title
-   and the content share one left edge. No bottom padding: the body scrolls
-   to the bottom of the screen and carries its own (below). */
+   card inside the shell's. The column's inset is `--shell-inset` (tokens.css,
+   tighter on a phone), so the title and the content share one left edge.
+   No bottom padding: the body scrolls to the bottom of the screen and
+   carries its own (below). */
 .shell__main {
 	display: flex; flex-direction: column; min-width: 0; min-height: 0;
-	gap: var(--space-4); padding: var(--space-6) var(--space-6) 0;
+	gap: var(--space-4); padding: var(--shell-inset) var(--shell-inset) 0;
 }
 /* The body, and the page's `main` landmark: the scroller and the skip link's
-   target. It reaches out across the column's side padding and pads itself
-   back by the same amount, so the content stays on the title's edge while
-   the scrollbar sits at the window's edge and a focus ring or a card's edge
-   at the content's side is not clipped by the scroller. */
+   target. A scroller clips what its children paint outside it, so it keeps
+   room on every side: it reaches out across the column's side padding and
+   pads itself back by `--shell-inset` (the scrollbar sits at the window's
+   edge, and a ring or card edge at the content's side is not clipped), and
+   it starts `--focus-reach` higher, into the gap above, and pads itself back
+   by that much, so a ring on a tab at its top is whole and nothing moves.
+   Pinned by ui::assets::tests::the_body_keeps_room_for_a_focus_ring_on_every_side. */
 .shell__body {
 	flex: 1; min-width: 0;
 	overflow-y: auto;
-	margin-inline: calc(-1 * var(--space-6));
-	padding: 0 var(--space-6) var(--space-6);
+	margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--shell-inset)) 0;
+	padding: var(--focus-reach) var(--shell-inset) var(--shell-inset);
+}
+/* The skip target's ring, drawn inside it: the body spans the column from
+   the sidebar to the window's right and bottom edges, so an outside ring
+   would show as one line under the header. Like the shared ring rule
+   (base.css), it keeps a transparent outline for forced-colors mode. */
+.shell__body:focus-visible {
+	outline: 2px solid transparent;
+	outline-offset: -2px;
+	box-shadow: var(--focus-ring-inset);
 }
 
 /* The page header (`ui::shell::Topbar`): crumbs + title + subtitle on the
@@ -383,7 +396,7 @@
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
 	min-height: var(--control-height);
-	background: var(--surface-1); border: 1px solid var(--border-color);
+	background: var(--surface-1); border: 1px solid var(--border-control);
 	border-radius: var(--radius-md); padding: var(--space-1) var(--space-3); font-size: var(--text-sm);
 	color: var(--text-secondary); cursor: pointer;
 }
@@ -479,8 +492,7 @@
 	.shell .sidebar.collapsed .sidebar__user-text { display: inline; }
 	.shell .sidebar.collapsed .sidebar__group-label { visibility: visible; }
 
-	.shell__main { gap: var(--space-3); padding: var(--space-4) var(--space-4) 0; }
-	.shell__body { margin-inline: calc(-1 * var(--space-4)); padding: 0 var(--space-4) var(--space-4); }
+	.shell__main { gap: var(--space-3); }
 
 	/* The topbar stacks: title, then the actions on a row of their own.
 	   The subtitle is desktop-only (`Topbar::subtitle`'s contract), and the

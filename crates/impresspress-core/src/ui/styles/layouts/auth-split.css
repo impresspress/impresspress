@@ -124,9 +124,10 @@
 	color: var(--text-secondary);
 }
 
-/* --primary-color is 3.66:1 on white (.login-container's background) --
-   below the 4.5:1 AA floor; --primary-button (4.99:1, computed) is the
-   text-safe sibling. */
+/* The link sits on white (.login-container, signup) or #fdfdfd
+   (.auth-split__form, login). --primary-color is 3.66:1 / 3.60:1 there --
+   below the 4.5:1 AA floor; --primary-button (4.99:1 / 4.90:1, computed) is
+   the text-safe sibling. */
 .signup-link a {
 	color: var(--primary-button); text-decoration: none;
 	font-weight: 600; transition: color 0.2s;

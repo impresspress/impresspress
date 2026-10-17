@@ -64,8 +64,12 @@
 	   are the same height. */
 	width: 100%; min-height: var(--control-height);
 	padding: var(--space-2) var(--space-4);
-	border: 1px solid #e8ecf1; border-radius: 10px;
-	background: #f8fafc; color: #111827;
+	/* White with a 3:1 edge, so a field reads both in a card and straight on
+	   the page background (a toolbar's search, a filter row): the old
+	   #f8fafc fill with a #e8ecf1 edge was 1.01:1 and 1.12:1 against
+	   --surface-2, a field nobody could find. */
+	border: 1px solid var(--border-control); border-radius: 10px;
+	background: var(--surface-1); color: #111827;
 	font-size: 0.9rem; transition: all 0.2s ease;
 }
 
@@ -75,17 +79,19 @@
    lighter than the #111827 input value above. */
 .form-textarea::placeholder { color: #6b7280; }
 
+/* Hover darkens the edge and keeps the white fill: a tinted fill would
+   read as the page background around a field that sits on it. */
 .form-input:hover:not(:disabled),
 .form-select:hover:not(:disabled),
 .form-textarea:hover:not(:disabled) {
-	border-color: #dde3ea; background: #f1f5f9;
+	border-color: var(--text-secondary);
 }
 
+/* The keyboard ring is base.css's outline; focus keeps the field's own
+   edge (the old translucent teal one was 1.8:1, fainter than at rest). */
 .form-input:focus,
 .form-select:focus,
 .form-textarea:focus {
-	border-color: rgba(24, 154, 180, 0.5);
-	background: white;
 	box-shadow: 0 0 0 3px rgba(24, 154, 180, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
@@ -270,7 +276,9 @@
 .wizard-step__number::after { content: "."; }
 .wizard-step-check { display: inline-flex; }
 .wizard-step-check svg { width: .75rem; height: .75rem; }
-.product-wizard-actions { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-top: var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--border-color); background: var(--surface-1); }
+/* Sticky over the scrolled steps, so opaque: in the page background it sits
+   on (the shell draws no white frame behind it any more). */
+.product-wizard-actions { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-top: var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--border-color); background: var(--surface-2); }
 .product-wizard-actions__buttons { display: flex; gap: var(--space-3); margin-left: auto; }
 /* Rows built client-side by `blocks/products/assets/products-manager.js`
  * (pricing preview, saved

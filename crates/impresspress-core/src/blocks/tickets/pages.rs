@@ -1703,8 +1703,9 @@ pub(super) mod render_tests {
         assert!(html.contains(">Filters</summary>"), "{html}");
     }
 
-    /// The endpoint reference is generated from the route table: every row
-    /// appears once, in one of the two tables.
+    /// Types, Settings and Endpoints are titled by their own names under the
+    /// trail `Tickets ›`, which links back to the inbox; the inbox is the
+    /// trail's root. The window titles keep the block's name.
     #[tokio::test]
     async fn the_sub_pages_are_titled_under_the_tickets_trail() {
         let (ctx, _, _) = seeded().await;
@@ -1741,6 +1742,8 @@ pub(super) mod render_tests {
         assert!(!inbox.contains("topbar__crumbs"), "{inbox}");
     }
 
+    /// The endpoint reference is generated from the route table: every row
+    /// appears once, in one of the two tables.
     #[tokio::test]
     async fn the_endpoints_page_lists_every_declared_route() {
         let ctx = TestContext::with_tickets().await;
