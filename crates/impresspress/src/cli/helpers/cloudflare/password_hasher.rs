@@ -1,4 +1,5 @@
-//! Build the password-hasher Worker.
+//! Build the password-hasher Worker, and deploy or keep it (step 0 of a
+//! Cloudflare deploy, [`release`]).
 //!
 //! The hasher is `impresspress-password`'s Durable Object class
 //! (`impresspress_password::durable_object`) in a Worker of its own (see
@@ -16,6 +17,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use tokio::process::Command;
+
+use super::first_create::WorkerCommands;
 
 /// The crate that carries the hasher's Durable Object class.
 const PASSWORD_CRATE: &str = "impresspress-password";
@@ -323,6 +326,117 @@ pub fn parse_secret_names(stdout: &str) -> Result<Vec<String>> {
     Ok(secrets.into_iter().map(|secret| secret.name).collect())
 }
 
+/// What `impresspress deploy --target cloudflare` does with the
+/// password-hasher Worker (`--password-hasher`).
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PasswordHasherMode {
+    /// Build the hasher from this release and deploy it before any main
+    /// Worker version is uploaded.
+    #[default]
+    Deploy,
+    /// Leave the deployed hasher as it is: neither build nor deploy it. The
+    /// deploy still reads its secret names for the pepper check and records
+    /// the version it keeps, and promotion still needs it to answer this
+    /// release's protocol version (the `/_deploy/verify` probe).
+    Keep,
+}
+
+/// The password-hasher Worker this deploy's main Worker versions will call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HasherRelease {
+    /// This deploy deployed it.
+    Deployed,
+    /// This deploy left it at this version.
+    Kept { version_id: String },
+}
+
+/// Step 0 of a Cloudflare deploy: put the hasher every main Worker version of
+/// this deploy will call in place, before any of them is uploaded.
+///
+/// [`PasswordHasherMode::Deploy`] runs plain `wrangler deploy` on `config`:
+/// it uploads and activates in one step, and applies the config's Durable
+/// Object migration, which `wrangler versions upload` cannot carry. The hasher
+/// has no preview to verify first — Cloudflare generates none for a Worker
+/// that implements a Durable Object — so what keeps that safe is the
+/// protocol's compatibility rule (`impresspress_password::protocol`): the
+/// hasher answers the live main Worker's requests as well as the new one's.
+///
+/// [`PasswordHasherMode::Keep`] runs no deploy. It reads the hasher's current
+/// deployment (`wrangler deployments status --json`), which must serve one
+/// version to all traffic, and returns that version. A hasher that does not
+/// exist, or splits its traffic, refuses the deploy: the version the main
+/// Worker would call must be one known version.
+pub fn release(
+    commands: &impl WorkerCommands,
+    config: &Path,
+    mode: PasswordHasherMode,
+) -> Result<HasherRelease> {
+    match mode {
+        PasswordHasherMode::Deploy => {
+            commands.deploy(config)?;
+            Ok(HasherRelease::Deployed)
+        }
+        PasswordHasherMode::Keep => {
+            let status = commands.deployment_status(config).context(
+                "--password-hasher keep needs the password-hasher Worker to be deployed already",
+            )?;
+            Ok(HasherRelease::Kept {
+                version_id: parse_deployment_status(&status)?.sole_version()?,
+            })
+        }
+    }
+}
+
+/// `wrangler deployments status --json`: Cloudflare's latest deployment of a
+/// Worker, as its API returns it. Only the fields the deploy reads; the
+/// object carries more (`source`, `strategy`, `author_email`,
+/// `annotations`, …).
+#[derive(Debug, Deserialize)]
+pub struct DeploymentStatus {
+    pub id: String,
+    pub created_on: String,
+    pub versions: Vec<VersionTraffic>,
+}
+
+/// One version of a deployment and the share of traffic it serves.
+#[derive(Debug, Deserialize)]
+pub struct VersionTraffic {
+    pub version_id: String,
+    pub percentage: f64,
+}
+
+impl DeploymentStatus {
+    /// The version serving all traffic, when exactly one does.
+    pub fn sole_version(&self) -> Result<String> {
+        match self.versions.as_slice() {
+            [only] if only.percentage == 100.0 && !only.version_id.is_empty() => {
+                Ok(only.version_id.clone())
+            }
+            versions => bail!(
+                "deployment {} serves {} version(s) ({}); --password-hasher keep needs one \
+                 version at 100%",
+                self.id,
+                versions.len(),
+                versions
+                    .iter()
+                    .map(|v| format!("{} at {}%", v.version_id, v.percentage))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// Read `wrangler deployments status --json` output. Wrangler prints no
+/// banner with `--json`; the object is still read from its first `{` so a
+/// stray line before it cannot break the parse.
+pub fn parse_deployment_status(stdout: &str) -> Result<DeploymentStatus> {
+    let start = stdout
+        .find('{')
+        .context("no JSON object in `wrangler deployments status --json` output")?;
+    serde_json::from_str(&stdout[start..]).context("parse `wrangler deployments status --json`")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +611,151 @@ features = ["durable-object"]"#
         assert!(std::fs::read_to_string(dir.join("Cargo.toml"))
             .unwrap()
             .contains("/src/impresspress/crates/impresspress-password"));
+    }
+
+    /// `wrangler deployments status --json` for a Worker deployed with plain
+    /// `wrangler deploy`: Cloudflare's deployment object, which wrangler
+    /// 4.72 prints unchanged (`JSON.stringify(latestDeployment, null, 2)`).
+    const DEPLOYMENT_STATUS: &str = include_str!("fixtures/wrangler-deployments-status.json");
+
+    #[test]
+    fn reads_the_kept_version_from_wrangler_deployments_status() {
+        let status = parse_deployment_status(DEPLOYMENT_STATUS).unwrap();
+        assert_eq!(status.id, "6f4c3b1e-8a2d-4d0f-9b7e-2c5a1d9e0f34");
+        assert_eq!(status.created_on, "2026-09-27T10:12:44.318231Z");
+        assert_eq!(
+            status.sole_version().unwrap(),
+            "20577eb6-6e78-4b5e-9dc4-403951f2ed5e"
+        );
+    }
+
+    /// A gradual deployment serves two versions; which one a main Worker
+    /// request reaches is not known, so keep refuses it. So does a deployment
+    /// that lists no version.
+    #[test]
+    fn a_split_or_empty_deployment_cannot_be_kept() {
+        let mut split: serde_json::Value = serde_json::from_str(DEPLOYMENT_STATUS).unwrap();
+        split["versions"] = serde_json::json!([
+            { "percentage": 90, "version_id": "a" },
+            { "percentage": 10, "version_id": "b" },
+        ]);
+        let err = parse_deployment_status(&split.to_string())
+            .unwrap()
+            .sole_version()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a at 90%, b at 10%"), "{err}");
+
+        let mut empty = split;
+        empty["versions"] = serde_json::json!([]);
+        assert!(parse_deployment_status(&empty.to_string())
+            .unwrap()
+            .sole_version()
+            .is_err());
+        assert!(parse_deployment_status("The Worker has no deployments.").is_err());
+    }
+
+    /// A [`WorkerCommands`] that records every call and answers
+    /// `deployment_status` with `status`.
+    struct Recorder {
+        status: Result<String, &'static str>,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl WorkerCommands for Recorder {
+        fn worker_exists(&self, config: &Path) -> Result<bool> {
+            self.calls
+                .borrow_mut()
+                .push(format!("exists {}", config.display()));
+            Ok(true)
+        }
+
+        fn deploy(&self, config: &Path) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("deploy {}", config.display()));
+            Ok(())
+        }
+
+        fn deployment_status(&self, config: &Path) -> Result<String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("status {}", config.display()));
+            self.status.clone().map_err(|e| anyhow!(e))
+        }
+
+        fn secret_put(&self, config: &Path, name: &str, _value: &str) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("secret {name} {}", config.display()));
+            Ok(())
+        }
+
+        fn secret_names(&self, config: &Path) -> Result<Vec<String>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("list {}", config.display()));
+            Ok(Vec::new())
+        }
+    }
+
+    /// `keep` deploys nothing: its one wrangler call against the hasher is
+    /// the read-only status, and the version it reports is the deployed one.
+    #[test]
+    fn keep_reads_the_deployed_version_and_deploys_nothing() {
+        let commands = Recorder {
+            status: Ok(DEPLOYMENT_STATUS.to_string()),
+            calls: Default::default(),
+        };
+        let release = release(
+            &commands,
+            Path::new("hasher.toml"),
+            PasswordHasherMode::Keep,
+        )
+        .unwrap();
+        assert_eq!(
+            release,
+            HasherRelease::Kept {
+                version_id: "20577eb6-6e78-4b5e-9dc4-403951f2ed5e".into()
+            }
+        );
+        assert_eq!(*commands.calls.borrow(), ["status hasher.toml"]);
+    }
+
+    #[test]
+    fn deploy_deploys_the_hasher_config() {
+        let commands = Recorder {
+            status: Err("never asked"),
+            calls: Default::default(),
+        };
+        let release = release(
+            &commands,
+            Path::new("hasher.toml"),
+            PasswordHasherMode::Deploy,
+        )
+        .unwrap();
+        assert_eq!(release, HasherRelease::Deployed);
+        assert_eq!(*commands.calls.borrow(), ["deploy hasher.toml"]);
+    }
+
+    /// No hasher to keep (a first deploy, or a renamed one): refused, and
+    /// nothing is deployed in its place.
+    #[test]
+    fn keep_without_a_deployed_hasher_refuses() {
+        let commands = Recorder {
+            status: Err("[code: 10007] This Worker does not exist on your account."),
+            calls: Default::default(),
+        };
+        let err = release(
+            &commands,
+            Path::new("hasher.toml"),
+            PasswordHasherMode::Keep,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("needs the password-hasher Worker to be deployed"),
+            "{err:#}"
+        );
+        assert_eq!(*commands.calls.borrow(), ["status hasher.toml"]);
     }
 }

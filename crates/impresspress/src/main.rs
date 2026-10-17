@@ -13,6 +13,7 @@ use clap::Parser;
 use impresspress::cli::{
     cli_args::{Cli, Command, DeployAction, Target},
     flows::{embed_cloudflare, embed_native, embed_web, sealed_native, sealed_web},
+    helpers::cloudflare::password_hasher::PasswordHasherMode,
     mode::{default_target, detect_mode, Mode, ModeContext},
 };
 
@@ -64,12 +65,13 @@ async fn run() -> anyhow::Result<()> {
         Command::Deploy {
             target,
             release,
+            password_hasher,
             action,
         } => {
             let target = default_target(&ctx, target)?;
             match action {
                 Some(DeployAction::Secret) => dispatch_deploy_secret(&ctx, target).await,
-                None => dispatch_deploy(&ctx, target, release).await,
+                None => dispatch_deploy(&ctx, target, release, password_hasher).await,
             }
         }
     }
@@ -110,10 +112,17 @@ async fn dispatch_serve(
     }
 }
 
-async fn dispatch_deploy(ctx: &ModeContext, target: Target, release: bool) -> anyhow::Result<()> {
+async fn dispatch_deploy(
+    ctx: &ModeContext,
+    target: Target,
+    release: bool,
+    password_hasher: PasswordHasherMode,
+) -> anyhow::Result<()> {
     let repo_root = &ctx.cwd;
     match (detect_mode(ctx), target) {
-        (Mode::Embed, Target::Cloudflare) => embed_cloudflare::deploy(repo_root, release).await,
+        (Mode::Embed, Target::Cloudflare) => {
+            embed_cloudflare::deploy(repo_root, release, password_hasher).await
+        }
         (Mode::Sealed, Target::Cloudflare) => anyhow::bail!(
             "--target cloudflare requires a Cargo package; sealed mode not yet implemented"
         ),

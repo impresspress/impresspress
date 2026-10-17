@@ -2,7 +2,10 @@
 //! design (build/serve, --target native|web, --release, --port).
 
 use clap::Parser;
-use impresspress::cli::cli_args::{Cli, Command, DeployAction, Target};
+use impresspress::cli::{
+    cli_args::{Cli, Command, DeployAction, Target},
+    helpers::cloudflare::password_hasher::PasswordHasherMode,
+};
 
 #[test]
 fn parses_build_with_target_native() {
@@ -43,15 +46,44 @@ fn parses_deploy_without_action() {
     if let Command::Deploy {
         target,
         release,
+        password_hasher,
         action,
     } = cli.command
     {
         assert_eq!(target, Some(Target::Cloudflare));
         assert!(!release);
+        assert_eq!(password_hasher, PasswordHasherMode::Deploy);
         assert!(action.is_none());
     } else {
         panic!("expected Deploy");
     }
+}
+
+/// `--password-hasher keep` leaves the deployed hasher in place; `deploy` is
+/// the default, and no other value is accepted.
+#[test]
+fn parses_deploy_password_hasher_mode() {
+    for (value, mode) in [
+        ("keep", PasswordHasherMode::Keep),
+        ("deploy", PasswordHasherMode::Deploy),
+    ] {
+        let cli = Cli::parse_from([
+            "impresspress",
+            "deploy",
+            "--target",
+            "cloudflare",
+            "--password-hasher",
+            value,
+        ]);
+        let Command::Deploy {
+            password_hasher, ..
+        } = cli.command
+        else {
+            panic!("expected Deploy");
+        };
+        assert_eq!(password_hasher, mode, "{value}");
+    }
+    assert!(Cli::try_parse_from(["impresspress", "deploy", "--password-hasher", "skip"]).is_err());
 }
 
 #[test]

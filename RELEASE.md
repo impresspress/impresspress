@@ -19,6 +19,33 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: `--password-hasher keep`, and verify probes the hasher
+
+**What changes.**
+- `impresspress deploy --target cloudflare --password-hasher keep` deploys the
+  main Worker only. The password-hasher Worker is neither built nor deployed.
+  The deploy reads the hasher's current deployment
+  (`wrangler deployments status --json`). It refuses when no hasher is
+  deployed, or when the deployment splits traffic across versions. It prints
+  the version it keeps. The default, `--password-hasher deploy`, behaves as
+  before: the hasher is built and deployed first.
+- In both modes, the final candidate's `/_deploy/verify` now sends the
+  deployed hasher one probe: a `verify` request in the candidate's protocol
+  version, against a stored hash that names no scheme. A passing hasher
+  answers `malformed_hash` in the version it was asked in. That costs no
+  argon2 work, and nothing is written. The answer is reported as the
+  response's `password_hasher` field, e.g.
+  `{"protocol": 1, "answer": "malformed_hash"}`. Any other answer makes
+  verify return a 503 that names the reason, and the version is not
+  promoted. So `/_deploy/verify` now calls another Worker.
+- The `/_deploy/*` response schema (`DEPLOY_RESPONSE_SCHEMA_VERSION`) is now
+  2.
+
+**Who has to act.** Use a CLI and a Worker from the same release. A CLI from
+before this release refuses a Worker from this one, and the reverse, with an
+"unsupported … response schema" error. A deploy from this workspace builds
+both, so it needs nothing.
+
 ### Cloudflare: a request stopped at its CPU limit no longer stops the isolate's later requests
 
 **What changes.** Every request and every `wait_until` task in the Worker is
@@ -395,6 +422,8 @@ the main Worker's `[vars]` as `IMPRESSPRESS_PASSWORD_HASHER_SHARDS`).
 - `impresspress deploy` deploys the hasher FIRST, with plain `wrangler
   deploy` (which applies its migration, tag `v1`, `new_sqlite_classes`), then
   takes the main Worker through the usual prepare/verify/promote funnel.
+  (`--password-hasher keep` leaves the deployed hasher in place instead; see
+  "Cloudflare: `--password-hasher keep`, and verify probes the hasher".)
   Every main Worker version — previews included — calls whichever hasher is
   live, so the call is versioned: a hasher answers the protocol version of
   the main Worker release before it as well as its own

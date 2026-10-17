@@ -27,12 +27,14 @@
 //!
 //! # Compatibility across a release
 //!
-//! `impresspress deploy` deploys the password-hasher Worker FIRST, then takes
+//! `impresspress deploy` deploys the password-hasher Worker FIRST (or, with
+//! `--password-hasher keep`, leaves the deployed one in place), then takes
 //! the main Worker through its prepare/verify/promote funnel, and every
 //! version of the main Worker — a preview being verified, the live one, a
 //! rollback target — talks to whichever hasher is deployed at that moment.
 //! So a hasher must answer the requests of the main Worker release before it,
-//! not just its own. The rule:
+//! not just its own. Before promotion the deploy checks that the hasher
+//! answers the new version's requests ([`crate::probe`]). The rule:
 //!
 //! - A change to [`Request`] or [`Response`] that an older peer cannot read
 //!   bumps [`PROTOCOL_VERSION`].
@@ -384,7 +386,7 @@ pub(crate) fn json_fault(error: &serde_json::Error, expected: &str) -> String {
     format!("{what} at column {}", error.column())
 }
 
-fn unexpected(operation: &str, outcome: &Outcome) -> CryptoError {
+pub(crate) fn unexpected(operation: &str, outcome: &Outcome) -> CryptoError {
     // Only the kind: a `Hashed` outcome carries a hash, which does not belong
     // in a log line.
     let kind = match outcome {

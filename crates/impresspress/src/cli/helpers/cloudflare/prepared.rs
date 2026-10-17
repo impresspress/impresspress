@@ -27,12 +27,14 @@ pub const PREPARED_TEXT_GLOB: &str = "**/*.prepared.json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TwoStageState {
     Built,
-    /// The password-hasher Worker is deployed. Before any version of the main
-    /// Worker is uploaded: every version — the candidate `/_deploy/prepare`
-    /// runs in, the final one verified before promotion — calls whichever
-    /// hasher is deployed, so the one it was built against must already be
-    /// there.
-    PasswordHasherDeployed,
+    /// The password-hasher Worker is in place: deployed by this deploy, or
+    /// kept at a recorded version (`--password-hasher keep`). Before any
+    /// version of the main Worker is uploaded: every version — the candidate
+    /// `/_deploy/prepare` runs in, the final one verified before promotion —
+    /// calls whichever hasher is deployed, so the one it will call must
+    /// already be there. Whether it answers this build's protocol is checked
+    /// by the final version's `/_deploy/verify` probe, before promotion.
+    PasswordHasherReady,
     /// The main Worker exists with its deploy secrets: already there, or just
     /// created as a placeholder (`first_create`). The pepper check lists its
     /// secrets and every upload targets it, so both need it to exist.
@@ -55,6 +57,8 @@ pub struct TwoStageDeploymentGate {
     state: TwoStageState,
     candidate_version: Option<String>,
     wasm_sha256: Option<String>,
+    /// The hasher version a `--password-hasher keep` deploy left in place.
+    kept_password_hasher: Option<String>,
 }
 
 impl TwoStageDeploymentGate {
@@ -63,20 +67,38 @@ impl TwoStageDeploymentGate {
             state: TwoStageState::Built,
             candidate_version: None,
             wasm_sha256: None,
+            kept_password_hasher: None,
         }
     }
 
     pub fn password_hasher_deployed(&mut self) -> Result<()> {
         self.advance(
             TwoStageState::Built,
-            TwoStageState::PasswordHasherDeployed,
+            TwoStageState::PasswordHasherReady,
             "password-hasher deploy",
         )
     }
 
+    /// The alternative to [`Self::password_hasher_deployed`]: the deployed
+    /// hasher was kept, at `version_id`.
+    pub fn password_hasher_kept(&mut self, version_id: &str) -> Result<()> {
+        self.expect(TwoStageState::Built, "password-hasher keep")?;
+        if version_id.trim().is_empty() {
+            bail!("a kept password-hasher Worker needs the version it was kept at");
+        }
+        self.kept_password_hasher = Some(version_id.to_string());
+        self.state = TwoStageState::PasswordHasherReady;
+        Ok(())
+    }
+
+    /// The hasher version this deploy kept, when it kept one.
+    pub fn kept_password_hasher(&self) -> Option<&str> {
+        self.kept_password_hasher.as_deref()
+    }
+
     pub fn main_worker_ready(&mut self) -> Result<()> {
         self.advance(
-            TwoStageState::PasswordHasherDeployed,
+            TwoStageState::PasswordHasherReady,
             TwoStageState::MainWorkerReady,
             "main Worker creation check",
         )
@@ -358,6 +380,12 @@ pub struct VerifyResponse {
     pub summary: PreparedRuntimePlanSummary,
     pub release_asset_verified: bool,
     pub release_asset: Option<VerifiedReleaseAsset>,
+    /// The password-hasher probe's answer. Its type admits only a passing
+    /// probe (`malformed_hash`, in the version asked): a Worker whose probe
+    /// fails answers 503 instead, and anything else here fails the decode,
+    /// so a final version whose hasher does not answer its protocol is never
+    /// promoted.
+    pub password_hasher: impresspress_password::probe::Report,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -435,7 +463,7 @@ mod tests {
 
     fn successful_prepare_json(plan: &PreparedRuntimePlan) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
+            "schema_version": DEPLOY_RESPONSE_SCHEMA_VERSION,
             "init_report": {
                 "sealed": true,
                 "seed": { "ok": true },
@@ -588,15 +616,68 @@ mod tests {
         assert!(verify_prepared_module(&second).is_err());
     }
 
+    /// What a passing probe reports, written by the type the Worker
+    /// serializes.
+    fn hasher_report() -> impresspress_password::probe::Report {
+        impresspress_password::probe::Report {
+            protocol: impresspress_password::protocol::PROTOCOL_VERSION,
+            answer: impresspress_password::probe::Answer::MalformedHash,
+        }
+    }
+
+    /// The verify response must carry a passing hasher probe: a response
+    /// without the field, or with any answer but `malformed_hash`, is
+    /// refused, so the version is not promoted.
     #[test]
-    fn verify_response_checks_plan_and_build_identity() {
+    fn verify_response_requires_a_passing_password_hasher_probe() {
         let plan = plan();
-        let body = serde_json::to_vec(&VerifyResponse {
-            schema_version: 1,
+        let passing = serde_json::to_value(VerifyResponse {
+            schema_version: DEPLOY_RESPONSE_SCHEMA_VERSION,
             ok: true,
             summary: plan.summary().unwrap(),
             release_asset_verified: true,
             release_asset: None,
+            password_hasher: hasher_report(),
+        })
+        .unwrap();
+        assert_eq!(
+            passing["password_hasher"],
+            serde_json::json!({ "protocol": 1, "answer": "malformed_hash" })
+        );
+        let parsed =
+            parse_verify_response(&serde_json::to_vec(&passing).unwrap(), &plan, None).unwrap();
+        assert_eq!(parsed.password_hasher, hasher_report());
+
+        let mut missing = passing.clone();
+        missing.as_object_mut().unwrap().remove("password_hasher");
+        for answer in ["verified", "mismatch", "unsupported_version", "pepper"] {
+            let mut wrong = passing.clone();
+            wrong["password_hasher"]["answer"] = serde_json::json!(answer);
+            assert!(
+                parse_verify_response(&serde_json::to_vec(&wrong).unwrap(), &plan, None).is_err(),
+                "{answer}"
+            );
+        }
+        let mut extra = passing.clone();
+        extra["password_hasher"]["unavailable"] = serde_json::json!("reason");
+        for body in [missing, extra] {
+            assert!(
+                parse_verify_response(&serde_json::to_vec(&body).unwrap(), &plan, None).is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_response_checks_plan_and_build_identity() {
+        let plan = plan();
+        let body = serde_json::to_vec(&VerifyResponse {
+            schema_version: DEPLOY_RESPONSE_SCHEMA_VERSION,
+            ok: true,
+            summary: plan.summary().unwrap(),
+            release_asset_verified: true,
+            release_asset: None,
+            password_hasher: hasher_report(),
         })
         .unwrap();
         parse_verify_response(&body, &plan, None).unwrap();
@@ -633,11 +714,12 @@ mod tests {
         )
         .unwrap();
         let body = serde_json::to_vec(&VerifyResponse {
-            schema_version: 1,
+            schema_version: DEPLOY_RESPONSE_SCHEMA_VERSION,
             ok: true,
             summary: plan.summary().unwrap(),
             release_asset_verified: true,
             release_asset: None,
+            password_hasher: hasher_report(),
         })
         .unwrap();
 
@@ -670,5 +752,43 @@ mod tests {
         assert!(gate.authorize_promotion().is_err());
         gate.final_verified().unwrap();
         gate.authorize_promotion().unwrap();
+        assert_eq!(gate.kept_password_hasher(), None);
+    }
+
+    /// `--password-hasher keep` is the other way out of `Built`: it records
+    /// the version kept, and the rest of the order is unchanged.
+    #[test]
+    fn two_stage_gate_accepts_a_kept_password_hasher_in_place_of_a_deploy() {
+        let mut gate = TwoStageDeploymentGate::new();
+        assert!(gate.main_worker_ready().is_err());
+        assert!(gate.password_hasher_kept("").is_err());
+        assert!(gate.password_hasher_kept("  ").is_err());
+        assert!(
+            gate.main_worker_ready().is_err(),
+            "a refused keep moves nothing"
+        );
+        gate.password_hasher_kept("hasher-v1").unwrap();
+        assert_eq!(gate.kept_password_hasher(), Some("hasher-v1"));
+        assert!(gate.password_hasher_kept("hasher-v1").is_err());
+        assert!(
+            gate.password_hasher_deployed().is_err(),
+            "kept and deployed are alternatives, not a sequence"
+        );
+        assert!(gate.candidate_uploaded("candidate-1", "wasm-a").is_err());
+        gate.main_worker_ready().unwrap();
+        assert!(gate.password_hasher_kept("hasher-v2").is_err());
+        gate.pepper_placement_checked().unwrap();
+        gate.candidate_uploaded("candidate-1", "wasm-a").unwrap();
+        gate.assets_verified().unwrap();
+        gate.prepared().unwrap();
+        gate.final_uploaded("final-1", "wasm-a").unwrap();
+        assert!(gate.authorize_promotion().is_err());
+        gate.final_verified().unwrap();
+        gate.authorize_promotion().unwrap();
+        assert_eq!(gate.kept_password_hasher(), Some("hasher-v1"));
+
+        let mut deployed = TwoStageDeploymentGate::new();
+        deployed.password_hasher_deployed().unwrap();
+        assert!(deployed.password_hasher_kept("hasher-v1").is_err());
     }
 }
