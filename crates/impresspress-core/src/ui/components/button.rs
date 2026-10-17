@@ -70,7 +70,7 @@ pub fn filter_toggle(label: &str, pressed: bool, href: &str) -> Markup {
 /// is right for views of ONE page (they share its header) and wrong between
 /// pages, whose title, actions and scripts differ — the previous page's
 /// header and `<title>` would stay on screen over the next page's body. Rendered by
-/// the shell above the content card through
+/// the shell between the page header and the body through
 /// [`crate::ui::PageBody::with_subnav`]; `label` names the landmark ("Tickets
 /// sections").
 pub fn subnav(label: &str, tabs: Vec<Tab<'_>>) -> Markup {

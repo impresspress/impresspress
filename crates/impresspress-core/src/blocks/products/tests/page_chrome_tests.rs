@@ -1,7 +1,7 @@
 //! The products pages' chrome: the topbar owns the page's one title and its
-//! actions, the block's sections are plain links above the content card, one
-//! list's views are filter links, and each section of a page has at most one
-//! primary action.
+//! actions, the block's sections are plain links between the header and the
+//! body, one list's views are filter links, and each section of a page has at
+//! most one primary action.
 
 use super::harness::*;
 

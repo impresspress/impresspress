@@ -13,7 +13,6 @@ pub mod nav_groups;
 pub mod palette;
 pub mod settings_form;
 pub mod shell;
-pub use shell::BodyLayout;
 pub mod sidebar;
 pub mod templates;
 
@@ -275,68 +274,30 @@ pub struct Page<'a> {
     pub body: PageBody,
 }
 
-/// A shelled page's body, and how the shell's content card frames it.
-///
-/// The frame belongs to the body's TEMPLATE, not to the page that calls it:
-/// a full-bleed template (`templates::chat_page`) returns a `PageBody` that
-/// already says so, and every other body — any plain `Markup` — converts to
-/// the padded default. So a page cannot render a chat layout and forget to
-/// drop the padding, because it never chooses.
+/// A shelled page's body, with the block's own section links if it has
+/// any. Any plain `Markup` converts to one; the shell draws no frame around
+/// it, so a template that needs one (the chat panes) draws its own.
 pub struct PageBody {
-    layout: shell::BodyLayout,
     subnav: Option<maud::Markup>,
     markup: maud::Markup,
 }
 
 impl PageBody {
-    /// A body that draws its own panes edge to edge. Only full-bleed
-    /// templates construct one.
-    pub(crate) fn full_bleed(markup: maud::Markup) -> Self {
-        Self {
-            layout: shell::BodyLayout::Flush,
-            subnav: None,
-            markup,
-        }
-    }
-
     /// The same body under a block's own section links
     /// ([`components::subnav`]) — Tickets' Inbox / Types / Settings /
     /// Endpoints, say. The shell renders them between the page header and
-    /// the content card, outside the body, so a full-bleed body (the LLM
-    /// chat) carries them as well as a padded one does.
+    /// the body, outside the body, so an htmx swap of `#content` keeps them.
     pub fn with_subnav(self, subnav: maud::Markup) -> Self {
         Self {
             subnav: Some(subnav),
             ..self
         }
     }
-
-    /// The same body, with `extra` rendered after it (a page's own scripts
-    /// or styles), keeping the template's frame.
-    pub fn append(self, extra: maud::Markup) -> Self {
-        let markup = self.markup;
-        Self {
-            layout: self.layout,
-            subnav: self.subnav,
-            markup: maud::html! { (markup) (extra) },
-        }
-    }
-
-    /// How the content card frames this body.
-    pub fn layout(&self) -> shell::BodyLayout {
-        self.layout
-    }
-
-    /// The body's markup, without the frame.
-    pub fn into_markup(self) -> maud::Markup {
-        self.markup
-    }
 }
 
 impl From<maud::Markup> for PageBody {
     fn from(markup: maud::Markup) -> Self {
         Self {
-            layout: shell::BodyLayout::Padded,
             subnav: None,
             markup,
         }
@@ -366,7 +327,6 @@ impl<'a> Page<'a> {
                     &self.config.logo_icon_url,
                     &self.config.app_name,
                     self.topbar,
-                    self.body.layout,
                     self.body.subnav,
                     self.body.markup,
                 ))
@@ -1388,10 +1348,12 @@ mod tests {
         assert!(s.contains("hello"));
     }
 
-    /// The frame comes from the body's template: a chat body renders the
-    /// content card flush, any plain markup renders it padded.
+    /// The shell frames no body: a chat page and a plain page get the same
+    /// bare `main`, and the chat panes are the first thing inside it — the
+    /// chat template draws its own frame (`.page--chat`, pinned by
+    /// `assets::tests::the_shell_paints_no_frame_and_the_chat_draws_its_own`).
     #[test]
-    fn the_body_template_chooses_the_content_card_frame() {
+    fn chat_page_draws_its_own_frame_inside_a_bare_main() {
         let config = site_config();
         let groups = nav_groups::admin();
         let chat = templates::chat_page(
@@ -1404,17 +1366,22 @@ mod tests {
             html! {},
             None,
         );
-        let flush = Page {
-            body: chat,
-            ..dashboard_page(&config, &groups, html! {})
-        }
-        .render()
-        .into_string();
-        assert!(flush.contains(r#"<main class="shell__body shell__body--flush""#));
-        let padded = dashboard_page(&config, &groups, html! { p { "x" } })
+        let chat = dashboard_page(&config, &groups, chat)
             .render()
             .into_string();
-        assert!(padded.contains(r#"<main class="shell__body" id="content""#));
+        assert!(
+            chat.contains(
+                r#"<main class="shell__body" id="content" tabindex="0"><div class="page--chat" data-chat-focus="threads">"#
+            ),
+            "{chat}"
+        );
+        let plain = dashboard_page(&config, &groups, html! { p { "x" } })
+            .render()
+            .into_string();
+        assert!(
+            plain.contains(r#"<main class="shell__body" id="content" tabindex="0"><p>x</p>"#),
+            "{plain}"
+        );
     }
 
     #[tokio::test]

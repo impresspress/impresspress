@@ -13,12 +13,16 @@ use crate::{
     util::format_bytes,
 };
 
+/// The storage overview, the first of the storage-admin sections and the
+/// trail's root on the others.
+const OVERVIEW: &str = "/b/storage/admin/";
+
 /// The storage-admin sections (Overview / Buckets / Shares / Quotas) as the
-/// shared sub-nav the shell draws above the content card, the current one
-/// marked `aria-current="page"`. `active` is the section's label.
+/// shared sub-nav the shell draws between the page header and the body, the
+/// current one marked `aria-current="page"`. `active` is the section's label.
 pub(crate) fn admin_sections(active: &str) -> Markup {
     let items: [(&str, &str); 4] = [
-        ("Overview", "/b/storage/admin/"),
+        ("Overview", OVERVIEW),
         ("Buckets", "/b/storage/admin/buckets"),
         ("Shares", "/b/storage/admin/shares"),
         ("Quotas", "/b/storage/admin/quotas"),
@@ -36,8 +40,12 @@ pub(crate) fn admin_sections(active: &str) -> Markup {
     )
 }
 
-/// Admin storage shell: the admin nav, the page's one crumb, its subtitle and
+/// Admin storage shell: the admin nav, the page's trail, its subtitle and
 /// primary action, and the storage sections above the body.
+///
+/// The overview is titled "Storage". A sub-page is titled by its own name
+/// under the trail `Storage ›`, which leads back to the overview: the one
+/// trail rule every block's sub-pages follow.
 async fn files_page(
     ctx: &dyn Context,
     msg: &Message,
@@ -46,12 +54,12 @@ async fn files_page(
     primary_action: Option<HeaderAction<'_>>,
     content: Markup,
 ) -> OutputStream {
-    let title = if section == "Overview" {
-        "Storage"
+    let mut shell = if section == "Overview" {
+        ui::Shell::admin("Storage", "Storage")
     } else {
-        section
-    };
-    let mut shell = ui::Shell::admin(title, title).subtitle(subtitle);
+        ui::Shell::admin(section, section).trail(storage_trail(section))
+    }
+    .subtitle(subtitle);
     if let Some(action) = primary_action {
         shell = shell.primary_action(action);
     }
@@ -62,6 +70,21 @@ async fn files_page(
         ui::PageBody::from(content).with_subnav(admin_sections(section)),
     )
     .await
+}
+
+/// The trail of a storage sub-page: `Storage › {section}`, the overview
+/// linked and the sub-page its title.
+fn storage_trail(section: &str) -> Vec<ui::shell::Crumb<'_>> {
+    vec![
+        ui::shell::Crumb {
+            label: "Storage",
+            href: Some(OVERVIEW),
+        },
+        ui::shell::Crumb {
+            label: section,
+            href: None,
+        },
+    ]
 }
 
 /// A storage admin page whose read failed: drawn in the admin shell, with a
@@ -557,6 +580,43 @@ mod tests {
             html.contains(r#"href="/b/storage/admin/buckets""#),
             "CTA should link to the Buckets tab: {html}"
         );
+    }
+
+    /// The overview is "Storage"; each sub-page is titled by its own name
+    /// under the trail `Storage ›`, which links back to the overview.
+    #[tokio::test]
+    async fn the_sub_pages_are_titled_under_the_storage_trail() {
+        use crate::test_support::{admin_msg, output_html, TestContext};
+
+        let ctx = TestContext::with_files().await;
+        let overview_html =
+            output_html(overview(&ctx, &admin_msg("retrieve", OVERVIEW)).await).await;
+        assert!(overview_html.contains(r#"<h1 class="topbar__title">Storage</h1>"#));
+        assert!(!overview_html.contains("topbar__crumbs"), "{overview_html}");
+        for (path, h1) in [
+            ("/b/storage/admin/buckets", "Buckets"),
+            ("/b/storage/admin/shares", "Shares"),
+            ("/b/storage/admin/quotas", "Quotas"),
+        ] {
+            let msg = admin_msg("retrieve", path);
+            let html = match h1 {
+                "Buckets" => output_html(buckets(&ctx, &msg).await).await,
+                "Shares" => output_html(shares(&ctx, &msg).await).await,
+                _ => output_html(quotas(&ctx, &msg).await).await,
+            };
+            assert!(
+                html.contains(&format!(
+                    concat!(
+                        r#"<nav class="topbar__crumbs" aria-label="Breadcrumb"><ol>"#,
+                        r#"<li><a href="{overview}">Storage</a></li></ol></nav>"#,
+                        r#"<h1 class="topbar__title">{h1}</h1>"#
+                    ),
+                    overview = OVERVIEW,
+                    h1 = h1
+                )),
+                "{path}: expected the trail Storage › {h1}: {html}"
+            );
+        }
     }
 
     #[tokio::test]
