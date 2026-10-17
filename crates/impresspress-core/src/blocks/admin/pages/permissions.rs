@@ -159,7 +159,7 @@ pub(crate) async fn grants_custom_tab(
         div .card .mt-4 {
             header .card__head {
                 div {
-                    h3 .card__title { "Custom Grants" }
+                    h2 .card__title { "Custom Grants" }
                     p .card__subtitle {
                         "Add grants for third-party or WASM blocks. These are loaded at startup alongside code-declared grants."
                     }

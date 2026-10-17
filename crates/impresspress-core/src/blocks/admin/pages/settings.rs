@@ -447,6 +447,81 @@ mod tests {
         );
     }
 
+    /// The level of every `<hN` start tag in `html`, in document order.
+    fn heading_levels(html: &str) -> Vec<u8> {
+        let b = html.as_bytes();
+        (0..b.len().saturating_sub(3))
+            .filter(|&i| {
+                b[i] == b'<'
+                    && b[i + 1] == b'h'
+                    && (b'1'..=b'6').contains(&b[i + 2])
+                    && matches!(b[i + 3], b' ' | b'>')
+            })
+            .map(|i| b[i + 2] - b'0')
+            .collect()
+    }
+
+    /// The topbar's h1 names the page and the tab is its subtitle, so each
+    /// tab's top-level sections are h2s. A tab that still opened with the h3s
+    /// it had under the deleted tab-name h2 would skip a level (h1 → h3).
+    /// Network renders its groups only with traffic, so one request is
+    /// logged first.
+    #[tokio::test]
+    async fn no_settings_tab_skips_a_heading_level() {
+        use crate::platform_state::request_logs::{self, NewRequestLog};
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        request_logs::insert(
+            &ctx,
+            &NewRequestLog {
+                method: "GET",
+                path: "/b/admin/ok",
+                status_code: 200,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "",
+            },
+        )
+        .await
+        .expect("log a request");
+        for (tab, subtab, section) in [
+            ("email", None, r#"<h2 class="card__title">Mailgun"#),
+            (
+                "authentication",
+                None,
+                r#"<h2 class="card__title">Registration"#,
+            ),
+            ("branding", None, r#"<h2 class="card__title">Branding"#),
+            ("network", None, r#"<h2 class="network-group__head">"#),
+            ("variables", None, r#"<h2 class="var-group__title">"#),
+            (
+                "permissions",
+                Some("database"),
+                r#"<h2 class="card__title">Custom "#,
+            ),
+        ] {
+            let mut msg = admin_msg("retrieve", &format!("/b/admin/settings/{tab}"));
+            if let Some(subtab) = subtab {
+                msg.set_meta("req.query.subtab", subtab);
+            }
+            let html = output_html(settings_page(&ctx, &msg, tab).await).await;
+            assert!(html.contains(section), "{tab}: no {section}: {html}");
+            let levels = heading_levels(&html);
+            assert_eq!(levels.first(), Some(&1), "{tab}: {levels:?}");
+            for pair in levels.windows(2) {
+                assert!(
+                    pair[1] <= pair[0] + 1,
+                    "{tab}: a heading skips from h{} to h{}: {levels:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+    }
+
     #[test]
     fn tab_title_known_tabs() {
         assert_eq!(tab_title("email"), "Email");

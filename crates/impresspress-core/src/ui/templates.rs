@@ -104,9 +104,9 @@ pub fn detail_page(
 
 /// `tabbed_page` template: the settings rail beside one tab's body.
 ///
-/// The rail (`nav.form-tabs`) is its own card-level surface on a wide screen,
-/// beside the body; below 720px it is a scrolling row of underline tabs above
-/// it, with no card. The body is the tab's own markup (a `settings_form` of
+/// The rail (`nav.form-tabs`) is its own card-level surface beside the body
+/// from 1024px; below 1024px, where it cannot sit beside the body, it is a
+/// scrolling row of underline tabs above it, with no card. The body is the tab's own markup (a `settings_form` of
 /// section `Card`s, or a read-only view). The page names the open tab in its
 /// topbar subtitle, so nothing here repeats it as a heading.
 ///

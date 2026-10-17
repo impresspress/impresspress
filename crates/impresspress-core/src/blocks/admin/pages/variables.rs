@@ -899,7 +899,7 @@ fn variable_groups(
         @for group in groups {
             details .var-group data-var-group open[group.open] data-default-open[group.open] {
                 summary .var-group__summary {
-                    h3 .var-group__title { (group.title) }
+                    h2 .var-group__title { (group.title) }
                     span .var-group__stats {
                         (group.rows.len())
                         @if group.rows.len() == 1 { " variable" } @else { " variables" }

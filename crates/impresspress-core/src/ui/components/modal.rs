@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_sits_in_the_scrolling_body_with_a_block_cancel() {
+    fn the_footer_sits_in_the_scrolling_body_with_its_cancel() {
         let html = rendered();
         let body = html.find(r#"<div class="modal__body">"#).expect("body");
         let footer = html.find(r#"<div class="modal__footer">"#).expect("footer");

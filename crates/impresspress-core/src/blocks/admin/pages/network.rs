@@ -262,7 +262,7 @@ fn group_section(group: &Group, totals: Option<&request_logs::BlockTotals>) -> M
     let rows: Vec<components::TableRow> = group.rows.iter().map(inbound_row).collect();
     html! {
         section .network-group {
-            h3 .network-group__head {
+            h2 .network-group__head {
                 button .network-group__toggle
                     type="button"
                     aria-expanded="true"

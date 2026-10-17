@@ -3373,33 +3373,6 @@ mod tests {
         );
     }
 
-    /// The page header had two renderers. `templates::render_header` emitted
-    /// `header.page-header > div.page-header__text > h2.page-header__title`;
-    /// `components::page_header` emitted `div.flex > div > h2.page-title`.
-    /// Both are gone: the topbar is the page's header, and a heading in the
-    /// body is a `components::Card` title or a `components::section_header`.
-    /// The first one went for free rather than by a cutover:
-    /// every one of its 15 production call sites passed
-    /// `PageHeader { title: "", subtitle: None, primary_action: None }`, which
-    /// `render_header` answered with empty markup, so the `.page-header*`
-    /// family reached no page in any deployment and its stylesheet rules
-    /// styled nothing.
-    ///
-    /// This guard keeps it deleted from both halves. A `.page-header` or
-    /// `.page-header__*` class appearing in maud markup means the second
-    /// renderer is back; the same name appearing in a stylesheet means a rule
-    /// is waiting for it. `pages_use_only_classes_defined_in_the_stylesheet`
-    /// above cannot see either case — it only asserts that markup is a subset
-    /// of the stylesheet, so a class in neither passes it, and a class in the
-    /// stylesheet alone passes it too.
-    ///
-    /// The stylesheet half reads the shared bundle *and* every stylesheet a
-    /// block owns and serves itself, for the reason that guard keeps them
-    /// apart: a block-local sheet is served with that block's pages, so a
-    /// `.page-header` rule in one is as live as a rule in `ui/styles/`. This
-    /// half deliberately merges the two rather than keeping them per block —
-    /// unlike the subset guard, it asks whether the rule exists anywhere at
-    /// all, not whether it reaches the page using it.
     /// The per-button phone-width class is gone, and stays gone. A row whose
     /// buttons span a phone says so on the row (`.modal__footer`,
     /// `.form-actions`, `.account-form__actions`,
@@ -3440,6 +3413,33 @@ mod tests {
         );
     }
 
+    /// The page header had two renderers. `templates::render_header` emitted
+    /// `header.page-header > div.page-header__text > h2.page-header__title`;
+    /// `components::page_header` emitted `div.flex > div > h2.page-title`.
+    /// Both are gone: the topbar is the page's header, and a heading in the
+    /// body is a `components::Card` title or a `components::section_header`.
+    /// The first one went for free rather than by a cutover:
+    /// every one of its 15 production call sites passed
+    /// `PageHeader { title: "", subtitle: None, primary_action: None }`, which
+    /// `render_header` answered with empty markup, so the `.page-header*`
+    /// family reached no page in any deployment and its stylesheet rules
+    /// styled nothing.
+    ///
+    /// This guard keeps it deleted from both halves. A `.page-header` or
+    /// `.page-header__*` class appearing in maud markup means the second
+    /// renderer is back; the same name appearing in a stylesheet means a rule
+    /// is waiting for it. `pages_use_only_classes_defined_in_the_stylesheet`
+    /// above cannot see either case — it only asserts that markup is a subset
+    /// of the stylesheet, so a class in neither passes it, and a class in the
+    /// stylesheet alone passes it too.
+    ///
+    /// The stylesheet half reads the shared bundle *and* every stylesheet a
+    /// block owns and serves itself, for the reason that guard keeps them
+    /// apart: a block-local sheet is served with that block's pages, so a
+    /// `.page-header` rule in one is as live as a rule in `ui/styles/`. This
+    /// half deliberately merges the two rather than keeping them per block —
+    /// unlike the subset guard, it asks whether the rule exists anywhere at
+    /// all, not whether it reaches the page using it.
     #[test]
     fn the_first_generation_page_header_stays_deleted() {
         fn is_gen1_header(class: &str) -> bool {
