@@ -1,7 +1,8 @@
 /* ===== Card =====
    `components::Card` is the only writer of `.card` and `.card__*`. One
    surface, one padding: the card owns it, so a card with a head and a body
-   and a card with only a body sit their content the same 20px in, and the
+   and a card with only a body sit their content the same `--card-pad` in
+   (20px; 16px on a phone, tokens.css), and the
    head is part of the card rather than a band across it (no divider).
 
    `.card__body` adds no padding of its own. A `Card::flush()` card drops
@@ -13,15 +14,8 @@
 	background: var(--surface-1);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-lg);
-	padding: var(--space-5);
+	padding: var(--card-pad);
 	margin-bottom: var(--space-4);
-}
-/* Tighter on a phone. Stated here, before every card modifier, so a
-   modifier that sets its own padding (`.card--flush`) still wins below
-   720px; anywhere that loads after this file (layouts/page.css) it would
-   override them all. */
-@media (max-width: 720px) {
-	.card { padding: var(--space-4); }
 }
 /* Title block, then the head link (`Card::link`) and head action
    (`Card::action`) at the end, on the title's first baseline: both are
@@ -54,18 +48,15 @@
    would end at different depths depending on what they hold. */
 .card__body > :last-child { margin-bottom: 0; }
 .card--flush { padding: 0; overflow: hidden; }
-.card--flush > .card__head { padding: var(--space-5) var(--space-5) 0; }
-@media (max-width: 720px) {
-	.card--flush > .card__head { padding: var(--space-4) var(--space-4) 0; }
-}
+.card--flush > .card__head { padding: var(--card-pad) var(--card-pad) 0; }
 /* The table's frame is the card's. On a wide screen its first and last
    columns take the card's inset, so the cells line up with the head. */
 .card--flush .data-table { border: 0; border-radius: 0; }
 @media (min-width: 721px) {
 	.card--flush .data-table th:first-child,
-	.card--flush .data-table td:first-child { padding-left: var(--space-5); }
+	.card--flush .data-table td:first-child { padding-left: var(--card-pad); }
 	.card--flush .data-table th:last-child,
-	.card--flush .data-table td:last-child { padding-right: var(--space-5); }
+	.card--flush .data-table td:last-child { padding-right: var(--card-pad); }
 }
 /* Below 720px a data table turns each row into a framed box of its own
    (table.css "Card mode"). In a flush card that would be a card inside a
@@ -74,7 +65,7 @@
 @media (max-width: 720px) {
 	.card--flush .data-table:not(.data-table--scroll) tr {
 		border: 0; border-radius: 0; margin: 0;
-		padding: var(--space-3) var(--space-4);
+		padding: var(--space-3) var(--card-pad);
 	}
 	.card--flush .data-table:not(.data-table--scroll) tr + tr { border-top: 1px solid var(--border-light); }
 }
@@ -82,12 +73,8 @@
    where the table would be. A sentence has no frame to absorb, so it takes
    the card's inset back: under the head, it lines up with the title; with
    no head, it is padded on every side like a framed card's content. */
-.card--flush .empty-note { padding: 0 var(--space-5) var(--space-5); }
-.card--flush > .card__body:first-child .empty-note { padding-top: var(--space-5); }
-@media (max-width: 720px) {
-	.card--flush .empty-note { padding: 0 var(--space-4) var(--space-4); }
-	.card--flush > .card__body:first-child .empty-note { padding-top: var(--space-4); }
-}
+.card--flush .empty-note { padding: 0 var(--card-pad) var(--card-pad); }
+.card--flush > .card__body:first-child .empty-note { padding-top: var(--card-pad); }
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 

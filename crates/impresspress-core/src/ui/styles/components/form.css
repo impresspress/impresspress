@@ -483,7 +483,10 @@
  * read as broken. Narrower screens are unaffected. */
 .settings-form { max-width: 52rem; }
 /* A form's submit row: its buttons at their own width, sharing the row
- * equally on a phone. */
+ * equally on a phone while the form is stacked. An aligned settings form
+ * (`.form--aligned`, below) stays aligned while it is 40rem wide, which
+ * a 641-720px window still gives it; there Save sits under the controls at
+ * its own width, like on a wide screen. */
 .form-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
 @media (max-width: 720px) {
 	.form-actions > .btn { flex: 1 1 0; }
@@ -508,7 +511,8 @@
 	}
 	.form--aligned .form-group > :not(.form-label),
 	.form--aligned .form-actions > * { grid-column: 2; }
-	.form--aligned .form-actions { padding-inline: calc(var(--space-5) + 1px); }
+	/* The card's inset plus its 1px border. */
+	.form--aligned .form-actions { padding-inline: calc(var(--card-pad) + 1px); }
 	.form--aligned .form-actions > * { justify-self: start; }
 }
 
