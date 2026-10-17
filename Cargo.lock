@@ -2699,7 +2699,6 @@ dependencies = [
  "wafer-sql-utils",
  "wasm-bindgen",
  "wasm-bindgen-test",
- "wasm-streams 0.5.0",
  "worker",
 ]
 
