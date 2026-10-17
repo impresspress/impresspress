@@ -44,7 +44,7 @@ fn render_page_body(
     default_model: &str,
     thread_id: Option<&str>,
     llm_chat_js_url: &str,
-) -> crate::ui::PageBody {
+) -> Markup {
     // Build messages JSON for the bootstrap carrier. Empty array when no thread.
     let messages_json: Vec<serde_json::Value> = entries
         .iter()
@@ -88,7 +88,8 @@ fn render_page_body(
 
     // The "Thinking..." pulse and the typing caret llm-chat.js draws are
     // styled in components/card.css, under a reduced-motion guard.
-    chat_body.append(html! {
+    html! {
+        (chat_body)
         // DOMPurify must load before marked.js/llm-chat.js so `window.DOMPurify`
         // exists when renderMarkdown() sanitizes marked's output (P0 stored-XSS fix).
         script src=(super::assets::purify_js_url()) {}
@@ -108,7 +109,7 @@ fn render_page_body(
         script {
             (maud::PreEscaped("window.addEventListener('DOMContentLoaded', function(){ if (window.impresspressLlmChat) window.impresspressLlmChat.init(); });"))
         }
-    })
+    }
 }
 
 /// What the model picker says when the remote model list could not be read.
@@ -242,7 +243,7 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ui::Shell::admin(display_title, display_title)
             .trail(crumbs)
             .subtitle("Chat with a configured provider or local model"),
-        content.with_subnav(sections(Section::Chat)),
+        ui::PageBody::from(content).with_subnav(sections(Section::Chat)),
     )
     .await
 }
@@ -995,7 +996,6 @@ mod tests {
     #[test]
     fn page_body_renders_empty_state_at_root() {
         let html = render_page_body(&[], &[], &[], false, "", None, "/b/static/llm-chat-test.js")
-            .into_markup()
             .into_string();
         assert!(html.contains(r#"id="no-thread-prompt""#));
         assert!(html.contains("Choose a thread, or start one with New thread."));
@@ -1020,7 +1020,6 @@ mod tests {
             Some("some-id"),
             "/b/static/llm-chat-test.js",
         )
-        .into_markup()
         .into_string();
         assert!(html.contains(r#"value="some-id""#));
         assert!(!html.contains(r#"id="no-thread-prompt""#));
@@ -1034,9 +1033,7 @@ mod tests {
     #[test]
     fn page_body_includes_external_llm_chat_js_and_drops_inline_constants() {
         let url = "/b/static/llm-chat-deadbeef.js";
-        let html = render_page_body(&[], &[], &[], false, "", None, url)
-            .into_markup()
-            .into_string();
+        let html = render_page_body(&[], &[], &[], false, "", None, url).into_string();
         assert!(
             html.contains(&format!(r#"src="{url}""#)),
             "missing external llm-chat.js script tag (expected src={url}): {html}"
@@ -1058,9 +1055,7 @@ mod tests {
     #[test]
     fn page_body_loads_purify_before_marked_and_llm_chat_js() {
         let url = "/b/static/llm-chat-deadbeef.js";
-        let html = render_page_body(&[], &[], &[], false, "", None, url)
-            .into_markup()
-            .into_string();
+        let html = render_page_body(&[], &[], &[], false, "", None, url).into_string();
 
         let purify_url = crate::blocks::llm::assets::purify_js_url();
         let marked_url = crate::blocks::llm::assets::marked_js_url();
@@ -1101,7 +1096,6 @@ mod tests {
             Some("sel-test"),
             "/b/static/llm-chat-test.js",
         )
-        .into_markup()
         .into_string();
 
         let required_ids = [
@@ -1157,7 +1151,7 @@ mod tests {
         // element termination.
         let entries = vec![record_with_content("</script><img src=x onerror=alert(1)>")];
         let markup = render_page_body(&[], &entries, &[], false, "", None, "/x.js");
-        let html = markup.into_markup().into_string();
+        let html = markup.into_string();
         assert!(
             !html.contains("</script><img"),
             "raw </script> must not survive into the carrier: {html}"
@@ -1173,7 +1167,6 @@ mod tests {
     #[test]
     fn page_body_emits_chat_page_template_class() {
         let html = render_page_body(&[], &[], &[], false, "", None, "/b/static/llm-chat-test.js")
-            .into_markup()
             .into_string();
         assert!(
             html.contains(r#"class="page--chat""#),
@@ -1233,9 +1226,7 @@ mod tests {
     /// reduced-motion guard — not in a `<style>` element of the page.
     #[test]
     fn the_chat_page_carries_no_style_element() {
-        let html = render_page_body(&[], &[], &[], false, "", Some("t1"), "/x.js")
-            .into_markup()
-            .into_string();
+        let html = render_page_body(&[], &[], &[], false, "", Some("t1"), "/x.js").into_string();
         assert!(!html.contains("<style"), "{html}");
         assert!(!html.contains("@keyframes"), "{html}");
     }
@@ -1244,9 +1235,7 @@ mod tests {
     /// page; both side panes are named landmarks.
     #[test]
     fn the_page_says_which_pane_a_phone_leads_with() {
-        let root = render_page_body(&[], &[], &[], false, "", None, "/x.js")
-            .into_markup()
-            .into_string();
+        let root = render_page_body(&[], &[], &[], false, "", None, "/x.js").into_string();
         assert!(root.contains(r#"data-chat-focus="threads""#), "{root}");
         assert!(
             root.contains(r#"<aside class="chat-threads" aria-label="Threads">"#),
@@ -1256,9 +1245,7 @@ mod tests {
             root.contains(r#"<aside class="chat-rail" aria-label="Chat options">"#),
             "{root}"
         );
-        let thread = render_page_body(&[], &[], &[], false, "", Some("t1"), "/x.js")
-            .into_markup()
-            .into_string();
+        let thread = render_page_body(&[], &[], &[], false, "", Some("t1"), "/x.js").into_string();
         assert!(
             thread.contains(r#"data-chat-focus="conversation""#),
             "{thread}"

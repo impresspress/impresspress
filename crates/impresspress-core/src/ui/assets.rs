@@ -533,7 +533,9 @@ mod tests {
                     .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
                     .collect();
                 let has = |d: &str| decls.iter().any(|x| x == d);
-                if has("box-shadow: var(--focus-ring)") {
+                if has("box-shadow: var(--focus-ring)")
+                    || has("box-shadow: var(--focus-ring-inset)")
+                {
                     rings += 1;
                     assert!(
                         has("outline: 2px solid transparent") && has("outline-offset: -2px"),
@@ -620,6 +622,11 @@ mod tests {
                     .count();
         }
         assert!(violations.is_empty(), "{}", violations.join("\n"));
+        assert_eq!(
+            stale_tall_boxes(&all_stylesheets()),
+            Vec::<String>::new(),
+            "TALL_BOXES names a box no stylesheet sizes any more: drop the entry"
+        );
         assert!(
             uses >= 30,
             "expected the controls to use the target tokens, found {uses} uses"
@@ -784,7 +791,6 @@ mod tests {
             "height",
             "the sidebar header band holding the logo",
         ),
-        (".topbar", "min-height", "the page header band"),
         (".page-body", "min-height", "a page's content area"),
         (
             ".auth-status__icon",
@@ -813,6 +819,56 @@ mod tests {
         ),
         ("#dev-log", "height", "the dev workspace's activity log"),
     ];
+
+    /// The `TALL_BOXES` entries no rule declares any more: the selector has
+    /// no rule setting that property in any of `sheets`. An exemption for a
+    /// box that is gone is one a new rule of the same name would inherit
+    /// unexamined (the page header lost its band in the frame change, and
+    /// its entry with it).
+    #[cfg(feature = "embed-assets")]
+    fn stale_tall_boxes(sheets: &[(String, String)]) -> Vec<String> {
+        TALL_BOXES
+            .iter()
+            .filter(|(selector, prop, _)| {
+                !sheets.iter().any(|(_, sheet)| {
+                    css_leaf_blocks(sheet).iter().any(|(s, body)| {
+                        s == selector
+                            && body.split(';').any(|decl| {
+                                decl.split_once(':')
+                                    .is_some_and(|(p, _)| p.trim().eq_ignore_ascii_case(prop))
+                            })
+                    })
+                })
+            })
+            .map(|(selector, prop, _)| format!("{selector} {{ {prop} }}"))
+            .collect()
+    }
+
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn a_tall_box_entry_is_stale_once_its_rule_is_gone() {
+        let sheet = |css: &str| vec![("app.css".to_string(), css.to_string())];
+        let all_but_chart: String = TALL_BOXES
+            .iter()
+            .filter(|(s, _, _)| *s != ".chart")
+            .map(|(s, p, _)| format!("{s} {{ {p}: 50px; }}\n"))
+            .collect();
+        assert_eq!(
+            stale_tall_boxes(&sheet(&all_but_chart)),
+            vec![".chart { height }".to_string()]
+        );
+        // The same selector sizing a different property does not keep it.
+        assert_eq!(
+            stale_tall_boxes(&sheet(&format!(
+                "{all_but_chart}.chart {{ min-height: 50px; }}"
+            ))),
+            vec![".chart { height }".to_string()]
+        );
+        assert!(stale_tall_boxes(&sheet(&format!(
+            "{all_but_chart}.chart {{ height: 50px; }}"
+        )))
+        .is_empty());
+    }
 
     /// The smallest a CSS length can resolve to, in px (1rem = 1em = 16px),
     /// through `calc`, `max`, `min` and `clamp`. `None` when it depends on
@@ -1559,29 +1615,180 @@ mod tests {
         ".form-textarea:disabled",
     ];
 
-    /// Text whose background comes from an ANCESTOR rule rather than its own.
-    /// A single-rule scan cannot see the cascade, so without this table these
-    /// selectors would either be skipped (unverified) or measured against a
-    /// wrong assumed-white background and reported as false failures. Mapping
-    /// each to the token its true ancestor actually sets means they get
-    /// genuinely checked instead of waved through -- the navy panels are the
-    /// only place in the bundle where text sits on a non-white surface set by
-    /// a parent.
+    /// Text whose background comes from an ANCESTOR rule rather than its own:
+    /// (selector prefix, the ancestor rule that paints it). A single-rule
+    /// scan cannot see the cascade, so without this table these selectors
+    /// would be measured against the wrong surface. The ancestor's
+    /// background is read from the stylesheet itself, not copied here, so
+    /// the table cannot drift from what the ancestor paints, and an entry
+    /// whose ancestor no longer paints a background fails the guard.
     #[cfg(feature = "embed-assets")]
     const ANCESTOR_BACKGROUNDS: &[(&str, &str)] = &[
-        // `.sidebar`'s navy slab is painted by `.sidebar__nav` in
-        // components/nav.css (`background: var(--bg-sidebar)`); every
-        // `.sidebar__*` label, link and avatar caption renders on it.
-        (".sidebar__", "--bg-sidebar"),
-        // `.auth-split__brand` sets `background: var(--navy-900)` for the
-        // login page's left-hand brand panel (layouts/auth-split.css).
-        (".auth-split__", "--navy-900"),
+        // The sidebar's navy slab (components/nav.css); every `.sidebar__*`
+        // label, link and avatar caption renders on it.
+        (".sidebar__", ".sidebar"),
+        // The login page's left-hand brand panel (layouts/auth-split.css).
+        (".auth-split__", ".auth-split__brand"),
+        // The "Sign up" / "Sign in" line under the auth form. It sits on
+        // `.auth-split__form` (login) or `.login-container` (signup, white);
+        // it is measured on `.auth-split__form`, the darker of the two.
+        (".signup-link", ".auth-split__form"),
+        // The page header and the body have no box of their own: they sit
+        // on the shell's page background (layouts/shell.css). Every
+        // `.topbar*` crumb, title, subtitle and palette label renders on it,
+        // and so does text set directly on the body.
+        (".topbar", ".shell"),
+        (".shell__body", ".shell"),
     ];
+
+    /// The surfaces a rule with no background of its own and no
+    /// `ANCESTOR_BACKGROUNDS` entry may be drawn on: a card (`--surface-1`)
+    /// or the page background (`--surface-2`), since the shell draws no
+    /// frame and a page puts text on either. Such a rule is measured on
+    /// both, and must clear the floor on the worse.
+    #[cfg(feature = "embed-assets")]
+    const PAGE_SURFACES: &[&str] = &["--surface-1", "--surface-2"];
+
+    /// Every text/background pair in `sheets` under 4.5:1, worst surface
+    /// first, and how many pairs were resolvable: the measurement behind
+    /// [`text_and_background_pairs_meet_wcag_aa`], over any stylesheets so
+    /// a fixture can pin it.
+    ///
+    /// Background resolution, in order: the rule's own `background`/
+    /// `background-color`, composited over its base; the base is the
+    /// `ANCESTOR_BACKGROUNDS` token where the selector has one, else each of
+    /// `PAGE_SURFACES`. Translucent tints are alpha-composited over the
+    /// base before measuring.
+    #[cfg(feature = "embed-assets")]
+    fn contrast_offenders(
+        sheets: &[(String, String)],
+        tokens: &std::collections::HashMap<String, String>,
+    ) -> (Vec<String>, usize) {
+        let exempt = |selector: &str| -> bool {
+            selector
+                .split(',')
+                .map(str::trim)
+                .any(|part| CONTRAST_EXEMPT_SELECTORS.contains(&part))
+        };
+        let token = |name: &str| -> Option<Rgba> { resolve_color(tokens.get(name)?, tokens, 0) };
+        let blocks: Vec<(String, String)> = sheets
+            .iter()
+            .flat_map(|(_, css)| css_leaf_blocks(css))
+            .collect();
+        // What the ancestor rule `ancestor` paints: its own `background`.
+        let painted_by = |ancestor: &str| -> Rgba {
+            blocks
+                .iter()
+                .filter(|(selector, _)| selector == ancestor)
+                .flat_map(|(_, body)| body.split(';'))
+                .filter_map(|decl| decl.split_once(':'))
+                .find(|(prop, _)| matches!(prop.trim(), "background" | "background-color"))
+                .and_then(|(_, value)| resolve_color(value, tokens, 0))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ANCESTOR_BACKGROUNDS: no stylesheet rule `{ancestor}` paints a background"
+                    )
+                })
+        };
+        let ancestor_bg = |selector: &str| -> Option<Rgba> {
+            ANCESTOR_BACKGROUNDS.iter().find_map(|(prefix, ancestor)| {
+                selector
+                    .split(',')
+                    .map(str::trim)
+                    .any(|part| part.starts_with(prefix))
+                    .then(|| painted_by(ancestor))
+            })
+        };
+        let page_surfaces: Vec<Rgba> = PAGE_SURFACES
+            .iter()
+            .map(|name| token(name).unwrap_or_else(|| panic!("tokens.css must set {name}")))
+            .collect();
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        let rules = sheets.iter().flat_map(|(sheet, css)| {
+            css_leaf_blocks(css)
+                .into_iter()
+                .map(move |(selector, body)| (sheet.as_str(), selector, body))
+        });
+        for (sheet, selector, body) in rules {
+            if exempt(&selector) {
+                continue;
+            }
+            let decls: Vec<&str> = body
+                .split(';')
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .collect();
+            let Some(color_decl) = decls.iter().find(|d| d.starts_with("color:")).copied() else {
+                continue;
+            };
+            let Some(text_rgba) = resolve_color(&color_decl["color:".len()..], tokens, 0) else {
+                continue; // unresolvable -- can't verify, skip (documented above)
+            };
+            if text_rgba.3 == 0 {
+                continue; // fully transparent text, not visible
+            }
+            let bg_decl: Option<&str> = decls
+                .iter()
+                .find(|d| d.starts_with("background:") || d.starts_with("background-color:"))
+                .copied();
+            let own_bg = match bg_decl {
+                Some(d) => {
+                    let val = d.split_once(':').map(|x| x.1).unwrap_or_default();
+                    match resolve_color(val, tokens, 0) {
+                        Some(c) => Some(c),
+                        None => continue, // declared but unresolvable -- can't verify
+                    }
+                }
+                None => None,
+            };
+
+            // The surfaces this rule's own background (if any) paints onto:
+            // its ancestor's where we know it, else both page surfaces.
+            let bases: Vec<Rgba> = match ancestor_bg(&selector) {
+                Some(ancestor) => vec![ancestor],
+                None => page_surfaces.clone(),
+            };
+            // A declared background composites OVER the base rather than
+            // replacing it, so `background: transparent` (and any
+            // translucent tint) correctly shows the base through it.
+            // Compositing against white unconditionally instead would have
+            // reported `.sidebar__collapse-toggle` -- transparent over the
+            // navy slab -- as 2.56:1 white-background text, a false failure.
+            let worst = bases
+                .iter()
+                .map(|base| {
+                    let base_rgb = composite_over(*base, (255, 255, 255));
+                    let bg_rgb = own_bg.map_or(base_rgb, |c| composite_over(c, base_rgb));
+                    let text_rgb = composite_over(text_rgba, bg_rgb);
+                    (
+                        contrast(&hex_of(text_rgb), &hex_of(bg_rgb)),
+                        text_rgb,
+                        bg_rgb,
+                    )
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .expect("at least one base surface");
+            checked += 1;
+            let (ratio, text_rgb, bg_rgb) = worst;
+            if ratio < 4.5 {
+                offenders.push(format!(
+                    "{sheet}: {}: {ratio:.2}:1 ({} text on {} background)",
+                    selector.split(',').next().unwrap_or(&selector).trim(),
+                    hex_of(text_rgb),
+                    hex_of(bg_rgb)
+                ));
+            }
+        }
+        (offenders, checked)
+    }
 
     /// Asserts every text/background pair the CSS bundle -- and every
     /// block-owned stylesheet (`all_stylesheets`) -- declares meets the 4.5:1
     /// WCAG AA floor for normal text, matching on RESOLVED COLOR VALUES
-    /// rather than token names.
+    /// rather than token names, on every surface the text can be drawn on
+    /// (`contrast_offenders`).
     ///
     /// Value-matching is what closes the alias hole that let
     /// `--accent-info: #fd3534` -- and bare literals like `#ef4444` --
@@ -1602,10 +1809,10 @@ mod tests {
     /// Scoping a guard to the family whose bug prompted it is exactly how the
     /// next family's copy of that bug survives.
     ///
-    /// Background resolution, in order: the rule's own `background`/
-    /// `background-color`; else an `ANCESTOR_BACKGROUNDS` entry; else the
-    /// page surface (white). Translucent tints are alpha-composited over the
-    /// resolved background before measuring.
+    /// It also used to measure a rule with no background against white only,
+    /// while the shell drew a white frame around every page. The frame is
+    /// gone (the header and body sit on `--surface-2`), so such a rule is
+    /// measured on both surfaces.
     ///
     /// What this still cannot see: a parent background paired with child text
     /// outside the `ANCESTOR_BACKGROUNDS` table; colors applied via inline
@@ -1620,94 +1827,7 @@ mod tests {
     #[test]
     fn text_and_background_pairs_meet_wcag_aa() {
         let tokens = parse_root_tokens(super::css());
-
-        let exempt = |selector: &str| -> bool {
-            selector
-                .split(',')
-                .map(str::trim)
-                .any(|part| CONTRAST_EXEMPT_SELECTORS.contains(&part))
-        };
-        let ancestor_bg = |selector: &str| -> Option<Rgba> {
-            ANCESTOR_BACKGROUNDS.iter().find_map(|(prefix, token)| {
-                if selector
-                    .split(',')
-                    .map(str::trim)
-                    .any(|part| part.starts_with(prefix))
-                {
-                    resolve_color(tokens.get(*token)?, &tokens, 0)
-                } else {
-                    None
-                }
-            })
-        };
-
-        let mut offenders: Vec<String> = Vec::new();
-        let mut checked = 0usize;
-        let sheets = all_stylesheets();
-        let rules = sheets.iter().flat_map(|(sheet, css)| {
-            css_leaf_blocks(css)
-                .into_iter()
-                .map(move |(selector, body)| (sheet.as_str(), selector, body))
-        });
-        for (sheet, selector, body) in rules {
-            if exempt(&selector) {
-                continue;
-            }
-            let decls: Vec<&str> = body
-                .split(';')
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .collect();
-            let Some(color_decl) = decls.iter().find(|d| d.starts_with("color:")).copied() else {
-                continue;
-            };
-            let Some(text_rgba) = resolve_color(&color_decl["color:".len()..], &tokens, 0) else {
-                continue; // unresolvable -- can't verify, skip (documented above)
-            };
-            if text_rgba.3 == 0 {
-                continue; // fully transparent text, not visible
-            }
-
-            // The surface this rule's own background (if any) paints onto:
-            // an ancestor's background where we know it, else the page.
-            let base_rgb = composite_over(
-                ancestor_bg(&selector).unwrap_or((255, 255, 255, 255)),
-                (255, 255, 255),
-            );
-            let bg_decl: Option<&str> = decls
-                .iter()
-                .find(|d| d.starts_with("background:") || d.starts_with("background-color:"))
-                .copied();
-            // A declared background composites OVER that base rather than
-            // replacing it, so `background: transparent` (and any translucent
-            // tint) correctly shows the ancestor through it. Compositing
-            // against white unconditionally instead would have reported
-            // `.sidebar__collapse-toggle` -- transparent over the navy slab --
-            // as 2.56:1 white-background text, a false failure.
-            let bg_rgb = match bg_decl {
-                Some(d) => {
-                    let val = d.split_once(':').map(|x| x.1).unwrap_or_default();
-                    match resolve_color(val, &tokens, 0) {
-                        Some(c) => composite_over(c, base_rgb),
-                        None => continue, // declared but unresolvable -- can't verify
-                    }
-                }
-                None => base_rgb,
-            };
-
-            let text_rgb = composite_over(text_rgba, bg_rgb);
-            let ratio = contrast(&hex_of(text_rgb), &hex_of(bg_rgb));
-            checked += 1;
-            if ratio < 4.5 {
-                offenders.push(format!(
-                    "{sheet}: {}: {ratio:.2}:1 ({} text on {} background)",
-                    selector.split(',').next().unwrap_or(&selector).trim(),
-                    hex_of(text_rgb),
-                    hex_of(bg_rgb)
-                ));
-            }
-        }
-
+        let (offenders, checked) = contrast_offenders(&all_stylesheets(), &tokens);
         assert!(
             offenders.is_empty(),
             "text/background pairs failing 4.5:1 AA (computed): {offenders:#?}"
@@ -1723,6 +1843,290 @@ mod tests {
              the resolver has probably stopped understanding a common value form, \
              which would make the contrast assertion above vacuous"
         );
+    }
+
+    /// The measurement holds a rule with no background to the worse of the
+    /// two page surfaces, and the header's text to the page background it
+    /// sits on: a grey that clears 4.5:1 on white (#737373, 4.74:1) but not
+    /// on `--surface-2` (4.47:1) fails either way it is written.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn contrast_is_measured_on_the_surface_the_text_sits_on() {
+        let tokens = parse_root_tokens(super::css());
+        let shell = ".shell { background: var(--surface-2); }\n";
+        let measure = |css: &str| {
+            contrast_offenders(&[("t.css".to_string(), format!("{shell}{css}"))], &tokens)
+        };
+        let (bare, _) = measure(".probe { color: #737373; }");
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert!(bare[0].contains("#f8f8f9 background"), "{bare:?}");
+        let (header, _) = measure(".topbar__probe { color: #737373; background: transparent; }");
+        assert_eq!(header.len(), 1, "{header:?}");
+        // The header is measured on the page background alone, the ancestor
+        // `.shell` paints: white text there is reported on grey, where a rule
+        // with no known ancestor is reported on its worse surface, white.
+        let (header_white, _) = measure(".topbar__probe { color: #ffffff; }");
+        assert!(
+            header_white[0].contains("#f8f8f9 background"),
+            "{header_white:?}"
+        );
+        let (bare_white, _) = measure(".probe { color: #ffffff; }");
+        assert!(
+            bare_white[0].contains("#ffffff background"),
+            "{bare_white:?}"
+        );
+        // On its own white background it passes.
+        let (carded, checked) = measure(".probe { color: #737373; background: var(--surface-1); }");
+        assert!(carded.is_empty(), "{carded:?}");
+        assert_eq!(checked, 1);
+    }
+
+    /// Design rules 1 and 2: the page header and the body sit on the page
+    /// background, so the shell paints no frame — no background, border or
+    /// radius on `.topbar` or `.shell__body`, at any width — and a card a page
+    /// draws is the first level of card. The one template whose panes need a
+    /// frame, the chat, draws its own: `.page--chat` is a card-level surface.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_shell_paints_no_frame_and_the_chat_draws_its_own() {
+        let frame_props = ["background", "border", "border-radius", "box-shadow"];
+        let declares = |body: &str, props: &[&str]| -> Vec<String> {
+            body.split(';')
+                .filter_map(|decl| decl.split_once(':'))
+                .map(|(prop, _)| prop.trim().to_ascii_lowercase())
+                .filter(|prop| {
+                    props
+                        .iter()
+                        .any(|p| prop == p || prop.starts_with(&format!("{p}-")))
+                })
+                .collect()
+        };
+        let blocks = css_leaf_blocks(super::css());
+        let mut framed = Vec::new();
+        for (selector, body) in &blocks {
+            let shell_frame = selector.split(',').map(str::trim).any(|part| {
+                matches!(part, ".topbar" | ".shell__body" | ".shell__main")
+                    || part.starts_with(".shell__body--")
+            });
+            if !shell_frame {
+                continue;
+            }
+            for prop in declares(body, &frame_props) {
+                framed.push(format!("{selector} {{ {prop} }}"));
+            }
+        }
+        assert!(
+            framed.is_empty(),
+            "the shell draws a frame around the page again: {framed:?}"
+        );
+        let chat = blocks
+            .iter()
+            .find(|(selector, _)| selector == ".page--chat")
+            .map(|(_, body)| body.as_str())
+            .expect("layouts/page.css has a `.page--chat` rule");
+        let normalised = chat.split_whitespace().collect::<Vec<_>>().join(" ");
+        for decl in [
+            "background: var(--surface-1)",
+            "border: 1px solid var(--border-color)",
+            "border-radius: var(--radius-lg)",
+            "overflow: hidden",
+        ] {
+            assert!(
+                normalised.contains(decl),
+                "the chat draws its own frame: `.page--chat` lacks `{decl}`: {chat}"
+            );
+        }
+    }
+
+    /// The body is the scroller, so it clips whatever its children paint
+    /// outside it. It keeps room on every side: `--focus-reach` at the top
+    /// (taken from the gap above it, so nothing moves) and `--shell-inset`
+    /// at the sides and bottom. And the column's inset is ONE value: the
+    /// column's padding, the body's counter-margin and the body's padding
+    /// all read `--shell-inset` (redefined once for phones in tokens.css),
+    /// so the content cannot drift off the title's edge at either width.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_body_keeps_room_for_a_focus_ring_on_every_side() {
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let blocks = css_leaf_blocks(super::css());
+        // Every declaration of `props` on exactly `selector`, at any width.
+        let decls = |selector: &str, props: &[&str]| -> Vec<(String, String)> {
+            blocks
+                .iter()
+                .filter(|(s, _)| s == selector)
+                .flat_map(|(_, body)| body.split(';'))
+                .filter_map(|decl| decl.split_once(':'))
+                .map(|(prop, value)| (prop.trim().to_ascii_lowercase(), normalise(value)))
+                .filter(|(prop, _)| {
+                    props
+                        .iter()
+                        .any(|p| prop == p || prop.starts_with(&format!("{p}-")))
+                })
+                .collect()
+        };
+        assert_eq!(
+            decls(".shell__main", &["padding"]),
+            vec![(
+                "padding".to_string(),
+                "var(--shell-inset) var(--shell-inset) 0".to_string()
+            )],
+            "the column's inset is --shell-inset, set once"
+        );
+        assert_eq!(
+            decls(".shell__body", &["padding", "margin"]),
+            vec![
+                (
+                    "margin".to_string(),
+                    "calc(-1 * var(--focus-reach)) calc(-1 * var(--shell-inset)) 0".to_string()
+                ),
+                (
+                    "padding".to_string(),
+                    "var(--focus-reach) var(--shell-inset) var(--shell-inset)".to_string()
+                ),
+            ],
+            "the body spans the column's padding and the gap's top --focus-reach, \
+             and pads itself back by the same values"
+        );
+
+        // `--focus-reach` covers the shared keyboard ring: base.css's outline
+        // width plus its offset.
+        let tokens = parse_root_tokens(super::css());
+        let reach = tokens
+            .get("--focus-reach")
+            .and_then(|v| css_length_px(v))
+            .expect("tokens.css sets --focus-reach as a length");
+        let ring = blocks
+            .iter()
+            .find(|(s, _)| s.starts_with(":where(") && s.ends_with(":focus-visible"))
+            .map(|(_, body)| body.as_str())
+            .expect("base.css has the shared :where(..):focus-visible ring");
+        let px_of = |prop: &str| -> f64 {
+            ring.split(';')
+                .filter_map(|decl| decl.split_once(':'))
+                .find(|(p, _)| p.trim() == prop)
+                .and_then(|(_, v)| v.split_whitespace().find_map(css_length_px))
+                .unwrap_or_else(|| panic!("the shared ring sets no {prop} length: {ring}"))
+        };
+        let needed = px_of("outline") + px_of("outline-offset");
+        assert!(
+            reach >= needed && reach > 0.0,
+            "--focus-reach is {reach}px; the shared ring reaches {needed}px outside its element"
+        );
+    }
+
+    /// The fields a page can put straight on the page background, and the
+    /// palette trigger beside them. Each is the class itself, or the class
+    /// with a state or modifier (`:hover`, `.error`), never a descendant.
+    #[cfg(feature = "embed-assets")]
+    const FIELD_CLASSES: &[&str] = &[
+        ".form-input",
+        ".form-select",
+        ".form-textarea",
+        ".topbar__palette",
+    ];
+
+    /// WCAG 1.4.11: a field's edge is what shows where it is, so it needs
+    /// 3:1 against what surrounds it. The shell draws no white frame, so a
+    /// field sits on a card (`--surface-1`) or straight on the page
+    /// (`--surface-2`): every edge a field rule declares is measured on
+    /// both, and every fill it declares is opaque. Disabled fields are
+    /// exempt (1.4.11 excludes inactive components).
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn controls_are_visible_on_both_surfaces() {
+        let tokens = parse_root_tokens(super::css());
+        let surface = |name: &str| -> (u8, u8, u8) {
+            let c = resolve_color(tokens.get(name).expect("surface token"), &tokens, 0)
+                .expect("surface token resolves");
+            composite_over(c, (255, 255, 255))
+        };
+        let surfaces = [
+            ("--surface-1", surface("--surface-1")),
+            ("--surface-2", surface("--surface-2")),
+        ];
+        let is_field = |part: &str| {
+            FIELD_CLASSES.iter().any(|class| {
+                part.strip_prefix(class).is_some_and(|rest| {
+                    rest.is_empty()
+                        || rest.starts_with(':')
+                        || rest.starts_with('.')
+                        || rest.starts_with('[')
+                })
+            })
+        };
+        let disabled = |part: &str| part.replace(":not(:disabled)", "").contains(":disabled");
+        let mut wrong = Vec::new();
+        let (mut edges, mut fills) = (0, 0);
+        for (selector, body) in css_leaf_blocks(super::css()) {
+            let parts: Vec<&str> = selector.split(',').map(str::trim).collect();
+            if !parts.iter().all(|&p| is_field(p))
+                || parts.iter().any(|&p| disabled(p) || p.contains("::"))
+            {
+                continue;
+            }
+            for decl in body.split(';') {
+                let Some((prop, value)) = decl.split_once(':') else {
+                    continue;
+                };
+                match prop.trim() {
+                    "border" | "border-color" => {
+                        let Some(edge) = value
+                            .split_whitespace()
+                            .rev()
+                            .find_map(|t| resolve_color(t, &tokens, 0))
+                        else {
+                            wrong.push(format!("{selector}: cannot resolve `{}`", value.trim()));
+                            continue;
+                        };
+                        edges += 1;
+                        for (name, bg) in surfaces {
+                            let ratio = contrast(&hex_of(composite_over(edge, bg)), &hex_of(bg));
+                            if ratio < 3.0 {
+                                wrong.push(format!(
+                                    "{selector}: edge `{}` is {ratio:.2}:1 on {name}",
+                                    value.trim()
+                                ));
+                            }
+                        }
+                    }
+                    "background" | "background-color" => match resolve_color(value, &tokens, 0) {
+                        Some(fill) if fill.3 == 255 => fills += 1,
+                        Some(_) => wrong.push(format!(
+                            "{selector}: a translucent fill shows the surface through it"
+                        )),
+                        None => {
+                            wrong.push(format!("{selector}: cannot resolve `{}`", value.trim()))
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "fields that do not read on both surfaces:\n{}",
+            wrong.join("\n")
+        );
+        assert!(
+            edges >= 4 && fills >= 2,
+            "only {edges} field edges and {fills} fills were measured; the selector match has drifted"
+        );
+    }
+
+    /// The product wizard's footer is sticky over the scrolled steps, so it
+    /// is opaque, and it paints the page background it sits on: the white it
+    /// had matched the shell frame that is gone, and showed as a band.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_wizard_footer_paints_the_page_it_sticks_over() {
+        let footer = css_leaf_blocks(super::css())
+            .into_iter()
+            .find(|(s, _)| s == ".product-wizard-actions")
+            .map(|(_, body)| body.split_whitespace().collect::<Vec<_>>().join(" "))
+            .expect("components/form.css has `.product-wizard-actions`");
+        assert!(footer.contains("position: sticky"), "{footer}");
+        assert!(footer.contains("background: var(--surface-2)"), "{footer}");
     }
 
     /// Design rule 4: case is the source's, never the stylesheet's. A label

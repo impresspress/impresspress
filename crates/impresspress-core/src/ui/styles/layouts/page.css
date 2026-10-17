@@ -9,7 +9,7 @@
 }
 
 /* ===== Page templates — Phase 1 ===== */
-/* No padding: `.shell__body` (layouts/shell.css) pads every page body. */
+/* No padding: the shell (layouts/shell.css) insets every page body. */
 .page { display: flex; flex-direction: column; gap: var(--space-4); }
 .page-filters { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .page-body { min-height: 100px; }
@@ -83,11 +83,18 @@
 .dashboard-wide > * { width: 100%; }
 
 /* ===== Chat page ===== */
-/* Fill the shell body exactly: `.shell__body` is the height-constrained flex
-   child (flex:1 + min-height:0 up the chain), so 100% pins the composer to
-   its bottom edge. The old `calc(100vh - 2rem)` ignored the topbar + shell
-   gaps and pushed the composer below the fold. */
-.page--chat { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; height: 100%; }
+/* Self-framed (`templates::chat_page`): the shell draws no frame, so the
+   chat is one card-level surface on the page background, its panes edge to
+   edge inside it, clipped to its rounded corners. It fills the shell body
+   exactly: `.shell__body` is the height-constrained flex child (flex:1 +
+   min-height:0 up the chain), so 100% pins the composer to its bottom edge.
+   The old `calc(100vh - 2rem)` ignored the topbar + shell gaps and pushed
+   the composer below the fold. */
+.page--chat {
+	display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; height: 100%;
+	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+	overflow: hidden;
+}
 .page--chat:has(.chat-rail) { grid-template-columns: 280px minmax(0,1fr) 320px; }
 /* The rail had no padding at all, so `.thread-pane`'s "THREADS" heading sat
    flush against the left edge and its "+" button flush against the right and
@@ -150,6 +157,7 @@
 .status-page__title { font-size: var(--text-xl); font-weight: 500; margin: 0; }
 .status-page__body { font-size: var(--text-base); color: var(--text-secondary); margin: 0; }
 .status-page .btn { margin-top: var(--space-4); text-decoration: none; }
-/* Inside the shell's content card (`templates::status_panel`): the card is the frame. */
+/* Inside the shell (`templates::status_panel`): no frame, on the page
+   background under the header; it is the page's only content. */
 .status-page--in-shell { min-height: 0; padding: var(--space-12) var(--space-4); background: none; }
 

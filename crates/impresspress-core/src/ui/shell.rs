@@ -67,17 +67,6 @@ impl<'a> Default for Topbar<'a> {
     }
 }
 
-/// How the shell's content region (`main.shell__body`) frames the page body.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum BodyLayout {
-    /// The standard page: the body sits inside the content card's padding.
-    #[default]
-    Padded,
-    /// A full-bleed layout that draws its own panes edge to edge (the chat
-    /// template's thread list / messages / rail), so the card adds no padding.
-    Flush,
-}
-
 impl Topbar<'_> {
     /// The `header.topbar`; empty when the page declared nothing for it.
     pub(crate) fn render(self) -> Markup {
@@ -154,6 +143,11 @@ impl Topbar<'_> {
 /// Account / Apps for portal). `signed_in` (the viewer and their profile menu) is pinned at the sidebar bottom. The
 /// body renders inside `main#content` — the page's one `main` landmark and
 /// the skip link's target.
+///
+/// The shell draws no frame of its own: the header and the body sit on the
+/// page background (`--surface-2`), so every card-level surface a page draws
+/// (a `components::Card`, a stat, an empty state, a table, the chat panes)
+/// is the first level of card, never a card inside the shell's.
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is an independent slot in the page chrome; a struct \
@@ -168,11 +162,9 @@ pub fn shell(
     logo_icon_url: &str,
     app_name: &str,
     topbar: Topbar<'_>,
-    body_layout: BodyLayout,
     subnav: Option<Markup>,
     body: Markup,
 ) -> Markup {
-    let flush = body_layout == BodyLayout::Flush;
     html! {
         div .shell {
             a .skip-link href="#content" { "Skip to content" }
@@ -204,14 +196,13 @@ pub fn shell(
             div .shell__main {
                 (topbar.render())
                 // A block's own sections (`PageBody::with_subnav`): a row of
-                // links between the page header and the content card, so it
-                // frames a full-bleed body as well as a padded one.
+                // links between the page header and the body.
                 @if let Some(subnav) = subnav { (subnav) }
                 // The page scrolls inside this element, not the document, so
                 // it is a Tab stop (`tabindex="0"`): a keyboard user can
                 // focus it and scroll a page with nothing focusable in it.
                 // It is also the skip link's target.
-                main .shell__body .shell__body--flush[flush] #content tabindex="0" { (body) }
+                main .shell__body #content tabindex="0" { (body) }
             }
         }
     }
@@ -268,7 +259,6 @@ mod tests {
             "",
             "Impresspress",
             topbar,
-            BodyLayout::Padded,
             None,
             body,
         )
@@ -306,7 +296,6 @@ mod tests {
             "",
             "Impresspress",
             topbar,
-            BodyLayout::Padded,
             None,
             html! { p { "body" } },
         )
@@ -347,7 +336,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             html! {},
         )
@@ -384,7 +372,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             body,
         )
@@ -417,7 +404,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             html! {},
         )
@@ -439,7 +425,6 @@ mod tests {
             "",
             "Impresspress",
             Topbar::default(),
-            BodyLayout::Padded,
             None,
             html! { "body" },
         )
@@ -480,7 +465,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             html! { "body" },
         )
@@ -513,7 +497,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             html! {},
         )
@@ -540,7 +523,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             html! { "body" },
         )
@@ -551,31 +533,29 @@ mod tests {
     }
 
     /// The body is the page's one `main` landmark and the skip link's
-    /// target; a flush body (chat) drops only the padding modifier.
+    /// target, and it is one element whatever the page: the shell has no
+    /// per-page frame to choose.
     #[test]
     fn body_renders_as_the_main_landmark() {
         let groups = one_group(vec![item("X", "/x")]);
-        let render = |layout| {
-            shell(
-                NavKind::Admin,
-                &groups,
-                None,
-                "/x",
-                "",
-                "",
-                "Impresspress",
-                Topbar::default(),
-                layout,
-                None,
-                html! { "body" },
-            )
-            .into_string()
-        };
-        let padded = render(BodyLayout::Padded);
-        assert_eq!(padded.matches("<main").count(), 1);
-        assert!(padded.contains(r#"<main class="shell__body" id="content" tabindex="0">"#));
-        let flush = render(BodyLayout::Flush);
-        assert!(flush.contains(r#"<main class="shell__body shell__body--flush" id="content""#));
+        let s = shell(
+            NavKind::Admin,
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            Topbar::default(),
+            None,
+            html! { "body" },
+        )
+        .into_string();
+        assert_eq!(s.matches("<main").count(), 1);
+        assert!(
+            s.contains(r#"<main class="shell__body" id="content" tabindex="0">body</main>"#),
+            "{s}"
+        );
     }
 
     /// The subtitle sits on its own line under the title (no "|" separator),
@@ -622,7 +602,6 @@ mod tests {
             "",
             "Impresspress",
             tb,
-            BodyLayout::Padded,
             None,
             html! {},
         )

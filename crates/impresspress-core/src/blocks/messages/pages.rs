@@ -333,7 +333,7 @@ fn render_context_detail_body(
     entries: &[db::Record],
     siblings: &[db::Record],
     context_id: &str,
-) -> Result<crate::ui::PageBody, WaferError> {
+) -> Result<Markup, WaferError> {
     let context_type = context.str_field("type");
 
     // Why type=conversation diverges: conversation contexts are chat-shaped,
@@ -345,7 +345,7 @@ fn render_context_detail_body(
     }
 
     // Existing single-pane render path for non-conversation types.
-    render_default_view(entries, context_id).map(Into::into)
+    render_default_view(entries, context_id)
 }
 
 /// Conversation-type view: chat_page template with sibling thread list,
@@ -355,7 +355,7 @@ fn render_conversation_view(
     entries: &[db::Record],
     siblings: &[db::Record],
     context_id: &str,
-) -> Result<crate::ui::PageBody, WaferError> {
+) -> Result<Markup, WaferError> {
     let post_url = format!("/b/messages/api/contexts/{context_id}/entries");
 
     // Ensure the active context is always present in the thread list (a
@@ -610,7 +610,6 @@ mod tests {
 
         let html = render_context_detail_body(&ctx_rec, &[], &[], "ctx-1")
             .expect("the fixture rows decode")
-            .into_markup()
             .into_string();
         assert!(
             html.contains(r#"class="page--chat""#),
@@ -638,7 +637,6 @@ mod tests {
 
         let html = render_context_detail_body(&ctx_rec, &[], &[], "ctx-1")
             .expect("the fixture rows decode")
-            .into_markup()
             .into_string();
         assert!(
             !html.contains(r#"class="page--chat""#),
@@ -773,7 +771,6 @@ mod tests {
         let html =
             render_context_detail_body(&active, &[], std::slice::from_ref(&sibling), "ctx-1")
                 .expect("the fixture rows decode")
-                .into_markup()
                 .into_string();
         assert!(
             html.contains(r#"href="/b/messages/contexts/ctx-2""#),
@@ -804,7 +801,6 @@ mod tests {
 
         let html = render_context_detail_body(&ctx_rec, &[], &[], "ctx-1")
             .expect("the fixture rows decode")
-            .into_markup()
             .into_string();
 
         // #entries-list still exists for htmx hx-target.
@@ -1027,7 +1023,6 @@ mod form_contract_tests {
     fn the_conversation_composer_posts_the_fields_add_entry_reads() {
         let html = render_context_detail_body(&context_of_type("conversation"), &[], &[], "ctx-1")
             .expect("the fixture row decodes")
-            .into_markup()
             .into_string();
         assert_posts_form_fields(
             &html,
@@ -1041,7 +1036,6 @@ mod form_contract_tests {
     fn the_default_view_composer_posts_the_fields_add_entry_reads() {
         let html = render_context_detail_body(&context_of_type("task"), &[], &[], "ctx-1")
             .expect("the fixture row decodes")
-            .into_markup()
             .into_string();
         assert_posts_form_fields(
             &html,
