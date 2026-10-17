@@ -76,6 +76,10 @@ pub trait WorkerCommands {
     /// Worker: its latest deployment. `Err` when the command fails, which it
     /// does for a Worker that does not exist or has no deployment.
     fn deployment_status(&self, config: &Path) -> Result<String>;
+    /// What `wrangler versions view <version_id> --json` prints for
+    /// `config`'s Worker: that version, its bindings included (secret
+    /// bindings by name only).
+    fn version_view(&self, config: &Path, version_id: &str) -> Result<String>;
     /// Set secret `name` on `config`'s Worker.
     fn secret_put(&self, config: &Path, name: &str, value: &str) -> Result<()>;
     /// The NAMES of the secrets `config`'s Worker holds; never a value.
@@ -160,6 +164,28 @@ impl WorkerCommands for Wrangler {
             );
             bail!(
                 "wrangler deployments status --config {} failed (exit {:?}): {}",
+                config.display(),
+                output.status.code(),
+                diagnostics.trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn version_view(&self, config: &Path, version_id: &str) -> Result<String> {
+        let output = Command::new(&self.program)
+            .args(["versions", "view", version_id, "--json", "--config"])
+            .arg(config)
+            .output()
+            .context("run wrangler versions view")?;
+        if !output.status.success() {
+            let diagnostics = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            bail!(
+                "wrangler versions view {version_id} --config {} failed (exit {:?}): {}",
                 config.display(),
                 output.status.code(),
                 diagnostics.trim()
@@ -467,6 +493,13 @@ mod tests {
         fn deployment_status(&self, config: &Path) -> Result<String> {
             unreachable!(
                 "creating the main Worker never reads a deployment ({})",
+                config.display()
+            )
+        }
+
+        fn version_view(&self, config: &Path, version_id: &str) -> Result<String> {
+            unreachable!(
+                "creating the main Worker never reads a version ({version_id}, {})",
                 config.display()
             )
         }

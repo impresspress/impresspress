@@ -26,8 +26,12 @@ what it did happens on every native boot.
   main Worker only. The password-hasher Worker is neither built nor deployed.
   The deploy reads the hasher's current deployment
   (`wrangler deployments status --json`). It refuses when no hasher is
-  deployed, or when the deployment splits traffic across versions. It prints
-  the version it keeps. The default, `--password-hasher deploy`, behaves as
+  deployed, or when the deployment splits traffic across versions. It then
+  reads that version's vars (`wrangler versions view --json`) and refuses
+  unless they are exactly the ones this release would deploy: a
+  `[cloudflare.password_hasher]` change such as `pepper_required = true`
+  takes a hasher deploy, and `keep` says so instead of reporting it applied.
+  It prints the version it keeps. The default, `--password-hasher deploy`, behaves as
   before: the hasher is built and deployed first.
 - In both modes, the final candidate's `/_deploy/verify` now sends the
   deployed hasher one probe: a `verify` request in the candidate's protocol

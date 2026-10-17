@@ -380,10 +380,13 @@ pub struct VerifyResponse {
     pub summary: PreparedRuntimePlanSummary,
     pub release_asset_verified: bool,
     pub release_asset: Option<VerifiedReleaseAsset>,
-    /// The password-hasher probe's answer. Its type admits only a passing
-    /// probe (`malformed_hash`, in the version asked): a Worker whose probe
-    /// fails answers 503 instead, and anything else here fails the decode,
-    /// so a final version whose hasher does not answer its protocol is never
+    /// The password-hasher probe's answer, under
+    /// `impresspress_password::probe::VERIFY_FIELD` (a test holds the two
+    /// equal). Its type admits only `malformed_hash`, and
+    /// [`parse_verify_response`] only this build's protocol version, the
+    /// version the Worker built from the same tree asked in: a Worker whose
+    /// probe fails answers 503 instead, and anything else is refused, so a
+    /// final version whose hasher does not answer its protocol is never
     /// promoted.
     pub password_hasher: impresspress_password::probe::Report,
 }
@@ -427,6 +430,14 @@ pub fn parse_verify_response(
                 && actual.immutable_key == immutable_key
                 && actual.sha256 == sha256 => {}
         _ => bail!("/_deploy/verify representative release asset mismatch"),
+    }
+    let asked = impresspress_password::protocol::PROTOCOL_VERSION;
+    if response.password_hasher.protocol != asked {
+        bail!(
+            "/_deploy/verify reports the password-hasher probe in protocol version {}, and this \
+             build asks in {asked}",
+            response.password_hasher.protocol
+        );
     }
     Ok(response)
 }
@@ -658,14 +669,42 @@ mod tests {
                 "{answer}"
             );
         }
+        let mut other_version = passing.clone();
+        other_version["password_hasher"]["protocol"] =
+            serde_json::json!(impresspress_password::protocol::PROTOCOL_VERSION + 1);
         let mut extra = passing;
         extra["password_hasher"]["unavailable"] = serde_json::json!("reason");
-        for body in [missing, extra] {
+        for body in [missing, other_version, extra] {
             assert!(
                 parse_verify_response(&serde_json::to_vec(&body).unwrap(), &plan, None).is_err(),
                 "{body}"
             );
         }
+    }
+
+    /// The Worker's own reply (`probe::verify_reply`) parses as the CLI's
+    /// `VerifyResponse`: the field name is the shared
+    /// `probe::VERIFY_FIELD`, not a literal each side spells.
+    #[test]
+    fn the_workers_verify_reply_round_trips_through_the_cli_parser() {
+        use impresspress_password::probe;
+        let plan = plan();
+        let verified = serde_json::json!({
+            "schema_version": DEPLOY_RESPONSE_SCHEMA_VERSION,
+            "ok": true,
+            "summary": plan.summary().unwrap(),
+            "release_asset_verified": true,
+            "release_asset": null,
+        });
+        let (status, body) = probe::verify_reply(verified, Ok(hasher_report()));
+        assert_eq!(status, 200);
+        let parsed = parse_verify_response(body.as_bytes(), &plan, None).unwrap();
+        assert_eq!(parsed.password_hasher, hasher_report());
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert!(
+            serialized.get(probe::VERIFY_FIELD).is_some(),
+            "{serialized}"
+        );
     }
 
     #[test]

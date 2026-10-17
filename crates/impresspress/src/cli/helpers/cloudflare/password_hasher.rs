@@ -12,7 +12,10 @@
 //! consumer's `Cargo.lock`, the same versions of everything under it,
 //! wafer-run's crypto included — and runs `worker-build` on it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -335,9 +338,12 @@ pub enum PasswordHasherMode {
     #[default]
     Deploy,
     /// Leave the deployed hasher as it is: neither build nor deploy it. The
-    /// deploy still reads its secret names for the pepper check and records
-    /// the version it keeps, and promotion still needs it to answer this
-    /// release's protocol version (the `/_deploy/verify` probe).
+    /// kept version must already hold the vars this release would deploy
+    /// (`[cloudflare.password_hasher]`, e.g. `pepper_required`), or the
+    /// deploy refuses; the deploy still reads its secret names for the
+    /// pepper check and records the version it keeps, and promotion still
+    /// needs it to answer this release's protocol version (the
+    /// `/_deploy/verify` probe).
     Keep,
 }
 
@@ -363,13 +369,19 @@ pub enum HasherRelease {
 ///
 /// [`PasswordHasherMode::Keep`] runs no deploy. It reads the hasher's current
 /// deployment (`wrangler deployments status --json`), which must serve one
-/// version to all traffic, and returns that version. A hasher that does not
-/// exist, or splits its traffic, refuses the deploy: the version the main
-/// Worker would call must be one known version.
+/// version to all traffic, then that version (`wrangler versions view
+/// --json`), whose vars must be exactly `vars`, the ones a deploy of this
+/// release would apply (`wrangler::password_hasher_vars`). It returns that
+/// version. A hasher that does not exist, splits its traffic, or holds other
+/// vars refuses the deploy: the version the main Worker would call must be
+/// one known version, configured as this release says. Without the vars
+/// check, a `pepper_required = true` the operator just set would look
+/// applied while the hasher kept running without it.
 pub fn release(
     commands: &impl WorkerCommands,
     config: &Path,
     mode: PasswordHasherMode,
+    vars: &BTreeMap<String, String>,
 ) -> Result<HasherRelease> {
     match mode {
         PasswordHasherMode::Deploy => {
@@ -380,9 +392,10 @@ pub fn release(
             let status = commands.deployment_status(config).context(
                 "--password-hasher keep needs the password-hasher Worker to be deployed already",
             )?;
-            Ok(HasherRelease::Kept {
-                version_id: parse_deployment_status(&status)?.sole_version()?,
-            })
+            let version_id = parse_deployment_status(&status)?.sole_version()?;
+            let view = commands.version_view(config, &version_id)?;
+            parse_version_view(&view)?.check_vars(&version_id, vars)?;
+            Ok(HasherRelease::Kept { version_id })
         }
     }
 }
@@ -391,10 +404,13 @@ pub fn release(
 /// Worker, as its API returns it. Only the fields the deploy reads; the
 /// object carries more (`source`, `strategy`, `author_email`,
 /// `annotations`, …).
+///
+/// `id` is only named in an error; a missing one reads as empty rather than
+/// refusing the deploy.
 #[derive(Debug, Deserialize)]
 pub struct DeploymentStatus {
+    #[serde(default)]
     pub id: String,
-    pub created_on: String,
     pub versions: Vec<VersionTraffic>,
 }
 
@@ -425,6 +441,99 @@ impl DeploymentStatus {
             ),
         }
     }
+}
+
+/// `wrangler versions view <id> --json`: one version of a Worker, as
+/// Cloudflare's API returns it. Only its bindings are read.
+#[derive(Debug, Deserialize)]
+pub struct VersionView {
+    pub resources: VersionResources,
+}
+
+/// The resources of a version; only its bindings are read.
+#[derive(Debug, Deserialize)]
+pub struct VersionResources {
+    pub bindings: Vec<VersionBinding>,
+}
+
+/// One binding of a version. A var is `plain_text` (its value in `text`) or
+/// `json` (in `json`); every other type (`secret_text`, `durable_object_namespace`,
+/// …) is not a var.
+#[derive(Debug, Deserialize)]
+pub struct VersionBinding {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub json: Option<serde_json::Value>,
+}
+
+impl VersionView {
+    /// The version's vars, by name: a `plain_text` var's text, a `json`
+    /// var's JSON text.
+    pub fn vars(&self) -> BTreeMap<String, String> {
+        self.resources
+            .bindings
+            .iter()
+            .filter_map(|binding| match binding.kind.as_str() {
+                "plain_text" => Some((
+                    binding.name.clone(),
+                    binding.text.clone().unwrap_or_default(),
+                )),
+                "json" => Some((
+                    binding.name.clone(),
+                    binding
+                        .json
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Refuse unless the version's vars are exactly `expected`, naming each
+    /// one that differs.
+    pub fn check_vars(&self, version_id: &str, expected: &BTreeMap<String, String>) -> Result<()> {
+        let held = self.vars();
+        let differences: Vec<String> = expected
+            .keys()
+            .chain(held.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|name| expected.get(*name) != held.get(*name))
+            .map(|name| {
+                let show = |value: Option<&String>| {
+                    value.map_or_else(|| "unset".to_string(), |v| format!("{v:?}"))
+                };
+                format!(
+                    "{name}: kept version has {}, this release deploys {}",
+                    show(held.get(name)),
+                    show(expected.get(name))
+                )
+            })
+            .collect();
+        if differences.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "the kept password-hasher version {version_id} is not configured as this release \
+             says ([cloudflare.password_hasher] in impresspress.toml):\n  {}\nDeploy the hasher \
+             to apply it: impresspress deploy --target cloudflare --password-hasher deploy",
+            differences.join("\n  ")
+        )
+    }
+}
+
+/// Read `wrangler versions view --json` output, from its first `{`.
+pub fn parse_version_view(stdout: &str) -> Result<VersionView> {
+    let start = stdout
+        .find('{')
+        .context("no JSON object in `wrangler versions view --json` output")?;
+    serde_json::from_str(&stdout[start..]).context("parse `wrangler versions view --json`")
 }
 
 /// Read `wrangler deployments status --json` output. Wrangler prints no
@@ -622,7 +731,6 @@ features = ["durable-object"]"#
     fn reads_the_kept_version_from_wrangler_deployments_status() {
         let status = parse_deployment_status(DEPLOYMENT_STATUS).unwrap();
         assert_eq!(status.id, "6f4c3b1e-8a2d-4d0f-9b7e-2c5a1d9e0f34");
-        assert_eq!(status.created_on, "2026-09-27T10:12:44.318231Z");
         assert_eq!(
             status.sole_version().unwrap(),
             "20577eb6-6e78-4b5e-9dc4-403951f2ed5e"
@@ -655,8 +763,65 @@ features = ["durable-object"]"#
         assert!(parse_deployment_status("The Worker has no deployments.").is_err());
     }
 
-    /// A [`WorkerCommands`] that records every call and answers
-    /// `deployment_status` with `status`.
+    /// `wrangler versions view <id> --json` for the kept hasher version: its
+    /// pepper key secret (name only) and `pepper_required = false`.
+    const VERSION_VIEW: &str = include_str!("fixtures/wrangler-versions-view.json");
+
+    /// The vars a release with `pepper_required = required` deploys.
+    fn vars(required: bool) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            "IMPRESSPRESS_PASSWORD_PEPPER_REQUIRED".to_string(),
+            required.to_string(),
+        )])
+    }
+
+    #[test]
+    fn reads_the_kept_versions_vars_from_wrangler_versions_view() {
+        let view = parse_version_view(VERSION_VIEW).unwrap();
+        assert_eq!(view.vars(), vars(false), "the secret is not a var");
+        view.check_vars("v", &vars(false)).unwrap();
+    }
+
+    /// A var this release would deploy that the kept version does not hold —
+    /// a different value, a missing var, or one the release no longer
+    /// writes — refuses, naming it.
+    #[test]
+    fn a_kept_version_with_other_vars_is_refused() {
+        let view = parse_version_view(VERSION_VIEW).unwrap();
+        let err = view.check_vars("v", &vars(true)).unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "IMPRESSPRESS_PASSWORD_PEPPER_REQUIRED: kept version has \"false\", this release \
+                 deploys \"true\""
+            ),
+            "{err}"
+        );
+        assert!(err.contains("--password-hasher deploy"), "{err}");
+
+        let mut extra = vars(false);
+        extra.insert("NEW_HASHER_VAR".into(), "1".into());
+        let err = view.check_vars("v", &extra).unwrap_err().to_string();
+        assert!(
+            err.contains("NEW_HASHER_VAR: kept version has unset"),
+            "{err}"
+        );
+
+        let err = view
+            .check_vars("v", &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "IMPRESSPRESS_PASSWORD_PEPPER_REQUIRED: kept version has \"false\", this \
+                          release deploys unset"
+            ),
+            "{err}"
+        );
+    }
+
+    /// A [`WorkerCommands`] that records every call, answers
+    /// `deployment_status` with `status` and `version_view` with
+    /// [`VERSION_VIEW`].
     struct Recorder {
         status: Result<String, &'static str>,
         calls: std::cell::RefCell<Vec<String>>,
@@ -684,6 +849,13 @@ features = ["durable-object"]"#
             self.status.clone().map_err(|e| anyhow!(e))
         }
 
+        fn version_view(&self, config: &Path, version_id: &str) -> Result<String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("view {version_id} {}", config.display()));
+            Ok(VERSION_VIEW.to_string())
+        }
+
         fn secret_put(&self, config: &Path, name: &str, _value: &str) -> Result<()> {
             self.calls
                 .borrow_mut()
@@ -699,8 +871,9 @@ features = ["durable-object"]"#
         }
     }
 
-    /// `keep` deploys nothing: its one wrangler call against the hasher is
-    /// the read-only status, and the version it reports is the deployed one.
+    /// `keep` deploys nothing: its wrangler calls against the hasher are the
+    /// read-only status and version view, and the version it reports is the
+    /// deployed one.
     #[test]
     fn keep_reads_the_deployed_version_and_deploys_nothing() {
         let commands = Recorder {
@@ -711,6 +884,7 @@ features = ["durable-object"]"#
             &commands,
             Path::new("hasher.toml"),
             PasswordHasherMode::Keep,
+            &vars(false),
         )
         .unwrap();
         assert_eq!(
@@ -719,7 +893,44 @@ features = ["durable-object"]"#
                 version_id: "20577eb6-6e78-4b5e-9dc4-403951f2ed5e".into()
             }
         );
-        assert_eq!(*commands.calls.borrow(), ["status hasher.toml"]);
+        assert_eq!(
+            *commands.calls.borrow(),
+            [
+                "status hasher.toml",
+                "view 20577eb6-6e78-4b5e-9dc4-403951f2ed5e hasher.toml"
+            ]
+        );
+    }
+
+    /// `keep` with a `[cloudflare.password_hasher]` change the kept version
+    /// does not hold — here `pepper_required = true` — refuses before
+    /// anything is uploaded, and still deploys nothing.
+    #[test]
+    fn keep_refuses_a_kept_version_without_this_releases_config() {
+        let commands = Recorder {
+            status: Ok(DEPLOYMENT_STATUS.to_string()),
+            calls: Default::default(),
+        };
+        let err = release(
+            &commands,
+            Path::new("hasher.toml"),
+            PasswordHasherMode::Keep,
+            &vars(true),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("IMPRESSPRESS_PASSWORD_PEPPER_REQUIRED"),
+            "{err}"
+        );
+        assert!(
+            !commands
+                .calls
+                .borrow()
+                .iter()
+                .any(|c| c.starts_with("deploy")),
+            "nothing is deployed"
+        );
     }
 
     #[test]
@@ -732,6 +943,7 @@ features = ["durable-object"]"#
             &commands,
             Path::new("hasher.toml"),
             PasswordHasherMode::Deploy,
+            &vars(true),
         )
         .unwrap();
         assert_eq!(release, HasherRelease::Deployed);
@@ -750,6 +962,7 @@ features = ["durable-object"]"#
             &commands,
             Path::new("hasher.toml"),
             PasswordHasherMode::Keep,
+            &vars(false),
         )
         .unwrap_err();
         assert!(

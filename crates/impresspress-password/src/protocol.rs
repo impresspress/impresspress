@@ -37,7 +37,10 @@
 //! answers the new version's requests ([`crate::probe`]). The rule:
 //!
 //! - A change to [`Request`] or [`Response`] that an older peer cannot read
-//!   bumps [`PROTOCOL_VERSION`].
+//!   bumps [`PROTOCOL_VERSION`]. So does a change to the scheme or cost the
+//!   hasher writes ([`WRITTEN_ARGON2_PARAMS`]): a main Worker of another
+//!   release refuses those hashes ([`check_written_hash`]), and the deploy's
+//!   probe ([`crate::probe`]) vouches for a hasher by version alone.
 //! - The hasher answers every version from [`OLDEST_ACCEPTED_VERSION`] to
 //!   [`PROTOCOL_VERSION`], in the version it was asked in; the release that
 //!   bumps the version keeps [`OLDEST_ACCEPTED_VERSION`] at the previous one

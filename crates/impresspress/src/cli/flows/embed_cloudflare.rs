@@ -306,7 +306,12 @@ pub async fn deploy(
     //    keeps working meanwhile: the hasher answers the previous release's
     //    protocol version too.
     let hasher_toml = out_dir.join(wrangler::PASSWORD_HASHER_CONFIG_FILE);
-    match password_hasher::release(&wrangler_cli, &hasher_toml, password_hasher_mode)? {
+    match password_hasher::release(
+        &wrangler_cli,
+        &hasher_toml,
+        password_hasher_mode,
+        &wrangler::password_hasher_vars(&cfg.password_hasher),
+    )? {
         password_hasher::HasherRelease::Deployed => {
             deployment_gate.password_hasher_deployed()?;
             println!(

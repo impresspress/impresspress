@@ -361,10 +361,10 @@ pub async fn call_deploy_verify(
     // The preparation candidate writes the exact structural generation to
     // Workers KV immediately before exporting the plan. A final-version
     // preview can land in another colo before that KV write has propagated.
-    // A failed hasher probe is a 503 too, and the same retries ride out a
-    // hasher Durable Object resetting after its own deploy. Retry only
-    // server-side verification failures; malformed auth/routes remain
-    // immediate hard failures and persistent mismatches never promote.
+    // A failed password-hasher probe is a server error too (503), and the
+    // same retries ride out a transient Durable Object or binding error.
+    // Retry only server-side verification failures; malformed auth/routes
+    // remain immediate hard failures and persistent mismatches never promote.
     const VERIFY_RETRY_SECS: &[u64] = &[1, 2, 4, 8, 16, 30];
     let url = format!("{}{VERIFY_ENDPOINT}", preview_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()

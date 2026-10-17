@@ -36,6 +36,35 @@ pub fn operation() -> Operation {
     }
 }
 
+/// The name of the `/_deploy/verify` response field [`verify_reply`] writes
+/// the [`Report`] under, and the CLI's `VerifyResponse` reads it from.
+pub const VERIFY_FIELD: &str = "password_hasher";
+
+/// The `/_deploy/verify` reply, from the rest of the verified report and the
+/// probe's outcome: on a pass, status 200 and `verified` with the [`Report`]
+/// under [`VERIFY_FIELD`]; on a failure, status 503 and a body naming why.
+/// The 503 is what keeps the version from being promoted: the CLI retries
+/// server errors, then refuses.
+pub fn verify_reply(
+    mut verified: serde_json::Value,
+    probe: Result<Report, String>,
+) -> (u16, String) {
+    match probe {
+        Ok(report) => {
+            verified[VERIFY_FIELD] =
+                serde_json::to_value(report).expect("a report of a number and a name serializes");
+            (
+                200,
+                serde_json::to_string_pretty(&verified).expect("a JSON value serializes"),
+            )
+        }
+        Err(reason) => (
+            503,
+            format!("the password-hasher Worker failed the deploy probe: {reason}"),
+        ),
+    }
+}
+
 /// The `password_hasher` field of the `/_deploy/verify` response:
 /// `{"protocol": 1, "answer": "malformed_hash"}`. Only a passing probe
 /// writes one; a failing probe fails the request instead.
@@ -202,6 +231,36 @@ mod tests {
                 "a wrong outcome must refuse"
             );
         }
+    }
+
+    /// A pass puts the report beside the verified fields, under
+    /// [`VERIFY_FIELD`], with status 200; a failure is a 503 that names the
+    /// reason and carries no report.
+    #[test]
+    fn the_verify_reply_carries_the_report_or_refuses() {
+        let verified = serde_json::json!({ "ok": true, "release_asset_verified": true });
+        let (status, body) = verify_reply(
+            verified.clone(),
+            Ok(Report {
+                protocol: PROTOCOL_VERSION,
+                answer: Answer::MalformedHash,
+            }),
+        );
+        assert_eq!(status, 200);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "ok": true,
+                "release_asset_verified": true,
+                "password_hasher": { "protocol": PROTOCOL_VERSION, "answer": "malformed_hash" },
+            })
+        );
+
+        let (status, body) = verify_reply(verified, Err("shard-3 answered HTTP 500".into()));
+        assert_eq!(status, 503);
+        assert!(body.contains("shard-3 answered HTTP 500"), "{body}");
+        assert!(!body.contains(VERIFY_FIELD), "{body}");
     }
 
     /// An unreadable body never reaches [`judge`]: it is unavailable where

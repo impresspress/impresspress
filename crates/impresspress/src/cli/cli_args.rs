@@ -65,8 +65,10 @@ pub enum Command {
         /// `deploy` (the default) builds it from this release and deploys it
         /// before any main Worker version is uploaded. `keep` neither builds
         /// nor deploys it: the deployed one must serve a single version, which
-        /// the deploy prints, and promotion still needs it to answer this
-        /// release's protocol version (the `/_deploy/verify` probe).
+        /// the deploy prints, that version must already hold this release's
+        /// `[cloudflare.password_hasher]` vars (e.g. `pepper_required`), and
+        /// promotion still needs it to answer this release's protocol
+        /// version (the `/_deploy/verify` probe).
         #[arg(long, value_enum, default_value_t = PasswordHasherMode::Deploy)]
         password_hasher: PasswordHasherMode,
 

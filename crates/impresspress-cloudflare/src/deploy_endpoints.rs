@@ -426,25 +426,20 @@ pub(crate) async fn prepared_verify_endpoint(
     }
     .await;
 
-    let mut report = match result {
+    let report = match result {
         Ok(report) => report,
         Err(error) => {
             worker::console_log!("prepared runtime deep verification failed: {error}");
             return worker::Response::error("prepared runtime deep verification failed", 500);
         }
     };
-    match probe_password_hasher(env, environment).await {
-        Ok(password_hasher) => {
-            report["password_hasher"] = serde_json::to_value(password_hasher)?;
-            worker::Response::ok(serde_json::to_string_pretty(&report)?)
-        }
-        Err(error) => {
-            worker::console_log!("password-hasher probe failed: {error}");
-            worker::Response::error(
-                format!("the password-hasher Worker failed the deploy probe: {error}"),
-                503,
-            )
-        }
+    let probe = probe_password_hasher(env, environment).await;
+    if let Err(error) = &probe {
+        worker::console_log!("password-hasher probe failed: {error}");
+    }
+    match impresspress_password::probe::verify_reply(report, probe) {
+        (200, body) => worker::Response::ok(body),
+        (status, body) => worker::Response::error(body, status),
     }
 }
 
@@ -473,13 +468,14 @@ mod tests {
         crypto_service::test_support::FakeHasher, environment::test_support::empty_environment,
     };
 
-    /// The probe reaches the hasher through the binding and the configured
-    /// shards, and through nothing else: the `Env` here binds only the
+    /// The probe reaches the hasher through the binding, one request to one
+    /// of the shards, and through nothing else (that the shard count is the
+    /// configured one is pinned by the bad-count case below): the `Env` here binds only the
     /// hasher — no D1, no KV, no R2, no rate limiter — so a probe that wrote
     /// an audit row, counted against a limiter or created a session would
     /// fail here rather than pass.
     #[wasm_bindgen_test]
-    async fn the_probe_asks_only_the_hasher_through_the_configured_shards() {
+    async fn the_probe_asks_only_the_hasher_through_one_shard() {
         let fake = FakeHasher::running(Default::default());
         let mut environment = empty_environment();
         environment.set_password_hasher_shards_for_test("3");

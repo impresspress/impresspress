@@ -533,7 +533,7 @@ fn generate_named(
 /// var comes from `[cloudflare.password_hasher].pepper_required`, because a
 /// deploy replaces the vars the dashboard holds.
 pub fn generate_password_hasher(cfg: &CloudflareConfig, out_dir: &Path) -> Result<PathBuf> {
-    use impresspress_password::{pepper::PASSWORD_PEPPER_REQUIRED_VAR, protocol};
+    use impresspress_password::protocol;
     use toml::Value;
 
     let hasher = &cfg.password_hasher;
@@ -564,11 +564,10 @@ pub fn generate_password_hasher(cfg: &CloudflareConfig, out_dir: &Path) -> Resul
         Value::Array(vec![Value::Table(migration)]),
     );
 
-    let mut vars = toml::map::Map::new();
-    vars.insert(
-        PASSWORD_PEPPER_REQUIRED_VAR.into(),
-        Value::String(hasher.pepper_required.to_string()),
-    );
+    let vars = password_hasher_vars(hasher)
+        .into_iter()
+        .map(|(name, value)| (name, Value::String(value)))
+        .collect();
     root.insert("vars".into(), Value::Table(vars));
 
     let mut obs = toml::map::Map::new();
@@ -591,6 +590,20 @@ pub fn generate_password_hasher(cfg: &CloudflareConfig, out_dir: &Path) -> Resul
     )
     .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
+}
+
+/// The password-hasher Worker's `[vars]`, as [`generate_password_hasher`]
+/// writes them: what a hasher deploy applies, and what
+/// `--password-hasher keep` requires the kept version to hold already
+/// (`password_hasher::release`).
+pub fn password_hasher_vars(
+    hasher: &PasswordHasherConfig,
+) -> std::collections::BTreeMap<String, String> {
+    use impresspress_password::pepper::PASSWORD_PEPPER_REQUIRED_VAR;
+    std::collections::BTreeMap::from([(
+        PASSWORD_PEPPER_REQUIRED_VAR.to_string(),
+        hasher.pepper_required.to_string(),
+    )])
 }
 
 /// Put the main Worker's binding to the hasher's Durable Object class into
