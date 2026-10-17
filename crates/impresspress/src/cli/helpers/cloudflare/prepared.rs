@@ -658,7 +658,7 @@ mod tests {
                 "{answer}"
             );
         }
-        let mut extra = passing.clone();
+        let mut extra = passing;
         extra["password_hasher"]["unavailable"] = serde_json::json!("reason");
         for body in [missing, extra] {
             assert!(
