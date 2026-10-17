@@ -76,7 +76,7 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         pattern=".*\\S.*" title="Enter a name that is not just spaces";
                 }
                 div .account-form__actions {
-                    button .btn .btn--primary .btn--block type="submit" { "Save" }
+                    button .btn .btn--primary type="submit" { "Save" }
                 }
             }
         }

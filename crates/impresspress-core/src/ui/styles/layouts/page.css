@@ -1,8 +1,8 @@
 /* ===== Responsive ===== */
 /* Live mobile rules migrated from former (max-width: 767px) block — Phase 5c.
  * No rule here widens buttons: a button is as wide as its label at every
- * width, and a row that wants full-width buttons on a phone opts in with
- * `.btn--block` (components/button.css). */
+ * width, and a row whose buttons span a phone says so on the row
+ * (components/button.css). */
 @media (max-width: 720px) {
 	.tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
 	.tab { flex-shrink: 0; }
@@ -32,23 +32,36 @@
 .detail-meta dt { color: var(--text-muted); }
 .detail-meta dd { margin: 0; color: var(--text-primary); word-break: break-word; }
 
-/* ===== Form page ===== */
-/* The tabbed page (`templates::tabbed_page`) draws no box of its own: the
-   rail and sections sit directly in the shell's content card
-   (`.shell__body`). A second bordered card inside that one was the "double
-   border" around every settings page. */
-.form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+/* ===== Settings page (`templates::tabbed_page`) ===== */
+/* The rail and the tab's body side by side. Each is its own card-level
+   surface on the page background: the rail is a card (the user's choice,
+   from the mockup), and the body is the tab's section cards or table. */
+.form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 @media (min-width: 1024px) {
-	.form-grid--with-tabs { grid-template-columns: 220px minmax(0,1fr); }
+	.form-grid { grid-template-columns: 220px minmax(0, 1fr); gap: var(--space-6); }
+}
+.form-grid__body { min-width: 0; }
+/* The lead line of a read-only tab (network, variables, permissions). */
+.settings-lead { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); }
+.form-tabs {
+	background: var(--surface-1); border: 1px solid var(--border-color);
+	border-radius: var(--radius-lg); padding: var(--space-2);
 }
 .form-tabs ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 2px; }
 .form-tabs li a { display: flex; align-items: center; min-height: var(--target-min); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); color: var(--text-secondary); text-decoration: none; font-size: var(--text-sm); }
-/* Below 720px the section rail becomes one horizontally scrolling row of
-   tabs (the `.tabs` look), instead of a stack of four full-width rows above
-   the form. */
-@media (max-width: 720px) {
-	.form-grid { gap: var(--space-4); }
-	.form-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; border-bottom: 1px solid var(--border-color); }
+/* --primary-color text on the tint is 3.31:1, below the 4.5:1 AA floor for
+ * normal-size text; --primary-button is 4.51:1 on it (tokens.css). */
+.form-tabs li.is-active a { background: var(--primary-tint); color: var(--primary-button); }
+/* Where the rail cannot sit beside the body (below 1024px) it is no card:
+   one horizontally scrolling row of underline tabs (the `.tabs` look) above
+   the body, instead of a card of six full-width rows pushing the form below
+   the fold. */
+@media (max-width: 1023px) {
+	.form-tabs {
+		background: none; border: 0; border-radius: 0; padding: 0;
+		overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+		border-bottom: 1px solid var(--border-color);
+	}
 	.form-tabs::-webkit-scrollbar { display: none; }
 	.form-tabs ul { flex-direction: row; gap: 0; width: max-content; }
 	.form-tabs li a {
@@ -58,17 +71,6 @@
 	}
 	.form-tabs li.is-active a { background: none; box-shadow: inset 0 -2px 0 var(--primary-color); }
 }
-/* --primary-color text on this tint is 3.31:1 -- below the 4.5:1 AA floor
- * for normal-size text (caught auditing the tabbed/form templates during the
- * 12d design pass). --primary-button (4.99:1 on white, 4.51:1 on this tint)
- * is the accessible choice for text, matching the rest of the palette's
- * text/button split. */
-.form-tabs li.is-active a { background: #fff1e6; color: var(--primary-button); }
-.form-sections { display: flex; flex-direction: column; gap: var(--space-8); }
-.form-section { display: flex; flex-direction: column; gap: var(--space-2); }
-.form-section__title { font-size: var(--text-lg); font-weight: 500; margin: 0; }
-.form-section__desc { font-size: var(--text-sm); color: var(--text-secondary); margin: var(--space-1) 0 0; }
-.form-section__body { padding-top: var(--space-2); }
 
 /* ===== Dashboard page ===== */
 /* The stat row (`.stat-row`, `components::stat_row`) is defined once, in
@@ -101,7 +103,7 @@
    the LLM page's client-side thread switcher (llm-chat.js toggles the same
    attribute; it previously painted inline styles via a nonexistent
    `--primary-light` token whose blue fallback always won). */
-.chat-threads .thread-card[data-active="true"] { border-color: var(--primary-color); background: #fff1e6; }
+.chat-threads .thread-card[data-active="true"] { border-color: var(--primary-color); background: var(--primary-tint); }
 .chat-main { display: flex; flex-direction: column; min-height: 0; }
 .chat-messages { flex: 1; overflow-y: auto; padding: var(--space-4) var(--space-6); }
 .chat-composer { border-top: 1px solid var(--border-light); padding: var(--space-4); background: var(--surface-1); }

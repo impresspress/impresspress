@@ -63,7 +63,7 @@ pub fn render_create_index_modal() -> Markup {
                 }
                 (crate::ui::components::modal_footer(html! {
                     (crate::ui::components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Create" }
+                    button .btn .btn--primary type="submit" { "Create" }
                 }))
             }
         },

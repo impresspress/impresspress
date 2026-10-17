@@ -314,7 +314,7 @@ fn provider_form(form: ProviderForm<'_>) -> Markup {
             }
             (components::modal_footer(html! {
                 (components::modal_cancel())
-                button .btn.btn--primary.btn--block type="submit" { (submit) }
+                button .btn.btn--primary type="submit" { (submit) }
             }))
         }
     }

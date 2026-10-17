@@ -34,8 +34,8 @@ fn render_confirm_modal(id: &str, title: &str, confirm: &str) -> Markup {
         html! {
             p id=(format!("{id}-question")) {}
             (components::modal_footer(html! {
-                button .btn .btn--secondary .btn--block type="button" data-action="modal-close" autofocus { "Cancel" }
-                button .btn .btn--danger .btn--block type="button" data-confirm { (confirm) }
+                button .btn .btn--secondary type="button" data-action="modal-close" autofocus { "Cancel" }
+                button .btn .btn--danger type="button" data-confirm { (confirm) }
             }))
         },
     )

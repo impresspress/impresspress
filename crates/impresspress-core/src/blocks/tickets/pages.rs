@@ -164,7 +164,7 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 (type_fields("type-new", None))
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Create type" }
+                    button .btn .btn--primary type="submit" { "Create type" }
                 }))
             }
         }))
@@ -509,7 +509,7 @@ fn create_ticket_modal(types: &[db::Record]) -> Markup {
                     }
                     (components::modal_footer(html! {
                         (components::modal_cancel())
-                        button .btn .btn--primary .btn--block type="submit" { "Create ticket" }
+                        button .btn .btn--primary type="submit" { "Create ticket" }
                     }))
                 }
             }
@@ -953,7 +953,7 @@ pub(super) fn types_region(types: &[db::Record]) -> Markup {
                         (type_fields(&format!("type-{}", kind.id), Some(kind)))
                         (components::modal_footer(html! {
                             (components::modal_cancel())
-                            button .btn .btn--primary .btn--block type="submit" { "Save type" }
+                            button .btn .btn--primary type="submit" { "Save type" }
                         }))
                     }
                 }))

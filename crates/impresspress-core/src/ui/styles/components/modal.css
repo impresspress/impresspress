@@ -131,6 +131,8 @@ dialog.modal.modal--lg { max-width: 720px; }
 		margin: var(--space-4) calc(-1 * var(--space-4)) 0;
 		padding: var(--space-3) var(--space-4);
 	}
+	/* The footer's buttons share the row equally. */
+	.modal__footer > .btn { flex: 1 1 0; }
 }
 
 /* ===== Block detail modal (blocks/admin/pages/blocks.rs) ===== */

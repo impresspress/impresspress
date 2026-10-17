@@ -61,7 +61,7 @@ fn changed_response(msg: &Message) -> OutputStream {
                 ))
                 // `autofocus`: htmx focuses it once swapped in, so focus is
                 // not left on the submit button the swap just removed.
-                a .btn .btn--primary .btn--block autofocus href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity" {
+                a .btn .btn--primary autofocus href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity" {
                     "Sign in again"
                 }
             }

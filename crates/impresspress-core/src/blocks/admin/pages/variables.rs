@@ -235,7 +235,7 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
             }
             (components::modal_footer(html! {
                 (components::modal_cancel())
-                button .btn .btn--primary .btn--block type="submit" { "Create" }
+                button .btn .btn--primary type="submit" { "Create" }
             }))
         }
     }
@@ -899,7 +899,7 @@ fn variable_groups(
         @for group in groups {
             details .var-group data-var-group open[group.open] data-default-open[group.open] {
                 summary .var-group__summary {
-                    h3 .var-group__title { (group.title) }
+                    h2 .var-group__title { (group.title) }
                     span .var-group__stats {
                         (group.rows.len())
                         @if group.rows.len() == 1 { " variable" } @else { " variables" }
@@ -1122,7 +1122,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Save" }
+                    button .btn .btn--primary type="submit" { "Save" }
                 }))
             }
         },

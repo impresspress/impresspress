@@ -155,7 +155,7 @@ pub fn render_new_bucket_modal() -> Markup {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary .btn--block type="submit" { "Create bucket" }
+                    button .btn .btn--primary type="submit" { "Create bucket" }
                 }))
             }
         },

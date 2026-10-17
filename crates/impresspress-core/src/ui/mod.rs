@@ -3318,12 +3318,10 @@ mod tests {
             "dashboard-grid__secondary",
             "db-table-list__count",
             "detail-body__main",
-            "form-section__head",
             "messages-new__title",
             "messages-new__type",
             "page--dashboard",
             "page--detail",
-            "page--form",
             "page--list",
             "sidebar__brand--text",
         ];
@@ -3372,6 +3370,46 @@ mod tests {
         assert!(
             stale.is_empty(),
             "exception list entries no longer both used and undefined -- remove them: {stale:?}"
+        );
+    }
+
+    /// The per-button phone-width class is gone, and stays gone. A row whose
+    /// buttons span a phone says so on the row (`.modal__footer`,
+    /// `.form-actions`, `.account-form__actions`,
+    /// `.admin-buttons-form-grid__submit`, `.change-password-done`), so a
+    /// button an `Action` renders, which has no width of its own, takes the
+    /// row's layout like a hand-written one. A class on the button would let
+    /// the two drift apart within one footer.
+    #[test]
+    fn no_button_carries_its_own_phone_width_class() {
+        // Spelled in two halves so this test is not its own hit.
+        let class = concat!("btn--", "block");
+        let mut hits = Vec::new();
+        for entry in walkdir::WalkDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x == "rs" || x == "css" || x == "js")
+            })
+        {
+            let src = std::fs::read_to_string(entry.path()).unwrap();
+            for (n, line) in src.lines().enumerate() {
+                if line.contains(class) {
+                    hits.push(format!(
+                        "{}:{}: {}",
+                        entry.path().display(),
+                        n + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "`.{class}` is back; put the phone layout on the button row instead:\n{}",
+            hits.join("\n")
         );
     }
 

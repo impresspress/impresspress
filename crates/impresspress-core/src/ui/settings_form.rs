@@ -27,6 +27,7 @@ use wafer_core::clients::config;
 use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
 pub use wafer_run::{ConfigVar, InputType};
 
+use super::components::{Action, ActionTarget, Card};
 use crate::{
     blocks::admin::logs::audit_log,
     config_vars::is_truthy,
@@ -34,19 +35,18 @@ use crate::{
     util::{is_sensitive_key, validate_declared_config_value, MASKED_VALUE},
 };
 
-/// One titled group of settings within a form (e.g. "Stripe", "OAuth Providers").
+/// One titled group of settings within a form (e.g. "Stripe", "OAuth providers").
 ///
-/// Its heading is the shared in-body heading, an `h2`
-/// (`components::section_header`): the page's title is the topbar's `h1`,
-/// so a settings page is h1 → one h2 per section, with no icon (no other
-/// section heading has one).
+/// It renders as one [`Card`]: the title is the card's `h2` (the page's title
+/// is the topbar's `h1`, so a settings page is h1 → one h2 per section, with
+/// no icon) and the description its subtitle.
 pub struct SettingsSection<'a> {
     /// Section heading text.
     pub title: &'a str,
     /// The config variables rendered in this section, in order.
     pub vars: &'a [ConfigVar],
-    /// One-line explanation rendered under the heading; empty renders
-    /// nothing.
+    /// One-line explanation rendered under the heading (the card's
+    /// subtitle); empty renders nothing.
     pub description: &'a str,
     /// Whether this optional section starts behind a native disclosure
     /// control. Existing pages remain expanded unless they opt in.
@@ -438,9 +438,10 @@ fn render_section_fields(
 /// tabbed_page` — precisely so every tab can render a complete
 /// [`settings_form`] instead.)
 ///
-/// Each section is a `<section>` headed by `components::section_header`; a
-/// collapsible one is a `<details>` whose summary holds the same `h2`, so
-/// the outline is the same whether it is open or not.
+/// Each section is a [`Card`] titled with the section's `h2`, its
+/// description the subtitle, and its fields in a `div.settings-section`. A
+/// collapsible one is a plain card whose body is a `<details>` with the same
+/// `h2` in its summary, so the outline is the same whether it is open or not.
 ///
 /// `Err` when the current values could not be read: the caller answers with
 /// an error page, never with fields filled from defaults.
@@ -457,38 +458,48 @@ pub async fn render_sections(
                 "settings-section"
             };
             @if section.collapsible {
-                details class={ (class) " settings-section--collapsible" } {
-                    summary { h2 .section-header__title { (section.title) } }
-                    @if !section.description.is_empty() {
-                        p .settings-section-desc { (section.description) }
+                (Card::plain(html! {
+                    details class={ (class) " settings-section--collapsible" } {
+                        summary { h2 .section-header__title { (section.title) } }
+                        @if !section.description.is_empty() {
+                            p .settings-section-desc { (section.description) }
+                        }
+                        (render_section_fields(section, &values))
                     }
-                    (render_section_fields(section, &values))
-                }
+                })
+                .render())
             } @else {
-                section class=(class) {
-                    (super::components::section_header(section.title, None))
-                    @if !section.description.is_empty() {
-                        p .settings-section-desc { (section.description) }
-                    }
-                    (render_section_fields(section, &values))
-                }
+                @let card = Card::titled(
+                    section.title,
+                    html! { div class=(class) { (render_section_fields(section, &values)) } },
+                );
+                @let card = if section.description.is_empty() {
+                    card
+                } else {
+                    card.subtitle(section.description)
+                };
+                (card.render())
             }
         }
     })
 }
 
 /// Render the full ConfigVar-driven settings form: a `#settings-form` posting
-/// JSON to `post_url`, with one titled section per [`SettingsSection`], a
-/// "Save Settings" button, and the shared submit snippet. Current values are
-/// loaded from the config block internally; `Err` when they could not be read,
-/// and the caller answers an error page instead of a form (see
-/// [`render_sections`]) — [`crate::blocks::crud::db_error_page`], which keeps
-/// a WRAP denial's 403 where [`crate::ui::server_error_response`] would make
-/// it a 500.
+/// JSON to `post_url`, with one section [`Card`] per [`SettingsSection`], the
+/// page's one primary, "Save settings", and the shared submit snippet.
+/// Current values are loaded from the config block internally; `Err` when
+/// they could not be read, and the caller answers an error page instead of a
+/// form (see [`render_sections`]) — [`crate::blocks::crud::db_error_page`],
+/// which keeps a WRAP denial's 403 where [`crate::ui::server_error_response`]
+/// would make it a 500.
 ///
-/// `extra` is appended after the last section and before the submit button —
-/// used by blocks that want an extra panel inside the form (e.g. legalpages'
-/// live-preview links).
+/// The form is `.form--aligned`: once it is at least 40rem wide each label
+/// sits left of its control, and Save lines up with the controls
+/// (`components/form.css`). Narrower, every field stacks.
+///
+/// `extra` is appended after the last section and before the Save row —
+/// used by blocks that want an extra card inside the form (legalpages' live
+/// preview links).
 pub async fn settings_form(
     ctx: &dyn Context,
     post_url: &str,
@@ -500,10 +511,12 @@ pub async fn settings_form(
         // `.settings-form` caps the form at a readable measure on wide
         // screens; a 1,100px text box for a six-character value read as
         // broken.
-        form #settings-form .settings-form {
+        form #settings-form .settings-form .form--aligned {
             (fields)
             (extra)
-            button .btn .btn--primary .btn--block .mt-4 type="submit" { "Save settings" }
+            div .form-actions {
+                (Action::primary("Save settings", ActionTarget::Submit { form: None }).render())
+            }
         }
         script { (PreEscaped(submit_js(post_url))) }
     })
@@ -759,7 +772,10 @@ mod tests {
             .await
             .expect("the current values are readable")
             .into_string();
-        assert!(s.contains("Defaults applied to new offers."), "{s}");
+        assert!(
+            s.contains(r#"<h2 class="card__title">Checkout</h2><p class="card__subtitle">Defaults applied to new offers.</p>"#),
+            "the description is the section card's subtitle: {s}"
+        );
     }
 
     #[test]
@@ -965,7 +981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sections_are_h2_section_headers_and_a_gated_section_wraps_its_dependents() {
+    async fn sections_are_h2_titled_cards_and_a_gated_section_wraps_its_dependents() {
         let ctx = crate::test_support::TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
@@ -983,14 +999,18 @@ mod tests {
             .await
             .expect("readable")
             .into_string();
+        // Each section is one card, its title the card's h2 and its fields
+        // the card's body.
         assert!(
-            s.contains(r#"<h2 class="section-header__title">Basics</h2>"#),
+            s.starts_with(r#"<section class="card"><header class="card__head"><div><h2 class="card__title">Basics</h2></div></header><div class="card__body"><div class="settings-section"><div class="form-group">"#),
             "{s}"
         );
+        assert_eq!(s.matches(r#"class="card""#).count(), 3, "{s}");
         assert!(!s.contains("<h3"), "{s}");
-        // Collapsible: the same h2, inside the summary.
+        // Collapsible: a plain card around the disclosure, the same h2 inside
+        // the summary.
         assert!(
-            s.contains(r#"<summary><h2 class="section-header__title">Advanced</h2></summary>"#),
+            s.contains(r#"<div class="card"><div class="card__body"><details class="settings-section settings-section--collapsible"><summary><h2 class="section-header__title">Advanced</h2></summary>"#),
             "{s}"
         );
         // Gated: the toggle first (declared second), controlling the region
@@ -1006,6 +1026,31 @@ mod tests {
             s.contains(r#"class="settings-section settings-section--gated""#),
             "{s}"
         );
+    }
+
+    /// The form aligns its rows, puts any `extra` card after the sections,
+    /// and ends in one Save row holding the page's one primary.
+    #[tokio::test]
+    async fn the_form_is_aligned_and_ends_in_one_primary_save_row() {
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let vars = [var("X__A", "A", InputType::Text)];
+        let sections = [SettingsSection::new("Basics", &vars)];
+        let s = settings_form(&ctx, "/x", &sections, html! { p #extra { "extra" } })
+            .await
+            .expect("readable")
+            .into_string();
+        assert!(
+            s.starts_with(r#"<form class="settings-form form--aligned" id="settings-form"><section class="card">"#),
+            "{s}"
+        );
+        let extra = s.find(r#"<p id="extra">"#).expect("extra");
+        let actions = s
+            .find(r#"<div class="form-actions"><button class="btn btn--primary" type="submit">Save settings</button></div></form>"#)
+            .expect("one Save row, last in the form");
+        assert!(extra < actions, "{s}");
+        assert_eq!(s.matches("btn--primary").count(), 1, "{s}");
     }
 
     #[test]

@@ -520,54 +520,40 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let vars = super::config_vars();
     let sections = [settings_form::SettingsSection::new("Appearance", &vars)];
 
-    // The live-preview links ride in the form's `extra` slot so they stay
-    // inside the settings form (above the Save button), as before.
-    let preview = html! {
-        section .card .mt-6 .mb-5 .p-4 {
-            (components::section_header("Preview", None))
-            p .text-muted .text-xs .mb-3 {
-                "See how your changes look on the public pages."
+    // The live-preview links are a card of their own after the Appearance
+    // card, in the form's `extra` slot: the same width as the section cards,
+    // above the Save row.
+    let preview = components::Card::titled(
+        "Preview",
+        html! {
+            div .flex .gap-2 .flex-wrap {
+                (components::Action::quiet("Privacy policy", components::ActionTarget::NewTab("/b/legalpages/privacy"))
+                    .icon(icons::eye())
+                    .render())
+                (components::Action::quiet("Terms of service", components::ActionTarget::NewTab("/b/legalpages/terms"))
+                    .icon(icons::eye())
+                    .render())
             }
-            div .flex .gap-2 {
-                a .btn .btn--sm .btn--ghost href="/b/legalpages/privacy" target="_blank" rel="noopener" {
-                    (icons::eye()) " Privacy Policy"
-                    span .sr-only { " (opens in a new tab)" }
-                }
-                a .btn .btn--sm .btn--ghost href="/b/legalpages/terms" target="_blank" rel="noopener" {
-                    (icons::eye()) " Terms of Service"
-                    span .sr-only { " (opens in a new tab)" }
-                }
+        },
+    )
+    .subtitle("See how your changes look on the public pages.")
+    .render();
+
+    let content =
+        match settings_form::settings_form(ctx, SETTINGS_SAVE_PATH, &sections, preview).await {
+            Ok(form) => form,
+            Err(e) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    "Legal settings",
+                    "settings",
+                    e,
+                    "legalpages settings: current values read failed",
+                )
+                .await
             }
-        }
-    };
-
-    let saved = msg.query("saved") == "1";
-    let form = match settings_form::settings_form(ctx, SETTINGS_SAVE_PATH, &sections, preview).await
-    {
-        Ok(form) => form,
-        Err(e) => {
-            return error_page(
-                ctx,
-                msg,
-                "Legal settings",
-                "settings",
-                e,
-                "legalpages settings: current values read failed",
-            )
-            .await
-        }
-    };
-
-    let content = html! {
-        @if saved {
-            div .alert .alert--success .mb-4 {
-                span aria-hidden="true" { (icons::check()) }
-                "Settings saved successfully."
-            }
-        }
-
-        (form)
-    };
+        };
 
     ui::shell_page(
         ctx,

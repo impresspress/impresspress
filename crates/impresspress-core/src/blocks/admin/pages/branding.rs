@@ -38,7 +38,8 @@ fn branding_vars() -> Vec<ConfigVar> {
 /// be read.
 pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, WaferError> {
     let vars = branding_vars();
-    let sections = [SettingsSection::new("Branding", &vars)];
+    let sections = [SettingsSection::new("Branding", &vars)
+        .description("The app name, logos, favicon and accent colour.")];
     settings_form::settings_form(ctx, BRANDING_PATH, &sections, html! {}).await
 }
 

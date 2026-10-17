@@ -193,7 +193,7 @@ fn change_password_form(min_length: usize) -> Markup {
             }
             div #(RESULT_ID) .account-form__result {}
             div .account-form__actions {
-                button .btn .btn--primary .btn--block type="submit" { "Change password" }
+                button .btn .btn--primary type="submit" { "Change password" }
             }
         }
     }
