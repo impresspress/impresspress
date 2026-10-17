@@ -152,13 +152,81 @@ fn streamed_response(streamed: StreamedHttpResponse) -> Result<Response> {
         .with_headers(headers_from(&headers)?);
     let body = body.map(|chunk| chunk.map_err(|e| worker::Error::RustError(e.message)));
     match content_length {
-        None => builder.from_stream(body),
-        Some(length) => {
-            let fixed =
-                worker::worker_sys::FixedLengthStream::from(FixedLengthStream::wrap(body, length));
-            Ok(builder.stream(fixed.readable()))
-        }
+        None => builder.from_stream(log_body_failures(body)),
+        Some(length) => Ok(builder.stream(fixed_length_body(body, length)?)),
     }
+}
+
+/// `body`, with every failure it yields logged where it is yielded.
+///
+/// A failure here — an `Error` terminal, a body that breaks its declared
+/// length — happens after the status is committed, so the client sees only
+/// an aborted body; this line is the server's record of why. A client that
+/// goes away is not a failure of the body: the stream is dropped, its
+/// producer is cancelled, and that is recorded as `CANCELLED` where the
+/// request is logged.
+fn log_body_failures(
+    body: impl futures::Stream<Item = Result<Vec<u8>>> + 'static,
+) -> impl futures::Stream<Item = Result<Vec<u8>>> + 'static {
+    body.map(|chunk| {
+        if let Err(error) = &chunk {
+            worker::console_error!("streamed response body failed: {error}");
+        }
+        chunk
+    })
+}
+
+/// `body` framed by a Workers `FixedLengthStream` of `length` bytes: the
+/// body is piped into the stream's writable side, and its readable side is
+/// what the response sends.
+///
+/// The body becomes a `ReadableStream` the way every other streamed body
+/// does, through `ResponseBuilder::from_stream`, and the pipe is built here
+/// rather than through `worker`'s `From<worker::FixedLengthStream>`, because
+/// that conversion discards the promise `pipeTo` returns. That promise
+/// rejects whenever the pipe ends early: when the client cancels the
+/// response body (the common case: an abandoned download), and when the
+/// body fails (an overrun, an `Error` terminal). Unhandled, each is an
+/// uncaught error in workerd and fails the process in Node. Neither needs
+/// the rejection: the cancel reaches the producer through the dropped
+/// stream, and a failure is logged by [`log_body_failures`] as it is
+/// yielded. So the rejection is handled by [`IGNORE_PIPE_END`].
+fn fixed_length_body(
+    body: impl futures::Stream<Item = Result<Vec<u8>>> + 'static,
+    length: u64,
+) -> Result<worker::worker_sys::web_sys::ReadableStream> {
+    let fixed = match u32::try_from(length) {
+        Ok(length) if length < u32::MAX => worker::worker_sys::FixedLengthStream::new(length),
+        _ => worker::worker_sys::FixedLengthStream::new_big_int(js_sys::BigInt::from(length)),
+    }?;
+    let source = match ResponseBuilder::new()
+        .from_stream(log_body_failures(FixedLengthStream::wrap(body, length)))?
+        .body()
+    {
+        worker::ResponseBody::Stream(source) => source.clone(),
+        _ => {
+            return Err(worker::Error::RustError(
+                "ResponseBuilder::from_stream built no stream body".to_string(),
+            ))
+        }
+    };
+    let piped = source.pipe_to(&fixed.writable());
+    IGNORE_PIPE_END.with(|handler| {
+        // The promise `catch` returns settles with the pipe, and nothing
+        // waits for it.
+        let _ = piped.catch(handler);
+    });
+    Ok(fixed.readable())
+}
+
+thread_local! {
+    /// The rejection handler of every fixed-length body's pipe (see
+    /// [`fixed_length_body`] for why it does nothing), made once per
+    /// isolate: a closure made per response and attached as a rejection
+    /// handler would leak whenever the pipe succeeds and the handler never
+    /// runs.
+    static IGNORE_PIPE_END: wasm_bindgen::closure::Closure<dyn FnMut(wasm_bindgen::JsValue)> =
+        wasm_bindgen::closure::Closure::new(|_reason: wasm_bindgen::JsValue| {});
 }
 
 /// Header pairs, as the codec renders them, in a Worker `Headers`. Appended
@@ -302,6 +370,7 @@ mod request_tests {
 /// `parts_to_response` glue together.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod response_tests {
+    use futures::StreamExt;
     use impresspress_core::blocks::errors::{error_response, ErrorCode};
     use wafer_block::{
         http_codec::{META_RESP_CONTENT_LENGTH, META_RESP_STREAM, STREAM_MARKER_VALUE},
@@ -518,12 +587,57 @@ mod response_tests {
         assert_eq!(resp.text().await.expect("read body"), "abcdef");
     }
 
+    /// Start recording every promise rejection the runtime reports as
+    /// unhandled, in place of Node's default of failing the process at some
+    /// later tick. Read back with [`unhandled_rejections_since`].
+    fn record_unhandled_rejections() {
+        js_sys::Function::new_no_args(
+            "globalThis.__unhandledRejections = []; \
+             globalThis.__recordUnhandled = (reason) => \
+                 globalThis.__unhandledRejections.push(String(reason)); \
+             process.on('unhandledRejection', globalThis.__recordUnhandled);",
+        )
+        .call0(&wasm_bindgen::JsValue::UNDEFINED)
+        .expect("install the recorder");
+    }
+
+    /// Let the runtime settle every pending promise and report the ones left
+    /// unhandled (Node reports them between macrotasks), then stop recording
+    /// and return what was reported.
+    async fn unhandled_rejections_since() -> Vec<String> {
+        for _ in 0..3 {
+            let tick = js_sys::Function::new_no_args(
+                "return new Promise((resolve) => setTimeout(resolve, 0));",
+            )
+            .call0(&wasm_bindgen::JsValue::UNDEFINED)
+            .expect("schedule a macrotask");
+            worker::wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(tick))
+                .await
+                .expect("the macrotask runs");
+        }
+        let reported = js_sys::Function::new_no_args(
+            "process.off('unhandledRejection', globalThis.__recordUnhandled); \
+             return globalThis.__unhandledRejections;",
+        )
+        .call0(&wasm_bindgen::JsValue::UNDEFINED)
+        .expect("read the recorder");
+        js_sys::Array::from(&reported)
+            .iter()
+            .map(|reason| reason.as_string().unwrap_or_default())
+            .collect()
+    }
+
     /// A body that runs past its declared length is aborted, not ended: the
     /// codec's body yields an `Err` in place of the chunk that would overrun
     /// it, and the response body errors.
+    ///
+    /// The abort reaches the client through the response body and leaves no
+    /// promise rejected and unhandled behind it: in Node that fails the
+    /// process at a later tick, and workerd logs it as an uncaught error.
     #[wasm_bindgen_test]
     async fn a_body_overrunning_its_declared_length_is_aborted() {
         install_fixed_length_stream_stand_in();
+        record_unhandled_rejections();
         let stream = OutputStream::from_producer(|sink, _cancel| async move {
             for (key, value) in [
                 (META_RESP_STREAM, STREAM_MARKER_VALUE),
@@ -548,6 +662,58 @@ mod response_tests {
         assert!(
             resp.bytes().await.is_err(),
             "a body longer than it declared must not read back as complete"
+        );
+        assert_eq!(
+            unhandled_rejections_since().await,
+            Vec::<String>::new(),
+            "the aborted body left a rejected promise nobody handles"
+        );
+    }
+
+    /// A known-length download the client abandons — the common way a
+    /// fixed-length body's pipe ends early: the cancel reaches the producer,
+    /// through the pipe and the dropped Rust stream, and leaves no promise
+    /// rejected and unhandled behind it.
+    #[wasm_bindgen_test]
+    async fn a_cancelled_fixed_length_body_cancels_its_producer_and_leaves_no_rejection() {
+        install_fixed_length_stream_stand_in();
+        record_unhandled_rejections();
+        let (cancelled_tx, cancelled_rx) = futures::channel::oneshot::channel();
+        let stream = OutputStream::from_producer(|sink, cancel| async move {
+            for (key, value) in [
+                (META_RESP_STREAM, STREAM_MARKER_VALUE),
+                (META_RESP_CONTENT_TYPE, "application/octet-stream"),
+                (META_RESP_CONTENT_LENGTH, "1000"),
+            ] {
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    })
+                    .await;
+            }
+            let _ = sink.send_chunk(b"first".to_vec()).await;
+            cancel.cancelled().await;
+            let _ = cancelled_tx.send(());
+        });
+
+        let mut resp = output_to_response(stream).await.expect("build response");
+        assert_eq!(resp.status_code(), 200);
+        let mut body = resp.stream().expect("a streamed body");
+        let first = crate::test_fakes::bounded(body.next(), "the first chunk")
+            .await
+            .expect("a first chunk")
+            .expect("a readable chunk");
+        assert_eq!(first, b"first");
+
+        drop(body);
+        crate::test_fakes::bounded(cancelled_rx, "the producer's cancel")
+            .await
+            .expect("the producer saw the client go");
+        assert_eq!(
+            unhandled_rejections_since().await,
+            Vec::<String>::new(),
+            "the cancelled body left a rejected promise nobody handles"
         );
     }
 
