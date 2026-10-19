@@ -2,7 +2,8 @@
 // `./index.js`, emulating what the Rust side does with the shared state:
 // one "linear memory" per instance, replaced by `__wbg_reset_state`, and
 // `__impresspressExecutorProbe` drawing the instance's identity on its first
-// traced call (`impresspress_cloudflare::executor_trace::probe`).
+// traced call and reporting worker 0.8's `__worker_init_state.instanceId`
+// when that global exists (`impresspress_cloudflare::executor_trace::probe`).
 let instances = 0;
 let memory = freshMemory();
 
@@ -32,7 +33,12 @@ export function __impresspressExecutorProbe() {
     instances += 1;
     memory.id = `wasm-${instances}`;
   }
-  return { wasm: memory.id, generation: memory.generation, stack: 1024 };
+  const answer = { wasm: memory.id, generation: memory.generation, stack: 1024 };
+  // worker 0.8's instance counter, read as the Rust probe reads it; the
+  // 0.7.5 shim creates no such global, so it is absent there.
+  const wbi = globalThis.__worker_init_state?.instanceId;
+  if (Number.isInteger(wbi) && wbi >= 0) answer.wbi = wbi;
+  return answer;
 }
 
 // A request whose URL ends in `/trap` traps synchronously, as a stranded

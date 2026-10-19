@@ -21,10 +21,10 @@
 //!
 //! # The signals
 //!
-//! - `ip-entry <isolate> <wasm> <generation> <seq> <stack>`: logged by the
-//!   generated JS entry module (`impresspress`'s
+//! - `ip-entry <isolate> <wasm> <generation> <seq> <stack> wbi=<n|->`: logged by
+//!   the generated JS entry module (`impresspress`'s
 //!   `cli::helpers::cloudflare::entry`) before it calls the shim's `fetch`.
-//!   The wasm id, generation and stack come from [`executor_probe`], a
+//!   The wasm id, generation, stack and `wbi` come from [`executor_probe`], a
 //!   synchronous export the module calls after the shim's
 //!   re-initialization check, so they name the instance that serves the
 //!   request. The probe runs outside the executor, so it answers even when the
@@ -52,6 +52,17 @@
 //!   object the shim hands to the Rust `fetch`; a single "current request"
 //!   global would be overwritten by a concurrent request before this one's
 //!   first poll.
+//! - **wbi**: workers-rs's own instance counter, `instanceId` on the JS global
+//!   `__worker_init_state` ([`WORKER_INIT_STATE_GLOBAL`]), or `-` where that
+//!   global does not exist. worker 0.8 creates it once per isolate, and both
+//!   of its reset paths move it: its `init` adds 1 on every instance start,
+//!   and worker-build's shim adds 1 more when it resets the instance itself.
+//!   So between two lines on one isolate, +2 means the shim's reset ran
+//!   (wasm-bindgen's call-guard reset may have been scheduled too; the shim's
+//!   reset consumes it), and +1 means the call-guard reset fired alone, which
+//!   logs nothing. worker 0.7.5 keeps the counter in a module-local variable
+//!   and creates no such global, so on 0.7.5 the field is `-` by
+//!   construction and its absence there is not a signal.
 //! - **stack**: the address of a local in a non-inlined function, i.e. a
 //!   point on the shadow stack. On `ip-entry` it is taken from the probe,
 //!   called from JS with no Rust frame below it, so it is the stack pointer
@@ -89,6 +100,12 @@ const REQUESTS_FIELD: &str = "requests";
 const PROBE_WASM_FIELD: &str = "wasm";
 const PROBE_GENERATION_FIELD: &str = "generation";
 const PROBE_STACK_FIELD: &str = "stack";
+const PROBE_WBI_FIELD: &str = "wbi";
+
+/// The JS global worker 0.8 keeps its per-isolate init state in, and the
+/// field of it [`executor_probe`] reports as `wbi`. Read, never written.
+const WORKER_INIT_STATE_GLOBAL: &str = "__worker_init_state";
+const WORKER_INSTANCE_ID_FIELD: &str = "instanceId";
 
 /// The response header carrying [`RequestTrace::instance`].
 pub(crate) const INSTANCE_HEADER: &str = "x-ip-instance";
@@ -225,8 +242,10 @@ fn traced_instance_in(global: &Object, instance: &OnceCell<WasmInstance>) -> Opt
 }
 
 /// The identity of the Wasm instance serving the current request, for the
-/// entry module's `ip-entry` line: `{ wasm, generation, stack }`, or
-/// `undefined` when no traced request has run in this isolate.
+/// entry module's `ip-entry` line: `{ wasm, generation, stack, wbi }`, or
+/// `undefined` when no traced request has run in this isolate. `wbi` is
+/// present only when `__worker_init_state.instanceId` is a count (see the
+/// module doc); the entry module prints `-` for it otherwise.
 ///
 /// Synchronous and executor-free: it answers on an instance whose task queue
 /// is wedged. Called on a fresh (or freshly reset) instance it draws that
@@ -256,7 +275,21 @@ fn probe(global: &Object, instance: &OnceCell<WasmInstance>) -> JsValue {
         PROBE_STACK_FIELD,
         &JsValue::from(stack_address() as f64),
     );
+    if let Some(wbi) = worker_instance_id(global) {
+        set_field(&answer, PROBE_WBI_FIELD, &JsValue::from(wbi));
+    }
     answer.into()
+}
+
+/// worker 0.8's `__worker_init_state.instanceId`, when the global exists and
+/// the field is a count. Read through `Reflect`, so on worker 0.7.5, which
+/// has no such global, it is `None` rather than an error.
+fn worker_instance_id(global: &Object) -> Option<u32> {
+    let state = Reflect::get(global, &JsValue::from_str(WORKER_INIT_STATE_GLOBAL)).ok()?;
+    if !state.is_object() {
+        return None;
+    }
+    as_count(&Reflect::get(&state, &JsValue::from_str(WORKER_INSTANCE_ID_FIELD)).ok()?)
 }
 
 /// [`on_first_poll`]'s work against an explicit global object and instance
@@ -544,6 +577,102 @@ mod tests {
         assert!(probe(&global, &instance).is_undefined());
         assert!(existing_state(&global).is_none(), "no state created");
         assert!(instance.get().is_none(), "no instance drawn");
+    }
+
+    /// A global whose every property read is recorded, for proving what the
+    /// probe does NOT read. The closure is returned to keep it alive for as
+    /// long as the proxy can call it.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the trap's closure type is spelled out once, where it is made"
+    )]
+    fn recording_global() -> (
+        Object,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        wasm_bindgen::closure::Closure<dyn FnMut(Object, JsValue) -> JsValue>,
+    ) {
+        let reads = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = reads.clone();
+        let trap = wasm_bindgen::closure::Closure::new(move |target: Object, key: JsValue| {
+            if let Some(name) = key.as_string() {
+                recorded.borrow_mut().push(name);
+            }
+            Reflect::get(&target, &key).unwrap_or(JsValue::UNDEFINED)
+        });
+        let handler = Object::new();
+        Reflect::set(&handler, &"get".into(), trap.as_ref()).unwrap();
+        let proxy: Object = js_sys::Proxy::new(&Object::new(), &handler).unchecked_into();
+        (proxy, reads, trap)
+    }
+
+    /// worker 0.8's `__worker_init_state` as its `init` leaves it after
+    /// `instance_id` instance starts. The names are spelled out here rather
+    /// than taken from this module's constants: they are worker 0.8's
+    /// (`worker/src/init.rs`), and a typo in a constant must fail this test.
+    fn worker_init_state_on(global: &Object, instance_id: JsValue) -> Object {
+        let state = Object::new();
+        Reflect::set(&state, &"criticalError".into(), &JsValue::FALSE).unwrap();
+        Reflect::set(&state, &"instanceId".into(), &instance_id).unwrap();
+        Reflect::set(global, &"__worker_init_state".into(), &state).unwrap();
+        state
+    }
+
+    /// Traced, on worker 0.8, the probe reports the init state's
+    /// `instanceId` as `wbi`, read afresh on every call: a reset moves it.
+    #[wasm_bindgen_test]
+    fn the_probe_reports_worker_0_8s_instance_counter_as_wbi() {
+        let global = Object::new();
+        let request = Object::new();
+        state_as_entry_module_leaves_it(&global, "isolate-w", &request, 1);
+        let init_state = worker_init_state_on(&global, JsValue::from(1));
+        let instance = OnceCell::new();
+
+        assert_eq!(
+            probe_field(&probe(&global, &instance), PROBE_WBI_FIELD),
+            1,
+            "the field is printed when the global is present"
+        );
+
+        Reflect::set(&init_state, &"instanceId".into(), &JsValue::from(3)).unwrap();
+        assert_eq!(
+            probe_field(&probe(&global, &OnceCell::new()), PROBE_WBI_FIELD),
+            3,
+            "the shim's reset (+2) shows on the next probe"
+        );
+    }
+
+    /// Traced, on worker 0.7.5, which creates no `__worker_init_state`, the
+    /// answer has no `wbi`, so the entry module prints `-`; and neither does
+    /// it when the field holds something that is not a count.
+    #[wasm_bindgen_test]
+    fn without_worker_0_8s_global_the_probe_has_no_wbi() {
+        let global = Object::new();
+        let request = Object::new();
+        state_as_entry_module_leaves_it(&global, "isolate-v", &request, 1);
+
+        let answer = probe(&global, &OnceCell::new());
+        assert!(!answer.is_undefined(), "a traced probe answers");
+        assert!(probe_field(&answer, PROBE_WBI_FIELD).is_undefined());
+
+        for not_a_count in [JsValue::from_str("2"), JsValue::from(1.5), JsValue::NULL] {
+            worker_init_state_on(&global, not_a_count.clone());
+            assert!(
+                probe_field(&probe(&global, &OnceCell::new()), PROBE_WBI_FIELD).is_undefined(),
+                "{not_a_count:?} is not a count"
+            );
+        }
+    }
+
+    /// Untraced, the probe reads the trace state's global and nothing else:
+    /// not worker 0.8's init state either.
+    #[wasm_bindgen_test]
+    fn untraced_the_probe_reads_only_the_trace_state_global() {
+        let (global, reads, _trap) = recording_global();
+        worker_init_state_on(&global, JsValue::from(1));
+        reads.borrow_mut().clear();
+
+        assert!(probe(&global, &OnceCell::new()).is_undefined());
+        assert_eq!(*reads.borrow(), [STATE_GLOBAL]);
     }
 
     /// The probe draws the serving instance's identity, so the `ip-entry` of
