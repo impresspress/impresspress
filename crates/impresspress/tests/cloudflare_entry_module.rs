@@ -21,7 +21,8 @@
 //!   that serves it: the request after the reset already carries the new wasm
 //!   id and the next generation. Its `wbi` field is `-`: worker-build 0.7.5's
 //!   shim keeps its instance counter module-local, and nothing creates
-//!   worker 0.8's `__worker_init_state` global;
+//!   worker 0.8's `__worker_init_state` global. When that global is present,
+//!   the line carries its counter instead (`wbi=1`);
 //! - a probe that traps still leaves a dashed `ip-entry` line, and its error
 //!   takes the path of a trap in `fetch`: `Critical`, the throw, then the
 //!   reset on the next request.
@@ -205,4 +206,24 @@ fn a_probe_that_traps_leaves_a_dashed_line_and_resets_like_a_fetch_trap() {
             "state seq=4",
         ]
     );
+}
+
+/// With worker 0.8's `__worker_init_state` present, the counter the probe
+/// reads reaches the line through the entry module as `wbi=<n>`. The 0.7.5
+/// shim never moves that global, so it stays at the preset 1 across the reset.
+#[test]
+fn traced_with_worker_0_8s_init_state_the_line_carries_its_instance_counter() {
+    let repo = tempfile::tempdir().unwrap();
+    let out = stage(repo.path());
+
+    let lines = serve(&out, "./entry.mjs", "on-0.8");
+
+    let entries: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.starts_with("ip-entry "))
+        .collect();
+    assert_eq!(entries.len(), 4, "one ip-entry per request: {lines:?}");
+    for line in entries {
+        assert!(line.ends_with(" 1024 wbi=1"), "{line}");
+    }
 }

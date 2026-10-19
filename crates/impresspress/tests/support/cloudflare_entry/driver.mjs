@@ -2,9 +2,11 @@
 // does (a new entrypoint instance per request, then `fetch`), and prints
 // everything that happened as a JSON array of lines. In `on` and `off` mode
 // the second request traps in `fetch`; in `probe-trap` mode (traced) it is
-// the executor probe that traps on that request instead.
+// the executor probe that traps on that request instead. `on-0.8` is `on`
+// with worker 0.8's `__worker_init_state` global present, as worker 0.8's
+// `init.rs` leaves it after one instance start.
 //
-// usage: node driver.mjs <module> <on|off|probe-trap>
+// usage: node driver.mjs <module> <on|off|probe-trap|on-0.8>
 const [modulePath, mode] = process.argv.slice(2);
 const lines = [];
 for (const level of ['log', 'error']) {
@@ -13,6 +15,9 @@ for (const level of ['log', 'error']) {
 // The shim registers a global `error` listener; Node has no such global.
 globalThis.addEventListener = () => {};
 
+if (mode === 'on-0.8') {
+  globalThis.__worker_init_state = { criticalError: false, instanceId: 1 };
+}
 const { default: Worker } = await import(modulePath);
 const env = mode === 'off' ? {} : { IMPRESSPRESS_EXECUTOR_TRACE: '1' };
 if (mode === 'probe-trap') globalThis.__stubProbeTrapsOnCall = 2;

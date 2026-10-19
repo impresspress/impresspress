@@ -627,15 +627,18 @@ mod tests {
         let init_state = worker_init_state_on(&global, JsValue::from(1));
         let instance = OnceCell::new();
 
+        // `"wbi"` is spelled out rather than taken from `PROBE_WBI_FIELD`: it
+        // is the name the generated entry module reads (`wasm?.wbi`), so a
+        // typo in the constant must fail here.
         assert_eq!(
-            probe_field(&probe(&global, &instance), PROBE_WBI_FIELD),
+            probe_field(&probe(&global, &instance), "wbi"),
             1,
             "the field is printed when the global is present"
         );
 
         Reflect::set(&init_state, &"instanceId".into(), &JsValue::from(3)).unwrap();
         assert_eq!(
-            probe_field(&probe(&global, &OnceCell::new()), PROBE_WBI_FIELD),
+            probe_field(&probe(&global, &OnceCell::new()), "wbi"),
             3,
             "the shim's reset (+2) shows on the next probe"
         );
