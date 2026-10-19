@@ -77,14 +77,25 @@
  * components/stat.css. */
 
 /* One row of cards (`templates::dashboard_page`). The page's own gap spaces
-   the rows; from 1024px a row's cards take equal columns and one height. */
-.dashboard-row { display: grid; gap: var(--space-4); }
-@media (min-width: 1024px) {
-	.dashboard-row { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+   the rows. A row's cards share it in equal columns of one height while
+   each gets at least 27rem, and stack below that: the row's width decides,
+   not the viewport's. 27rem is the narrowest card the "Recent server
+   errors" table fits in — a status, a method, a path that breaks at its
+   slashes and an unbroken `.datetime` — so 1024px (a 736px row) stacks,
+   where two 360px columns clipped the time. */
+.dashboard-row {
+	display: grid; gap: var(--space-4);
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 27rem), 1fr));
 }
-/* A recent user: the avatar beside the email. */
+/* The grid's gap spaces the cards: a card's own bottom margin, which spaces
+   cards stacked in flow (card.css), would add to it under every row. */
+.dashboard-row > .card { margin-bottom: 0; }
+/* A recent user: the avatar beside the email. An address with no break
+   opportunity (`components::breakable_id` offers them at `@` and `.`)
+   still wraps rather than pushing the date out of the card. */
 .recent-user { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .recent-user .avatar { flex-shrink: 0; }
+.recent-user > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 
 /* ===== Chat page ===== */
 /* Self-framed (`templates::chat_page`): the shell draws no frame, so the

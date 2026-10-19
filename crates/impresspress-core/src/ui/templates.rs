@@ -141,9 +141,10 @@ pub fn tabbed_page(
 ///
 /// `stats` are laid out by [`stat_row`] as the first thing on the page.
 /// Each of `rows` is the markup of one row's cards, top to bottom in the
-/// order given: from 1024px a row's cards share its width in equal columns
-/// and stretch to one height; below that they stack. The caller decides
-/// what shares a row; the page decides how a row is laid out.
+/// order given: a row's cards share its width in equal columns of one
+/// height while each gets at least 27rem, and stack below that (page.css).
+/// The caller decides what shares a row; the page decides how a row is
+/// laid out.
 pub fn dashboard_page(stats: Vec<Stat<'_>>, rows: Vec<Markup>) -> Markup {
     html! {
         div .page {
