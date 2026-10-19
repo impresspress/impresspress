@@ -126,16 +126,7 @@ pub async fn detail(ctx: &dyn Context, msg: &Message) -> OutputStream {
     shell(
         ctx,
         msg,
-        ui::Shell::admin(&reference, &reference).trail(vec![
-            Crumb {
-                label: "Tickets",
-                href: Some(INBOX),
-            },
-            Crumb {
-                label: &reference,
-                href: None,
-            },
-        ]),
+        ui::Shell::admin(&reference, &reference).trail(tickets_trail(&reference)),
         Section::Inbox,
         detail_region(&view),
     )
@@ -172,7 +163,8 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
     shell(
         ctx,
         msg,
-        ui::Shell::admin("Ticket types", "Tickets")
+        ui::Shell::admin("Ticket types", "Types")
+            .trail(tickets_trail("Types"))
             .subtitle("The categories every ticket is filed under")
             .primary_action(
                 HeaderAction::new("New type", ActionTarget::Modal(CREATE_TYPE_MODAL))
@@ -274,7 +266,9 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     shell(
         ctx,
         msg,
-        ui::Shell::admin("Ticket settings", "Tickets").subtitle("Public reporting and retention"),
+        ui::Shell::admin("Ticket settings", "Settings")
+            .trail(tickets_trail("Settings"))
+            .subtitle("Public reporting and retention"),
         Section::Settings,
         content,
     )
@@ -309,7 +303,8 @@ pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
     shell(
         ctx,
         msg,
-        ui::Shell::admin("Ticket endpoints", "Tickets")
+        ui::Shell::admin("Ticket endpoints", "Endpoints")
+            .trail(tickets_trail("Endpoints"))
             .subtitle("Every route the tickets block serves"),
         Section::Endpoints,
         content,
@@ -1177,6 +1172,21 @@ fn sections(active: Section) -> Markup {
     )
 }
 
+/// The trail of a tickets sub-page: `Tickets › {title}`, the inbox linked
+/// and the sub-page its title (the rule Storage's sub-pages follow too).
+fn tickets_trail(title: &str) -> Vec<Crumb<'_>> {
+    vec![
+        Crumb {
+            label: "Tickets",
+            href: Some(INBOX),
+        },
+        Crumb {
+            label: title,
+            href: None,
+        },
+    ]
+}
+
 /// A tickets page whose read failed: drawn in the shell under its section's
 /// links, with a link back to the inbox.
 async fn error_page(
@@ -1691,6 +1701,45 @@ pub(super) mod render_tests {
         assert!(html.contains("Filters (2)</summary>"), "{html}");
         let html = page(&ctx, INBOX).await;
         assert!(html.contains(">Filters</summary>"), "{html}");
+    }
+
+    /// Types, Settings and Endpoints are titled by their own names under the
+    /// trail `Tickets ›`, which links back to the inbox; the inbox is the
+    /// trail's root. The window titles keep the block's name.
+    #[tokio::test]
+    async fn the_sub_pages_are_titled_under_the_tickets_trail() {
+        let (ctx, _, _) = seeded().await;
+        for (path, title, h1) in [
+            (TYPES, "Ticket types", "Types"),
+            ("/b/tickets/admin/settings", "Ticket settings", "Settings"),
+            (
+                "/b/tickets/admin/endpoints",
+                "Ticket endpoints",
+                "Endpoints",
+            ),
+        ] {
+            let html = page(&ctx, path).await;
+            assert!(
+                html.contains(&format!("<title>{title}")),
+                "{path}: the window title stays {title:?}: {html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    concat!(
+                        r#"<nav class="topbar__crumbs" aria-label="Breadcrumb"><ol>"#,
+                        r#"<li><a href="{inbox}">Tickets</a></li></ol></nav>"#,
+                        r#"<h1 class="topbar__title">{h1}</h1>"#
+                    ),
+                    inbox = INBOX,
+                    h1 = h1
+                )),
+                "{path}: expected the trail Tickets › {h1}: {html}"
+            );
+        }
+        // The inbox is the trail's root, titled "Tickets" with no trail.
+        let inbox = page(&ctx, INBOX).await;
+        assert!(inbox.contains(r#"<h1 class="topbar__title">Tickets</h1>"#));
+        assert!(!inbox.contains("topbar__crumbs"), "{inbox}");
     }
 
     /// The endpoint reference is generated from the route table: every row

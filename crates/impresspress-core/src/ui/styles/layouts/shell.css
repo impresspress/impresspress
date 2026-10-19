@@ -334,26 +334,46 @@
 	   an off-canvas drawer. */
 	.shell, .shell:has(.sidebar.collapsed) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
 }
-.shell__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: var(--space-4); padding: var(--space-4); }
-/* The content card, and the page's `main` landmark. It owns the padding
-   around every page body, so no template or block pads itself against the
-   card's edge. `--flush` (`ui::shell::BodyLayout::Flush`) is for a
-   full-bleed template that draws its own panes edge to edge. */
+/* The content column. The shell draws no frame: the header, the section
+   links and the body all sit on the page background (`.shell`'s
+   `--surface-2`), so a card a page draws is the first level of card, never a
+   card inside the shell's. The column's inset is `--shell-inset` (tokens.css,
+   tighter on a phone), so the title and the content share one left edge.
+   No bottom padding: the body scrolls to the bottom of the screen and
+   carries its own (below). */
+.shell__main {
+	display: flex; flex-direction: column; min-width: 0; min-height: 0;
+	gap: var(--space-4); padding: var(--shell-inset) var(--shell-inset) 0;
+}
+/* The body, and the page's `main` landmark: the scroller and the skip link's
+   target. A scroller clips what its children paint outside it, so it keeps
+   room on every side: it reaches out across the column's side padding and
+   pads itself back by `--shell-inset` (the scrollbar sits at the window's
+   edge, and a ring or card edge at the content's side is not clipped), and
+   it starts `--focus-reach` higher, into the gap above, and pads itself back
+   by that much, so a ring on a tab at its top is whole and nothing moves.
+   Pinned by ui::assets::tests::the_body_keeps_room_for_a_focus_ring_on_every_side. */
 .shell__body {
 	flex: 1; min-width: 0;
-	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
 	overflow-y: auto;
-	padding: var(--space-6);
+	margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--shell-inset)) 0;
+	padding: var(--focus-reach) var(--shell-inset) var(--shell-inset);
 }
-.shell__body--flush { padding: 0; }
+/* The skip target's ring, drawn inside it: the body spans the column from
+   the sidebar to the window's right and bottom edges, so an outside ring
+   would show as one line under the header. Like the shared ring rule
+   (base.css), it keeps a transparent outline for forced-colors mode. */
+.shell__body:focus-visible {
+	outline: 2px solid transparent;
+	outline-offset: -2px;
+	box-shadow: var(--focus-ring-inset);
+}
 
 /* The page header (`ui::shell::Topbar`): crumbs + title + subtitle on the
-   left, the page's actions and the palette trigger on the right. */
+   left, the page's actions and the palette trigger on the right, on the page
+   background with no box of its own. */
 .topbar {
-	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
-	padding: var(--space-3) var(--space-5);
 	display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-4);
-	min-height: 64px;
 }
 .topbar__heading { flex: 1 1 16rem; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .topbar__crumbs ol { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; list-style: none; padding: 0; margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
@@ -361,22 +381,22 @@
 /* The trail points at the title on the line below it. */
 .topbar__crumbs li:last-child::after { content: "›"; padding: 0 0 0 var(--space-2); color: var(--text-muted); }
 .topbar__crumbs a { display: inline-flex; align-items: center; min-height: var(--target-min); min-width: var(--target-min); color: var(--text-secondary); text-decoration: none; }
-/* --primary-color is 3.66:1 on white (.topbar's background) -- below the
-   4.5:1 AA floor for this hover-state link text; --primary-button
-   (4.99:1, computed) is the text-safe sibling. */
+/* --primary-color is 3.45:1 on --surface-2 (the page background the topbar
+   sits on) -- below the 4.5:1 AA floor for this hover-state link text;
+   --primary-button (4.70:1, computed) is the text-safe sibling. */
 .topbar__crumbs a:hover { color: var(--primary-button); text-decoration: underline; }
 /* The page's one `h1`, rendered AFTER the breadcrumb nav. */
 .topbar__title {
-	font-size: var(--text-xl); font-weight: 600; line-height: 1.25;
+	font-size: var(--text-2xl); font-weight: 600; line-height: 1.25;
 	color: var(--text-primary); margin: 0;
 	overflow-wrap: anywhere;
 }
-.topbar__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: 0; }
+.topbar__subtitle { font-size: var(--text-base); color: var(--text-secondary); margin: 0; }
 .topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
 	min-height: var(--control-height);
-	background: var(--surface-3); border: 1px solid var(--border-color);
+	background: var(--surface-1); border: 1px solid var(--border-control);
 	border-radius: var(--radius-md); padding: var(--space-1) var(--space-3); font-size: var(--text-sm);
 	color: var(--text-secondary); cursor: pointer;
 }
@@ -472,15 +492,12 @@
 	.shell .sidebar.collapsed .sidebar__user-text { display: inline; }
 	.shell .sidebar.collapsed .sidebar__group-label { visibility: visible; }
 
-	.shell__main { gap: var(--space-3); padding: var(--space-3); }
-	.shell__body { padding: var(--space-4); }
-	.shell__body--flush { padding: 0; }
+	.shell__main { gap: var(--space-3); }
 
 	/* The topbar stacks: title, then the actions on a row of their own.
 	   The subtitle is desktop-only (`Topbar::subtitle`'s contract), and the
 	   desktop palette button gives way to the mobile header's icon. */
-	.topbar { padding: var(--space-3) var(--space-4); min-height: 0; }
-	.topbar__title { font-size: var(--text-lg); }
+	.topbar__title { font-size: var(--text-xl); }
 	.topbar__subtitle { display: none; }
 	.topbar__actions { flex-basis: 100%; }
 	.topbar__palette { display: none; }

@@ -13,7 +13,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use super::{
     assets,
-    components::{stat_row, Stat},
+    components::{stat_row, Action, ActionTarget, Stat},
     SiteConfig,
 };
 
@@ -208,10 +208,9 @@ pub struct ChatPane<'a> {
 
 /// The chat layout: thread list, messages + composer, optional right rail.
 ///
-/// Full-bleed — it draws its own panes edge to edge — so it returns a
-/// [`PageBody`](super::PageBody) that carries that frame to the shell; a page
-/// passes it to `shell_page` as is (or [`append`](super::PageBody::append)s
-/// its own scripts) and never picks the frame itself.
+/// Self-framed: `.page--chat` is one card-level surface on the page
+/// background, filling the body's height, with its panes drawn edge to edge
+/// inside it. The shell draws no frame, so the template owns this one.
 ///
 /// `focus` decides which pane a phone shows — see [`ChatFocus`].
 pub fn chat_page(
@@ -220,8 +219,8 @@ pub fn chat_page(
     messages: Markup,
     composer: Markup,
     right_rail: Option<ChatPane<'_>>,
-) -> super::PageBody {
-    super::PageBody::full_bleed(html! {
+) -> Markup {
+    html! {
         div .page--chat data-chat-focus=(focus.as_str()) {
             aside .chat-threads aria-label=(threads.label) { (threads.body) }
             section .chat-main {
@@ -232,7 +231,7 @@ pub fn chat_page(
                 aside .chat-rail aria-label=(r.label) { (r.body) }
             }
         }
-    })
+    }
 }
 
 /// The brand icon, drawn at `size_px` CSS pixels.
@@ -298,8 +297,8 @@ pub fn status_page(
                 @if !code.is_empty() { div .status-page__code { (code) } }
                 h1 .status-page__title { (title) }
                 p .status-page__body { (body) }
-                @if let Some((label, href)) = primary_action {
-                    a .btn .btn--primary .btn--md href=(href) { (label) }
+                @if let Some((label, href)) = &primary_action {
+                    (Action::primary(label, ActionTarget::Link(href)).render())
                 }
             }
         }
@@ -308,8 +307,10 @@ pub fn status_page(
 
 /// [`status_page`] inside the shell ([`crate::ui::shell_error_page`]): the
 /// same panel, but its title is an `h2` — the shell's topbar holds the page's
-/// one `h1` — and it fills the content card rather than the viewport. The
-/// action is required: an error inside a page always says where to go back.
+/// one `h1` — and it sits on the page background under the header rather
+/// than filling the viewport. It has no frame: it is the page's only
+/// content, not a card among others. The action is required: an error
+/// inside a page always says where to go back.
 pub fn status_panel(code: &str, title: &str, body: &str, action: (&str, &str)) -> Markup {
     html! {
         div .status-page .status-page--in-shell {
@@ -317,7 +318,7 @@ pub fn status_panel(code: &str, title: &str, body: &str, action: (&str, &str)) -
                 div .status-page__code { (code) }
                 h2 .status-page__title { (title) }
                 p .status-page__body { (body) }
-                a .btn .btn--primary .btn--md href=(action.1) { (action.0) }
+                (Action::primary(action.0, ActionTarget::Link(action.1)).render())
             }
         }
     }
@@ -591,19 +592,14 @@ mod tests {
 
     #[test]
     fn chat_page_with_rail() {
-        let body = chat_page(
+        let s = chat_page(
             ChatFocus::Conversation,
             pane("Threads", html! { div { "threads" } }),
             html! { div { "messages" } },
             html! { textarea {} },
             Some(pane("Chat options", html! { div { "rail" } })),
-        );
-        assert_eq!(
-            body.layout(),
-            super::super::BodyLayout::Flush,
-            "chat is full-bleed"
-        );
-        let s = body.into_markup().into_string();
+        )
+        .into_string();
         assert!(s.contains("chat-threads"));
         assert!(s.contains("chat-main"));
         assert!(s.contains("chat-messages"));
@@ -623,7 +619,6 @@ mod tests {
             html! {},
             Some(pane("Chat options", html! {})),
         )
-        .into_markup()
         .into_string();
         assert!(
             s.contains(r#"<aside class="chat-threads" aria-label="Threads">"#),
@@ -642,9 +637,8 @@ mod tests {
             (ChatFocus::Threads, "threads"),
             (ChatFocus::Conversation, "conversation"),
         ] {
-            let s = chat_page(focus, pane("Threads", html! {}), html! {}, html! {}, None)
-                .into_markup()
-                .into_string();
+            let s =
+                chat_page(focus, pane("Threads", html! {}), html! {}, html! {}, None).into_string();
             assert!(
                 s.contains(&format!(
                     r#"<div class="page--chat" data-chat-focus="{value}">"#
@@ -663,7 +657,6 @@ mod tests {
             html! { textarea {} },
             None,
         )
-        .into_markup()
         .into_string();
         assert!(!s.contains("chat-rail"));
     }
@@ -694,8 +687,36 @@ mod tests {
         .into_string();
         assert!(s.contains(">404<"));
         assert!(s.contains("Page not found"));
-        assert!(s.contains("Go home"));
-        assert!(s.contains(r#"href="/""#));
+        // The one primary is an `Action`, the only writer of `.btn--primary`.
+        assert!(
+            s.contains(r#"<a class="btn btn--primary" href="/">Go home</a>"#),
+            "{s}"
+        );
+    }
+
+    /// Inside the shell the panel is an `h2` under the topbar's `h1`, with
+    /// no frame of its own, and its way back is the page's one primary, an
+    /// `Action`.
+    #[test]
+    fn status_panel_is_an_unframed_h2_panel_with_an_action_primary() {
+        let s = status_panel(
+            "500",
+            "Something went wrong",
+            "Please try again.",
+            ("Back to the dashboard", "/b/admin/"),
+        )
+        .into_string();
+        assert_eq!(
+            s,
+            concat!(
+                r#"<div class="status-page status-page--in-shell"><div class="status-page__inner">"#,
+                r#"<div class="status-page__code">500</div>"#,
+                r#"<h2 class="status-page__title">Something went wrong</h2>"#,
+                r#"<p class="status-page__body">Please try again.</p>"#,
+                r#"<a class="btn btn--primary" href="/b/admin/">Back to the dashboard</a>"#,
+                r#"</div></div>"#,
+            )
+        );
     }
 
     #[test]

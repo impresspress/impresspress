@@ -78,8 +78,8 @@
 
 /* ===== Block section links (`components::subnav`) =====
  * The `.tabs` strip as a row of its own between the page header and the
- * content card (`ui::PageBody::with_subnav`), on the shell's surface. One
- * horizontal scroller below the card width, never a wrapped second line;
+ * body (`ui::PageBody::with_subnav`), on the page background. One
+ * horizontal scroller below the column width, never a wrapped second line;
  * each link is a `.tab`, held to the target floor. */
 .subnav {
 	min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
