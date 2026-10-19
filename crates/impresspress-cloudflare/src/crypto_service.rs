@@ -37,7 +37,10 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use impresspress_password::protocol::{self, Operation};
+use impresspress_password::{
+    probe,
+    protocol::{self, Operation},
+};
 use wafer_block_crypto::{primitives, service::Argon2JwtCryptoService};
 use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 
@@ -173,6 +176,14 @@ impl PasswordHasher {
             transport: Ok(Box::new(transport)),
             shards,
         }
+    }
+
+    /// Ask the hasher the deploy's probe ([`impresspress_password::probe`])
+    /// through the same path a sign-in takes — this binding, a shard picked
+    /// by [`protocol::shard_name`] — and judge its answer. Nothing else is
+    /// touched: no database, no rate limiter, no session.
+    pub async fn probe(&self) -> Result<probe::Report, CryptoError> {
+        probe::judge(self.ask(probe::operation()).await?)
     }
 
     /// Send one operation to one instance and read its answer. Every way the
@@ -342,6 +353,7 @@ mod tests {
 
     use impresspress_password::{
         pepper::{password_peppers, PasswordPeppers},
+        probe,
         protocol::{self, Outcome},
     };
     use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
@@ -683,6 +695,94 @@ mod tests {
             .compare_hash("pw", "$argon2id$x")
             .await
             .expect("verified");
+    }
+
+    /// The deploy probe goes through the production transport to one shard,
+    /// asks in this build's version, and passes on the real hasher's answer.
+    #[wasm_bindgen_test]
+    async fn the_probe_passes_against_the_real_hasher_in_the_version_asked() {
+        let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let fake = FakeHasher::new(Rc::new(move |body| {
+            let request: serde_json::Value = serde_json::from_slice(body).expect("json");
+            seen.borrow_mut().push(request);
+            let answer =
+                impresspress_password::hasher::answer(body, Ok(&PasswordPeppers::default()));
+            (200, serde_json::to_string(&answer).expect("encode"))
+        }));
+        let report = PasswordHasher::from_env(&fake.env, 4)
+            .probe()
+            .await
+            .expect("the probe passes");
+        assert_eq!(
+            report,
+            probe::Report {
+                protocol: protocol::PROTOCOL_VERSION,
+                answer: probe::Answer::MalformedHash,
+            }
+        );
+        let asked = asked.borrow();
+        assert_eq!(asked.len(), 1, "one hasher call");
+        assert_eq!(asked[0]["version"], protocol::PROTOCOL_VERSION);
+        assert_eq!(asked[0]["operation"]["op"], "verify");
+        assert_eq!(asked[0]["operation"]["hash"], probe::PROBE_HASH);
+        let shards = fake.shards.borrow();
+        assert_eq!(shards.len(), 1);
+        assert!(
+            ["shard-0", "shard-1", "shard-2", "shard-3"].contains(&shards[0].as_str()),
+            "routed through shard_name: {}",
+            shards[0]
+        );
+    }
+
+    /// Every answer but an in-version `malformed_hash` refuses the probe: an
+    /// HTTP error, an unreadable body, `unsupported_version`, the right
+    /// answer in another version, and an answer to another question.
+    #[wasm_bindgen_test]
+    async fn the_probe_refuses_every_other_answer() {
+        fn at(version: u32, outcome: Outcome) -> Answer {
+            Rc::new(move |_| {
+                let answer = protocol::Response {
+                    version,
+                    outcome: outcome.clone(),
+                };
+                (200, serde_json::to_string(&answer).expect("encode"))
+            })
+        }
+        let malformed = Outcome::MalformedHash {
+            message: "m".into(),
+        };
+        let refusing: [(&str, Answer); 5] = [
+            ("an HTTP error", Rc::new(|_| (500, "internal error".into()))),
+            (
+                "an unreadable answer",
+                Rc::new(|_| (200, "Service temporarily unavailable".into())),
+            ),
+            (
+                "unsupported_version",
+                at(
+                    protocol::PROTOCOL_VERSION,
+                    Outcome::UnsupportedVersion {
+                        oldest: protocol::PROTOCOL_VERSION + 1,
+                        newest: protocol::PROTOCOL_VERSION + 1,
+                    },
+                ),
+            ),
+            (
+                "an answer in another version",
+                at(protocol::PROTOCOL_VERSION + 1, malformed),
+            ),
+            (
+                "an answer to another question",
+                at(protocol::PROTOCOL_VERSION, Outcome::Verified),
+            ),
+        ];
+        for (case, answer) in refusing {
+            let fake = FakeHasher::new(answer);
+            let result = PasswordHasher::from_env(&fake.env, 1).probe().await;
+            assert!(result.is_err(), "{case}: {result:?}");
+            assert_eq!(fake.shards.borrow().len(), 1, "{case}: the fake was asked");
+        }
     }
 
     /// Password hashing does not depend on the JWT secret, and signing still

@@ -11,7 +11,7 @@
 //! before it builds anything ([`plan_main_worker`]). When it does, the deploy
 //! needs the operator's `IMPRESSPRESS_DEPLOY_TOKEN` and nothing else changes.
 //! When it does not, the deploy creates it ([`create_main_worker`]) once the
-//! password-hasher Worker is deployed: a plain `wrangler deploy` of a
+//! password-hasher Worker is in place: a plain `wrangler deploy` of a
 //! placeholder that answers every request with a 503, never the application
 //! (nothing is migrated yet, and the placeholder binds nothing), then the two
 //! secrets. From there the ordinary funnel runs — candidate upload,
@@ -61,7 +61,9 @@ headers: { \"Content-Type\": \"text/plain; charset=utf-8\", \"Retry-After\": \"6
 },\n\
 };\n";
 
-/// The wrangler commands creating a Worker needs.
+/// The wrangler commands a deploy runs against a Worker's config: creating
+/// the main Worker here, and deploying or keeping the password-hasher Worker
+/// (`password_hasher::release`).
 pub trait WorkerCommands {
     /// Whether the Worker `config` names exists on its account. `Err` for any
     /// failure other than Cloudflare's "does not exist" answer: an
@@ -70,6 +72,14 @@ pub trait WorkerCommands {
     fn worker_exists(&self, config: &Path) -> Result<bool>;
     /// `wrangler deploy` of `config`, which creates the Worker when absent.
     fn deploy(&self, config: &Path) -> Result<()>;
+    /// What `wrangler deployments status --json` prints for `config`'s
+    /// Worker: its latest deployment. `Err` when the command fails, which it
+    /// does for a Worker that does not exist or has no deployment.
+    fn deployment_status(&self, config: &Path) -> Result<String>;
+    /// What `wrangler versions view <version_id> --json` prints for
+    /// `config`'s Worker: that version, its bindings included (secret
+    /// bindings by name only).
+    fn version_view(&self, config: &Path, version_id: &str) -> Result<String>;
     /// Set secret `name` on `config`'s Worker.
     fn secret_put(&self, config: &Path, name: &str, value: &str) -> Result<()>;
     /// The NAMES of the secrets `config`'s Worker holds; never a value.
@@ -138,6 +148,50 @@ impl WorkerCommands for Wrangler {
             );
         }
         Ok(())
+    }
+
+    fn deployment_status(&self, config: &Path) -> Result<String> {
+        let output = Command::new(&self.program)
+            .args(["deployments", "status", "--json", "--config"])
+            .arg(config)
+            .output()
+            .context("run wrangler deployments status")?;
+        if !output.status.success() {
+            let diagnostics = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            bail!(
+                "wrangler deployments status --config {} failed (exit {:?}): {}",
+                config.display(),
+                output.status.code(),
+                diagnostics.trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn version_view(&self, config: &Path, version_id: &str) -> Result<String> {
+        let output = Command::new(&self.program)
+            .args(["versions", "view", version_id, "--json", "--config"])
+            .arg(config)
+            .output()
+            .context("run wrangler versions view")?;
+        if !output.status.success() {
+            let diagnostics = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            bail!(
+                "wrangler versions view {version_id} --config {} failed (exit {:?}): {}",
+                config.display(),
+                output.status.code(),
+                diagnostics.trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// The value goes to wrangler on stdin, never as an argument, which would
@@ -224,7 +278,7 @@ pub enum MainWorkerPlan {
     /// The Worker exists; the deploy authenticates with this token.
     Existing { deploy_token: String },
     /// The account has no Worker by this name: [`create_main_worker`] makes
-    /// it after the password-hasher deploy.
+    /// it once the password-hasher Worker is in place (deployed or kept).
     Create,
 }
 
@@ -434,6 +488,20 @@ mod tests {
                 .push(format!("deploy {}", config.display()));
             *self.deployed.borrow_mut() = true;
             Ok(())
+        }
+
+        fn deployment_status(&self, config: &Path) -> Result<String> {
+            unreachable!(
+                "creating the main Worker never reads a deployment ({})",
+                config.display()
+            )
+        }
+
+        fn version_view(&self, config: &Path, version_id: &str) -> Result<String> {
+            unreachable!(
+                "creating the main Worker never reads a version ({version_id}, {})",
+                config.display()
+            )
         }
 
         fn secret_put(&self, config: &Path, name: &str, value: &str) -> Result<()> {

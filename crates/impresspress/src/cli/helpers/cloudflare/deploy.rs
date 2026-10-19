@@ -347,8 +347,10 @@ pub async fn call_deploy_prepare(preview_url: &str, token: &str) -> Result<Prepa
     parse_prepare_response(&bytes)
 }
 
-/// Verify the packaged Text module, plan identities, hydrated structure, and
-/// one representative immutable release asset without rerunning mutations.
+/// Verify the packaged Text module, plan identities, hydrated structure, one
+/// representative immutable release asset, and that the password-hasher
+/// Worker answers this version's protocol (the response's `password_hasher`
+/// probe), without rerunning mutations.
 pub async fn call_deploy_verify(
     preview_url: &str,
     token: &str,
@@ -359,6 +361,8 @@ pub async fn call_deploy_verify(
     // The preparation candidate writes the exact structural generation to
     // Workers KV immediately before exporting the plan. A final-version
     // preview can land in another colo before that KV write has propagated.
+    // A failed password-hasher probe is a server error too (503), and the
+    // same retries ride out a transient Durable Object or binding error.
     // Retry only server-side verification failures; malformed auth/routes
     // remain immediate hard failures and persistent mismatches never promote.
     const VERIFY_RETRY_SECS: &[u64] = &[1, 2, 4, 8, 16, 30];
@@ -412,7 +416,9 @@ pub async fn call_deploy_verify(
             );
         };
         eprintln!(
-            "-> {VERIFY_ENDPOINT} returned {status}; retrying in {delay}s for KV propagation"
+            "-> {VERIFY_ENDPOINT} returned {status}; retrying in {delay}s (KV propagation, or \
+             the password-hasher probe): {}",
+            String::from_utf8_lossy(&bytes)
         );
         tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
     }
@@ -659,28 +665,6 @@ pub async fn smoke_preview_lockdown(preview_url: &str) -> Result<()> {
                 response.status()
             );
         }
-    }
-    Ok(())
-}
-
-/// Deploy the password-hasher Worker with plain `wrangler deploy`: it uploads
-/// and activates in one step, and applies the config's Durable Object
-/// migration, which `wrangler versions upload` cannot carry. The hasher has no
-/// preview to verify first — Cloudflare generates none for a Worker that
-/// implements a Durable Object — so what keeps a deploy safe is the protocol's
-/// compatibility rule (`impresspress_password::protocol`): the hasher answers
-/// the live main Worker's requests as well as the new one's.
-pub fn wrangler_deploy_password_hasher(wrangler_toml: &Path) -> Result<()> {
-    let status = Command::new("wrangler")
-        .args(["deploy", "--config"])
-        .arg(wrangler_toml)
-        .status()
-        .context("run wrangler deploy for the password-hasher Worker")?;
-    if !status.success() {
-        bail!(
-            "wrangler deploy of the password-hasher Worker failed (exit {:?})",
-            status.code()
-        );
     }
     Ok(())
 }
