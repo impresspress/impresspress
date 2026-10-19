@@ -8,7 +8,7 @@ use crate::{
     blocks::auth::repo::users::{self, DailySignups},
     platform_state::request_logs::{self, DailyCounts, TodayCounts},
     ui::{
-        components::{self, Badge, Card},
+        components::{self, empty_note, AvatarSize, Badge, Card, ChartCard, DataTable, TableRow},
         shell::Topbar,
         templates::dashboard_page,
     },
@@ -24,7 +24,7 @@ use crate::{
 const STAT_UNAVAILABLE: &str = "Unavailable";
 
 /// The same marker for the card- and chart-shaped panels, which have a body
-/// rather than a value.
+/// rather than a value. It is the card's one sentence, an `empty_note`.
 const CARD_UNAVAILABLE: &str = "Could not load";
 
 /// A stat's pre-formatted figure, or [`STAT_UNAVAILABLE`] when the aggregate
@@ -36,18 +36,52 @@ fn stat_value(value: &Option<String>) -> &str {
 /// A chart card whose series could not be read: the same head, and the marker
 /// where the plot would be.
 ///
-/// It cannot reuse `components::{line,bar}_chart_card` with an empty series —
-/// those render an axis and a flat line, which reads as a real measurement of
-/// zero rather than as an absent one.
-fn chart_unavailable_card(title: &str, subtitle: &str, view_href: &str) -> maud::Markup {
-    Card::titled(
-        title,
-        html! { p .text-muted .text-sm { (CARD_UNAVAILABLE) } },
-    )
-    .subtitle(subtitle)
-    .link("View", view_href)
-    .render()
+/// It cannot reuse [`ChartCard`] with an empty series: that says "No … in the
+/// last 30 days", a claim about a log nobody could read.
+fn chart_unavailable_card(title: &str, link: Destination) -> Markup {
+    Card::titled(title, empty_note(CARD_UNAVAILABLE, None))
+        .subtitle(CHART_WINDOW)
+        .link(link.label, link.href)
+        .render()
 }
+
+/// Every chart's subtitle: the window its series covers.
+const CHART_WINDOW: &str = "Last 30 days";
+
+/// Where a card's head link goes, and the name it goes by.
+///
+/// A link's label is its accessible name, and a screen reader's links list
+/// shows it out of context. So each destination has one label, and no two
+/// destinations share one: the page's six head links read "View users" (×2),
+/// "View logs", "View server errors" (×2) and "View client errors", where
+/// they were four "View" and two "View all".
+#[derive(Clone, Copy)]
+struct Destination {
+    label: &'static str,
+    href: &'static str,
+}
+
+const USERS: Destination = Destination {
+    label: "View users",
+    href: "/b/admin/users",
+};
+
+const LOGS: Destination = Destination {
+    label: "View logs",
+    href: "/b/admin/logs",
+};
+
+/// The logs page narrowed by the same rule the server-error card and chart
+/// count by (`request_logs::StatusClass`).
+const SERVER_ERRORS_LOGS: Destination = Destination {
+    label: "View server errors",
+    href: "/b/admin/logs?server_errors=1",
+};
+
+const CLIENT_ERRORS_LOGS: Destination = Destination {
+    label: "View client errors",
+    href: "/b/admin/logs?client_errors=1",
+};
 
 /// Trailing 30-day window as `(oldest_day, oldest_day_midnight_iso)`.
 /// `oldest_day` anchors the zero-fill; the ISO string is the `created_at >=`
@@ -249,10 +283,6 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .as_ref()
         .map(|c: &TodayCounts| format!("{:.0}ms", c.avg_ms));
 
-    let server_errors_colour = server_errors_daily
-        .as_deref()
-        .map_or(QUIET_SERIES, server_error_colour);
-
     // Five figures, no trend lines: the charts below draw the 30-day series.
     let stats = vec![
         components::Stat::new("Total users", stat_value(&user_count_str)),
@@ -267,137 +297,121 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         components::Stat::new("Avg response", stat_value(&avg_ms_str)),
     ];
 
-    // A card holding a table is flush, so the table's frame is the card's
-    // (layout rule 2); a card holding a sentence keeps its padding.
+    // Both recent-rows cards are flush whatever they hold: the table's frame
+    // is the card's (layout rule 2), and `DataTable::empty_note` and a bare
+    // `empty_note` take the card's inset back, so the sentence lines up with
+    // the title (card.css).
     let recent_users_card = {
-        let (body, has_rows) = match &recent_users {
-            Some(recent_users) if !recent_users.is_empty() => {
-                let rows: Vec<components::TableRow> = recent_users
+        let body = match &recent_users {
+            Some(recent_users) => {
+                let rows: Vec<TableRow> = recent_users
                     .iter()
                     .map(|record| {
                         let created = record.created_at.as_str();
-                        components::TableRow::new(vec![
-                            html! { (record.email) },
+                        TableRow::new(vec![
+                            html! {
+                                span .recent-user {
+                                    (components::avatar(&record.email, AvatarSize::Md))
+                                    span { (components::breakable_id(&record.email)) }
+                                }
+                            },
                             // `.text-right` needs a block box to align against,
                             // and the component owns the `<td>`.
                             html! { div .text-muted .text-right { (components::timestamp(created)) } },
                         ])
                     })
                     .collect();
-                let table = components::DataTable::new(&RECENT_USERS_COLUMNS)
+                DataTable::new(&RECENT_USERS_COLUMNS)
                     .rows(rows)
                     .headless()
-                    .render();
-                (table, true)
+                    .empty_note(NO_USERS_YET)
+                    .render()
             }
-            Some(_) => (html! { p .text-muted .text-sm { "No users yet" } }, false),
-            None => (
-                html! { p .text-muted .text-sm { (CARD_UNAVAILABLE) } },
-                false,
-            ),
+            None => empty_note(CARD_UNAVAILABLE, None),
         };
-        let card = Card::titled("Recent users", body).link("View all", "/b/admin/users");
-        if has_rows { card.flush() } else { card }.render()
+        Card::titled("Recent users", body)
+            .link(USERS.label, USERS.href)
+            .flush()
+            .render()
     };
 
     let recent_errors_card = {
-        let (body, has_rows) = match &recent_errors {
-            Some(recent_errors) if !recent_errors.is_empty() => {
-                let rows: Vec<Vec<Markup>> = recent_errors
+        let body = match &recent_errors {
+            Some(recent_errors) => {
+                let rows: Vec<TableRow> = recent_errors
                     .iter()
                     .map(|row| {
                         let code = row.status_code;
                         let created = row.created_at.as_str();
-                        vec![
+                        TableRow::new(vec![
                             Badge::new(status_code_badge_variant(code)).render(html! { (code) }),
                             html! { span .font-medium { (row.method.to_uppercase()) } },
                             html! { (components::breakable_id(&row.path)) },
                             html! { span .text-muted { (components::timestamp(created)) } },
-                        ]
+                        ])
                     })
                     .collect();
-                let table = components::data_table::<fn(usize) -> Option<String>>(
-                    &RECENT_ERRORS_COLUMNS,
-                    rows,
-                    None,
-                    html! {},
-                );
-                (table, true)
+                DataTable::new(&RECENT_ERRORS_COLUMNS)
+                    .rows(rows)
+                    .empty_note(NO_RECENT_SERVER_ERRORS)
+                    .render()
             }
-            Some(_) => (
-                html! { p .text-muted .text-sm { (NO_RECENT_SERVER_ERRORS) } },
-                false,
-            ),
-            None => (
-                html! { p .text-muted .text-sm { (CARD_UNAVAILABLE) } },
-                false,
-            ),
+            None => empty_note(CARD_UNAVAILABLE, None),
         };
-        let card =
-            Card::titled("Recent server errors", body).link("View all", SERVER_ERRORS_LOGS_HREF);
-        if has_rows { card.flush() } else { card }.render()
+        Card::titled("Recent server errors", body)
+            .link(SERVER_ERRORS_LOGS.label, SERVER_ERRORS_LOGS.href)
+            .flush()
+            .render()
     };
 
-    let new_users_chart = match &new_users_daily {
-        Some(series) => components::line_chart_card(
-            "New users",
-            "Last 30 days",
-            series,
-            users_history,
-            "var(--primary-color)",
-            "/b/admin/users",
-        ),
-        None => chart_unavailable_card("New users", "Last 30 days", "/b/admin/users"),
-    };
-    let requests_chart = match &requests_daily {
-        Some(series) => components::bar_chart_card(
-            "Requests",
-            "Last 30 days",
-            series,
-            requests_history,
-            NEUTRAL_SERIES,
-            "/b/admin/logs",
-        ),
-        None => chart_unavailable_card("Requests", "Last 30 days", "/b/admin/logs"),
-    };
-    let client_errors_chart = match &client_errors_daily {
-        Some(series) => components::line_chart_card(
-            "Client errors",
-            "Last 30 days",
-            series,
-            requests_history,
-            QUIET_SERIES,
-            CLIENT_ERRORS_LOGS_HREF,
-        ),
-        None => chart_unavailable_card("Client errors", "Last 30 days", CLIENT_ERRORS_LOGS_HREF),
-    };
-    let server_errors_chart = match &server_errors_daily {
-        Some(series) => components::line_chart_card(
-            "Server errors",
-            "Last 30 days",
-            series,
-            requests_history,
-            server_errors_colour,
-            SERVER_ERRORS_LOGS_HREF,
-        ),
-        None => chart_unavailable_card("Server errors", "Last 30 days", SERVER_ERRORS_LOGS_HREF),
-    };
-
-    let charts_section = html! {
-        div .dashboard-charts {
-            (new_users_chart)
-            (requests_chart)
-            (server_errors_chart)
-            (client_errors_chart)
-        }
-    };
+    // Each chart is drawn when its window has data; a window that is zero
+    // every day is one sentence in the card (`ChartCard`, layout rule 10).
+    let new_users_chart = chart_panel(
+        |card| card.line(),
+        "New users",
+        "new users",
+        new_users_daily.as_deref(),
+        users_history,
+        "var(--primary-color)",
+        USERS,
+    );
+    let requests_chart = chart_panel(
+        |card| card.bars(),
+        "Requests",
+        "requests",
+        requests_daily.as_deref(),
+        requests_history,
+        NEUTRAL_SERIES,
+        LOGS,
+    );
+    // Drawn only when the window holds a server error, so always in the
+    // danger red; a quiet window is the sentence, not a grey line.
+    let server_errors_chart = chart_panel(
+        |card| card.line(),
+        "Server errors",
+        "server errors",
+        server_errors_daily.as_deref(),
+        requests_history,
+        "var(--accent-danger)",
+        SERVER_ERRORS_LOGS,
+    );
+    let client_errors_chart = chart_panel(
+        |card| card.line(),
+        "Client errors",
+        "client errors",
+        client_errors_daily.as_deref(),
+        requests_history,
+        QUIET_SERIES,
+        CLIENT_ERRORS_LOGS,
+    );
 
     let body = dashboard_page(
         stats,
-        recent_users_card,
-        recent_errors_card,
-        None,
-        Some(charts_section),
+        vec![
+            html! { (new_users_chart) (requests_chart) },
+            html! { (server_errors_chart) (client_errors_chart) },
+            html! { (recent_users_card) (recent_errors_card) },
+        ],
     );
 
     admin_page(
@@ -414,30 +428,42 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-/// The colour of a series that is a count of traffic: neutral ink.
-const NEUTRAL_SERIES: &str = "var(--text-primary)";
-
-/// The colour of a secondary or all-quiet series.
-const QUIET_SERIES: &str = "var(--text-secondary)";
-
-/// The server-error series' colour: the danger red only when the window holds
-/// a server error, so a flat zero line does not read as an alarm.
-fn server_error_colour(series: &[(String, i64)]) -> &'static str {
-    if series.iter().any(|(_, n)| *n > 0) {
-        "var(--accent-danger)"
-    } else {
-        QUIET_SERIES
+/// One chart panel: the series drawn by `draw` (or its all-zero sentence),
+/// or, when the series could not be read, the unavailable marker under the
+/// same head.
+fn chart_panel(
+    draw: fn(ChartCard<'_>) -> Markup,
+    title: &str,
+    counts: &str,
+    series: Option<&[(String, i64)]>,
+    history: components::ChartHistory,
+    color_var: &str,
+    link: Destination,
+) -> Markup {
+    match series {
+        Some(data) => draw(ChartCard {
+            title,
+            subtitle: CHART_WINDOW,
+            counts,
+            data,
+            history,
+            color_var,
+            link: (link.label, link.href),
+        }),
+        None => chart_unavailable_card(title, link),
     }
 }
 
-/// Where the dashboard's server-error stat, card and chart send an operator:
-/// the logs page narrowed by the same rule they count by.
-const SERVER_ERRORS_LOGS_HREF: &str = "/b/admin/logs?server_errors=1";
+/// The colour of a series that is a count of traffic: neutral ink.
+const NEUTRAL_SERIES: &str = "var(--text-primary)";
 
-/// Where the client-error chart sends an operator.
-const CLIENT_ERRORS_LOGS_HREF: &str = "/b/admin/logs?client_errors=1";
+/// The colour of a secondary series.
+const QUIET_SERIES: &str = "var(--text-secondary)";
 
-/// The "Recent server errors" card's empty state.
+/// The "Recent users" card's empty note.
+const NO_USERS_YET: &str = "No users yet";
+
+/// The "Recent server errors" card's empty note.
 const NO_RECENT_SERVER_ERRORS: &str = "No server errors recently";
 
 /// `"1 client error"` / `"3 client errors"`.
@@ -452,7 +478,10 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 /// The dashboard cards' table columns. "Recent users" renders headless — it
 /// reads as a two-column list, not a grid — but still declares its columns,
 /// because the `data-label` the component stamps on every `<td>` is what names
-/// the cells when the table collapses to cards on a narrow viewport.
+/// the cells when the table collapses to cards on a narrow viewport. It has no
+/// status column: the card lists active accounts only
+/// (`users::list_recent_active`), and a state badge shows only a non-default
+/// state (layout rule 11), which no row here has.
 const RECENT_USERS_COLUMNS: [components::TableCol<'static>; 2] = [
     components::TableCol::new("Email").primary(),
     components::TableCol::new("Created"),
@@ -477,21 +506,6 @@ mod tests {
 
     use super::{series_from_signups, window_30d, zero_filled_30d};
     use crate::blocks::auth::repo::users::DailySignups;
-
-    #[test]
-    fn dashboard_renders_stats_before_charts() {
-        let m = crate::ui::templates::dashboard_page(
-            vec![crate::ui::components::Stat::new("Total users", "1")],
-            maud::html! { div .probe-primary {} },
-            maud::html! {},
-            None,
-            None,
-        )
-        .into_string();
-        let stats = m.find("stat-row").expect("stat row missing");
-        let charts = m.find("dashboard-grid").expect("charts grid missing");
-        assert!(stats < charts, "the stat row must precede the charts row");
-    }
 
     /// Value for `date` in a `(date, count)` series, or `-1` if absent.
     fn day_value(series: &[(String, i64)], date: &str) -> i64 {
@@ -600,9 +614,14 @@ mod outage_tests {
             "an unreadable user list must not render as 'no users yet': {html}"
         );
         assert_eq!(
-            html.matches(CARD_UNAVAILABLE).count(),
+            html.matches(&format!(r#"<p class="empty-note">{CARD_UNAVAILABLE}</p>"#))
+                .count(),
             6,
-            "two recent-row cards and four chart cards each carry a marker"
+            "two recent-row cards and four chart cards each carry a marker: {html}"
+        );
+        assert!(
+            !html.contains("in the last 30 days") && !html.contains("recorded yet"),
+            "an unreadable series must not be published as a quiet window: {html}"
         );
         assert!(
             !html.contains("chart__plot") && !html.contains("chart__bar"),
@@ -612,8 +631,9 @@ mod outage_tests {
         );
     }
 
-    /// The healthy render is untouched: real figures, both empty states, and
-    /// four drawn charts, with no marker anywhere.
+    /// The healthy render of a fresh install: real figures and the genuine
+    /// empty notes, with no marker anywhere. Every series is zero, so no
+    /// chart is drawn: each chart card holds one sentence.
     #[tokio::test]
     async fn a_healthy_dashboard_carries_no_marker() {
         let ctx = TestContext::with_auth()
@@ -636,8 +656,91 @@ mod outage_tests {
             "all four chart cards render"
         );
         assert!(
-            html.contains("chart__plot") && html.contains("chart__bar"),
-            "both the line charts and the bar chart are plotted: {html}"
+            !html.contains(r#"class="chart""#),
+            "a fresh install's windows are all zero, so nothing is drawn: {html}"
+        );
+        assert_eq!(
+            html.matches(r#"<p class="empty-note">"#).count(),
+            6,
+            "four chart sentences and the two recent-rows notes: {html}"
+        );
+    }
+
+    /// A window with data is drawn, with its "Collecting data" note while the
+    /// records are younger than the window; a quiet window beside it is one
+    /// sentence. This is the visual baseline's state: one admin and some
+    /// traffic today, no error.
+    #[tokio::test]
+    async fn a_window_with_data_is_drawn_and_a_quiet_one_is_a_sentence() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        // Created now, inside the window (`seed_auth_user` dates its row
+        // 2026-01-01).
+        users::insert(
+            &ctx.fixture(),
+            users::NewUser {
+                email: "today@example.com".into(),
+                display_name: "Today".into(),
+                avatar_url: None,
+                role: "user".into(),
+                email_verified: false,
+                verification_token_hash: None,
+            },
+        )
+        .await
+        .expect("seed a user created today");
+        request_logs::insert(
+            &ctx,
+            &request_logs::NewRequestLog {
+                method: "GET",
+                path: "/served",
+                status_code: 200,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "",
+            },
+        )
+        .await
+        .expect("seed a request log row");
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        let doc = scraper::Html::parse_document(&html);
+        let selector = |s: &str| scraper::Selector::parse(s).unwrap();
+        let card_body = |title: &str| {
+            doc.select(&selector("section.card"))
+                .find(|card| {
+                    card.select(&selector("h2.card__title"))
+                        .any(|h| h.text().collect::<String>() == title)
+                })
+                .unwrap_or_else(|| panic!("no {title} card: {html}"))
+                .select(&selector(".card__body"))
+                .next()
+                .unwrap()
+                .inner_html()
+        };
+
+        let users = card_body("New users");
+        assert!(
+            users.contains("chart__plot") && users.contains("chart__line"),
+            "{users}"
+        );
+        let requests = card_body("Requests");
+        assert!(requests.contains("chart__bar"), "{requests}");
+        for drawn in [&users, &requests] {
+            assert!(
+                drawn.starts_with(r#"<p class="chart__note">Collecting data — 1 day so far</p>"#),
+                "a series with data keeps its chart and its note: {drawn}"
+            );
+            assert!(!drawn.contains("empty-note"), "{drawn}");
+        }
+        assert_eq!(
+            card_body("Server errors"),
+            r#"<p class="empty-note">No server errors yet — collecting data, 1 day so far</p>"#
+        );
+        assert_eq!(
+            card_body("Client errors"),
+            r#"<p class="empty-note">No client errors yet — collecting data, 1 day so far</p>"#
         );
     }
 
@@ -653,7 +756,7 @@ mod outage_tests {
         let start = html
             .find(r#"<div class="stat-row">"#)
             .expect("the stat row");
-        let row = &html[start..html[start..].find("dashboard-charts").unwrap() + start];
+        let row = &html[start..html[start..].find("dashboard-row").unwrap() + start];
         let labels: Vec<&str> = row
             .split(r#"<div class="stat__label">"#)
             .skip(1)
@@ -786,7 +889,7 @@ mod outage_tests {
         assert!(server.starts_with(r#"<div class="stat">"#), "{server}");
         assert!(
             !html.contains("--chart-color: var(--accent-danger)"),
-            "no server error in the window: its chart is not red: {html}"
+            "no server error in the window: no red chart is drawn: {html}"
         );
         assert!(
             server.contains(r#"<div class="stat__value">0</div>"#),
@@ -798,22 +901,24 @@ mod outage_tests {
         );
     }
 
-    /// The chart notes follow how far the records go back. A request log
-    /// that began 40 days ago with no errors since says "None in the last 30
-    /// days" — zero is data — and never "Collecting data".
+    /// An all-zero chart's sentence follows how far the records go back. A
+    /// request log that began 40 days ago with nothing in the window since
+    /// says "No requests in the last 30 days" — zero is data — and never
+    /// "recorded yet".
     #[tokio::test]
-    async fn chart_notes_follow_the_oldest_record_not_the_first_non_zero_day() {
+    async fn chart_sentences_follow_the_oldest_record_not_the_first_non_zero_day() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let fresh = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
-        assert_eq!(
-            fresh
-                .matches("Collecting data — nothing recorded yet")
-                .count(),
-            4,
-            "no accounts and no request log yet: all four charts say so: {fresh}"
-        );
+        for counts in ["new users", "requests", "server errors", "client errors"] {
+            assert!(
+                fresh.contains(&format!(
+                    r#"<p class="empty-note">No {counts} recorded yet</p>"#
+                )),
+                "no accounts and no request log yet: the {counts} chart says so: {fresh}"
+            );
+        }
 
         let at = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
         request_logs::insert_at(
@@ -834,18 +939,19 @@ mod outage_tests {
         .expect("seed an old request log row");
 
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
-        assert_eq!(
-            html.matches(r#"<p class="chart__note">None in the last 30 days</p>"#)
-                .count(),
-            3,
-            "requests, server errors and client errors: covered and all zero: {html}"
-        );
-        assert_eq!(
-            html.matches("Collecting data — nothing recorded yet")
-                .count(),
-            1,
+        for counts in ["requests", "server errors", "client errors"] {
+            assert!(
+                html.contains(&format!(
+                    r#"<p class="empty-note">No {counts} in the last 30 days</p>"#
+                )),
+                "the {counts} window is covered and all zero: {html}"
+            );
+        }
+        assert!(
+            html.contains(r#"<p class="empty-note">No new users recorded yet</p>"#),
             "only the signup chart still has no records: {html}"
         );
+        assert_eq!(html.matches("recorded yet").count(), 1, "{html}");
     }
 
     /// A recent user's creation date is a per-run value in the visual-baseline
@@ -864,12 +970,44 @@ mod outage_tests {
         );
     }
 
-    /// The recent-rows and chart panels are `Card`s, each an h2 under the
-    /// page's h1. A card holding a table is flush, so the table's frame is
-    /// the card's (layout rule 2); one holding the empty sentence is not, so
-    /// the sentence keeps the card's padding.
+    /// A recent user is the avatar beside the email; the avatar is
+    /// decorative, so the row reads as the email alone.
     #[tokio::test]
-    async fn the_panels_are_cards_and_only_a_card_holding_a_table_is_flush() {
+    async fn a_recent_user_is_an_avatar_beside_the_email() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        let doc = scraper::Html::parse_document(&html);
+        let cell = doc
+            .select(&scraper::Selector::parse(r#"td[data-label="Email"] .recent-user"#).unwrap())
+            .next()
+            .unwrap_or_else(|| panic!("no recent user: {html}"));
+        let markup = cell.inner_html();
+        // scraper writes attributes in name order.
+        assert!(
+            markup.starts_with(r#"<span aria-hidden="true" class="avatar avatar--md">U</span>"#),
+            "{markup}"
+        );
+        let cells = doc
+            .select(&scraper::Selector::parse("tr").unwrap())
+            .find(|row| row.inner_html().contains("recent-user"))
+            .unwrap()
+            .select(&scraper::Selector::parse("td").unwrap())
+            .count();
+        assert_eq!(
+            cells, 2,
+            "the email and the date; every recent user is active, so no status (rule 11): {html}"
+        );
+    }
+
+    /// The recent-rows and chart panels are `Card`s, each an h2 under the
+    /// page's h1. Both recent-rows cards are flush whether or not they have
+    /// rows: an empty one holds the `DataTable`'s note, which takes the
+    /// card's inset back, never a framed empty state.
+    #[tokio::test]
+    async fn the_panels_are_cards_and_the_recent_cards_are_always_flush() {
         use crate::test_support::dom;
 
         let ctx = TestContext::with_auth()
@@ -891,7 +1029,22 @@ mod outage_tests {
             .to_vec(),
             "{fresh}"
         );
-        assert!(!fresh.contains("card--flush"), "{fresh}");
+        let flush_head = |text: &str| {
+            format!(
+                r#"<section class="card card--flush"><header class="card__head"><div><h2 class="card__title">{text}"#
+            )
+        };
+        for title in ["Recent users", "Recent server errors"] {
+            assert!(fresh.contains(&flush_head(title)), "{title}: {fresh}");
+        }
+        assert!(
+            fresh.contains(&format!(
+                r#"<div class="card__body"><p class="empty-note">{NO_USERS_YET}</p></div>"#
+            )) && fresh.contains(&format!(
+                r#"<div class="card__body"><p class="empty-note">{NO_RECENT_SERVER_ERRORS}</p></div>"#
+            )),
+            "{fresh}"
+        );
         assert!(dom::card_level_inside_card(&fresh).is_empty(), "{fresh}");
 
         ctx.seed_auth_user("u-1").await;
@@ -914,9 +1067,67 @@ mod outage_tests {
             html.matches(r#"<section class="card card--flush">"#)
                 .count(),
             2,
-            "both recent-rows cards hold a table: {html}"
+            "both recent-rows cards, now holding a table: {html}"
         );
+        for title in ["Recent users", "Recent server errors"] {
+            let card = &html[html.find(&flush_head(title)).unwrap()..];
+            let card = &card[..card.find("</section>").unwrap()];
+            assert!(
+                card.contains(r#"<div class="data-table">"#) && !card.contains("empty-note"),
+                "{title}: {card}"
+            );
+        }
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
+    }
+
+    /// Every card-head link is named for where it goes. A screen reader's
+    /// links list shows the names without their cards, where four "View"
+    /// and two "View all" links went to five different pages: each name now
+    /// goes to one destination, and each destination has one name.
+    #[tokio::test]
+    async fn every_head_link_names_its_one_destination() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        let doc = scraper::Html::parse_document(&html);
+        let links: Vec<(String, String)> = doc
+            .select(&scraper::Selector::parse("a.card__link").unwrap())
+            .map(|a| {
+                (
+                    a.text().collect::<String>(),
+                    a.value().attr("href").unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("View users", "/b/admin/users"),
+                ("View logs", "/b/admin/logs"),
+                ("View server errors", "/b/admin/logs?server_errors=1"),
+                ("View client errors", "/b/admin/logs?client_errors=1"),
+                ("View users", "/b/admin/users"),
+                ("View server errors", "/b/admin/logs?server_errors=1"),
+            ]
+            .map(|(label, href)| (label.to_string(), href.to_string()))
+            .to_vec(),
+            "in card order: the four charts, then Recent users and Recent server errors"
+        );
+        let mut names: HashMap<&str, &str> = HashMap::new();
+        let mut hrefs: HashMap<&str, &str> = HashMap::new();
+        for (label, href) in &links {
+            assert_eq!(
+                *names.entry(label).or_insert(href),
+                href,
+                "{label} names two pages"
+            );
+            assert_eq!(
+                *hrefs.entry(href).or_insert(label),
+                label,
+                "{href} has two names"
+            );
+        }
     }
 
     /// Three panels carry figures the visual-baseline suite masks: the "Avg
@@ -930,11 +1141,28 @@ mod outage_tests {
     /// makes each label part of the mask's contract: rename it and the mask
     /// silently stops matching, and the panel is compared pixel by pixel
     /// again with nothing announcing the change.
+    ///
+    /// The capture follows the suite's own traffic, so the Requests chart is
+    /// drawn there; the test seeds a request to draw it too.
     #[tokio::test]
     async fn the_masked_panels_keep_the_labels_the_visual_masks_key_on() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        request_logs::insert(
+            &ctx,
+            &request_logs::NewRequestLog {
+                method: "GET",
+                path: "/served",
+                status_code: 200,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "",
+            },
+        )
+        .await
+        .expect("seed a request log row");
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
         for stat in ["Avg response", "Requests today"] {

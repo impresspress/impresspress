@@ -76,11 +76,15 @@
 /* The stat row (`.stat-row`, `components::stat_row`) is defined once, in
  * components/stat.css. */
 
-.dashboard-charts { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
-@media (min-width: 1024px) { .dashboard-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.dashboard-grid { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
-@media (min-width: 1024px) { .dashboard-grid { grid-template-columns: 2fr 1fr; } }
-.dashboard-wide > * { width: 100%; }
+/* One row of cards (`templates::dashboard_page`). The page's own gap spaces
+   the rows; from 1024px a row's cards take equal columns and one height. */
+.dashboard-row { display: grid; gap: var(--space-4); }
+@media (min-width: 1024px) {
+	.dashboard-row { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+}
+/* A recent user: the avatar beside the email. */
+.recent-user { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.recent-user .avatar { flex-shrink: 0; }
 
 /* ===== Chat page ===== */
 /* Self-framed (`templates::chat_page`): the shell draws no frame, so the

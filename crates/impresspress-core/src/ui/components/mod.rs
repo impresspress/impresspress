@@ -26,7 +26,7 @@ pub use badge::{badge, status_badge, Badge, BadgeVariant, HeaderStatus};
 pub use button::{filter_links, filter_toggle, subnav, tab_navigation, FilterLinks, Tab};
 pub use callout::{callout, CalloutTone};
 pub use card::Card;
-pub use chart::{bar_chart_card, line_chart_card, ChartHistory};
+pub use chart::{ChartCard, ChartHistory};
 pub use empty::{empty_note, empty_state};
 pub use endpoints::endpoint_table;
 pub use form::{password_field, reveal_toggle, PasswordPurpose, SearchInput};

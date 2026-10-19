@@ -14,6 +14,10 @@ pub enum AvatarSize {
 /// color across every avatar is calmer to scan than a wall of per-hash
 /// hues, and the colored variants previously made the admin lists feel
 /// like distinct personas instead of rows of the same shape.
+///
+/// Decorative (`aria-hidden`): an avatar always sits beside the name it is
+/// the initial of, so a screen reader announcing it would read that
+/// initial before the name ("A, admin@example.com").
 pub fn avatar(seed: &str, size: AvatarSize) -> maud::Markup {
     use maud::html;
     let initial = seed.chars().next().unwrap_or('?').to_ascii_uppercase();
@@ -23,7 +27,7 @@ pub fn avatar(seed: &str, size: AvatarSize) -> maud::Markup {
         AvatarSize::Lg => "avatar--lg",
     };
     html! {
-        span class={ "avatar " (size_class) } { (initial) }
+        span class={ "avatar " (size_class) } aria-hidden="true" { (initial) }
     }
 }
 
@@ -45,6 +49,16 @@ mod tests {
         }
         assert!(a.contains(">A</span>"), "alice initial A: {a}");
         assert!(b.contains(">B</span>"), "bob initial B: {b}");
+    }
+
+    /// The initial repeats the name beside it, so assistive technology
+    /// skips it.
+    #[test]
+    fn avatar_is_hidden_from_assistive_technology() {
+        assert_eq!(
+            avatar("alice@example.com", AvatarSize::Md).into_string(),
+            r#"<span class="avatar avatar--md" aria-hidden="true">A</span>"#
+        );
     }
 
     #[test]
