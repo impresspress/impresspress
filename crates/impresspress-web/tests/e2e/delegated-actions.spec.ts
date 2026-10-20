@@ -70,6 +70,14 @@ test.describe('delegated actions', () => {
     await expect(users).toBeVisible();
     await expect(shown).toHaveCount(total);
     await expect(page.locator('#db-filter-empty')).toBeHidden();
+
+    // Each block's tables are a fold. A group folded by hand still shows
+    // what the filter finds in it.
+    const auth = page.locator('details[data-db-group="wafer_run__auth"]');
+    await auth.locator('> summary').click();
+    await expect(users).toBeHidden();
+    await filter.fill('wafer_run__auth__users');
+    await expect(users).toBeVisible();
   });
 
   test('modal-open and modal-close drive the create-variable modal', async ({ page }) => {

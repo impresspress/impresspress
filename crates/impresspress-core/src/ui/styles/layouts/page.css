@@ -94,12 +94,6 @@
 /* The grid's gap spaces the cards: a card's own bottom margin, which spaces
    cards stacked in flow (card.css), would add to it under every row. */
 .dashboard-row > .card { margin-bottom: 0; }
-/* A recent user: the avatar beside the email. An address with no break
-   opportunity (`components::breakable_id` offers them at `@` and `.`)
-   still wraps rather than pushing the date out of the card. */
-.recent-user { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-.recent-user .avatar { flex-shrink: 0; }
-.recent-user > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 
 /* ===== Chat page ===== */
 /* Self-framed (`templates::chat_page`): the shell draws no frame, so the

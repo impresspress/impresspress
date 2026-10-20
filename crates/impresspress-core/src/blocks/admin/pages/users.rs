@@ -16,7 +16,7 @@ use crate::{
     http::err_not_found,
     ui::{
         self,
-        components::{self, badge, pagination, Badge, BadgeVariant},
+        components::{self, badge, pagination, Action, ActionTarget, Badge, BadgeVariant},
         icons,
         shell::Topbar,
         templates::list_page,
@@ -203,15 +203,18 @@ const USER_COLUMNS: [components::TableCol<'static>; 5] = [
 /// enable/disable mutations).
 ///
 /// `current_uid` is `""` when the caller is rendering a single-row update
-/// fragment (no "(you)" affordance) — the mutation endpoints reject
-/// self-disable before reaching this path.
+/// fragment (no "You" in place of the actions) — the mutation endpoints
+/// reject self-disable before reaching this path.
+///
+/// The status is "Active" or "Disabled", in sentence case at the source
+/// (`status_badge` prints the stored word as it is, lowercase).
 fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> components::TableRow {
     let email = record.email.as_str();
     let disabled = record.disabled;
     let created = record.created_at.as_str();
     let is_self = !current_uid.is_empty() && record.id == current_uid;
     components::TableRow::new(vec![
-        html! { (email) },
+        components::user_identity(email),
         html! {
             @for role in roles {
                 (Badge::new(BadgeVariant::Secondary).classes("mr-1").render(html! { (role) }))
@@ -222,15 +225,15 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
         },
         html! {
             @if disabled {
-                (components::status_badge("disabled"))
+                (badge(BadgeVariant::Danger, "Disabled"))
             } @else {
-                (components::status_badge("active"))
+                (badge(BadgeVariant::Success, "Active"))
             }
         },
         html! { span .text-muted { (components::timestamp(created)) } },
         html! {
                 @if is_self {
-                    span .text-muted { "(you)" }
+                    span .text-muted { "You" }
                 } @else {
                     @if disabled {
                         button .btn .btn--sm .btn--secondary
@@ -497,16 +500,12 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let list = db::list(ctx, ROLES_TABLE, &opts).await?;
 
     Ok(html! {
-        (components::section_header("Roles", Some(html! {
-            button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-role" {
-                (icons::plus()) " Create Role"
-            }
-        })))
+        (components::section_header("Roles", Some(create_role_action(Action::primary))))
 
-        @let rows: Vec<Vec<Markup>> = list.records.iter().map(|record| {
+        @let rows: Vec<components::TableRow> = list.records.iter().map(|record| {
             let name = record.str_field("name");
             let is_system = record.bool_field("is_system");
-            vec![
+            components::TableRow::new(vec![
                 html! { (name) },
                 html! {
                     @let description = record.str_field("description");
@@ -531,18 +530,20 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                         { (icons::trash()) }
                     }
                 },
-            ]
+            ])
         }).collect();
 
-        (components::data_table::<fn(usize) -> Option<String>>(
-            &ROLE_COLUMNS,
-            rows,
-            None,
-            html! { p .text-center .text-muted { "No roles" } },
-        ))
+        (components::DataTable::new(&ROLE_COLUMNS)
+            .rows(rows)
+            .empty_state(
+                "No roles",
+                "Roles group what people may do. Create one to assign it.",
+                Some(create_role_action(Action::secondary)),
+            )
+            .render())
 
         // Create role modal
-        (components::modal("create-role", "Create Role", html! {
+        (components::modal("create-role", "Create role", html! {
             form hx-post="/b/admin/iam/roles" hx-target="#iam-content" {
                 div .form-group {
                     label .form-label .required for="role-name" { "Name" }
@@ -554,7 +555,7 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Create" }
+                    (Action::primary("Create", ActionTarget::Submit { form: None }).render())
                 }))
             }
         }))
@@ -572,34 +573,30 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let now = chrono::Utc::now();
 
     Ok(html! {
-        (components::section_header("API keys", Some(html! {
-            button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-api-key" {
-                (icons::plus()) " Create API Key"
-            }
-        })))
+        (components::section_header("API keys", Some(create_api_key_action(Action::primary))))
 
-        @let rows: Vec<Vec<Markup>> = list.iter().map(|record| {
+        @let rows: Vec<components::TableRow> = list.iter().map(|record| {
             let created = record.created_at.as_str();
             // A key authenticates only while it is neither revoked nor past
             // its expiry — the two checks `auth` makes before it accepts one
             // — so the badge names whichever of them retired it.
             let retired = if record.is_revoked() {
-                Some("revoked")
+                Some("Revoked")
             } else if record.is_expired(now) {
-                Some("expired")
+                Some("Expired")
             } else {
                 None
             };
-            vec![
+            components::TableRow::new(vec![
                 html! { code { (record.key_prefix) "..." } },
                 html! { (record.name) },
                 super::user_cell(&record.user_id, &emails),
                 html! { span .text-muted { (components::timestamp(created)) } },
                 html! {
                     @if let Some(reason) = retired {
-                        (components::badge(components::BadgeVariant::Danger, reason))
+                        (badge(BadgeVariant::Danger, reason))
                     } @else {
-                        (components::status_badge("active"))
+                        (badge(BadgeVariant::Success, "Active"))
                     }
                 },
                 html! {
@@ -617,18 +614,20 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                         { "Revoke" }
                     }
                 },
-            ]
+            ])
         }).collect();
 
-        (components::data_table::<fn(usize) -> Option<String>>(
-            &API_KEY_COLUMNS,
-            rows,
-            None,
-            html! { p .text-center .text-muted { "No API keys" } },
-        ))
+        (components::DataTable::new(&API_KEY_COLUMNS)
+            .rows(rows)
+            .empty_state(
+                "No API keys",
+                "A key lets a script call the API as the account that created it.",
+                Some(create_api_key_action(Action::secondary)),
+            )
+            .render())
 
         // Create API key modal
-        (components::modal("create-api-key", "Create API Key", html! {
+        (components::modal("create-api-key", "Create API key", html! {
             form hx-post="/b/auth/api/api-keys" hx-target="#users-tab-content" {
                 div .form-group {
                     label .form-label for="key-name" { "Name" }
@@ -636,11 +635,31 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Create" }
+                    (Action::primary("Create", ActionTarget::Submit { form: None }).render())
                 }))
             }
         }))
     })
+}
+
+/// The roles tab's create action, at the emphasis the caller gives it: the
+/// tab's one primary in its toolbar, a secondary in the empty state under it
+/// (layout rule 9). One label and one target, so the two cannot drift.
+fn create_role_action(
+    emphasis: fn(&'static str, ActionTarget<'static>) -> Action<'static>,
+) -> Markup {
+    emphasis("Create role", ActionTarget::Modal("create-role"))
+        .icon(icons::plus())
+        .render()
+}
+
+/// The API-keys tab's create action, as [`create_role_action`].
+fn create_api_key_action(
+    emphasis: fn(&'static str, ActionTarget<'static>) -> Action<'static>,
+) -> Markup {
+    emphasis("Create API key", ActionTarget::Modal("create-api-key"))
+        .icon(icons::plus())
+        .render()
 }
 
 /// The roles and API-key tables' columns. Declared once each so the
@@ -718,6 +737,144 @@ mod tests {
         assert!(!html.contains("<thead>"), "{html}");
     }
 
+    /// The Users page, for `tab` (`None` for the Users tab).
+    async fn users_page_html(ctx: &TestContext, tab: Option<&str>) -> String {
+        let mut msg = admin_msg("retrieve", "/b/admin/users");
+        if let Some(tab) = tab {
+            msg.set_meta("req.query.tab", tab);
+        }
+        let parts = crate::blocks::admin::test_support::browser_request(ctx, msg).await;
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert_eq!(parts.status, 200, "{html}");
+        html
+    }
+
+    /// Each account is its avatar beside its email, its status a
+    /// sentence-case badge, and the signed-in admin's own row says "You"
+    /// where the others offer their actions.
+    #[tokio::test]
+    async fn a_user_row_is_the_avatar_and_email_with_a_sentence_case_status() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("admin_1").await;
+        ctx.seed_auth_user("u-1").await;
+        let html = users_page_html(&ctx, None).await;
+
+        let row = |id: &str| -> String {
+            let start = html
+                .find(&format!(r#"<tr id="user-row-{id}""#))
+                .unwrap_or_else(|| panic!("no row for {id}: {html}"));
+            html[start..start + html[start..].find("</tr>").expect("a closed row")].to_owned()
+        };
+        let other = row("u-1");
+        assert!(
+            other.contains(concat!(
+                r#"<span class="user-identity"><span class="avatar avatar--md" aria-hidden="true">U</span>"#,
+                r#"<span>u-1<wbr>@example<wbr>.com</span></span>"#,
+            )),
+            "{other}"
+        );
+        assert!(
+            other.contains(r#"<span class="badge badge-success">Active</span>"#),
+            "{other}"
+        );
+        let own = row("admin_1");
+        assert!(
+            own.contains(r#"<span class="text-muted">You</span>"#),
+            "{own}"
+        );
+        assert!(!own.contains("(you)") && !own.contains("hx-post"), "{own}");
+    }
+
+    /// A disabled account's badge says so, in sentence case.
+    #[tokio::test]
+    async fn a_disabled_user_reads_disabled() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        ops::set_user_disabled(
+            &ctx,
+            &admin_msg("create", "/b/admin/users/u-1/disable"),
+            "u-1",
+            true,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("disable u-1"));
+        let html = users_page_html(&ctx, None).await;
+        assert!(
+            html.contains(r#"<span class="badge badge-danger">Disabled</span>"#),
+            "{html}"
+        );
+    }
+
+    /// The Roles and API-keys tabs each carry their create action as the
+    /// page's one visible primary, in the tab's toolbar and in sentence case;
+    /// the create modal's submit is that dialog's own primary.
+    #[tokio::test]
+    async fn each_tab_toolbar_holds_the_pages_one_primary() {
+        use crate::test_support::dom;
+
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        for (tab, label, modal) in [
+            ("roles", "Create role", "create-role"),
+            ("api-keys", "Create API key", "create-api-key"),
+        ] {
+            let html = users_page_html(&ctx, Some(tab)).await;
+            let (page, dialogs) = dom::visible_primaries(&html);
+            assert_eq!(
+                page,
+                [format!(r#"button.btn.btn--primary "{label}""#)],
+                "{tab}: {html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    r#"<div class="section-header__action"><button class="btn btn--primary" type="button" data-action="modal-open" data-modal-target="{modal}">"#
+                )),
+                "{tab}: the toolbar trigger is full size and opens the modal: {html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    r#"<h2 class="modal__title" id="{modal}-title">{label}</h2>"#
+                )),
+                "{tab}: the modal is titled in sentence case: {html}"
+            );
+            assert!(
+                dialogs
+                    .iter()
+                    .any(|d| d == &[r#"button.btn.btn--primary "Create""#.to_string()]),
+                "{tab}: {dialogs:?}"
+            );
+        }
+    }
+
+    /// With no keys, the API-keys tab is the framed empty state, and its
+    /// copy of the create action is a secondary: the toolbar already holds
+    /// it as the page's primary (layout rule 9).
+    #[tokio::test]
+    async fn the_empty_api_keys_tab_offers_create_as_a_secondary() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = users_page_html(&ctx, Some("api-keys")).await;
+        assert!(
+            html.contains(r#"<h2 class="empty__title">No API keys</h2>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(concat!(
+                r#"<div class="empty__action"><button class="btn btn--secondary" type="button" "#,
+                r#"data-action="modal-open" data-modal-target="create-api-key">"#,
+            )),
+            "{html}"
+        );
+        assert!(!html.contains("text-center"), "{html}");
+    }
+
     /// A key the auth block would refuse is not shown as active. Revoked and
     /// expired are both dead keys, each badged with its own reason, and
     /// neither offers a Revoke button — only the live key does.
@@ -766,17 +923,17 @@ mod tests {
         for (prefix, badge, revocable) in [
             (
                 "ipk_live",
-                r#"<span class="badge badge-success">active</span>"#,
+                r#"<span class="badge badge-success">Active</span>"#,
                 true,
             ),
             (
                 "ipk_expired",
-                r#"<span class="badge badge-danger">expired</span>"#,
+                r#"<span class="badge badge-danger">Expired</span>"#,
                 false,
             ),
             (
                 "ipk_revoked",
-                r#"<span class="badge badge-danger">revoked</span>"#,
+                r#"<span class="badge badge-danger">Revoked</span>"#,
                 false,
             ),
         ] {

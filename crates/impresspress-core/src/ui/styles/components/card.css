@@ -341,10 +341,22 @@
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 	gap: var(--space-4);
-	margin-top: var(--space-4);
 }
-.block-cards__filter { margin-top: var(--space-4); max-width: 240px; }
-.block-cards__filter .form-label { margin-bottom: var(--space-1); }
+/* The tab row with the runtime filter at its end. The tabs keep their own
+   rule at every width and grow to fill the row, so the rule runs up to the
+   filter while both fit on one line. When they do not (the row's own width
+   decides, not the viewport), the filter wraps onto a line of its own under
+   the tabs, right-aligned, and the rule stays under the tabs with the
+   current tab's underline on it. */
+.block-tabs {
+	display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: flex-end;
+	gap: var(--space-2) var(--space-4);
+	margin-bottom: var(--space-6);
+}
+.block-tabs > .tabs { flex: 1 1 auto; margin-bottom: 0; min-width: 0; }
+.block-tabs__filter { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1); }
+.block-tabs__filter .form-label { margin: 0; }
+.block-tabs__filter .form-input { width: auto; }
 .block-card {
 	display: flex;
 	flex-direction: column;
@@ -378,13 +390,6 @@
 }
 .block-card__title-button::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius-lg); }
 .block-card__title-button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
-/* `font-size` here used to size the "\u{2713}"/"\u{2717}" text glyphs; the
-   marks are now `icons::check()`/`icons::x()`, so the size moves to the svg
-   rule below (16px to sit with the card title rather than the icon set's
-   default 18px). */
-.block-card__check { color: var(--accent-success-text); line-height: 0; flex-shrink: 0; }
-.block-card__check svg { width: 16px; height: 16px; }
-.block-card__check--off { color: var(--text-muted); }
 .block-card__summary {
 	font-size: var(--text-sm); color: var(--text-secondary);
 	margin: 0; line-height: 1.5;
@@ -413,13 +418,18 @@
    for .badge-primary/.products-guide__number above. */
 .block-card__runtime--wasm { background: color-mix(in srgb, var(--primary-color) 6%, var(--surface-1)); color: var(--primary-button); }
 .block-card__version { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* A quiet text link (the card's own control is its title), drawn like a
+   card head's link (`.card__link`): --primary-button is the text-safe red. */
 .block-card__open {
 	margin-left: auto;
 	/* Above the title button's card-wide ::after, so it is its own target. */
 	position: relative; z-index: 1;
-	/* Match the meta-row baseline; no absolute positioning so the Open
-	   button can never overlap the next card's title (the previous bug). */
+	display: inline-flex; align-items: center; gap: var(--space-1);
+	min-height: var(--target-min);
+	font-weight: 500; color: var(--primary-button); text-decoration: none;
 }
+.block-card__open:hover { text-decoration: underline; }
+.block-card__open svg { width: 14px; height: 14px; flex-shrink: 0; }
 
 /* ===== Messages page (Contexts list) =====
    The New context card's form on one row, and the context list as rows

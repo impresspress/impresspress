@@ -154,29 +154,79 @@ a.pagination__link { color: var(--primary-button); }
 a.pagination__link:hover { background: var(--bg-hover); }
 .pagination__link.is-disabled { color: var(--text-muted); }
 
+/* An account in a list (`components::user_identity`): the avatar beside the
+   email. An address with no break opportunity (`components::breakable_id`
+   offers them at `@` and `.`) still wraps rather than pushing the next
+   cell out of the table. Wrapping anywhere would let a table's automatic
+   layout starve the column to one letter per line, so the identity keeps a
+   floor of its own (an avatar and about fifteen characters). */
+.user-identity { display: flex; align-items: center; gap: var(--space-3); min-width: 10rem; }
+.user-identity .avatar { flex-shrink: 0; }
+.user-identity > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+
 /* ── Database admin ─────────────────────────────────────── */
+/* Two sibling cards (`blocks/admin/pages/database.rs`): "Tables" and the
+   workbench. Their own grid gap spaces them, not a card's bottom margin. */
 .db-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 32%) 1fr;
+  grid-template-columns: minmax(220px, 32%) minmax(0, 1fr);
   gap: var(--space-4);
   align-items: start;
 }
-.db-pane {
-  background: var(--surface-1);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.db-pane--left { padding: var(--space-3); }
-.db-pane--right { padding: var(--space-3); min-height: 360px; }
-.db-pane__head { margin-bottom: var(--space-2); }
-.db-pane__head input {
-  width: 100%;
-  min-height: var(--target-min);
-  padding: var(--space-2) var(--space-3);
+.db-layout > .card { margin-bottom: 0; }
+.db-tables__filter { margin-bottom: var(--space-3); }
+/* A count beside a name: the whole list's, a group's. */
+.db-count {
   font-size: var(--text-sm);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+/* Each block's tables: one collapsible row (name, org, count) with no frame
+   of its own, over its list. */
+.db-table-groups { display: flex; flex-direction: column; gap: var(--space-1); }
+/* Three columns: the chevron, the name, the count. The name (the block,
+   then its org) wraps between the two as whole words when the column is
+   narrow, and the count keeps its own column, so neither runs into it. A
+   single word wider than the column is the only thing that breaks. */
+.db-table-group__head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-2);
+  min-height: var(--target-min);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  list-style: none;
+}
+.db-table-group__head::-webkit-details-marker { display: none; }
+.db-table-group__head:hover { background: var(--bg-hover); }
+/* The fold's chevron: points right when closed, down when open. */
+.db-table-group__head::before {
+  content: "";
+  width: 0.4rem; height: 0.4rem; margin: 0 var(--space-1);
+  border-right: 2px solid var(--text-muted); border-bottom: 2px solid var(--text-muted);
+  transform: rotate(-45deg);
+}
+.db-table-group[open] > .db-table-group__head::before { transform: rotate(45deg); }
+.db-table-group__name { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-2); min-width: 0; }
+.db-table-group__title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+.db-table-group__org {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+.db-table-group__list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 var(--space-1) var(--space-5);
 }
 .db-table-list__item {
   display: flex;
@@ -184,89 +234,30 @@ a.pagination__link:hover { background: var(--bg-hover); }
   min-height: var(--target-min);
   justify-content: space-between;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-2);
-  border-radius: 4px;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
   text-decoration: none;
   color: inherit;
   font-size: var(--text-sm);
 }
-.db-table-list__item:hover { background: var(--bg-secondary, #f8f9fa); }
+.db-table-list__item:hover { background: var(--bg-hover); }
 .db-table-list__item.is-active { background: var(--bg-hover); box-shadow: inset 3px 0 0 var(--primary-color); font-weight: 600; }
 .db-table-list__name { font-weight: 500; word-break: break-all; }
-.db-table-list__empty { padding: var(--space-2); }
-
-/* Grouped tables (left pane) — one card per `org__block` prefix.
-   No inner max-height: groups expand to fit all their rows and the page
-   itself scrolls. The earlier 60vh + overflow-y clipped rows mid-line at
-   the scroll edges, which read like the list was broken. */
-.db-table-groups {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.db-table-group {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--surface-1);
-  overflow: hidden;
-}
-.db-table-group__head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-secondary, #f8f9fa);
-  border-bottom: 1px solid var(--border-color);
-}
-.db-table-group__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  color: var(--primary-color);
+.db-table-list__count {
   flex: 0 0 auto;
-}
-.db-table-group__icon svg { width: 16px; height: 16px; }
-.db-table-group__title-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.db-table-group__title {
-  font-weight: 600;
   font-size: var(--text-sm);
-  color: var(--text-primary, #0f172a);
-  word-break: break-all;
-}
-.db-table-group__org {
-  font-size: var(--text-sm);
-}
-.db-table-group__count {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  height: 22px;
-  padding: 0 var(--space-2);
-  border-radius: 999px;
-  /* A count, not a call to action: neutral, like `.badge`. */
-  background: var(--border-color);
-  color: var(--text-primary);
-  font-size: var(--text-sm);
-  font-weight: 600;
+  color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
-.db-table-group__list {
-  list-style: none;
-  margin: 0;
-  padding: var(--space-1) var(--space-2);
-}
-.db-panel { padding: var(--space-1) 0; }
-.db-panel-body { padding-top: var(--space-2); }
+/* The workbench card is flush: the schema grid and the query results run
+   edge to edge, their frame the card's (layout rule 2). Everything else in
+   it takes the card's inset back; an `empty_note` already does
+   (card.css). */
+.db-workbench > .tabs { padding: var(--space-2) var(--card-pad) 0; margin-bottom: var(--space-4); }
+.db-workbench .section-header,
+.db-workbench .db-sql,
+.db-sql-results > :not(.data-table):not(.empty-note) { margin-inline: var(--card-pad); }
+.db-sql-results > :last-child:not(.data-table):not(.empty-note) { margin-bottom: var(--card-pad); }
 .db-sql { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
 .db-sql__input {
   width: 100%;
@@ -279,10 +270,13 @@ a.pagination__link:hover { background: var(--bg-hover); }
   color: #cbd5e1;
   resize: vertical;
 }
-.db-sql__actions { display: flex; align-items: center; gap: var(--space-3); }
+.db-sql__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
 .db-sql-results { border-top: 1px solid var(--border-color); padding-top: var(--space-3); }
-@media (max-width: 720px) {
-  .db-layout { grid-template-columns: 1fr; }
+/* Stacked below 900px: beside the sidebar, the workbench would be too
+   narrow for a schema grid (the list then folds away above it,
+   `database.rs`'s `TABLE_FILTER_JS`). */
+@media (max-width: 900px) {
+  .db-layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ===== Card mode (below 720px) =====
@@ -387,12 +381,13 @@ a.pagination__link:hover { background: var(--bg-hover); }
 }
 
 /* The database page's table list (`blocks/admin/pages/database.rs`) is a
-   `<details>` headed by its summary, so on a phone it can fold away above the
-   panel; the page folds it there itself once a panel is open. */
+   `<details>` headed by its summary, so where the cards stack (below 900px)
+   it can fold away above the panel; the page folds it there itself once a
+   panel is open. */
 .db-tables__summary {
 	display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
 	min-height: var(--target-min); padding: var(--space-2) var(--space-1);
-	font-weight: 600; cursor: pointer; border-radius: var(--radius-md);
+	font-weight: 600; cursor: pointer; border-radius: var(--radius-md); list-style: none;
 }
 .db-tables[open] > .db-tables__summary { margin-bottom: var(--space-2); }
 .db-tables__summary::-webkit-details-marker { display: none; }
@@ -403,3 +398,5 @@ a.pagination__link:hover { background: var(--bg-hover); }
 }
 .db-tables[open] > .db-tables__summary::after { transform: rotate(45deg); }
 .db-tables__summary > :first-child { flex: 1; }
+/* The card's heading, at a card title's size (card.css `.card__title`). */
+.db-tables__summary > .section-header__title { font-size: var(--text-base); }

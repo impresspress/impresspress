@@ -59,10 +59,9 @@
 	display: flex; align-items: center; justify-content: center;
 	margin: 0 auto var(--space-4); font-size: 1.5rem;
 }
-/* The status glyph is now an inline `icons::check()`/`icons::x()` SVG (18x18
+/* The status glyph is an inline `icons::check()`/`icons::x()` SVG (18x18
    by default) rather than a text character -- sized up to read clearly in
-   the 48px badge, matching the `.db-table-group__icon svg` override
-   precedent for an icon inside an oversized badge. */
+   the 48px badge. */
 .auth-status__icon svg { width: 24px; height: 24px; }
 /* Was `.auth-status__icon--dynamic`, coloured by `--icon-color`/`--icon-bg`
    custom properties set inline from Rust (verify.rs, reset_password.rs) --

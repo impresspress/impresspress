@@ -8,7 +8,7 @@ use crate::{
     blocks::auth::repo::users::{self, DailySignups},
     platform_state::request_logs::{self, DailyCounts, TodayCounts},
     ui::{
-        components::{self, empty_note, AvatarSize, Badge, Card, ChartCard, DataTable, TableRow},
+        components::{self, empty_note, Badge, Card, ChartCard, DataTable, TableRow},
         shell::Topbar,
         templates::{dashboard_page, DashboardRow},
     },
@@ -311,12 +311,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     .map(|record| {
                         let created = record.created_at.as_str();
                         TableRow::new(vec![
-                            html! {
-                                span .recent-user {
-                                    (components::avatar(&record.email, AvatarSize::Md))
-                                    span { (components::breakable_id(&record.email)) }
-                                }
-                            },
+                            components::user_identity(&record.email),
                             // `.text-right` needs a block box to align against,
                             // and the component owns the `<td>`.
                             html! { div .text-muted .text-right { (components::timestamp(created)) } },
@@ -989,7 +984,7 @@ mod outage_tests {
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
         let doc = scraper::Html::parse_document(&html);
         let cell = doc
-            .select(&scraper::Selector::parse(r#"td[data-label="Email"] .recent-user"#).unwrap())
+            .select(&scraper::Selector::parse(r#"td[data-label="Email"] .user-identity"#).unwrap())
             .next()
             .unwrap_or_else(|| panic!("no recent user: {html}"));
         let markup = cell.inner_html();
@@ -1000,7 +995,7 @@ mod outage_tests {
         );
         let cells = doc
             .select(&scraper::Selector::parse("tr").unwrap())
-            .find(|row| row.inner_html().contains("recent-user"))
+            .find(|row| row.inner_html().contains("user-identity"))
             .unwrap()
             .select(&scraper::Selector::parse("td").unwrap())
             .count();

@@ -140,7 +140,7 @@ pub(crate) fn request_path_cell(path: &str) -> Markup {
     maud::html! {
         @if path == crate::pipeline::UNMATCHED_PATH_LABEL {
             div .text-muted { "Unmatched route" }
-            div .text-muted .text-xs { "Paths no block serves, counted together" }
+            div .text-muted { "Paths no block serves, counted together" }
         } @else {
             (ui::components::breakable_id(path))
         }

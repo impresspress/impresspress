@@ -1,6 +1,6 @@
 //! /b/auth/api/api-keys — relocated from auth/api_keys.rs in Task 5.
 //!
-//! Admin user-management's Create API Key form still posts [`handle_create`]
+//! Admin user-management's Create API key form still posts [`handle_create`]
 //! via htmx (see `impresspress-core/src/blocks/admin/pages/users.rs`); its
 //! Revoke button is served by the admin block's own route, which answers with
 //! the re-rendered tab. PAT migration is a
