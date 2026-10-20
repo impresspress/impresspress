@@ -46,11 +46,10 @@ fn refuse(code: ErrorCode, message: &str, clear_binding: &str) -> OutputStream {
 /// lifecycle gate read it.
 ///
 /// The row's address matters on its own: everything downstream that keys on
-/// "who is this" — the session's email claim, the bootstrap-admin comparison —
-/// must read the row's address, not the one the provider reported. They
-/// differ whenever a linked account's address has since changed, and a
-/// provider that asserts nothing (`spec::EmailAssertion::None`) can report any
-/// address at all. The row's `auth_version` is the one the session's access
+/// "who is this" — the session's email claim — must read the row's address,
+/// not the one the provider reported. They differ whenever a linked account's
+/// address has since changed, and a provider that asserts nothing
+/// (`spec::EmailAssertion::None`) can report any address at all. The row's `auth_version` is the one the session's access
 /// token carries (see `TokenGrant`).
 struct ResolvedAccount {
     user: users::UserRow,
@@ -556,7 +555,10 @@ async fn resolve_user(
         // `!REQUIRE_VERIFICATION`, so on the default configuration every
         // password signup carries it having proved nothing and with no mail
         // ever sent. Gating on it would leave the takeover wide open on
-        // exactly the deployments that never turned verification on.
+        // exactly the deployments that never turned verification on. A
+        // bootstrapped admin passes it with `proof::BOOTSTRAP`: its address
+        // was chosen by the operator, not registered by an anonymous party,
+        // which is the takeover this half exists to stop.
         //
         // A refusal here does tell the caller that an account with this
         // address exists. That is unavoidable — `users.email` is UNIQUE, so
@@ -927,10 +929,12 @@ mod tests {
 ///   ran the start endpoint, so a `code`/`state` pair captured in the
 ///   attacker's browser cannot be replayed at the victim's (login CSRF).
 /// * **Account adoption** — an OAuth identity joins an existing local account
-///   only when the provider asserts a verified address AND someone actually
-///   proved the local one (pre-account takeover).
+///   only when the provider asserts a verified address AND the local one was
+///   proven (pre-account takeover). A bootstrapped admin's address is proven
+///   by its provisioning, so it is adopted; it still needs the assertion.
 /// * **Role grants** — no sign-in grants a role: the bootstrap admin
-///   address, asserted by a provider, signs in as a plain `user`.
+///   address, asserted by a provider, makes a new account a plain `user` and
+///   promotes no existing one.
 /// * **Verification policy** — the callback applies
 ///   `WAFER_RUN__AUTH__REQUIRE_VERIFICATION` as login and refresh do, and
 ///   mails the link rather than stranding an account that has no other way
@@ -2472,6 +2476,135 @@ mod security_regression_tests {
         assert!(
             location.ends_with("/b/admin/"),
             "admin OAuth login must still default to the admin home: {location}"
+        );
+    }
+
+    /// Run the callback for the flow's provider and assert that it adopted
+    /// the account `admin_id` — the link points at it, no second account
+    /// was made — and that the account is still the admin, landing in the
+    /// admin home.
+    async fn assert_adopts_the_admin(ctx: &TestContext, email: &str, admin_id: &str) {
+        let location = crate::test_support::output_header(
+            handle(&limiter(), ctx, &callback_msg(ctx).await).await,
+            "Location",
+        )
+        .await
+        .expect("an adopted sign-in is a 302 with a Location header");
+        assert!(
+            location.ends_with("/b/admin/"),
+            "the adopted admin lands in the admin home: {location}"
+        );
+        assert!(
+            provider_links::find_by_provider_ref(ctx, "google", GOOGLE_ID)
+                .await
+                .expect("link lookup ok")
+                .is_some_and(|link| link.user_id == admin_id),
+            "the provider identity is linked to the bootstrapped admin"
+        );
+        assert_eq!(
+            users::find_by_email(ctx, email)
+                .await
+                .expect("user lookup ok")
+                .expect("user present")
+                .id,
+            admin_id,
+            "adoption must not duplicate the account"
+        );
+        assert!(
+            holds_admin(ctx, admin_id).await,
+            "and it is still the admin"
+        );
+    }
+
+    /// An admin provisioned at first boot (email + password) can sign in
+    /// with a provider that asserts its address: the bootstrap records the
+    /// address as proven (`proof::BOOTSTRAP`), so the callback adopts the
+    /// account instead of refusing it as one that never confirmed its email.
+    #[tokio::test]
+    async fn a_bootstrapped_admin_is_adopted_by_a_provider_asserting_its_address() {
+        let email = "init-admin@example.com";
+        let ctx = OauthFlow::google(email).ctx().await;
+        crate::blocks::auth::bootstrap::run(
+            &ctx,
+            &crate::blocks::auth::config::AuthConfig::from_env_for_test(&[
+                (BOOTSTRAP_ADMIN_EMAIL_KEY, email),
+                (
+                    crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
+                    FIXTURE_PASSWORD,
+                ),
+            ]),
+        )
+        .await
+        .expect("provision the admin at first boot");
+        let admin = users::find_by_email(&ctx, email)
+            .await
+            .expect("user lookup ok")
+            .expect("provisioning created the admin");
+
+        assert_adopts_the_admin(&ctx, email, &admin.id).await;
+    }
+
+    /// The same for an admin created by redeeming a bootstrap token, through
+    /// the real redemption handler: its address was typed by the holder of
+    /// the operator's single-use token, and carries the same proof.
+    #[tokio::test]
+    async fn a_token_redeemed_admin_is_adopted_by_a_provider_asserting_its_address() {
+        use crate::blocks::auth::{repo::bootstrap_tokens, service::hash_token};
+
+        let email = "token-admin@example.com";
+        let ctx = OauthFlow::google(email).ctx().await;
+        let token = "operator-bootstrap-token";
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash_token(token), &expires)
+            .await
+            .expect("install the bootstrap token");
+        let msg = crate::test_support::anon_msg("create", "/b/auth/api/bootstrap");
+        let form = format!(
+            "token={token}&email={email}&password={FIXTURE_PASSWORD}&{}={}",
+            crate::csrf::FIELD_NAME,
+            crate::csrf::token(&ctx, &msg)
+        );
+        let status = crate::test_support::output_status(
+            crate::blocks::auth_ui::api::bootstrap::handle(
+                &ctx,
+                &msg,
+                InputStream::from_bytes(form.into_bytes()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 302, "precondition: the token is redeemed");
+        let admin = users::find_by_email(&ctx, email)
+            .await
+            .expect("user lookup ok")
+            .expect("redemption created the admin");
+
+        assert_adopts_the_admin(&ctx, email, &admin.id).await;
+    }
+
+    /// The proof is only half of the adoption rule. A provider that does not
+    /// vouch for the address still cannot join a bootstrapped admin.
+    #[tokio::test]
+    async fn a_bootstrapped_admin_is_not_adopted_without_the_providers_assertion() {
+        let email = "init-admin@example.com";
+        let ctx = OauthFlow::google(email)
+            .provider_verified(false)
+            .ctx()
+            .await;
+        crate::blocks::auth::bootstrap::bootstrap_with_email_password(
+            &ctx,
+            email,
+            FIXTURE_PASSWORD,
+        )
+        .await
+        .expect("provision the admin");
+
+        let out = handle(&limiter(), &ctx, &callback_msg(&ctx).await).await;
+        assert!(
+            crate::test_support::output_is_error(out, "AlreadyExists").await,
+            "an address the provider does not vouch for cannot claim the admin"
         );
     }
 

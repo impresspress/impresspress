@@ -44,8 +44,9 @@ pub struct UserRow {
     pub deleted_at: Option<String>,
     pub email_verified: bool,
     /// What proved the address, if anything ever did: `"email_token"` for a
-    /// redeemed verification link, `"oauth.<provider>"` for a provider
-    /// assertion. `None`/empty means nobody proved it.
+    /// redeemed verification or reset link, `"oauth.<provider>"` for a
+    /// provider assertion, `"bootstrap"` for a bootstrapped admin's address
+    /// (see [`proof::BOOTSTRAP`]). `None`/empty means nobody proved it.
     ///
     /// Separate from [`email_verified`](Self::email_verified), which is a
     /// policy flag: signup writes it `!REQUIRE_VERIFICATION`, so on a
@@ -81,9 +82,10 @@ impl UserRow {
         !self.disabled && !self.is_deleted()
     }
 
-    /// True when someone actually proved control of this address — a redeemed
-    /// verification link or a provider assertion — rather than the deployment
-    /// merely not asking for one. See
+    /// True when the address was proven — a redeemed verification link, a
+    /// provider assertion, or the operator's own provisioning of a
+    /// bootstrapped admin — rather than the deployment merely not asking for
+    /// one. See
     /// [`email_verified_by`](Self::email_verified_by).
     pub fn email_is_proven(&self) -> bool {
         self.email_verified_by
@@ -375,9 +377,11 @@ pub async fn find_by_verification_token(
 ///
 /// With [`record_email_proof_op`], its batch form, the ONLY writer of
 /// `email_verified_by`. Call either from a caller that has just watched the
-/// proof happen — `auth_ui::api::verify` redeeming a mailed token
-/// (`proof::EMAIL_TOKEN`), or `auth_ui::oauth::callback` receiving a verified
-/// address from a provider that asserts one (`proof::oauth`). Setting the
+/// proof happen — `auth_ui::api::verify` or `reset_password` redeeming a
+/// mailed token (`proof::EMAIL_TOKEN`), `auth_ui::oauth::callback` receiving a
+/// verified address from a provider that asserts one (`proof::oauth`), or
+/// `auth::bootstrap::create_admin` provisioning the address the operator
+/// chose (`proof::BOOTSTRAP`). Setting the
 /// policy flag alone is [`set_email_verified`], which deliberately cannot
 /// manufacture a proof.
 pub async fn record_email_proof(
@@ -391,9 +395,9 @@ pub async fn record_email_proof(
     Ok(())
 }
 
-/// [`record_email_proof`] as one write of a batch: for the OAuth sign-up
-/// whose provider asserted the address, so the proof lands with the account
-/// it is about.
+/// [`record_email_proof`] as one write of a batch, so the proof lands with
+/// the account it is about: for the OAuth sign-up whose provider asserted the
+/// address, and for a bootstrapped admin.
 pub fn record_email_proof_op(user_id: &str, proof: &str) -> wire::BatchWrite {
     wire::BatchWrite::Update {
         collection: TABLE.to_string(),
@@ -421,6 +425,15 @@ pub mod proof {
     pub fn oauth(provider: &str) -> String {
         format!("oauth.{provider}")
     }
+
+    /// The account is a bootstrapped admin (`auth::bootstrap::create_admin`),
+    /// whose address was not registered by an anonymous party: the operator
+    /// set it in config (Init), or the holder of the single-use operator
+    /// token typed it (redemption). It proves the operator's choice, not a
+    /// round trip to the mailbox, which is why it is named apart from
+    /// [`EMAIL_TOKEN`]. An operator who configures an address they do not own
+    /// hands its owner the account through any provider that asserts it.
+    pub const BOOTSTRAP: &str = "bootstrap";
 }
 
 /// Read a user's `last_verification_sent` timestamp (the resend cooldown

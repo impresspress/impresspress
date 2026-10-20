@@ -1,5 +1,5 @@
-//! `bootstrap::run` — covers email+password, token, empty-config, and
-//! already-seeded paths.
+//! `bootstrap::run` — covers email+password, token, email-only,
+//! empty-config, and already-seeded paths.
 
 use impresspress_core::{
     blocks::auth::{
@@ -23,6 +23,10 @@ fn cfg_email_pw(email: &str, pw: &str) -> AuthConfig {
 
 fn cfg_token(token: &str) -> AuthConfig {
     AuthConfig::from_env_for_test(&[("WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_TOKEN", token)])
+}
+
+fn cfg_email_only(email: &str) -> AuthConfig {
+    AuthConfig::from_env_for_test(&[("WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL", email)])
 }
 
 fn cfg_empty() -> AuthConfig {
@@ -57,6 +61,70 @@ async fn email_password_path_creates_admin_with_local_credentials() {
         creds.password_hash
     );
     assert!(!creds.must_reset);
+    assert_eq!(
+        u.email_verified_by.as_deref(),
+        Some(users::proof::BOOTSTRAP),
+        "the operator chose this address, so it is recorded as proven by the bootstrap"
+    );
+    assert!(u.email_is_proven());
+}
+
+/// An email with neither a password nor a token creates nobody, and no
+/// sign-in grants a role from the email: booting would leave the site
+/// without the admin its operator configured. So `Init` fails, saying what
+/// to set.
+#[tokio::test]
+async fn email_only_on_an_empty_table_is_refused() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migrations");
+
+    let refusal = match bootstrap::run(&ctx, &cfg_email_only("root@x.io")).await {
+        Err(bootstrap::RunError::Misconfigured(e)) => e,
+        other => panic!("an email-only first run must be refused, got {other:?}"),
+    };
+    assert_eq!(refusal.code, wafer_run::ErrorCode::InvalidArgument);
+    for key in [
+        "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL",
+        "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD",
+        "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_TOKEN",
+    ] {
+        assert!(
+            refusal.message.contains(key),
+            "the refusal names {key}: {}",
+            refusal.message
+        );
+    }
+    assert_eq!(
+        users::count(&ctx).await.expect("count"),
+        0,
+        "nothing is written"
+    );
+}
+
+/// The same email-only configuration on a table that already has an
+/// account is a no-op, like every other configuration there: the email is
+/// spent, and a later settings edit cannot fail a running site's boot.
+#[tokio::test]
+async fn email_only_after_provisioning_is_a_noop() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migrations");
+    seed_user("existing@x.io")
+        .display_name("E")
+        .insert(&ctx)
+        .await;
+
+    bootstrap::run(&ctx, &cfg_email_only("root@x.io"))
+        .await
+        .expect("an email left behind after provisioning is ignored");
+
+    assert!(
+        users::find_by_email(&ctx, "root@x.io")
+            .await
+            .expect("lookup")
+            .is_none(),
+        "no account is created for the email"
+    );
+    assert_eq!(users::count(&ctx).await.expect("count"), 1);
 }
 
 #[tokio::test]

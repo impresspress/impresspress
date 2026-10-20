@@ -127,15 +127,21 @@ On a site's first deploy the Worker does not exist yet, so run that deploy
 first (it creates the Worker; the database gets no accounts from it), then the
 three commands above. Sign in at `/b/auth/login` with that email and password.
 
-Then delete both secrets and deploy again. Both are spent once the account
-exists: nothing reads either value after first boot, and no sign-in grants a
-role from the email:
+Then delete the password secret and deploy again: it is a plaintext copy of
+the admin's password, and nothing reads it after first boot:
 
 ```sh
-npx wrangler secret delete WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL --name impresspress-webmcp-demo
 npx wrangler secret delete WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD --name impresspress-webmcp-demo
 impresspress deploy --target cloudflare --release
 ```
+
+The email secret is spent too, and deleting it is optional tidying: no sign-in
+grants a role from it, so leaving it set opens nothing. If you do, delete it
+the same way (`npx wrangler secret delete
+WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL --name impresspress-webmcp-demo`).
+Do not set the email again without the password on a database with no
+accounts: that first boot refuses to start, because nothing would create the
+admin.
 
 Further admins are granted in the admin UI (`/b/admin`), which records them
 in `impresspress__admin__user_roles`; editing the database by hand is not a

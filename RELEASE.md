@@ -41,6 +41,41 @@ boot with the email and password together, as every documented setup does, or
 redeem a bootstrap token. An existing admin keeps their role: nothing is
 removed by this change.
 
+### Auth: the bootstrap email is first-boot only, and a bootstrapped admin can use OAuth
+
+**What changes.**
+
+- **An email-only first boot is refused.** On a first boot (no accounts yet),
+  `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` set without
+  `..._BOOTSTRAP_ADMIN_PASSWORD` or `..._BOOTSTRAP_ADMIN_TOKEN` now fails the
+  auth block's `Init`, so the server refuses to start and names the missing
+  keys. Before, that boot created nobody, and the email was granted admin at its
+  first sign-in, which no longer happens (entry above). Once any account
+  exists, the bootstrap values are ignored, as before: a later settings edit
+  cannot stop a running site from booting.
+- **The email may be cleared after provisioning.** Nothing reads it after the
+  first boot except the dev sandbox's one-click entry, which falls back to the
+  login page when it is empty.
+- **A bootstrapped admin's address counts as proven.** The admin created at
+  first boot (email + password) or by redeeming a bootstrap token is recorded
+  as proven by the bootstrap (`email_verified_by = "bootstrap"`), in the same
+  write as the account. So it can later sign in with Google or GitHub when the
+  provider asserts that address: the OAuth callback joins the existing admin
+  account instead of refusing it as one that never confirmed its address. A
+  provider that does not assert the address is still refused.
+
+**Who has to act.**
+
+- **Configure an address you own.** The bootstrap trusts the address the
+  operator configured, or the one the token's holder typed. If it is someone
+  else's (a typo, say), that address's owner can sign in to the admin account
+  through any provider that asserts it.
+- **An operator whose first boot set only the email** must also set the
+  password, or a bootstrap token.
+- **Existing bootstrapped admins** stay unproven: there is no data migration.
+  An admin who wants to link a provider proves the address once with a
+  verification link or a password reset (see the OAuth adoption entry below).
+
 ### Browser: an unreadable database stops with its cause instead of starting empty
 
 **What changes.** A browser install whose stored database could not be read
@@ -1185,9 +1220,10 @@ upgrade is always safe, whatever your deployment config says.
 
 **Keys worth checking first**, because they decide who can get in:
 
-- `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` — **every** signup with this
-  address is granted admin, not just the first one (`auth::initial_role_for`),
-  so a stale value here is a standing back door. Clear it once you have your
+- `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` — read only on the first
+  boot, to provision the admin together with the password. No sign-in grants
+  a role from it (see "the bootstrap admin email grants nothing at sign-in"),
+  so a stale value is not a back door; you may clear it once you have your
   admin account.
 - `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` and
   `..._BOOTSTRAP_ADMIN_TOKEN` — plaintext credentials; a cleared one now stays
@@ -1210,15 +1246,27 @@ about: a deployment with no admin user yet, whose stored
 `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` / `..._PASSWORD` are wrong, and
 whose corrected values are in the deployment config. The upgrade boot keeps the
 stored pair, and `auth::bootstrap` creates the first admin from **those** — so
-signing in to fix it needs the credentials you were replacing.
+signing in to fix it needs the credentials you were replacing. They are still
+in the database, in plaintext; read them there and sign in with them, then
+change the password at **Account → Security**:
 
-Release a key without logging in by writing the released marker directly in the
-database (`impresspress__admin__variables`), then restarting:
+```sql
+SELECT key, value FROM impresspress__admin__variables
+ WHERE key IN ('WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL',
+               'WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD');
+```
+
+Releasing the email key does not help here: once the admin exists, the
+bootstrap values are never read again, and no sign-in grants admin from the
+email.
+
+Release any other key without logging in by writing the released marker
+directly in the database (`impresspress__admin__variables`), then restarting:
 
 ```sql
 UPDATE impresspress__admin__variables
    SET updated_by = 'released-to-environment'
- WHERE key = 'WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL';
+ WHERE key = 'WAFER_RUN_SHARED__ENABLE_OAUTH';
 ```
 
 `updated_by` is the whole mechanism, and `released-to-environment` is exactly
@@ -1869,9 +1917,9 @@ operator to run, and no database edit is expected of anybody.
 **A related nuisance, not a vulnerability.** A provider that asserts nothing
 about the address it returns — Microsoft, whose `email` claim is a mutable tenant
 attribute — can still create a local account holding *any* address, including the
-one in `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`. That account is created
-unproven, so it is granted no admin role and cannot be adopted by anyone; what it
-does is occupy the address, and the real owner then meets "an account already uses
+one in `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`. That account is a plain
+user, as every sign-up is, and it is created unproven, so it cannot be adopted by
+anyone; what it does is occupy the address, and the real owner then meets "an account already uses
 this email address" when they try to link their own provider.
 
 Recovery is **reset, then unlink**, and it takes both halves:

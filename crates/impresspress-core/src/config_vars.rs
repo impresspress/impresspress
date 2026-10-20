@@ -952,10 +952,11 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// about who reads these values but about which branch inside
 /// `auth::bootstrap::run` populates `wafer_run__auth__users`, because that
 /// table is the early-return that makes a value spent. `run` is called from
-/// `AuthServiceImpl::init` on EVERY boot, and it has three branches:
+/// `AuthServiceImpl::init` on EVERY boot, and on an empty table it has four
+/// branches:
 ///
 /// 1. email + password → `bootstrap_with_email_password` inserts a `users` row
-///    and a `local_credentials` row. From the next boot on, `run` returns
+///    (with its address proof) and a `local_credentials` row. From the next boot on, `run` returns
 ///    early and never reads the password again: it survives as an argon2 hash,
 ///    and the plaintext row is a spent copy no login consults. Clearable.
 /// 2. token only → `bootstrap_with_token` inserts into `bootstrap_tokens` and
@@ -963,7 +964,8 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 ///    re-runs this branch, re-reads the plaintext token, and mints a fresh 24h
 ///    row from it. The stored value is a LIVE credential that is continuously
 ///    reissued, not a spent copy.
-/// 3. neither → nothing.
+/// 3. email alone → refused: `Init` fails, and nothing is written.
+/// 4. neither → nothing.
 ///
 /// So `BOOTSTRAP_ADMIN_TOKEN` is deliberately NOT here. Exempting it from the
 /// sensitive-empty guard is a lockout: on a deployment provisioned by token
@@ -975,11 +977,15 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// whether it has, and guessing wrong one way is an inconvenience while
 /// guessing wrong the other locks the operator out of their own deployment.
 ///
-/// `BOOTSTRAP_ADMIN_EMAIL` is not here either, for a different reason: it is
-/// not a credential, so it is ordinary config, and not sensitive. No sign-in
-/// reads it — signup, login, refresh and OAuth grant no role from it — but
-/// the dev sandbox's one-click entry (`dev::enter`) still reads it at request
-/// time.
+/// `BOOTSTRAP_ADMIN_EMAIL` is not here either, though it is spent in the same
+/// way as the password: `run` reads it only on that first boot (and refuses
+/// it alone there), and no sign-in reads it — signup, login, refresh and OAuth
+/// grant no role from it. It needs no exemption because it is not a
+/// credential: it is stored unflagged, so the sensitive-empty guard this
+/// predicate exempts from never refuses clearing it. Listing it would change
+/// nothing, and would call an address a credential. The dev sandbox's
+/// one-click entry (`dev::enter`) still reads it at request time, and offers
+/// the login page once it is cleared.
 ///
 /// Exists because `admin::ops::update_variable` refuses to clear a sensitive
 /// value ("would break auth"), and that reasoning does not reach a spent

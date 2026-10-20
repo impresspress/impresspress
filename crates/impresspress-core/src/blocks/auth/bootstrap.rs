@@ -1,32 +1,61 @@
 //! First-run bootstrap for the `wafer-run/auth` block.
 //!
 //! On `Init`, if the `wafer_run__auth__users` table is empty, [`run`] picks
-//! one of three paths based on which bootstrap env vars are set:
+//! one of these paths based on which bootstrap vars are set:
 //!
 //! 1. `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD` — hash the password
-//!    via `wafer-run/crypto` and create an admin user + `local_credentials`.
+//!    via `wafer-run/crypto` and create the admin account, its
+//!    `local_credentials` row and its address proof ([`create_admin`]).
 //! 2. `BOOTSTRAP_ADMIN_TOKEN` — store sha256(token) in `bootstrap_tokens`
-//!    with a 24h expiry. The holder later redeems it by presenting the raw
-//!    token as a `Bearer` header (see `AuthServiceImpl::require_role`).
-//! 3. None set — log and do nothing; leaves the operator to provision via UI
-//!    / CLI.
+//!    with a 24h expiry. The holder later redeems it at
+//!    `POST /b/auth/api/bootstrap` (`auth_ui::api::bootstrap`), which creates
+//!    the admin through [`create_admin`] too.
+//! 3. `BOOTSTRAP_ADMIN_EMAIL` alone — refused: `Init` fails. Nothing would
+//!    create the first admin, and no sign-in grants a role from the email.
+//! 4. Nothing set, or a password without an email — log and do nothing;
+//!    leaves the operator to provision with a token.
 //!
-//! If the `users` table is non-empty, [`run`] is a no-op regardless of env —
-//! bootstrap is a first-run mechanism only, never a "re-seed" trigger.
+//! These are the only two ways an admin is created without an admin: no
+//! signup, login, refresh or OAuth sign-in reads the bootstrap email.
+//!
+//! If the `users` table is non-empty, [`run`] is a no-op regardless of
+//! config — bootstrap is a first-run mechanism only, never a "re-seed"
+//! trigger. So every one of these values is spent once an account exists,
+//! and a later settings edit cannot fail a running site's `Init`.
 
 use wafer_core::clients::crypto;
-use wafer_run::{context::Context, WaferError};
+use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use super::{
-    config::AuthConfig,
-    repo::{bootstrap_tokens, users},
+    config::{
+        AuthConfig, BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY,
+        BOOTSTRAP_ADMIN_TOKEN_KEY,
+    },
+    repo::{bootstrap_tokens, local_credentials, users},
     service::hash_token,
 };
 
+/// Why [`run`] did not complete.
+///
+/// Two variants because `Init` answers them differently: a misconfiguration
+/// is the operator's to fix and is reported in its own words, while a
+/// failed read or write is a backend fault, masked and logged like every
+/// other (`service::backend_error`).
+#[derive(Debug)]
+pub enum RunError {
+    /// The configured values cannot create the first admin. The error is
+    /// `InvalidArgument`, and its message names the keys to set.
+    Misconfigured(WaferError),
+    /// Counting the users or provisioning the admin failed.
+    Failed(WaferError),
+}
+
 /// Run the bootstrap step. Idempotent: returns `Ok(())` without side-effects
 /// when the `users` table is already populated.
-pub async fn run(ctx: &dyn Context, cfg: &AuthConfig) -> Result<(), WaferError> {
-    let user_count = users::count(ctx).await.map_err(bootstrap_failed)?;
+pub async fn run(ctx: &dyn Context, cfg: &AuthConfig) -> Result<(), RunError> {
+    let user_count = users::count(ctx)
+        .await
+        .map_err(|e| RunError::Failed(bootstrap_failed(e)))?;
     if user_count > 0 {
         tracing::debug!("auth: bootstrap skipped, users table already has {user_count} row(s)");
         return Ok(());
@@ -38,12 +67,29 @@ pub async fn run(ctx: &dyn Context, cfg: &AuthConfig) -> Result<(), WaferError> 
         cfg.bootstrap_admin_token.as_deref(),
     ) {
         (Some(email), Some(password), _) => {
-            bootstrap_with_email_password(ctx, email, password).await?;
+            bootstrap_with_email_password(ctx, email, password)
+                .await
+                .map_err(RunError::Failed)?;
             tracing::info!("auth: bootstrapped admin user: {email}");
         }
         (_, _, Some(token)) => {
-            bootstrap_with_token(ctx, token).await?;
+            bootstrap_with_token(ctx, token)
+                .await
+                .map_err(RunError::Failed)?;
             tracing::info!("auth: bootstrap token installed; expires in 24h");
+        }
+        // The operator named an admin and nothing would create it: no
+        // sign-in grants a role from the email. Booting would leave the site
+        // without the admin its operator configured, so `Init` fails and
+        // says what is missing.
+        (Some(_), None, None) => {
+            return Err(RunError::Misconfigured(WaferError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "{BOOTSTRAP_ADMIN_EMAIL_KEY} is set without {BOOTSTRAP_ADMIN_PASSWORD_KEY} \
+                     or {BOOTSTRAP_ADMIN_TOKEN_KEY}; nothing would create the first admin"
+                ),
+            )));
         }
         _ => {
             tracing::info!("auth: no bootstrap admin configured (users table empty)");
@@ -62,9 +108,10 @@ pub(crate) async fn bootstrap_with_email_password(
 }
 
 /// Create the verified admin account `email` whose password hashes to
-/// `password_hash`, the account and its credential in one write. The
-/// redemption route (`auth_ui::api::bootstrap`) hashes first itself, so a
-/// crypto outage is answered before the single-use token is spent.
+/// `password_hash`: the account, its credential and its address proof
+/// (`proof::BOOTSTRAP`) in one write. The redemption route
+/// (`auth_ui::api::bootstrap`) hashes first itself, so a crypto outage is
+/// answered before the single-use token is spent.
 pub(crate) async fn create_admin(
     ctx: &dyn Context,
     email: &str,
@@ -75,15 +122,20 @@ pub(crate) async fn create_admin(
     // the normalized address up) and one signup does not see as taken.
     let email = users::normalize_email(email);
 
-    // The account and its password in one atomic write. As two writes, a
-    // failure between them left an admin with no password — and since `run`
-    // only bootstraps an EMPTY users table, no later boot would repair it.
+    // The account, its password and its proof in one atomic write. As
+    // separate writes, a failure between them left an admin with no password
+    // — and since `run` only bootstraps an EMPTY users table, no later boot
+    // would repair it.
     //
-    // A bootstrapped admin is inherently trusted (the operator set
-    // BOOTSTRAP_ADMIN_PASSWORD), so it is verified on creation; without
-    // that, /b/userportal/security would show them unverified on first
-    // login.
-    users::insert_with_password(
+    // A bootstrapped admin is inherently trusted: the operator chose this
+    // address in config, or the holder of the operator's single-use token
+    // typed it. So it is verified on creation (without that,
+    // /b/userportal/security would show them unverified on first login), and
+    // its address counts as proven, naming the act (`proof::BOOTSTRAP`). The
+    // proof is what lets the admin later sign in with a provider that asserts
+    // this address: the OAuth callback adopts only a proven account. A
+    // provider that does not assert it is still refused there.
+    users::insert_with_ops(
         ctx,
         users::NewUser {
             email,
@@ -93,7 +145,12 @@ pub(crate) async fn create_admin(
             email_verified: true,
             verification_token_hash: None,
         },
-        password_hash,
+        |id| {
+            vec![
+                local_credentials::create_op(id, password_hash, false),
+                users::record_email_proof_op(id, users::proof::BOOTSTRAP),
+            ]
+        },
     )
     .await
     .map_err(bootstrap_failed)?;
@@ -121,7 +178,7 @@ mod tests {
     use crate::{
         blocks::auth::repo::{
             local_credentials,
-            test_faults::{drop_trigger, fail_inserts_into},
+            test_faults::{drop_trigger, fail_inserts_into, fail_updates_of},
         },
         test_support::TestContext,
     };
@@ -152,6 +209,47 @@ mod tests {
             .await
             .expect("lookup")
             .expect("the admin exists");
+        assert!(
+            local_credentials::has_password(&ctx, &admin.id)
+                .await
+                .expect("credentials lookup"),
+            "and it has its password"
+        );
+    }
+
+    /// The address proof is part of the same write: a bootstrapped admin
+    /// without it could never be adopted by an OAuth provider that asserts
+    /// its address, and since `run` bootstraps only an empty users table, no
+    /// later boot would add it. The proof is the batch's last statement, an
+    /// update of the row the first one created, so failing it must undo the
+    /// account and its password too.
+    #[tokio::test]
+    async fn a_failed_proof_write_leaves_the_table_empty_for_the_next_boot() {
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let trigger = fail_updates_of(&ctx, users::TABLE).await;
+
+        bootstrap_with_email_password(&ctx, "admin@example.com", "correct-horse-battery")
+            .await
+            .expect_err("the proof write fails");
+        assert_eq!(
+            users::count(&ctx).await.expect("count users"),
+            0,
+            "no admin row may outlive its failed proof write"
+        );
+
+        drop_trigger(&ctx, &trigger).await;
+        bootstrap_with_email_password(&ctx, "admin@example.com", "correct-horse-battery")
+            .await
+            .expect("the next attempt bootstraps");
+        let admin = users::find_by_email(&ctx, "admin@example.com")
+            .await
+            .expect("lookup")
+            .expect("the admin exists");
+        assert_eq!(
+            admin.email_verified_by.as_deref(),
+            Some(users::proof::BOOTSTRAP),
+            "and its address is proven by the bootstrap"
+        );
         assert!(
             local_credentials::has_password(&ctx, &admin.id)
                 .await

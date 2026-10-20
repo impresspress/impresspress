@@ -113,8 +113,8 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
 
     // 4. Create the admin user through the same write bootstrap-on-init
     //    uses, which keeps the legacy companion columns (`name`, `disabled`,
-    //    `deleted_at`) and the local_credentials row consistent with the
-    //    env-var path. The token is already consumed (step 3), so a failure
+    //    `deleted_at`), the local_credentials row and the address proof
+    //    (`proof::BOOTSTRAP`) consistent with the env-var path. The token is already consumed (step 3), so a failure
     //    here just means the caller needs a fresh token from an operator —
     //    it can't reopen the single-use race.
     if let Err(e) = bootstrap::create_admin(ctx, &email, &password_hash).await {

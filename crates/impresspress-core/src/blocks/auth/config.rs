@@ -30,7 +30,13 @@ use wafer_run::{context::Context, ConfigVar, InputType};
 pub const SESSION_LIFETIME_DAYS_KEY: &str = "WAFER_RUN_SHARED__AUTH__SESSION_LIFETIME_DAYS";
 
 /// `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` — email of the admin user to
-/// create on first startup.
+/// create on first startup, together with [`BOOTSTRAP_ADMIN_PASSWORD_KEY`].
+///
+/// Provisioning reads it once, on the first boot with an empty users table
+/// (`auth::bootstrap::run`); set alone, that boot fails. No sign-in reads it,
+/// so it grants nothing afterwards and may be cleared. The dev sandbox's
+/// one-click entry (`dev::enter`) still reads it to sign in to the seeded
+/// account, and offers the login page when it is cleared.
 pub const BOOTSTRAP_ADMIN_EMAIL_KEY: &str = "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL";
 
 /// `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` — password for the
@@ -122,7 +128,8 @@ pub fn auth_config_vars() -> Vec<ConfigVar> {
         .name("Session Lifetime (days)"),
         ConfigVar::new(
             BOOTSTRAP_ADMIN_EMAIL_KEY,
-            "Email of the admin user created on first startup",
+            "Email of the first admin, created together with the password on first startup \
+             (empty users table). Used only then; you may clear it afterwards.",
             "",
         )
         .name("Bootstrap Admin Email")

@@ -1230,9 +1230,10 @@ pub(super) async fn update_variable(
         // early-returns once the `users` table is non-empty, by which point the
         // password is an argon2 hash in `local_credentials` and the token a
         // sha256 in `bootstrap_tokens`. Clearing it before provisioning is
-        // equally safe: bootstrap then declines to auto-create an admin, which
-        // is a documented path (`"no bootstrap admin configured"`) and
-        // re-settable, not a lockout.
+        // equally safe: bootstrap then creates no admin — it logs `"no
+        // bootstrap admin configured"`, or, with the email still set, fails
+        // `Init` naming the missing password — and the value is re-settable,
+        // so neither is a lockout.
         //
         // NOTE the deliberate difference from the mask: an EMPTY value is a
         // refusal here but means "leave the stored value alone" on the two
@@ -2029,8 +2030,8 @@ mod tests {
     }
 
     /// A bootstrapped deployment must be able to CLEAR the plaintext admin
-    /// credential it no longer needs, and logging in must keep working after
-    /// it does.
+    /// credential it no longer needs, and the email beside it, and logging in
+    /// must keep working after it does.
     ///
     /// Flagging `BOOTSTRAP_ADMIN_PASSWORD` sensitive (it is declared
     /// `InputType::Password`) brought it under the sensitive-empty guard, while
@@ -2111,6 +2112,31 @@ mod tests {
             "the plaintext credential must actually be gone"
         );
 
+        // The email is spent too: provisioning read it once, and no sign-in
+        // reads it. It is not a credential, so no guard stands in the way.
+        expect_ok(
+            update_variable(
+                &ctx.clone().running_as(crate::blocks::admin::ADMIN_BLOCK_ID),
+                &msg,
+                BOOTSTRAP_ADMIN_EMAIL_KEY,
+                VariableUpdate {
+                    value: Some(""),
+                    description: None,
+                    sensitive: None,
+                },
+            )
+            .await,
+        );
+        assert_eq!(
+            variables::get_by_key(&ctx, BOOTSTRAP_ADMIN_EMAIL_KEY)
+                .await
+                .expect("get")
+                .expect("the row survives, emptied")
+                .value,
+            "",
+            "the bootstrap email is cleared"
+        );
+
         // And the bootstrapped admin can still log in.
         let body = serde_json::json!({"email": EMAIL, "password": PASSWORD}).to_string();
         let resp = crate::test_support::output_json(
@@ -2125,7 +2151,7 @@ mod tests {
         assert_eq!(
             resp["user"]["email"],
             serde_json::json!(EMAIL),
-            "clearing the spent provisioning copy must not affect authentication: {resp}"
+            "clearing the spent provisioning values must not affect authentication: {resp}"
         );
     }
 
@@ -2697,8 +2723,9 @@ mod tests {
             !crate::config_vars::is_provisioning_only_key(
                 crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY
             ),
-            "the bootstrap EMAIL is ordinary config (dev one-click entry reads it at \
-             request time), so it is not provisioning-only"
+            "the bootstrap EMAIL is spent after provisioning too, but it is not a \
+             credential: stored unflagged, its clear needs no exemption (see \
+             a_bootstrapped_admin_credential_can_be_cleared_and_login_still_works)"
         );
     }
 

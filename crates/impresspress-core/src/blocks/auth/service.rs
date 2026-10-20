@@ -373,7 +373,14 @@ impl AuthService for AuthServiceImpl {
             .map_err(|e| backend_error(e, "auth init: config"))?;
         super::bootstrap::run(ctx, &cfg)
             .await
-            .map_err(|e| backend_error(e, "auth init: bootstrap admin"))?;
+            .map_err(|e| match e {
+                // The operator's to fix, so in its own words: the boot that
+                // refuses to start says which key is missing.
+                super::bootstrap::RunError::Misconfigured(refusal) => AuthError::Backend(refusal),
+                super::bootstrap::RunError::Failed(e) => {
+                    backend_error(e, "auth init: bootstrap admin")
+                }
+            })?;
         Ok(())
     }
 
@@ -627,6 +634,37 @@ mod tests {
             .init(&*ctx)
             .await
             .expect("second init is idempotent");
+    }
+
+    /// An email-only first boot fails `Init` with the refusal's own words,
+    /// not the masked "Authentication is unavailable" a backend fault gets:
+    /// this is the message the operator reads when the server refuses to
+    /// start, and it has to say which key is missing.
+    #[tokio::test]
+    async fn init_reports_an_email_only_first_boot_in_its_own_words() {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        ctx.set_config(
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
+            "root@example.com",
+        );
+
+        let err = AuthServiceImpl
+            .init(&ctx)
+            .await
+            .expect_err("an email-only first boot must fail Init");
+        let AuthError::Backend(refusal) = err else {
+            panic!("expected the refusal itself, got {err:?}");
+        };
+        assert_eq!(refusal.code, ErrorCode::InvalidArgument);
+        assert!(
+            refusal
+                .message
+                .contains(crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY),
+            "the boot error names the missing key: {}",
+            refusal.message
+        );
     }
 
     #[test]
