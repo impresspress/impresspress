@@ -49,17 +49,20 @@ test.describe('core admin pages', () => {
     await expect(detail).toBeHidden();
   });
 
-  test('the network group heading collapses its routes', async ({ page }) => {
+  test('the network group heading folds its routes', async ({ page }) => {
     await loginAsAdmin(page);
     await page.request.get('/b/admin/network/detail/inbound?method=GET&path=/e2e-group');
     await page.goto('/b/admin/settings/network', { waitUntil: 'networkidle' });
-    const group = page.locator('.network-group').first();
-    const head = group.locator('button[data-action="network-group-toggle"]');
-    const body = page.locator(`#${await head.getAttribute('aria-controls')}`);
+    const group = page.locator('[data-fold="route"]').first();
+    const fold = group.locator('details.group-fold');
+    const body = group.locator('.network-routes');
+    await expect(fold).toHaveAttribute('open', '');
     await expect(body).toBeVisible();
-    await head.click();
-    await expect(head).toHaveAttribute('aria-expanded', 'false');
+    await group.locator('summary.group-fold__summary').click();
+    await expect(fold).not.toHaveAttribute('open', '');
     await expect(body).toBeHidden();
+    // The fold's head still says what it holds.
+    await expect(group.locator('.group-fold__stats')).toContainText('request');
   });
 
   test('the variables search finds a key in any group and restores the groups when cleared', async ({
@@ -68,26 +71,29 @@ test.describe('core admin pages', () => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/settings/variables', { waitUntil: 'networkidle' });
 
-    const groups = page.locator('[data-var-group]');
+    // Each group is a card (`data-fold`) holding its `<details>`; the filter
+    // hides the card, frame and all, and opens or closes the fold.
+    const groups = page.locator('[data-fold="variable"]');
     expect(await groups.count()).toBeGreaterThan(1);
-    const shared = groups.first();
+    const shared = groups.first().locator('details');
     await expect(shared).toHaveAttribute('open', '');
-    const closedBefore = await page.locator('[data-var-group]:not([open])').count();
+    const closed = page.locator('[data-fold="variable"] > .card__body > details:not([open])');
+    const closedBefore = await closed.count();
     expect(closedBefore, 'per-block groups start closed').toBeGreaterThan(0);
 
     const search = page.getByRole('searchbox', { name: 'Search variables by key, name or description' });
     await search.fill('APP_NAME');
     await expect(page.getByRole('button', { name: 'Edit WAFER_RUN_SHARED__APP_NAME' })).toBeVisible();
-    await expect(page.locator('[data-var-group]:not([hidden])')).toHaveCount(1);
+    await expect(page.locator('[data-fold="variable"]:not([hidden])')).toHaveCount(1);
     await expect(page.locator('#var-filter-empty')).toBeHidden();
 
     await search.fill('zzz-no-such-variable');
     await expect(page.locator('#var-filter-empty')).toBeVisible();
-    await expect(page.locator('[data-var-group]:not([hidden])')).toHaveCount(0);
+    await expect(page.locator('[data-fold="variable"]:not([hidden])')).toHaveCount(0);
 
     await search.fill('');
-    await expect(page.locator('[data-var-group]:not([hidden])')).toHaveCount(await groups.count());
-    await expect(page.locator('[data-var-group]:not([open])')).toHaveCount(closedBefore);
+    await expect(page.locator('[data-fold="variable"]:not([hidden])')).toHaveCount(await groups.count());
+    await expect(closed).toHaveCount(closedBefore);
     await expect(page.locator('#var-filter-empty')).toBeHidden();
   });
 
@@ -120,6 +126,57 @@ test.describe('core admin pages', () => {
     // The page was redrawn under the search box, which kept its query.
     await expect(page.getByRole('searchbox', { name: 'Search variables by key, name or description' })).toHaveValue(key);
     await expect(page.locator('#var-filter-empty')).toBeVisible();
+  });
+
+  /**
+   * The grant tables narrow by their own width (table.css `.grant-table`):
+   * from 721 to about 1150px, beside the settings rail, a card is too
+   * narrow for five or six columns, and the table used to scroll sideways
+   * with the custom grant's Delete out of view. Seeds one custom grant
+   * through the modal and deletes it again.
+   */
+  test('every grant table fits its card with Delete in view from 721 to 1100px', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.setViewportSize({ width: 1024, height: 900 });
+    const description = `E2E widths ${Date.now()}: a description long enough to wrap`;
+    await page.goto('/b/admin/settings/permissions?subtab=database', { waitUntil: 'networkidle' });
+    await page.locator('[data-action="modal-open"][data-modal-target="add-grant-modal"]').click();
+    const dialog = page.locator('dialog#add-grant-modal');
+    await dialog.locator('#grantee').selectOption('impresspress/files');
+    await dialog.locator('#grant_owner').selectOption('impresspress/admin');
+    await dialog.locator('#resource_type').selectOption('db');
+    await dialog.locator('#description').fill(description);
+    await dialog.getByRole('button', { name: 'Add grant' }).click();
+    const row = page.locator('tr', { hasText: description });
+    await expect(row).toHaveCount(1);
+
+    try {
+      for (const width of [721, 1024, 1100]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const path of ['/b/admin/settings/permissions?subtab=database', '/b/admin/settings/permissions']) {
+          await page.goto(path, { waitUntil: 'networkidle' });
+          const tables = await page.locator('.card .data-table').evaluateAll((all) =>
+            all.map((scroller) => {
+              const box = scroller.getBoundingClientRect();
+              return {
+                fits: scroller.querySelector('table')!.getBoundingClientRect().width <= (scroller as HTMLElement).clientWidth + 0.5,
+                deleteInView: [...scroller.querySelectorAll('button[aria-label^="Delete grant"]')].every(
+                  (b) => b.getBoundingClientRect().right <= box.right + 0.5,
+                ),
+              };
+            }),
+          );
+          expect(tables.length, `${path} at ${width}`).toBeGreaterThan(0);
+          expect(tables.filter((t) => !t.fits || !t.deleteInView), `${path} at ${width}`).toEqual([]);
+        }
+      }
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto('/b/admin/settings/permissions?subtab=database', { waitUntil: 'networkidle' });
+      page.once('dialog', (d) => void d.accept());
+      await row.locator('button[aria-label^="Delete grant"]').click();
+      await expect(row).toHaveCount(0);
+    }
   });
 
   test('the logs page filters server and client errors through two pressed toggles', async ({

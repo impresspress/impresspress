@@ -26,6 +26,9 @@ const ADMIN_ROUTES = [
   // admin-network has a test of its own below: it seeds the rows it shows.
   { path: '/b/admin/variables', name: 'admin-variables' },
   { path: '/b/admin/permissions', name: 'admin-permissions' },
+  // The Database & config subtab: the Custom grants card with its head
+  // action (empty on this server) and the code-declared grants.
+  { path: '/b/admin/settings/permissions?subtab=database', name: 'admin-permissions-database' },
   { path: '/b/userportal/', name: 'portal-dashboard' },
   { path: '/b/auth/orgs', name: 'portal-orgs' },
   { path: '/b/userportal/profile', name: 'portal-profile' },
@@ -249,17 +252,35 @@ test.describe('visual baseline — admin', () => {
   // requesting it a known number of times: one row, a known count, no errors.
   // The request log is written before the response on the native server
   // (`pipeline.rs`), so the rows exist once the requests return.
-  test('admin admin-network', async ({ page }) => {
+  //
+  // The phone capture is taken in the same test, in a touch context of its
+  // own, so both see the same three requests: a second test probing the same
+  // path would make the count depend on which ran first.
+  test('admin admin-network', async ({ page, browser }) => {
     const probe = '/b/admin/network/detail/inbound';
     for (let i = 0; i < 3; i++) {
       const res = await page.request.get(`${probe}?method=GET&path=/visual-baseline`);
       expect(res.status(), `probe request ${i + 1}`).toBe(200);
     }
-    await page.goto(`/b/admin/settings/network?search=${encodeURIComponent(probe)}`, {
-      waitUntil: 'networkidle',
-    });
+    const searched = `/b/admin/settings/network?search=${encodeURIComponent(probe)}`;
+    await page.goto(searched, { waitUntil: 'networkidle' });
     await expect(page.locator('tr.network-row')).toHaveCount(1);
     await expectPageScreenshot(page, 'admin-admin-network.png', volatileMasks(page));
+
+    const phone = await browser.newContext({
+      storageState: ADMIN_STATE_PATH,
+      viewport: MOBILE_VIEWPORT,
+      ...MOBILE_DEVICE,
+    });
+    try {
+      const phonePage = await phone.newPage();
+      await phonePage.goto(searched, { waitUntil: 'networkidle' });
+      await expect(phonePage.locator('tr.network-row')).toHaveCount(1);
+      expect(await targetFloor(phonePage)).toBe(44);
+      await expectPageScreenshot(phonePage, 'admin-admin-network-mobile.png', volatileMasks(phonePage));
+    } finally {
+      await phone.close();
+    }
   });
 });
 
@@ -289,6 +310,10 @@ const MOBILE_ADMIN_ROUTES = [
   { path: '/b/admin/database', name: 'admin-database' },
   { path: '/b/admin/email', name: 'admin-email' },
   { path: '/b/admin/variables', name: 'admin-variables' },
+  // The settings tabs. admin-network's phone capture is
+  // taken beside its desktop one (above): it seeds the rows it shows.
+  { path: '/b/admin/permissions', name: 'admin-permissions' },
+  { path: '/b/admin/settings/permissions?subtab=database', name: 'admin-permissions-database' },
   // Portal pages — primary mobile audience.
   { path: '/b/userportal/', name: 'portal-dashboard' },
   { path: '/b/auth/orgs', name: 'portal-orgs' },

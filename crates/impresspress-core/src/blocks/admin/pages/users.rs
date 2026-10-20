@@ -771,7 +771,7 @@ mod tests {
         assert!(
             other.contains(concat!(
                 r#"<span class="user-identity"><span class="avatar avatar--md" aria-hidden="true">U</span>"#,
-                r#"<span>u-1<wbr>@example<wbr>.com</span></span>"#,
+                r#"<span>u-1<wbr>@example.com</span></span>"#,
             )),
             "{other}"
         );
@@ -940,7 +940,7 @@ mod tests {
             let row = row(prefix);
             assert!(row.contains(badge), "{prefix} must render {badge}: {row}");
             assert!(
-                row.contains("u-1<wbr>@example<wbr>.com"),
+                row.contains("u-1<wbr>@example.com"),
                 "{prefix}: the owner reads as their email, not an id prefix: {row}"
             );
             assert_eq!(

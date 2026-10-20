@@ -797,10 +797,7 @@ mod tests {
         }];
         let html = render_admin_shares_table(&rows).into_string();
         assert!(html.contains("tok12345abc1"));
-        assert!(
-            html.contains("photos/<wbr>a<wbr>.png"),
-            "file missing: {html}"
-        );
+        assert!(html.contains("photos/<wbr>a.png"), "file missing: {html}");
         // access_count and max rendered together as "4 / 10"
         assert!(
             html.contains("4 / 10"),

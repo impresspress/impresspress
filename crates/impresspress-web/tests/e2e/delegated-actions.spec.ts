@@ -53,7 +53,7 @@ test.describe('delegated actions', () => {
     // Every deployment has the auth block's users table, and its full name
     // matches nothing else.
     const users = page.locator('[data-db-table="wafer_run__auth__users"]');
-    const filter = page.locator('#db-filter');
+    const filter = page.getByRole('searchbox', { name: 'Filter tables' });
 
     await filter.fill('wafer_run__auth__users');
     await expect(users).toBeVisible();

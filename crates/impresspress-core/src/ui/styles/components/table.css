@@ -174,7 +174,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
   align-items: start;
 }
 .db-layout > .card { margin-bottom: 0; }
-.db-tables__filter { margin-bottom: var(--space-3); }
+.db-tables > .search-input { margin-bottom: var(--space-3); }
 /* A count beside a name: the whole list's, a group's. */
 .db-count {
   font-size: var(--text-sm);
@@ -342,22 +342,10 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.data-table:not(.data-table--scroll) .data-table__row-href a { margin: -0.5rem -0.5rem -0.5rem 0; }
 }
 /* ── Network (Settings › Network, blocks/admin/pages/network.rs) ───── */
-.network-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+/* The sort and the error filter take the toolbar's second row, under the
+   search and Refresh. */
+.network-controls { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
 .network-summary { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.network-group { margin-top: var(--space-4); }
-.network-group__head { margin: 0; font-size: var(--text-base); }
-/* The group's collapse control: the heading's whole text, held to the
-   target floor. */
-.network-group__toggle {
-	display: inline-flex; align-items: center; gap: var(--space-2);
-	min-height: var(--target-min); padding: var(--space-1) var(--space-2) var(--space-1) 0;
-	background: none; border: none; border-radius: var(--radius-md);
-	font: inherit; font-weight: 600; color: var(--text-primary); cursor: pointer;
-}
-.network-group__name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.network-group__chevron { display: inline-flex; line-height: 0; transition: transform 150ms ease-out; }
-.network-group__toggle[aria-expanded="false"] .network-group__chevron { transform: rotate(-90deg); }
-.network-group__totals { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .network-row__toggle svg { transition: transform 150ms ease-out; }
 .network-row__toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
 .network-route__method { font-weight: 600; letter-spacing: 0.02em; }
@@ -366,17 +354,63 @@ a.pagination__link:hover { background: var(--bg-hover); }
 /* Card mode lays every row out as a grid, which would override `hidden`. */
 .data-table tr.network-detail-row[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) {
-	.network-group__chevron, .network-row__toggle svg { transition: none; }
+	.network-row__toggle svg { transition: none; }
 }
-/* Below 720px a route is a two-line card: the route, then one line of its
-   counts (`.network-route__meta`), which stands in for the separate cells
-   hidden here. */
-@media (max-width: 720px) {
+/* Seven columns need about 46rem: some 35rem of narrow columns and 11rem
+   for the route, which is what a group's table has beside the settings
+   rail at 1280px. The table follows its own width, not the viewport's, so where it
+   is narrower the route keeps its room instead of being squeezed to a word
+   per line:
+   - below 46rem it drops the two per-run columns, the average duration and
+     the last-seen time (the group's head and the route's detail say when);
+   - below 32rem (a phone, a tablet, a desktop window below about 1100px
+     with the rail beside) a route is two lines: the route, then one line of its
+     counts (`.network-route__meta`), which stands in for the count cells
+     hidden here. */
+.network-routes { container: network-routes / inline-size; }
+@container network-routes (max-width: 46rem) {
+	.network-routes > .data-table > table > thead > tr > th:nth-child(n+6),
+	.network-routes > .data-table > table > tbody > tr.network-row > td:nth-child(n+6) { display: none; }
+}
+@container network-routes (max-width: 32rem) {
+	.network-routes > .data-table > table > thead > tr > th:nth-child(n+3),
 	.network-row td:not(.data-table__cell--primary):not(.data-table__cell--actions) { display: none; }
 	.network-route__meta {
 		display: block; margin-top: var(--space-1);
 		font-weight: 400; color: var(--text-secondary);
 		font-variant-numeric: tabular-nums;
+	}
+}
+
+/* ── Permissions grant tables (Settings › Permissions,
+   blocks/admin/pages/permissions.rs) ────────────────────────────────
+   Five or six columns need about 40rem; beside the settings rail a card
+   has less from 721 to about 1150px, and the table scrolled sideways with
+   Custom grants' Delete out of view. So, by the table's own width: below
+   40rem a row keeps its grantee, its access and its controls, and the
+   other columns (the owner, the type, the resource pattern, the
+   description) are one line under the grantee (`.grant-table__meta`).
+   The headers of the hidden columns go with them: the custom table's
+   Description is an optional column, so it is the 5th header only when
+   it is not the last. */
+.grant-table { container: grant-table / inline-size; }
+.grant-table__meta { display: none; }
+@container grant-table (max-width: 40rem) {
+	.grant-table td:is([data-label="Block (owner)"], [data-label="Type"], [data-label="Resource pattern"], [data-label="Description"]) { display: none; }
+	.grant-table--code > .data-table > table > thead > tr > th:is(:nth-child(1), :nth-child(3), :nth-child(4)),
+	.grant-table--custom > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(5):not(:last-child)) { display: none; }
+	.grant-table__meta {
+		display: block; margin-top: var(--space-1);
+		font-weight: 400; color: var(--text-secondary);
+	}
+}
+/* With the owner column hidden, the code table's grantee is its first
+   visible column, so it takes the flush card's inset (card.css) that the
+   first column has on a wide screen. */
+@media (min-width: 721px) {
+	@container grant-table (max-width: 40rem) {
+		.card--flush .grant-table--code > .data-table > table > thead > tr > th:nth-child(2),
+		.card--flush .grant-table--code td.data-table__cell--primary { padding-left: var(--card-pad); }
 	}
 }
 
