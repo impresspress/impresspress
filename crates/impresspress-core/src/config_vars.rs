@@ -975,10 +975,11 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// whether it has, and guessing wrong one way is an inconvenience while
 /// guessing wrong the other locks the operator out of their own deployment.
 ///
-/// `BOOTSTRAP_ADMIN_EMAIL` is not here either, for a different reason: it stays
-/// live after provisioning — `auth::helpers::TokenGrant::resolve` and
-/// `initial_role_for` read it on every signup and token mint to decide who is
-/// admin — so it is ordinary config, and not sensitive.
+/// `BOOTSTRAP_ADMIN_EMAIL` is not here either, for a different reason: it is
+/// not a credential, so it is ordinary config, and not sensitive. No sign-in
+/// reads it — signup, login, refresh and OAuth grant no role from it — but
+/// the dev sandbox's one-click entry (`dev::enter`) still reads it at request
+/// time.
 ///
 /// Exists because `admin::ops::update_variable` refuses to clear a sensitive
 /// value ("would break auth"), and that reasoning does not reach a spent

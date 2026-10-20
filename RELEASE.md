@@ -19,6 +19,28 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: the bootstrap admin email grants nothing at sign-in
+
+**What changes.** `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` no longer
+makes anyone an admin when they sign in. Before, an account with that address
+was created as `admin` by password signup and by OAuth signup, and was granted
+`admin` again at every password login, token refresh and OAuth sign-in. With
+email verification off, whoever registered an unclaimed bootstrap address
+first was admin. An IAM removal of that admin was undone at their next
+sign-in.
+
+Now every signup creates a `user`, and login, refresh and OAuth sign-in only
+read the roles already stored. The first admin comes only from first-boot
+provisioning (email + password on an empty users table) or from redeeming the
+bootstrap token. Every later admin comes from an admin's IAM assign, and an
+IAM removal stays removed.
+
+**Who has to act.** An operator who set the email, and then signed up with it
+to become admin, now gets a `user` account. Provision the first admin at first
+boot with the email and password together, as every documented setup does, or
+redeem a bootstrap token. An existing admin keeps their role: nothing is
+removed by this change.
+
 ### Browser: an unreadable database stops with its cause instead of starting empty
 
 **What changes.** A browser install whose stored database could not be read

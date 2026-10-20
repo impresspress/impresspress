@@ -98,11 +98,12 @@ pub struct NewUser {
     pub display_name: String,
     pub avatar_url: Option<String>,
     /// The account's initial role, written to the inline `users.role`
-    /// column. This — not a `user_roles` row — is what makes a
-    /// bootstrap-admin signup an admin: `helpers::get_user_roles` reads the
-    /// inline column first and merges the grant rows onto it, so a
-    /// `user_roles` row means "granted beyond the initial role" (spec
-    /// 2.2.3). Neither signup path writes one.
+    /// column: `"admin"` for a bootstrapped admin (Init provisioning or
+    /// token redemption), `"user"` for every signup, password or OAuth. This
+    /// — not a `user_roles` row — is what makes a bootstrapped admin an
+    /// admin: `helpers::get_user_roles` reads the inline column first and
+    /// merges the grant rows onto it, so a `user_roles` row means "granted
+    /// beyond the initial role" (spec 2.2.3). Neither path writes one.
     pub role: String,
     /// Whether the address is already verified. `true` for a bootstrapped
     /// admin (the operator who set the password) and for a signup on a

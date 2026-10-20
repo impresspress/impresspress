@@ -160,7 +160,8 @@ pub enum SignupResponse {
         token_type: TokenType,
         /// Access token lifetime in seconds
         expires_in: u64,
-        /// Role-aware post-login redirect path
+        /// Post-login redirect path: always the user portal, since a new
+        /// account is a `user`
         default_redirect: String,
         user: AuthenticatedUser,
     },

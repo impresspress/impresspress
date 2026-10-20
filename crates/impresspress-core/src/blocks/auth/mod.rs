@@ -876,7 +876,7 @@ mod auth_version_cache_tests {
 pub(crate) mod helpers {
     use super::*;
     use crate::{
-        blocks::auth::config::{ALLOWED_EMAIL_DOMAINS_KEY, BOOTSTRAP_ADMIN_EMAIL_KEY},
+        blocks::auth::config::ALLOWED_EMAIL_DOMAINS_KEY,
         config_vars::{ALLOW_SIGNUP_KEY, ENVIRONMENT_KEY},
     };
 
@@ -929,28 +929,6 @@ pub(crate) mod helpers {
         roles
     }
 
-    /// Where [`TokenGrant::resolve`] takes the token's roles from.
-    #[derive(Clone, Copy)]
-    pub(crate) enum RoleSource<'a> {
-        /// The account's stored roles, as they are.
-        Stored,
-        /// The stored roles, first granting `admin` when `email` matches the
-        /// configured `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` and the
-        /// account does not hold it yet.
-        ///
-        /// This closes a real footgun: roles are normally only assigned at
-        /// signup, so changing the configured admin email after a user
-        /// already exists never elevates them. With this, every sign-in
-        /// re-checks the rule and grants admin once when appropriate.
-        ///
-        /// Intentionally **upgrade-only**: never removes a role, never
-        /// demotes. Unsetting the admin email does not revoke admin from
-        /// anyone — that has to be done explicitly via the admin UI / DB.
-        /// Removing roles silently on sign-in would be an availability
-        /// foot-gun (one typo in env locks everyone out).
-        CheckBootstrapAdmin { email: &'a str },
-    }
-
     /// What an access token asserts about its account: the roles it carries
     /// and the `auth_version` it was minted at (P2c). The only input
     /// [`generate_tokens`] accepts for either claim.
@@ -975,44 +953,21 @@ pub(crate) mod helpers {
         /// after it.
         ///
         /// Propagates the read's own [`WaferError`] (SB-3): a WRAP denial or
-        /// DB error must not be mistaken for "user has no roles" — nor, with
-        /// [`RoleSource::CheckBootstrapAdmin`], for "no admin grant yet",
-        /// which would drive a grant attempt into `user_roles::TABLE`.
+        /// DB error must not be mistaken for "user has no roles".
+        ///
+        /// The roles are the stored ones, as they are. No sign-in grants a
+        /// role: the first admin comes from Init provisioning or bootstrap-token
+        /// redemption, and every later grant from an admin's IAM assign.
         pub(crate) async fn resolve(
             ctx: &dyn wafer_run::context::Context,
             user: &repo::users::UserRow,
-            source: RoleSource<'_>,
         ) -> Result<Self, WaferError> {
-            let bootstrap_email = match source {
-                RoleSource::Stored => None,
-                RoleSource::CheckBootstrapAdmin { email } => Some(email),
-            };
-            // Read the bootstrap-admin email before the grants: the common
-            // case in production is "unset", and then there is no grant to
-            // attempt.
-            let admin_email = match bootstrap_email {
-                Some(_) => config_client::get_default(ctx, BOOTSTRAP_ADMIN_EMAIL_KEY, "").await?,
-                None => String::new(),
-            };
-
             let grants = user_roles::list_for_user(ctx, &user.id)
                 .await
                 .map_err(|e| repo::db_failed("token roles: roles table lookup", e))?;
-            let mut roles = merge_roles(Some(user.role.clone()), grants);
-
-            if let Some(email) = bootstrap_email {
-                if !admin_email.is_empty()
-                    && email.eq_ignore_ascii_case(&admin_email)
-                    && !roles.iter().any(|r| r == "admin")
-                    && grant_bootstrap_admin(ctx, &user.id, email).await
-                {
-                    roles.push("admin".to_string());
-                }
-            }
-
             Ok(Self {
                 auth_version: user.auth_version,
-                roles,
+                roles: merge_roles(Some(user.role.clone()), grants),
             })
         }
 
@@ -1024,37 +979,6 @@ pub(crate) mod helpers {
         /// The roles the token carries, for a response that echoes them.
         pub(crate) fn into_roles(self) -> Vec<String> {
             self.roles
-        }
-    }
-
-    /// Grant `admin` to the bootstrap admin, through the table's single
-    /// writer, with no admin behind the grant. A concurrent sign-in of the
-    /// same account can win the insert first; `assign` then answers
-    /// `AlreadyAssigned`, and the user holds admin all the same. `true` when
-    /// the user holds it afterwards. A failed grant is logged, not raised:
-    /// the sign-in goes ahead without `admin`, and the next one tries again.
-    async fn grant_bootstrap_admin(
-        ctx: &dyn wafer_run::context::Context,
-        user_id: &str,
-        email: &str,
-    ) -> bool {
-        match user_roles::assign(ctx, user_id, "admin", "").await {
-            Ok(user_roles::Assigned::Created(_)) => {
-                tracing::info!(
-                    user_id = %user_id,
-                    email = %email,
-                    "granted admin role on login (email matches ADMIN_EMAIL)"
-                );
-                true
-            }
-            Ok(user_roles::Assigned::AlreadyAssigned) => true,
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %user_id,
-                    "failed to grant admin role on login: {e}"
-                );
-                false
-            }
         }
     }
 
@@ -1086,25 +1010,6 @@ pub(crate) mod helpers {
         }
         let domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
         Ok(allowed.split(',').any(|d| d.trim() == domain))
-    }
-
-    /// The role a newly registered user should receive: `"admin"` when `email`
-    /// matches the configured `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`,
-    /// otherwise `"user"`. Shared by the JSON signup and OAuth-callback create
-    /// paths so the bootstrap-admin rule can't drift between them.
-    pub(crate) async fn initial_role_for(
-        ctx: &dyn wafer_run::context::Context,
-        email: &str,
-    ) -> Result<&'static str, WaferError> {
-        use super::config::BOOTSTRAP_ADMIN_EMAIL_KEY;
-        let admin_email = config_client::get_default(ctx, BOOTSTRAP_ADMIN_EMAIL_KEY, "").await?;
-        Ok(
-            if !admin_email.is_empty() && email.eq_ignore_ascii_case(&admin_email) {
-                "admin"
-            } else {
-                "user"
-            },
-        )
     }
 
     /// Resolve the configured access-token lifetime (SEC-042). Reads
@@ -1802,7 +1707,7 @@ pub(crate) mod helpers {
                 .await
                 .expect("read the user row")
                 .expect("the user exists");
-            TokenGrant::resolve(ctx, &user, RoleSource::Stored)
+            TokenGrant::resolve(ctx, &user)
                 .await
                 .expect("resolve the token grant")
         }
@@ -2270,21 +2175,20 @@ mod api_key_lifecycle_tests {
 // SB-3: `get_user_roles` used to swallow both DB reads with `if let
 // Ok(...)`, so a WRAP-grant regression or transient DB error yielded an
 // empty/partial roles list indistinguishable from "user genuinely has no
-// roles" — silently 403ing every admin (`require_role`), re-inserting a
-// duplicate admin row on every login (the bootstrap-admin check now in
-// `TokenGrant::resolve`), and stamping
+// roles" — silently 403ing every admin (`require_role`), minting tokens
+// that dropped a granted role (`TokenGrant::resolve`), and stamping
 // empty roles on API keys (`authenticate_api_key`). These tests pin the
 // fix: a denied/failed roles read is now an `Err`, not an empty `Vec`.
 #[cfg(test)]
 mod get_user_roles_error_surfacing_tests {
-    use super::helpers::{get_user_roles, RoleSource, TokenGrant};
+    use super::helpers::{get_user_roles, TokenGrant};
     use crate::test_support::{seed_user, TestContext};
 
     #[tokio::test]
     async fn denied_roles_table_read_is_an_error_not_empty_roles() {
         // `impresspress__admin__user_roles` is admin-owned. In production,
         // admin's own block-level grant
-        // (`ResourceGrant::read_write(AUTH_BLOCK_ID, user_roles::TABLE)` in
+        // (`ResourceGrant::read(AUTH_BLOCK_ID, user_roles::TABLE)` in
         // `blocks/admin/mod.rs`) makes the auth block's read succeed; a block
         // the deployment grants nothing stands in for that grant regressing.
         let ctx = TestContext::with_auth().await.running_as("test/ungranted");
@@ -2297,30 +2201,19 @@ mod get_user_roles_error_surfacing_tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_admin_check_propagates_denied_roles_read_instead_of_inserting() {
-        // If the roles-table read fails, the bootstrap-admin check must not
-        // silently treat that as "no admin row yet" and insert a duplicate
-        // — it must propagate the error and skip the insert entirely.
-        let mut ctx = TestContext::with_auth().await;
-        ctx.set_config(
-            super::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
-            "admin@example.com",
-        );
-        let user = seed_user("admin@example.com").insert(&ctx.fixture()).await;
+    async fn token_grant_propagates_denied_roles_read_instead_of_dropping_grants() {
+        // A mint whose grants read fails must not issue a token with only the
+        // inline role: that would silently strip every granted role.
+        let ctx = TestContext::with_auth().await;
+        let user = seed_user("someone@example.com")
+            .insert(&ctx.fixture())
+            .await;
         let ctx = ctx.running_as("test/ungranted");
 
-        let res = TokenGrant::resolve(
-            &ctx,
-            &user,
-            RoleSource::CheckBootstrapAdmin {
-                email: "admin@example.com",
-            },
-        )
-        .await;
+        let res = TokenGrant::resolve(&ctx, &user).await;
         assert!(
             res.is_err(),
-            "the bootstrap-admin check must propagate a denied roles read instead \
-             of proceeding to (possibly duplicate-)insert the admin grant"
+            "a denied roles read must be an Err, not a token without its grants"
         );
     }
 }

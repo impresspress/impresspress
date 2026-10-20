@@ -843,7 +843,7 @@
                             "type": "string"
                           },
                           "roles": {
-                            "description": "Roles granted to this user. Admins manage grants through\n`/b/admin/api/iam/user-roles`, but not every grant is made there: the\nconfigured bootstrap admin is granted `admin` when they sign in.",
+                            "description": "Roles granted to this user. Admins manage grants through\n`/b/admin/api/iam/user-roles`; no sign-in grants a role.",
                             "items": {
                               "type": "string"
                             },

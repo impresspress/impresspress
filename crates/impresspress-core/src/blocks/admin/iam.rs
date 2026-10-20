@@ -1587,8 +1587,7 @@ mod tests {
     /// read see no grant. The rendezvous holds both on that read (a
     /// `database.list` of the grants table; the handler's role-definition
     /// lookup is on another table and passes through) until each has made
-    /// it — the interleaving two concurrent bootstrap-admin logins produce
-    /// through `TokenGrant::resolve`, and two admins clicking "assign" at once
+    /// it — the interleaving two admins clicking "assign" at once produce
     /// through this handler. Without the unique index both inserts land, and
     /// `handle_remove_role` then deletes one of them, answers
     /// `{"deleted": true}`, and the twin keeps the role live.
@@ -2230,5 +2229,112 @@ mod tests {
             "a 404, not a success"
         );
         assert_eq!(audit_rows(&ctx, "permission.delete").await.len(), 0);
+    }
+
+    /// The roles claim of the access token `session` holds.
+    async fn token_roles(ctx: &TestContext, session: &crate::test_support::Session) -> Vec<String> {
+        // Tokens are signed under the minting block's key: verify as it.
+        let auth_ui = ctx
+            .clone()
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let claims = wafer_core::clients::crypto::verify(&auth_ui, &session.access_token)
+            .await
+            .expect("the minted token's signature verifies");
+        claims
+            .get("roles")
+            .and_then(|r| r.as_array())
+            .expect("the token carries a roles claim")
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// An IAM removal of admin sticks, even for the address configured as
+    /// the bootstrap admin email. Admin X is provisioned the way Init does;
+    /// X grants Y `admin` through the assign route, the only source of a
+    /// second admin, then removes it through the remove route. Y's next
+    /// sign-in carries no `admin` and writes no grant: no sign-in re-grants
+    /// it from the configured email.
+    #[tokio::test]
+    async fn an_iam_removal_of_the_bootstrap_email_admin_sticks() {
+        use crate::test_support::anon_msg;
+
+        const X_EMAIL: &str = "first-admin@example.com";
+        const Y_EMAIL: &str = "second-admin@example.com";
+        const PASSWORD: &str = "correct-horse-battery";
+
+        let mut ctx = TestContext::with_auth()
+            .await
+            .with_admin_added()
+            .await
+            .with_sign_in_added();
+        ctx.register_block(
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            Arc::new(crate::blocks::admin::AdminBlock::new()),
+        );
+        ctx.set_config(
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
+            Y_EMAIL,
+        );
+        seed_defaults(&ctx.fixture()).await;
+        crate::blocks::auth::bootstrap::bootstrap_with_email_password(
+            &ctx.fixture(),
+            X_EMAIL,
+            PASSWORD,
+        )
+        .await
+        .expect("provision the first admin");
+        let y_id = ctx.seed_account(Y_EMAIL, PASSWORD, "user").await;
+        let x = ctx.sign_in(X_EMAIL, PASSWORD).await;
+
+        // X grants Y admin through the assign route.
+        let assigned = ctx
+            .request_json(
+                x.bearer(anon_msg("create", "/b/admin/api/iam/user-roles")),
+                &serde_json::json!({ "user_id": y_id, "role": "admin" }),
+            )
+            .await;
+        let assigned = wafer_block::http_codec::collect_http_response(assigned).await;
+        let assigned_body: serde_json::Value =
+            serde_json::from_slice(&assigned.body).unwrap_or_default();
+        assert_eq!(assigned.status, 200, "assign: {assigned_body}");
+        let grant_id = assigned_body["id"]
+            .as_str()
+            .expect("the assign response names the grant")
+            .to_string();
+        let promoted = ctx.sign_in(Y_EMAIL, PASSWORD).await;
+        assert!(
+            token_roles(&ctx, &promoted)
+                .await
+                .iter()
+                .any(|r| r == "admin"),
+            "precondition: the IAM grant made Y an admin"
+        );
+
+        // X removes it through the remove route.
+        let removed = ctx
+            .request(x.bearer(anon_msg(
+                "delete",
+                &format!("/b/admin/api/iam/user-roles/{grant_id}"),
+            )))
+            .await;
+        let removed = wafer_block::http_codec::collect_http_response(removed).await;
+        assert_eq!(
+            removed.status,
+            200,
+            "remove: {}",
+            String::from_utf8_lossy(&removed.body)
+        );
+
+        // Y signs in again: the configured email re-grants nothing.
+        let demoted = ctx.sign_in(Y_EMAIL, PASSWORD).await;
+        assert_eq!(token_roles(&ctx, &demoted).await, vec!["user".to_string()]);
+        assert!(
+            user_roles::list_for_user(&ctx.fixture(), &y_id)
+                .await
+                .expect("list Y's grants")
+                .is_empty(),
+            "a sign-in must not write the removed grant back"
+        );
     }
 }

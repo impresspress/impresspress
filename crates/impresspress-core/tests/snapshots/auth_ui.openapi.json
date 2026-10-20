@@ -590,7 +590,7 @@
                           "type": "string"
                         },
                         "default_redirect": {
-                          "description": "Role-aware post-login redirect path",
+                          "description": "Post-login redirect path: always the user portal, since a new\naccount is a `user`",
                           "type": "string"
                         },
                         "email_verified": {

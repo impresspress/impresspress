@@ -127,10 +127,9 @@ On a site's first deploy the Worker does not exist yet, so run that deploy
 first (it creates the Worker; the database gets no accounts from it), then the
 three commands above. Sign in at `/b/auth/login` with that email and password.
 
-Then delete both secrets and deploy again. The password is spent once the
-account exists, but while the email is set, an account with that address is
-granted the admin role at signup and again at every login
-(`auth::initial_role_for`, `auth::helpers::TokenGrant::resolve`):
+Then delete both secrets and deploy again. Both are spent once the account
+exists: nothing reads either value after first boot, and no sign-in grants a
+role from the email:
 
 ```sh
 npx wrangler secret delete WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL --name impresspress-webmcp-demo
