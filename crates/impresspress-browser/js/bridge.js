@@ -37,10 +37,11 @@ const DB_FILENAME = 'impresspress.db';
  * - **Corrupt.** The bytes were read but are not a database SQLite can use.
  *   sql.js opens them without looking, and so does `configureConnection`
  *   (neither of its statements reads the file); the first statement that
- *   reads the schema — the runtime's migrations — throws SQLite's own error
- *   ("file is not a database"). That fails the runtime's `initialize()`, which
- *   sw.js reports as stage `initialize`: the one failure that is evidence the
- *   stored data is unusable.
+ *   reads the schema throws SQLite's own error ("file is not a database").
+ *   At boot that is the block-settings load in `BrowserServices::builder`
+ *   (`src/boot/mod.rs`), before any migration runs. That fails the runtime's
+ *   `initialize()`, which sw.js reports as stage `initialize`: the one failure
+ *   that is evidence the stored data is unusable.
  *
  * `_db` is cleared first and set only once the connection is set up, so after
  * any failed call it is `null` and `exportToOpfs` writes nothing: no flush

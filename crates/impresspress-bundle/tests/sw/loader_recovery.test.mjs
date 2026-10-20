@@ -3,8 +3,9 @@
 //
 // Five things here guard something that cannot be taken back or that never
 // ends: a recovery may ERASE the app's local data (so it must only do that
-// for a failure of the runtime's `initialize()`, and one that is about this
-// load); it must run automatically at most once per failure (so the cause
+// for a failure of the runtime's `initialize()` on the data it read, never
+// for a database it could not read, and one that is about this load); it
+// must run automatically at most once per failure (so the cause
 // stays on screen instead of looping) and once per death across tabs (so one
 // tab does not undo another's); a boot probe the runtime dies on must not be
 // mistaken for a boot that worked; and a start that is only slow must not be

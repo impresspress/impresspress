@@ -255,8 +255,9 @@ test('a host with no shell at its address is passed on as it answered', async (t
 });
 
 // The last sentence of the answer says what a reload does, and it follows
-// the same gate as the loader's recovery: only a failure of `initialize()`,
-// in a build rendered to erase, costs data.
+// the same gate as the loader's recovery: only a failure of `initialize()`
+// on the data it read (stage `initialize`, not `open`), in a build rendered
+// to erase, costs data.
 test('the answer says what a reload will do, and erasing is said only where it happens', async (t) => {
   captureConsole(t);
   const post = (worker) => worker.request(LOGIN, { method: 'POST' });

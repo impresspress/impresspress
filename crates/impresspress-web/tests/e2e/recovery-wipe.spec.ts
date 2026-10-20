@@ -22,8 +22,9 @@ import {
  * database an older build left behind does not trap a visitor in a boot that
  * can never succeed. That permission is the dangerous half of the recovery,
  * and the rule for using it is narrow: **only a failure of the runtime's
- * `initialize()` erases** — the one failure that can mean the stored data is
- * not what this build can use. Everything else that goes wrong keeps it:
+ * `initialize()` on the data it read erases** — the one failure that can mean
+ * the stored data is not what this build can use. A database that could not
+ * be read at all (stage `open`) and everything else that goes wrong keep it:
  *
  *  1. `initialize()` fails on the stored database → the boot shell says so,
  *     erases, and the app starts clean on the page the person was on.
