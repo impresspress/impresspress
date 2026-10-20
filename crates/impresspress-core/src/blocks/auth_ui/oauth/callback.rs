@@ -49,8 +49,9 @@ fn refuse(code: ErrorCode, message: &str, clear_binding: &str) -> OutputStream {
 /// "who is this" — the session's email claim — must read the row's address,
 /// not the one the provider reported. They differ whenever a linked account's
 /// address has since changed, and a provider that asserts nothing
-/// (`spec::EmailAssertion::None`) can report any address at all. The row's `auth_version` is the one the session's access
-/// token carries (see `TokenGrant`).
+/// (`spec::EmailAssertion::None`) can report any address at all. The row's
+/// `auth_version` is the one the session's access token carries (see
+/// `TokenGrant`).
 struct ResolvedAccount {
     user: users::UserRow,
 }
@@ -2606,6 +2607,57 @@ mod security_regression_tests {
             crate::test_support::output_is_error(out, "AlreadyExists").await,
             "an address the provider does not vouch for cannot claim the admin"
         );
+    }
+
+    /// The remedy RELEASE.md gives for a bootstrapped admin at an address
+    /// the operator does not control: another admin deletes or disables it
+    /// before OAuth is on. The address's owner then reaches it down the
+    /// email-adoption branch (proven by the bootstrap, asserted by the
+    /// provider) and is refused at the lifecycle gate, with no session and
+    /// no new account, since a deleted account keeps its address.
+    #[tokio::test]
+    async fn a_retired_bootstrapped_admin_cannot_be_reached_through_oauth() {
+        for retire in ["delete", "disable"] {
+            let email = "mistyped-admin@example.com";
+            let ctx = OauthFlow::google(email).ctx().await;
+            crate::blocks::auth::bootstrap::bootstrap_with_email_password(
+                &ctx,
+                email,
+                FIXTURE_PASSWORD,
+            )
+            .await
+            .expect("provision the admin");
+            let admin = users::find_by_email(&ctx, email)
+                .await
+                .expect("user lookup ok")
+                .expect("provisioning created the admin");
+            match retire {
+                "delete" => users::soft_delete(&ctx, &admin.id)
+                    .await
+                    .expect("delete the admin"),
+                _ => {
+                    users::set_disabled(&ctx, &admin.id, true)
+                        .await
+                        .expect("disable the admin");
+                }
+            }
+
+            let out = handle(&limiter(), &ctx, &callback_msg(&ctx).await).await;
+            assert!(
+                crate::test_support::output_is_error(out, "PermissionDenied").await,
+                "a {retire}d bootstrapped admin must be refused"
+            );
+            assert_eq!(
+                session_count(&ctx, &admin.id).await,
+                0,
+                "no session for a {retire}d admin"
+            );
+            assert_eq!(
+                users::count(&ctx).await.expect("count"),
+                1,
+                "no second account is created for the address ({retire})"
+            );
+        }
     }
 
     // ---------------------------------------------------------------

@@ -53,9 +53,10 @@ removed by this change.
   first sign-in, which no longer happens (entry above). Once any account
   exists, the bootstrap values are ignored, as before: a later settings edit
   cannot stop a running site from booting.
-- **The email may be cleared after provisioning.** Nothing reads it after the
-  first boot except the dev sandbox's one-click entry, which falls back to the
-  login page when it is empty.
+- **The email may be cleared after provisioning.** After the first boot only
+  the dev sandbox reads it: its one-click entry, which falls back to the login
+  page when it is empty, and its site export, whose README then names "the
+  account you signed in with" instead.
 - **A bootstrapped admin's address counts as proven.** The admin created at
   first boot (email + password) or by redeeming a bootstrap token is recorded
   as proven by the bootstrap (`email_verified_by = "bootstrap"`), in the same
@@ -69,7 +70,21 @@ removed by this change.
 - **Configure an address you own.** The bootstrap trusts the address the
   operator configured, or the one the token's holder typed. If it is someone
   else's (a typo, say), that address's owner can sign in to the admin account
-  through any provider that asserts it.
+  through any provider that asserts it. Changing that admin's password does
+  not stop this, and an account's address cannot be changed. If your
+  bootstrapped admin has an address you do not control, retire it before
+  OAuth is on (`WAFER_RUN_SHARED__ENABLE_OAUTH`, off by default; turn it off
+  first if it is on):
+  1. sign in as the bootstrapped admin with its password;
+  2. grant `admin` to an account at an address you control:
+     `POST /b/admin/api/iam/user-roles` with
+     `{"user_id": "<its id>", "role": "admin"}`;
+  3. sign in as that account and delete, or disable, the bootstrapped admin
+     on the **Users** page (an admin may delete or disable any account but
+     their own);
+  4. only then turn OAuth on. A deleted or disabled account is refused at
+     every OAuth sign-in, and a deleted one keeps its address, so the
+     address's owner cannot sign up with it either.
 - **An operator whose first boot set only the email** must also set the
   password, or a bootstrap token.
 - **Existing bootstrapped admins** stay unproven: there is no data migration.
@@ -1256,6 +1271,13 @@ SELECT key, value FROM impresspress__admin__variables
                'WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD');
 ```
 
+If the stored email is an address you do not control, the password change is
+not enough: that admin's address counts as proven (see "the bootstrap email is
+first-boot only" above), so the address's owner can sign in to it through any
+OAuth provider that asserts the address. Before OAuth is on, grant `admin` to
+an account at an address you control, sign in as it, delete or disable the
+bootstrapped admin, and only then turn OAuth on.
+
 Releasing the email key does not help here: once the admin exists, the
 bootstrap values are never read again, and no sign-in grants admin from the
 email.
@@ -1919,8 +1941,9 @@ about the address it returns — Microsoft, whose `email` claim is a mutable ten
 attribute — can still create a local account holding *any* address, including the
 one in `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`. That account is a plain
 user, as every sign-up is, and it is created unproven, so it cannot be adopted by
-anyone; what it does is occupy the address, and the real owner then meets "an account already uses
-this email address" when they try to link their own provider.
+anyone; what it does is occupy the address, and the real owner then meets "an
+account already uses this email address" when they try to link their own
+provider.
 
 Recovery is **reset, then unlink**, and it takes both halves:
 

@@ -956,9 +956,10 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// branches:
 ///
 /// 1. email + password → `bootstrap_with_email_password` inserts a `users` row
-///    (with its address proof) and a `local_credentials` row. From the next boot on, `run` returns
-///    early and never reads the password again: it survives as an argon2 hash,
-///    and the plaintext row is a spent copy no login consults. Clearable.
+///    (with its address proof) and a `local_credentials` row. From the next
+///    boot on, `run` returns early and never reads the password again: it
+///    survives as an argon2 hash, and the plaintext row is a spent copy no
+///    login consults. Clearable.
 /// 2. token only → `bootstrap_with_token` inserts into `bootstrap_tokens` and
 ///    **creates no user at all**. `users` stays empty, so every subsequent boot
 ///    re-runs this branch, re-reads the plaintext token, and mints a fresh 24h
@@ -981,8 +982,9 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// way as the password: `run` reads it only on that first boot (and refuses
 /// it alone there), and no sign-in reads it — signup, login, refresh and OAuth
 /// grant no role from it. It needs no exemption because it is not a
-/// credential: it is stored unflagged, so the sensitive-empty guard this
-/// predicate exempts from never refuses clearing it. Listing it would change
+/// credential: it is stored unflagged (unless an admin marks the row sensitive
+/// by hand, and can unmark it again), so the sensitive-empty guard this
+/// predicate exempts from does not refuse clearing it. Listing it would change
 /// nothing, and would call an address a credential. The dev sandbox's
 /// one-click entry (`dev::enter`) still reads it at request time, and offers
 /// the login page once it is cleared.

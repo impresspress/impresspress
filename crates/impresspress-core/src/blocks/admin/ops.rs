@@ -2724,7 +2724,8 @@ mod tests {
                 crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY
             ),
             "the bootstrap EMAIL is spent after provisioning too, but it is not a \
-             credential: stored unflagged, its clear needs no exemption (see \
+             credential: stored unflagged unless an admin marks it, its clear needs no \
+             exemption (see \
              a_bootstrapped_admin_credential_can_be_cleared_and_login_still_works)"
         );
     }
