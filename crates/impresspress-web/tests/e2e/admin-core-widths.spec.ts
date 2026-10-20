@@ -11,9 +11,23 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * - Database: each block's fold head keeps the block's name on one line and
  *   the name and org clear of the count, however narrow the Tables column
  *   (table.css `.db-table-group__head`).
- * The widths: 800 (the filter wraps; the database cards stack), and 960 and
- * 1024 (the database cards side by side, the Tables column at its
- * narrowest). Writes nothing (see `e2e:visual`).
+ * - Settings › Network: each block's route table fits its card with the
+ *   route keeping at least 10rem, because the table drops columns by its own
+ *   width (table.css `.network-routes`); at 1280 it shows all seven.
+ * - Settings › Permissions: "Add grant" stays on the Custom grants title's
+ *   row beside the long subtitle (card.css `.card__head`). (Its grant tables
+ *   at narrow widths, with a seeded grant, are in `admin-core-pages.spec.ts`,
+ *   which may write.)
+ * - The card head rule on the pages it reaches most, at 375, 721, 1024 and
+ *   1200: on the dashboard and on Products › Stripe a head wraps only when
+ *   its title's longest word and its other parts cannot share the line, and
+ *   no dashboard head wraps at all.
+ * - Settings › Variables: the value column keeps its share (`VAR_COLUMNS`),
+ *   and "Add variable" ends the search's row.
+ * The widths: 800 (the filter wraps; the database cards stack; the settings
+ * rail is a tab row), and 960 and 1024 (the database cards side by side, the
+ * Tables column at its narrowest). Writes nothing beyond the page loads'
+ * own request-log rows (see `e2e:visual`).
  */
 
 const WIDTHS = [800, 960, 1024] as const;
@@ -92,5 +106,114 @@ test.describe('admin core pages at in-between widths', () => {
       ).toEqual([]);
       expect(heads.map((h) => h.name)).toContain('legalpages impresspress');
     });
+
+    test(`permissions at ${width}px: Add grant stays on the custom grants title's row`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/settings/permissions?subtab=database');
+      const card = page.locator('section.card', { has: page.locator('h2.card__title', { hasText: 'Custom grants' }) });
+      const title = await card.locator('h2.card__title').boundingBox();
+      const action = await card.locator('.card__actions .btn').boundingBox();
+      expect(title && action, 'the title and its action').toBeTruthy();
+      expect(action!.y, JSON.stringify({ title, action })).toBeLessThan(title!.y + title!.height);
+      expect(action!.x).toBeGreaterThan(title!.x + title!.width);
+    });
+
+    test(`variables at ${width}px: the value column keeps its share and Add variable ends the search row`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/settings/variables');
+      const share = await page
+        .locator('[data-fold="variable"] table')
+        .first()
+        .evaluate((table) => {
+          const value = [...table.querySelectorAll('thead th')].find((th) => th.textContent === 'Value')!;
+          return value.getBoundingClientRect().width / table.getBoundingClientRect().width;
+        });
+      expect(share).toBeGreaterThanOrEqual(0.3);
+      const search = await page.locator('.filter-bar .search-input').boundingBox();
+      const add = await page.getByRole('button', { name: 'Add variable' }).boundingBox();
+      expect(Math.abs(search!.y + search!.height / 2 - (add!.y + add!.height / 2))).toBeLessThanOrEqual(1);
+    });
+  }
+
+  for (const width of [...WIDTHS, 1280]) {
+    test(`network at ${width}px: each route table fits its card and the route keeps its share`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/settings/network');
+      // A second load, so the first one's own request is listed.
+      await page.reload({ waitUntil: 'networkidle' });
+      const tables = await page.locator('.network-routes').evaluateAll((all) =>
+        all.map((routes) => {
+          const scroller = routes.querySelector<HTMLElement>(':scope > .data-table')!;
+          const table = scroller.querySelector('table')!.getBoundingClientRect();
+          const route = scroller.querySelector('tbody td.data-table__cell--primary')!.getBoundingClientRect();
+          const columns = [...scroller.querySelectorAll('thead th')].filter(
+            (th) => getComputedStyle(th).display !== 'none',
+          ).length;
+          return { fits: table.width <= scroller.clientWidth + 0.5, route: Math.round(route.width), columns };
+        }),
+      );
+      expect(tables.length).toBeGreaterThan(0);
+      expect(
+        tables.filter((t) => !t.fits || t.route < 160),
+        'a route table scrolled sideways or squeezed its route',
+      ).toEqual([]);
+      if (width === 1280) {
+        expect(tables.map((t) => t.columns), 'all seven columns beside the rail at 1280').toEqual(
+          tables.map(() => 7),
+        );
+      }
+    });
+  }
+
+  for (const width of [375, 721, 1024, 1200]) {
+    for (const path of ['/b/admin/', '/b/products/admin/stripe']) {
+      test(`card heads at ${width}px on ${path}: a head wraps only when its parts cannot share a line`, async ({
+        page,
+      }) => {
+        await open(page, width, path);
+        const heads = await page.locator('.card__head').evaluateAll((all) =>
+          all
+            .filter((head) => head.children.length > 1)
+            .map((head) => {
+              const [first, ...rest] = [...head.children] as HTMLElement[];
+              const title = head.querySelector('.card__title, h2, h3')!;
+              const titleBottom = title.getBoundingClientRect().bottom;
+              const wrapped = rest.some((el) => el.getBoundingClientRect().top >= titleBottom);
+              // What the line would need: the title block at its narrowest
+              // (its longest word) and every other part at its natural width.
+              // Measured on an out-of-flow copy in the head itself, so the
+              // flex sizing of the real one does not stand in for it.
+              const natural = (el: HTMLElement, size: string) => {
+                const copy = el.cloneNode(true) as HTMLElement;
+                Object.assign(copy.style, { position: 'absolute', visibility: 'hidden', width: size, flex: 'none' });
+                head.appendChild(copy);
+                const w = copy.getBoundingClientRect().width;
+                copy.remove();
+                return w;
+              };
+              const cs = getComputedStyle(head);
+              const gap = parseFloat(cs.columnGap) || 0;
+              const inner = head.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+              const needs =
+                natural(first, 'min-content') +
+                rest.reduce((sum, el) => sum + natural(el, 'max-content') + gap, 0);
+              return { title: title.textContent!.trim(), wrapped, couldShare: needs <= inner - 1 };
+            }),
+        );
+        expect(heads.length).toBeGreaterThan(0);
+        expect(
+          heads.filter((h) => h.wrapped && h.couldShare).map((h) => h.title),
+          'a head whose title and actions fit on one line wrapped anyway',
+        ).toEqual([]);
+        // The dashboard's heads are a title and a short link: they always
+        // share the line (PR-15 review F1 measured all of them wrapping).
+        if (path === '/b/admin/') {
+          expect(heads.filter((h) => h.wrapped).map((h) => h.title)).toEqual([]);
+        }
+      });
+    }
   }
 });

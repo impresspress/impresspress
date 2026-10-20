@@ -388,7 +388,7 @@ mod tests {
         }];
         let html = render_shares_table(&rows).into_string();
         assert!(html.contains("abc12345"));
-        assert!(html.contains("photos/<wbr>a<wbr>.png"));
+        assert!(html.contains("photos/<wbr>a.png"));
         assert!(html.contains(">4<"), "access count missing");
         assert!(
             html.contains(r#"aria-label="Revoke the share link for photos/a.png""#),

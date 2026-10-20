@@ -70,7 +70,7 @@ pub(super) async fn settings_page_after_write(
 }
 
 /// [`settings_page_after_write`] for a write submitted from a modal on the
-/// page (Add Variable, Edit Variable): the re-rendered page for the form's
+/// page (Add variable, Edit variable): the re-rendered page for the form's
 /// `#content` target, plus `closeModal` for `modal_id` and a `done` toast.
 ///
 /// The modal is CLOSED by the response rather than merely swapped away with
@@ -387,11 +387,11 @@ mod tests {
         assert_eq!(max_form_nesting_depth(&html), 1);
         assert!(
             html.contains("hx-post=\"/b/admin/variables\""),
-            "Add Variable modal form must target the CreateVariable route: {html}"
+            "Add variable modal form must target the CreateVariable route: {html}"
         );
         assert!(
             html.contains("type=\"submit\""),
-            "Add Variable modal must have a submit control"
+            "Add variable modal must have a submit control"
         );
     }
 
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(max_form_nesting_depth(&html), 1);
         assert!(
             html.contains("hx-post=\"/b/admin/grants/rules\""),
-            "Add Grant modal form must target the CreateWrapGrant route: {html}"
+            "Add grant modal form must target the CreateWrapGrant route: {html}"
         );
     }
 
@@ -495,8 +495,8 @@ mod tests {
                 r#"<h2 class="card__title">Registration"#,
             ),
             ("branding", None, r#"<h2 class="card__title">Branding"#),
-            ("network", None, r#"<h2 class="network-group__head">"#),
-            ("variables", None, r#"<h2 class="var-group__title">"#),
+            ("network", None, r#"<h2 class="group-fold__title">"#),
+            ("variables", None, r#"<h2 class="group-fold__title">"#),
             (
                 "permissions",
                 Some("database"),

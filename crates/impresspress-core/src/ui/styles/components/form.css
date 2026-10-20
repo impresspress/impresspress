@@ -29,6 +29,13 @@
 }
 
 .filter-bar .search-input { flex: 1; min-width: 200px; }
+/* While a term is applied, its "Results for …" line heads the toolbar on a
+   row of its own, so the box keeps its row with whatever follows it (a
+   toggle, the toolbar's actions) instead of being pushed under it. */
+.filter-bar > .search-summary { flex: 1 0 100%; margin-bottom: 0; }
+/* A toolbar's own actions, at the end of its row: secondaries first, the
+   one primary last. When the row wraps they keep to its right edge. */
+.filter-bar__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
 
 /* ===== Forms ===== */
 .form-group { margin-bottom: var(--space-5); }

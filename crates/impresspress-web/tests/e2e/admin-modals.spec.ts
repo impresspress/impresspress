@@ -11,7 +11,7 @@ import { PHONE, targetFloor } from './fixtures/targets';
  * part the platform does: that the dialog is really modal (the page behind it
  * inert, the dialog in the top layer), that Esc closes it, that focus lands in
  * it and comes back, and that the layout keeps a form's buttons on screen on a
- * phone — the Add Access Grant modal's were below the fold at 390px.
+ * phone — the Add access grant modal's were below the fold at 390px.
  *
  * Writes nothing: no modal here is submitted, so the shared database the
  * visual baselines are taken from is untouched (see `e2e:visual`). The submit
@@ -190,7 +190,7 @@ test.describe('admin modals', () => {
     const edit = page.getByRole('button', { name: 'Edit WAFER_RUN_SHARED__APP_NAME' });
     const dialog = await openVia(page, edit, 'edit-var');
     await expectModal(dialog);
-    await expect(dialog.getByRole('heading', { name: 'Edit Variable' })).toBeVisible();
+    await expect(dialog.getByRole('heading', { name: 'Edit variable' })).toBeVisible();
 
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
@@ -288,19 +288,19 @@ test.describe('admin modals', () => {
     test.use(PHONE);
 
     /**
-     * The failing case the rebuild is for: the Add Access Grant form is
+     * The failing case the rebuild is for: the Add access grant form is
      * taller than a phone, and its buttons were below the fold of a modal
      * capped at `90vh`. The footer now sticks to the bottom of the scrolling
      * body, so both buttons are on screen without scrolling.
      */
-    test('the Add Access Grant buttons are on screen without scrolling', async ({ page }) => {
+    test('the Add access grant buttons are on screen without scrolling', async ({ page }) => {
       await loginAsAdmin(page);
       await page.goto('/b/admin/settings/permissions?subtab=database', { waitUntil: 'networkidle' });
       const trigger = page.locator('[data-action="modal-open"][data-modal-target="add-grant-modal"]');
       const dialog = await openVia(page, trigger, 'add-grant-modal');
       await expectModal(dialog);
 
-      for (const name of ['Cancel', 'Add Grant']) {
+      for (const name of ['Cancel', 'Add grant']) {
         await expect(dialog.getByRole('button', { name })).toBeInViewport({ ratio: 1 });
       }
       // The dialog fits the viewport, with its gutter.
@@ -309,7 +309,7 @@ test.describe('admin modals', () => {
       expect(box && box.x >= 0 && box.x + box.width <= 390, JSON.stringify(box)).toBe(true);
       // Footer buttons share the row in full-width halves.
       const cancel = await dialog.getByRole('button', { name: 'Cancel' }).boundingBox();
-      const submit = await dialog.getByRole('button', { name: 'Add Grant' }).boundingBox();
+      const submit = await dialog.getByRole('button', { name: 'Add grant' }).boundingBox();
       expect(cancel && submit && Math.abs(cancel.width - submit.width) <= 1).toBe(true);
       expect(cancel && submit && Math.abs(cancel.y - submit.y) <= 1, JSON.stringify([cancel, submit])).toBe(true);
     });

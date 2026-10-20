@@ -556,6 +556,29 @@ mod tests {
         );
     }
 
+    /// A fold card's summary (`admin::pages::group_fold`) meets the edge of a
+    /// flush card, which clips its overflow: an outer ring there was cut off
+    /// on three sides, so the summary's ring is drawn inside it.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn a_fold_summarys_focus_ring_is_drawn_inside_it() {
+        let rings: Vec<String> = css_leaf_blocks(super::css())
+            .into_iter()
+            .filter(|(selector, _)| {
+                selector
+                    .split(',')
+                    .any(|s| s.trim() == ".group-fold__summary:focus-visible")
+            })
+            .flat_map(|(_, body)| {
+                body.split(';')
+                    .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|d| d.starts_with("box-shadow:"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(rings, ["box-shadow: var(--focus-ring-inset)"]);
+    }
+
     /// Target sizes follow the pointer (PLAN D4, refined): a finger gets
     /// 44px, a mouse keeps the compact controls with WCAG 2.5.8's 24px
     /// floor. Both values live in ONE token, `--target-min`, which tokens.css
@@ -2185,7 +2208,8 @@ mod tests {
         (".thread-card__date", None),
         (".legal-editor__meta", None),
         (".ticket-event__head", None),
-        (".network-group__totals", None),
+        (".group-fold__stats", None),
+        (".group-fold__lead", None),
         (".data-table tbody td", None),
         // Named rules.
         (".network-route__method", Some(".data-table tbody td")),

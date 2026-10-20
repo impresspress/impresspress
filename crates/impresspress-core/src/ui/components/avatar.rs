@@ -87,7 +87,7 @@ mod tests {
             concat!(
                 r#"<span class="user-identity">"#,
                 r#"<span class="avatar avatar--md" aria-hidden="true">A</span>"#,
-                r#"<span>ann<wbr>@example<wbr>.com</span></span>"#,
+                r#"<span>ann<wbr>@example.com</span></span>"#,
             )
         );
     }
