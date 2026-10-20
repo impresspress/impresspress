@@ -41,8 +41,11 @@ test('a bucket created from the modal takes an upload with labelled row controls
   await expect(page).toHaveURL(new RegExp(`/b/storage/${bucket}/$`));
   await expect(page.getByRole('heading', { level: 1, name: bucket })).toBeVisible();
 
-  // The empty bucket offers the upload it is waiting for.
+  // The empty bucket offers the upload it is waiting for: the header's
+  // Upload is the page's one primary, so the empty state's is a secondary.
   await expect(page.getByRole('heading', { level: 2, name: 'This folder is empty' })).toBeVisible();
+  await expect(page.locator('.empty__action').getByRole('button', { name: 'Upload' })).toHaveClass(/\bbtn--secondary\b/);
+  await expect(page.locator('.btn--primary:visible')).toHaveCount(1);
 
   // Upload through the picker every "Upload" opens. The listing is
   // swapped in place, not the page reloaded, so the outcome stays on screen.

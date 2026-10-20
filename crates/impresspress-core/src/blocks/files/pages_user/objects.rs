@@ -101,18 +101,25 @@ const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Actions").actions(),
 ];
 
-/// The "Upload" trigger as the empty folder's call to action: it opens the
-/// hidden file picker (`files-browser.js` binds every
-/// `[data-action="open-upload"]`).
-pub(crate) fn upload_button() -> Markup {
-    Action::primary("Upload", ActionTarget::Delegated("open-upload"))
-        .icon(icons::plus())
-        .render()
+/// The "Upload" trigger: one label and one target, which both of its
+/// renderings take — the topbar's primary ([`upload_action`]) and the empty
+/// folder's secondary ([`upload_secondary`]). It opens the hidden file picker
+/// (`files-browser.js` binds every `[data-action="open-upload"]`).
+const UPLOAD: (&str, ActionTarget<'static>) = ("Upload", ActionTarget::Delegated("open-upload"));
+
+/// The trigger as the topbar's primary action.
+fn upload_action() -> HeaderAction<'static> {
+    let (label, target) = UPLOAD;
+    HeaderAction::new(label, target).icon(icons::plus())
 }
 
-/// The same trigger as the topbar's primary action.
-fn upload_action() -> HeaderAction<'static> {
-    HeaderAction::new("Upload", ActionTarget::Delegated("open-upload")).icon(icons::plus())
+/// The trigger as the empty folder's call to action: a secondary, because the
+/// header already offers it as the page's primary (layout rule 9).
+fn upload_secondary() -> Markup {
+    let (label, target) = UPLOAD;
+    Action::secondary(label, target)
+        .icon(icons::plus())
+        .render()
 }
 
 /// A file row's "more actions" trigger: the shared `.btn--icon` button, named
@@ -164,6 +171,10 @@ pub(crate) fn render_delete_confirm_modal() -> Markup {
 
 /// Folder/file table for `/b/storage/{bucket}/...` views.
 ///
+/// The table narrows by its own width (table.css `.object-table`): where it
+/// is too narrow for the date column, the date becomes one line under the
+/// file's name (`.object-table__meta`), so the name keeps its room.
+///
 /// Folder rows link into `/b/storage/{bucket}/{prefix}{folder}/`. File rows
 /// show the filename portion (after the `current_prefix`), link to the
 /// download route, carry a checkbox named after the file for bulk actions and
@@ -207,7 +218,10 @@ pub fn render_objects_table(
                     span .sr-only { "Select " (filename) }
                 }
             },
-            html! { a href=(download_href) { (filename) } },
+            html! {
+                a href=(download_href) { (filename) }
+                span .object-table__meta { "Modified " (components::timestamp(&f.modified)) }
+            },
             html! { (format_bytes(f.size)) },
             components::timestamp(&f.modified),
             row_menu_trigger(bucket, &f.key, filename),
@@ -219,15 +233,17 @@ pub fn render_objects_table(
     html! {
         div #object-listing {
         @if !listing.files.is_empty() { (render_bulk_bar()) }
+        div .object-table {
         (DataTable::new(&OBJECT_COLUMNS)
             .rows(folder_rows.chain(file_rows).collect())
             .empty(components::empty_state(
                 icons::upload(),
                 "This folder is empty",
                 "Drag files here, or upload them from your device.",
-                Some(upload_button()),
+                Some(upload_secondary()),
             ))
             .render())
+        }
         }
     }
 }
@@ -268,7 +284,7 @@ pub(crate) fn render_share_modal() -> Markup {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Create link" }
+                    (Action::primary("Create link", ActionTarget::Submit { form: None }).render())
                 }))
             }
         },
@@ -716,6 +732,34 @@ mod tests {
         );
     }
 
+    /// The table sits in its narrowing container (table.css
+    /// `.object-table`), and a file row carries its date a second time under
+    /// its name, for where the date column drops out.
+    #[test]
+    fn a_file_row_carries_its_date_under_its_name_for_the_narrow_table() {
+        let f1 = ObjectRow {
+            key: "a.png".into(),
+            size: 1,
+            modified: "2026-05-06T10:00:00Z".into(),
+        };
+        let listing = FolderListing {
+            folders: Vec::new(),
+            files: vec![&f1],
+        };
+        let html = render_objects_table("photos", "", &listing).into_string();
+        assert!(
+            html.contains(r#"<div class="object-table"><div class="data-table">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(concat!(
+                r#"<a href="/b/storage/api/buckets/photos/objects/a.png">a.png</a>"#,
+                r#"<span class="object-table__meta">Modified <time class="datetime" datetime="2026-05-06T10:00:00.000Z""#
+            )),
+            "{html}"
+        );
+    }
+
     /// The selection count is a live region that is always rendered; only
     /// the delete button hides. The listing is wrapped in the element the
     /// script re-fetches after a delete or an upload.
@@ -771,8 +815,22 @@ mod tests {
             html.contains(r#"<h2 class="empty__title">This folder is empty</h2>"#),
             "{html}"
         );
-        assert!(html.contains(r#"data-action="open-upload""#), "{html}");
+        // A secondary: the header's "Upload" is the page's primary.
+        assert!(
+            html.contains(r#"<div class="empty__action"><button class="btn btn--secondary" type="button" data-action="open-upload"><svg"#),
+            "{html}"
+        );
         assert!(!html.contains("data-bulk-toggle"), "{html}");
+    }
+
+    /// The share dialog's submit is its own primary, drawn by `Action`.
+    #[test]
+    fn the_share_dialog_submits_with_its_one_primary() {
+        let html = render_share_modal().into_string();
+        assert!(
+            html.contains(r#"<button class="btn btn--primary" type="submit">Create link</button>"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -837,6 +895,22 @@ mod integration_tests {
             body.contains(r#"href="/b/storage/""#),
             "Files crumb link missing: {body}"
         );
+    }
+
+    /// An empty bucket: the header's "Upload" is the one primary on the page,
+    /// and each dialog has at most its own.
+    #[tokio::test]
+    async fn an_empty_bucket_shows_one_primary() {
+        let ctx = TestContext::with_files().await;
+        seed_two_buckets(&ctx, "admin_1").await;
+        let body = output_html(
+            object_list_page(&ctx, &admin_msg("retrieve", "/b/storage/docs/"), "docs", "").await,
+        )
+        .await;
+        let (page, dialogs) = crate::test_support::dom::visible_primaries(&body);
+        assert_eq!(page.len(), 1, "{page:?}");
+        assert!(page[0].contains("Upload"), "{page:?}");
+        assert!(dialogs.iter().all(|d| d.len() <= 1), "{dialogs:?}");
     }
 
     #[tokio::test]

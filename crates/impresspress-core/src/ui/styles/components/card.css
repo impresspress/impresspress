@@ -627,7 +627,6 @@
    kilobytes against a gigabyte do not read as an empty bar. At 90% the bar
    and its "Almost full" note turn to the warning colour (the note says it in
    words too). */
-.quota__summary, .quota-bar { max-width: 40rem; }
 .quota__summary { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .quota__warning { color: var(--accent-warning-text); font-weight: 500; }
 .quota-bar { background: var(--bg-secondary); border-radius: var(--radius-full); height: 8px; overflow: hidden; }
@@ -635,9 +634,6 @@
 .quota-bar--warning .quota-bar__fill { background: var(--accent-warning); }
 @media (prefers-reduced-motion: reduce) { .quota-bar__fill { transition: none; } }
 
-/* A page body made of `section_header` sections, one under the other: the
-   sections are spaced apart rather than butted together. */
-.page-sections { display: flex; flex-direction: column; gap: var(--space-8); }
 /* A share link's token: a long random string, set to wrap anywhere rather
    than widen its column. */
 .share-token { overflow-wrap: anywhere; font-size: var(--text-xs); }

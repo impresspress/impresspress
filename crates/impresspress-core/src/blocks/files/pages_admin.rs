@@ -7,7 +7,7 @@ use super::{models::QuotaConfig, repo};
 use crate::{
     ui::{
         self,
-        components::{self, DataTable, HeaderAction, TableCol, TableRow},
+        components::{self, Action, ActionTarget, DataTable, HeaderAction, TableCol, TableRow},
         icons,
     },
     util::format_bytes,
@@ -17,13 +17,16 @@ use crate::{
 /// trail's root on the others.
 const OVERVIEW: &str = "/b/storage/admin/";
 
+/// The Buckets sub-page, which owns the "New bucket" modal.
+const BUCKETS: &str = "/b/storage/admin/buckets";
+
 /// The storage-admin sections (Overview / Buckets / Shares / Quotas) as the
 /// shared sub-nav the shell draws between the page header and the body, the
 /// current one marked `aria-current="page"`. `active` is the section's label.
 pub(crate) fn admin_sections(active: &str) -> Markup {
     let items: [(&str, &str); 4] = [
         ("Overview", OVERVIEW),
-        ("Buckets", "/b/storage/admin/buckets"),
+        ("Buckets", BUCKETS),
         ("Shares", "/b/storage/admin/shares"),
         ("Quotas", "/b/storage/admin/quotas"),
     ];
@@ -136,22 +139,24 @@ pub fn render_admin_overview_stats(stats: &AdminStats) -> Markup {
     ])
 }
 
-/// Render the "create your first bucket" CTA for the empty admin storage
-/// overview. Renders empty markup once at least one bucket exists — this is
-/// a first-run nudge, not a permanent overview fixture. Links to the
-/// Buckets tab, which owns the actual "+ New bucket" trigger (the modal +
-/// `files-browser.js` bootstrap script) — no duplicate modal wiring here.
+/// Render the "create your first bucket" call to action for the empty admin
+/// storage overview. Renders empty markup once at least one bucket exists —
+/// this is a first-run nudge, not a permanent overview fixture.
+///
+/// The overview has no header action, so this "New bucket" is the page's one
+/// primary. It leads to the Buckets sub-page, which owns the trigger proper
+/// (the modal and its `files-browser.js` handler), so no second copy of that
+/// wiring lives here.
 pub fn render_admin_overview_empty_cta(bucket_count: i64) -> Markup {
     if bucket_count > 0 {
         return html! {};
     }
-    components::empty_state(
-        icons::folder(),
-        "No buckets yet",
-        "Buckets hold uploaded files. Create one to start uploading.",
-        Some(html! {
-            a .btn .btn--primary .btn--md href="/b/storage/admin/buckets" { "+ New bucket" }
-        }),
+    super::pages_user::buckets::no_buckets_empty(
+        Action::primary(
+            super::pages_user::buckets::NEW_BUCKET_LABEL,
+            ActionTarget::Link(BUCKETS),
+        )
+        .icon(icons::plus()),
     )
 }
 
@@ -178,10 +183,14 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Err(e) => return error_page(ctx, msg, e, "storage admin overview: stats read").await,
     };
 
+    // `.page` spaces its blocks: the stat row sets no outer margin of its
+    // own, so without it the call to action sat against the stats.
     let body = html! {
-        (render_admin_overview_stats(&stats))
-        (render_admin_overview_empty_cta(stats.buckets))
-        (render_admin_overview_quotas_hint(stats.quotas_count))
+        div .page {
+            (render_admin_overview_stats(&stats))
+            (render_admin_overview_empty_cta(stats.buckets))
+            (render_admin_overview_quotas_hint(stats.quotas_count))
+        }
     };
 
     files_page(ctx, msg, "Overview", "File storage statistics", None, body).await
@@ -353,13 +362,23 @@ const ADMIN_SHARE_COLUMNS: [TableCol<'static>; 5] = [
 /// Render the admin Shares table (or empty state). The token is a short
 /// prefix in a `<code>`; the access count carries its cap ("4 / 10") when one
 /// is set; a share with no expiry says "Never".
+///
+/// The table narrows by its own width (table.css `.share-table`): where it is
+/// too narrow for five columns, the token and the owner drop out of the row
+/// and become one line under the file (`.share-table__meta`).
 pub fn render_admin_shares_table(rows: &[AdminShareRow]) -> Markup {
-    DataTable::new(&ADMIN_SHARE_COLUMNS)
+    let table = DataTable::new(&ADMIN_SHARE_COLUMNS)
         .rows(
             rows.iter()
                 .map(|r| {
                     TableRow::new(vec![
-                        html! { (components::breakable_id(&format!("{}/{}", r.bucket, r.key))) },
+                        html! {
+                            (components::breakable_id(&format!("{}/{}", r.bucket, r.key)))
+                            span .share-table__meta {
+                                code { (r.token_short) "…" } " · by "
+                                span .font-mono { (r.owner_short) }
+                            }
+                        },
                         html! { code { (r.token_short) "…" } },
                         html! {
                             (r.access_count)
@@ -381,7 +400,8 @@ pub fn render_admin_shares_table(rows: &[AdminShareRow]) -> Markup {
             "Links people create to share a file appear here.",
             None,
         )
-        .render()
+        .render();
+    html! { div .share-table .share-table--admin { (table) } }
 }
 
 pub async fn shares(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -556,6 +576,36 @@ mod tests {
         assert!(html.contains("New bucket"), "cta label missing: {html}");
     }
 
+    /// With no header action on the overview, its "New bucket" is the page's
+    /// one primary: the shared `Action`, with the plus icon rather than a
+    /// "+ " glyph, leading to the Buckets sub-page.
+    #[test]
+    fn the_overview_cta_is_the_pages_one_primary_with_an_icon() {
+        let html = render_admin_overview_empty_cta(0).into_string();
+        assert!(
+            html.contains(r#"<div class="empty__action"><a class="btn btn--primary" href="/b/storage/admin/buckets"><svg"#),
+            "{html}"
+        );
+        assert!(html.contains("</svg>New bucket</a>"), "{html}");
+        assert!(!html.contains("+ "), "no text glyph for the icon: {html}");
+    }
+
+    /// The Buckets sub-page: its header's "New bucket" is the one primary,
+    /// and the empty table repeats it as a secondary.
+    #[tokio::test]
+    async fn the_buckets_page_has_one_primary_and_a_secondary_empty_action() {
+        use crate::test_support::{admin_msg, dom, output_html, TestContext};
+
+        let ctx = TestContext::with_files().await;
+        let html = output_html(buckets(&ctx, &admin_msg("retrieve", BUCKETS)).await).await;
+        let (page, _) = dom::visible_primaries(&html);
+        assert_eq!(page.len(), 1, "{page:?}");
+        assert!(
+            html.contains(r#"<div class="empty__action"><button class="btn btn--secondary" type="button" data-action="modal-open" data-modal-target="new-bucket">"#),
+            "{html}"
+        );
+    }
+
     #[test]
     fn render_admin_overview_empty_cta_hidden_when_buckets_exist() {
         let html = render_admin_overview_empty_cta(3).into_string();
@@ -576,6 +626,12 @@ mod tests {
         assert!(
             html.contains("No buckets yet"),
             "empty-state CTA missing from the live overview render: {html}"
+        );
+        // The page layout spaces the stat row and the call to action: the
+        // row sets no outer margin of its own.
+        assert!(
+            html.contains(r#"<div class="page"><div class="stat-row">"#),
+            "{html}"
         );
         assert!(
             html.contains(r#"href="/b/storage/admin/buckets""#),
@@ -796,6 +852,16 @@ mod tests {
             owner_short: "admin_1".into(),
         }];
         let html = render_admin_shares_table(&rows).into_string();
+        assert!(
+            html.starts_with(
+                r#"<div class="share-table share-table--admin"><div class="data-table">"#
+            ),
+            "the table narrows in its own container (table.css `.share-table`): {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="share-table__meta"><code>tok12345abc1…</code> · by <span class="font-mono">admin_1</span></span>"#),
+            "the token and owner also sit under the file, for the narrow table: {html}"
+        );
         assert!(html.contains("tok12345abc1"));
         assert!(html.contains("photos/<wbr>a.png"), "file missing: {html}");
         // access_count and max rendered together as "4 / 10"

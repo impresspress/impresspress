@@ -1,5 +1,5 @@
 //! Quota + share-links domain: the `/b/cloudstorage/` page showing a
-//! user's active public share links alongside their storage quota card.
+//! user's storage quota and their active public share links, as two cards.
 
 use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
@@ -9,7 +9,7 @@ use crate::{
     db_read::CappedList,
     ui::{
         self,
-        components::{self, DataTable, TableCol, TableRow},
+        components::{self, Card, DataTable, TableCol, TableRow},
         icons,
     },
     util::format_bytes,
@@ -71,7 +71,8 @@ fn quota_pct_text(used: i64, limit: i64) -> String {
     }
 }
 
-/// The storage quota: "8.3 KB of 1.0 GB used · <1%" over a meter. The meter
+/// The storage quota card, titled "Storage": "8.3 KB of 1.0 GB used · <1%"
+/// over a meter. The meter
 /// is `role="meter"` with its value in bytes and the same sentence as its
 /// value text, so a screen reader hears what the eye reads; any use at all
 /// fills a visible sliver (the stylesheet's minimum width), and at 90% or
@@ -83,9 +84,9 @@ pub fn render_quota_card(q: &QuotaInfo) -> Markup {
     let limit = format_bytes(q.limit_bytes);
     let pct_text = quota_pct_text(q.used_bytes, q.limit_bytes);
     let summary = format!("{used} of {limit} used · {pct_text}");
-    html! {
-        section {
-            (components::section_header("Storage", None))
+    Card::titled(
+        "Storage",
+        html! {
             p .quota__summary {
                 (summary)
                 @if warn { span .quota__warning { " · Almost full" } }
@@ -102,8 +103,9 @@ pub fn render_quota_card(q: &QuotaInfo) -> Markup {
                     div .quota-bar__fill style={"--fill-pct:" (pct.min(100)) "%"} {}
                 }
             }
-        }
-    }
+        },
+    )
+    .render()
 }
 
 const SHARE_COLUMNS: [TableCol<'static>; 6] = [
@@ -115,14 +117,22 @@ const SHARE_COLUMNS: [TableCol<'static>; 6] = [
     TableCol::new("Actions").actions(),
 ];
 
+/// The owner's share links. The table narrows by its own width (table.css
+/// `.share-table`): where it is too narrow for six columns, the token and
+/// the created date drop out of the row and the date becomes one line under
+/// the file (`.share-table__meta`), so the revoke control stays in view. With
+/// no links it is a note with the way to make one.
 pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
-    DataTable::new(&SHARE_COLUMNS)
+    let table = DataTable::new(&SHARE_COLUMNS)
         .rows(
             rows.iter()
                 .map(|r| {
                     let file = format!("{}/{}", r.bucket, r.key);
                     TableRow::new(vec![
-                        html! { (components::breakable_id(&file)) },
+                        html! {
+                            (components::breakable_id(&file))
+                            span .share-table__meta { "Created " (components::timestamp(&r.created_at)) }
+                        },
                         html! { code .share-token { (r.token) } },
                         components::timestamp(&r.created_at),
                         match &r.expires_at {
@@ -146,13 +156,32 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
                 })
                 .collect(),
         )
-        .empty(components::empty_state(
-            icons::link(),
-            "No share links yet",
-            "Share a file from its menu in Files to create a link.",
-            Some(html! { a .btn .btn--secondary .btn--md href="/b/storage/" { "Go to Files" } }),
+        .empty(components::empty_note(
+            "No share links yet. Share a file from its menu in Files to create one.",
+            Some(("Go to files", "/b/storage/")),
         ))
-        .render()
+        .render();
+    html! { div .share-table .share-table--owner { (table) } }
+}
+
+/// The share links as a flush card: the table is the card's one card-level
+/// surface, and with no links the card holds an `empty_note` instead (a
+/// framed empty state there would be a card inside a card). The card is
+/// `#share-listing`, the region `files-browser.js` re-fetches and swaps after
+/// a revoke, and its `h2` is where that script puts focus once the revoked
+/// row is gone. A capped list says so under the title.
+pub fn render_share_links_card(shares: &CappedList<ShareRow>) -> Markup {
+    let capped = shares
+        .truncated
+        .then(|| format!("Showing the first {} share links.", shares.rows.len()));
+    let card = Card::titled("Share links", render_shares_table(&shares.rows))
+        .flush()
+        .id("share-listing");
+    match &capped {
+        Some(note) => card.subtitle(note),
+        None => card,
+    }
+    .render()
 }
 
 /// The dialog that confirms revoking a share link: "Revoke the link to
@@ -213,19 +242,8 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     };
 
     let body = html! {
-        div .page-sections {
-            (render_quota_card(&quota))
-            // `#share-listing` is what `files-browser.js` re-fetches and swaps
-            // after a revoke, so the page shows the links that remain without
-            // a reload wiping the outcome it reports.
-            section #share-listing {
-                (components::section_header("Share links", None))
-                @if shares.truncated {
-                    p .text-muted .text-sm { "Showing the first " (shares.rows.len()) " share links." }
-                }
-                (render_shares_table(&shares.rows))
-            }
-        }
+        (render_quota_card(&quota))
+        (render_share_links_card(&shares))
         (render_revoke_confirm_modal())
         (super::render_bootstrap_script("", ""))
     };
@@ -317,8 +335,8 @@ mod tests {
             "no raw byte counts on the page: {html}"
         );
         assert!(
-            html.contains(r#"<h2 class="section-header__title">Storage</h2>"#),
-            "the section is headed by the shared h2: {html}"
+            html.starts_with(r#"<section class="card"><header class="card__head"><div><h2 class="card__title">Storage</h2>"#),
+            "the quota is a card titled Storage: {html}"
         );
     }
 
@@ -365,13 +383,55 @@ mod tests {
         );
     }
 
+    /// With no links the table is a note inside the flush card, with the way
+    /// to make one: a framed empty state there would be a card in a card.
     #[test]
     fn render_shares_table_empty() {
         let html = render_shares_table(&[]).into_string();
-        assert!(html.contains(r#"<h2 class="empty__title">No share links yet</h2>"#));
+        assert_eq!(
+            html,
+            concat!(
+                r#"<div class="share-table share-table--owner"><p class="empty-note">No share links yet. Share a file from its menu in Files to create one. "#,
+                r#"<a href="/b/storage/">Go to files</a></p></div>"#
+            )
+        );
+    }
+
+    fn capped(rows: Vec<ShareRow>, truncated: bool) -> CappedList<ShareRow> {
+        CappedList { rows, truncated }
+    }
+
+    /// The share links are a flush card that is the region the revoke script
+    /// swaps (`#share-listing`) and focuses (its `h2`); the table is the
+    /// card's one card-level surface.
+    #[test]
+    fn the_share_links_are_the_swapped_flush_card() {
+        let html = render_share_links_card(&capped(Vec::new(), false)).into_string();
         assert!(
-            html.contains(r#"href="/b/storage/""#),
-            "the way to share a file: {html}"
+            html.starts_with(concat!(
+                r#"<section class="card card--flush" id="share-listing"><header class="card__head">"#,
+                r#"<div><h2 class="card__title">Share links</h2></div></header>"#
+            )),
+            "{html}"
+        );
+        assert!(!html.contains("card__subtitle"), "{html}");
+        let row = ShareRow {
+            id: "s1".into(),
+            token: "t".into(),
+            bucket: "photos".into(),
+            key: "a.png".into(),
+            created_at: "2026-05-06T10:00:00Z".into(),
+            expires_at: None,
+            access_count: 0,
+        };
+        let html = render_share_links_card(&capped(vec![row], true)).into_string();
+        assert!(
+            html.contains(r#"<p class="card__subtitle">Showing the first 1 share links.</p>"#),
+            "a capped list says so under the title: {html}"
+        );
+        assert!(
+            crate::test_support::dom::card_level_inside_card(&html).is_empty(),
+            "{html}"
         );
     }
 
@@ -387,6 +447,16 @@ mod tests {
             access_count: 4,
         }];
         let html = render_shares_table(&rows).into_string();
+        assert!(
+            html.starts_with(
+                r#"<div class="share-table share-table--owner"><div class="data-table">"#
+            ),
+            "the table narrows in its own container (table.css `.share-table`): {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="share-table__meta">Created <time class="datetime" datetime="2026-05-06T10:00:00.000Z""#),
+            "the created date also sits under the file, for the narrow table: {html}"
+        );
         assert!(html.contains("abc12345"));
         assert!(html.contains("photos/<wbr>a.png"));
         assert!(html.contains(">4<"), "access count missing");

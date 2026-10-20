@@ -342,6 +342,11 @@ const MOBILE_ADMIN_ROUTES = [
   // Phase 5d Item C: seeded photos bucket — exercises the table-as-cards
   // mobile rendering of the file browser, not just the bucket list.
   { path: '/b/storage/photos/', name: 'storage-objects' },
+  // The share links' flush card and the quota card, and the admin storage
+  // overview and bucket list, at phone width.
+  { path: '/b/cloudstorage/', name: 'cloudstorage' },
+  { path: '/b/storage/admin/', name: 'storage-admin-overview' },
+  { path: '/b/storage/admin/buckets', name: 'storage-admin-buckets' },
 ];
 
 // ===== Phase 5b PR-1: vector index admin pages =====
