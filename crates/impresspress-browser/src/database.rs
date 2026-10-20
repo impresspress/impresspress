@@ -1016,14 +1016,22 @@ pub mod test_support {
     #[wasm_bindgen(inline_js = r#"
 let writes = 0;
 let failNextWrite = false;
+let failNextRead = null;
 export function opfsWrites() { return writes; }
 export function failNextOpfsWrite() { failNextWrite = true; }
+export function failNextOpfsRead(name) { failNextRead = name; }
 export function installMemoryOpfs() {
     const files = new Map();
     writes = 0;
     failNextWrite = false;
+    failNextRead = null;
     const handle = (name) => ({
         async getFile() {
+            if (failNextRead !== null) {
+                const failure = failNextRead;
+                failNextRead = null;
+                throw new DOMException('the file could not be read', failure);
+            }
             const data = files.get(name);
             return { async arrayBuffer() { return data.slice().buffer; } };
         },
@@ -1075,6 +1083,13 @@ export function installMemoryOpfs() {
         /// as it was and the write uncounted. One-shot.
         #[wasm_bindgen(js_name = failNextOpfsWrite)]
         pub fn fail_next_opfs_write();
+
+        /// Make the next `getFile()` on the OPFS installed last reject with a
+        /// `DOMException` of this `name` (`"NotReadableError"`, say) — a file
+        /// that exists and could not be read this time — leaving the file as
+        /// it is. One-shot.
+        #[wasm_bindgen(js_name = failNextOpfsRead)]
+        pub fn fail_next_opfs_read(name: &str);
     }
 
     /// A fresh in-memory OPFS and a fresh, empty sql.js database on it.
@@ -1750,7 +1765,7 @@ mod sql_js_transactions {
 
     use super::{
         bridge_control, in_transaction,
-        test_support::{fresh_db, opfs_writes},
+        test_support::{fail_next_opfs_read, fresh_db, opfs_writes},
         BrowserDatabaseService,
     };
 
@@ -1974,5 +1989,41 @@ mod sql_js_transactions {
             .await
             .expect("base64_decode is registered");
         assert_eq!(decoded[0].data.get("n"), Some(&serde_json::json!(3)));
+    }
+
+    /// **A database file that could not be read is not a first run.** The
+    /// file holds a row; its next read fails (`NotReadableError`, as a
+    /// browser reports a file it cannot read this time). `db_init` is an
+    /// `Err` named `DatabaseUnreadable` — the name `sw.js` keys its
+    /// non-erasing `open` stage on — and leaves no database open, so the
+    /// flush a mutation makes writes nothing over the file. The next
+    /// `db_init` reads the file and the row is there.
+    ///
+    /// Fails when `dbInit` treats every read failure as "no file yet": it
+    /// opens an empty database, the init is `Ok`, and the flush writes that
+    /// empty database over the row.
+    #[wasm_bindgen_test]
+    async fn an_unreadable_file_is_neither_opened_empty_nor_written_over() {
+        let svc = fresh().await;
+        svc.create(TABLE, row("kept")).await.expect("insert");
+        let writes = opfs_writes();
+
+        fail_next_opfs_read("NotReadableError");
+        let err = crate::db_init()
+            .await
+            .expect_err("an unreadable file fails the open");
+        let name = js_sys::Reflect::get(&err, &"name".into()).expect("an Error");
+        assert_eq!(name.as_string().as_deref(), Some("DatabaseUnreadable"));
+
+        // What boot does next: a mutation, and the flush it makes.
+        let _ = svc
+            .exec_raw(
+                &format!("CREATE TABLE IF NOT EXISTS {TABLE}_x (id TEXT)"),
+                &[],
+            )
+            .await;
+        assert_eq!(opfs_writes(), writes, "nothing is written over the file");
+
+        assert_eq!(durable_ids(&svc).await, ["kept"]);
     }
 }

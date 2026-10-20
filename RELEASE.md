@@ -19,6 +19,20 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Browser: an unreadable database stops with its cause instead of starting empty
+
+**What changes.** A browser install whose stored database could not be read
+(OPFS unavailable, or the file's read failed) used to start on an empty
+database, and its first flush wrote that empty database over the stored one.
+It now stops with a visible error at the new stage `open`, keeps the file,
+and offers "Try again". Builds rendered with `--opfs-wipe-on-recovery` do not
+erase for it either: only a database that was read and found unusable
+(stage `initialize`) is erased there.
+
+**Who has to act.** Nobody. The runtime and its `sw.js` must come from the same
+release, which `impresspress build` guarantees: an older `sw.js` reports the
+new error as stage `initialize`.
+
 ### Cloudflare: `--password-hasher keep`, and verify probes the hasher
 
 **What changes.**

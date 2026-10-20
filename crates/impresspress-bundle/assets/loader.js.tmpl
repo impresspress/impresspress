@@ -108,17 +108,21 @@ const WORKER_URL = '/sw.js';
 // `--opfs-wipe-on-recovery`). Demo builds set it true so a schema-drift
 // loop self-resolves; production apps whose OPFS holds user data leave
 // it false and surface the error instead. Even where it is true, only a
-// failure of the runtime's `initialize()` is recovered from by wiping —
-// `erasesFor` is the one place that decides.
+// failure of the runtime's `initialize()` on the data it read is recovered
+// from by wiping — `erasesFor` is the one place that decides.
 const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
-// The stage sw.js reports for a failure of the runtime's `initialize()`
-// (`STAGE_INITIALIZE` there): opening the database, migrating it, importing
-// the seed. Its other stages say nothing about the stored data:
+// The stage sw.js reports for a failure of the runtime's `initialize()` on
+// the data it read (`STAGE_INITIALIZE` there): bytes that are not a database,
+// migrating it, importing the seed. Its other stages say nothing about the
+// stored data:
 //   'load'    the wasm module could not be loaded;
 //   'build'   the runtime was compiled for another sandbox mode than the
 //             worker was built for — a bundle assembled from the wrong
 //             runtime, found before `initialize()` was ever called, which
 //             only a rebuild of the bundle fixes;
+//   'open'    the database could not be read at all (sql.js would not load,
+//             OPFS was unavailable, the file's read failed), so nothing was
+//             learned about it;
 //   'request' a started runtime died on a request.
 // Each is recovered from as any failure that keeps the data is: one restart,
 // then the stopped screen with the cause, which for 'build' says to rebuild.
@@ -428,10 +432,12 @@ function reported(cause, stage, id, runtime) {
 // Whether recovering from `failure` — automatically, or from the retry
 // button — erases the data this browser stores for the app. The only gate in
 // front of the OPFS wipe a recovery does: the build must allow it AND the
-// failure must be the runtime's `initialize()`, the one failure that can mean
-// the stored data is not what this build can use. A module that could not be
-// loaded, a request the runtime died on and a probe that ran out of time are
-// not evidence of that, and the wipe cannot be undone. (sw.js states the same
+// failure must be the runtime's `initialize()` on the data it read (stage
+// `initialize`), the one failure that can mean the stored data is not what
+// this build can use. A module that could not be loaded, a database that
+// could not be read at all (`open`), a request the runtime died on and a
+// probe that ran out of time are not evidence of that, and the wipe cannot be
+// undone. (sw.js states the same
 // rule as `recoveryErases`, to word its 503.)
 function erasesFor(failure) {
     return OPFS_WIPE_ON_RECOVERY && failure.stage === STAGE_INITIALIZE;

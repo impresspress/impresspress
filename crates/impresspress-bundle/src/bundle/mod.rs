@@ -165,9 +165,10 @@ pub struct AppConfig {
     /// stale-schema migration scenario self-resolves without manual user
     /// action; other apps surface the error to the user instead and let
     /// them choose whether to clear data. Even when true, only a failure
-    /// of the runtime's `initialize()` is recovered from by wiping: a module
-    /// that could not be loaded, a request the runtime died on and a boot
-    /// that merely runs out of time all keep the data (`erasesFor` in
+    /// of the runtime's `initialize()` on the data it read is recovered from
+    /// by wiping: a module that could not be loaded, a database that could
+    /// not be read at all, a request the runtime died on and a boot that
+    /// merely runs out of time all keep the data (`erasesFor` in
     /// `loader.js.tmpl`).
     pub opfs_wipe_on_recovery: bool,
     /// Which half of the browser sandbox this bundle's service worker boots

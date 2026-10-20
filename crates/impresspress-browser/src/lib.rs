@@ -101,9 +101,14 @@ pub use storage::make_storage_service;
 /// a prior call. Consumers should guard with `is_initialized()` before
 /// calling this on a re-entry path.
 ///
-/// Propagates a rejected `dbInit()` promise (sql.js WASM failed to load,
-/// OPFS unavailable, etc.) as `Err` instead of letting it panic the Service
-/// Worker — see `bridge::dbInit`'s `#[wasm_bindgen(catch)]`.
+/// Propagates a rejected `dbInit()` promise as `Err` instead of letting it
+/// panic the Service Worker — see `bridge::dbInit`'s `#[wasm_bindgen(catch)]`.
+/// The rejected value is passed through untouched: a database that could not
+/// be read is an `Error` named `DatabaseUnreadable` (`dbInit` in
+/// `js/bridge.js`), and `sw.js` keys on that `name` to report the failure as
+/// its non-erasing `open` stage rather than `initialize` (`STAGE_OPEN` in
+/// `impresspress-bundle`'s `sw.js.tmpl`), so it must reach `initialize()`'s
+/// caller as the same object, never re-wrapped or turned into a string.
 #[cfg(target_arch = "wasm32")]
 pub async fn db_init() -> Result<(), wasm_bindgen::JsValue> {
     let opened = bridge::dbInit().await;
