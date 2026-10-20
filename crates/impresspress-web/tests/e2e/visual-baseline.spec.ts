@@ -193,11 +193,13 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   below).
 //
 // What stays unmasked, deliberately: the dashboard's server-error figure,
-// charts and "Recent server errors" card are zero and empty on a healthy run,
-// so an error there is a regression the capture should catch. The client
-// errors under "Requests today" and in their chart count the refused requests
-// the captures before the dashboard make (the anonymous 404 page among them):
-// fixed while the group's order is, so they are compared too. The new-user
+// chart and "Recent server errors" card are zero and empty on a healthy run
+// (the chart is then one sentence, "No server errors yet — …"), so an error
+// there is a regression the capture should catch. The client errors under
+// "Requests today" and in their chart are zero in the capture too ("0 client
+// errors", and the chart's "No client errors yet — …" sentence), so they are
+// compared as well: a refused request the server logs before the capture
+// changes both, and the baseline with them. The new-user
 // chart plots its one signup on the last day of the window, and "Total users"
 // / "New today" are the one bootstrap admin, so none of them depends on what
 // ran first. The charts and "New today" do depend on the UTC day: a run

@@ -137,30 +137,47 @@ pub fn tabbed_page(
     }
 }
 
-/// `stats` are the page's headline figures, laid out by [`stat_row`] as the
-/// first thing on the page.
+/// One row of a [`dashboard_page`]: its cards, and what they hold, which
+/// sets how narrow a card may get before the row stacks them (page.css).
+pub struct DashboardRow {
+    cards: Markup,
+    holds_tables: bool,
+}
+
+impl DashboardRow {
+    /// Chart cards: side by side while each gets 22rem, so two share a row
+    /// from 1024px.
+    pub fn charts(cards: Markup) -> Self {
+        Self {
+            cards,
+            holds_tables: false,
+        }
+    }
+
+    /// Cards holding a table: side by side while each gets 27rem, the
+    /// narrowest the admin dashboard's "Recent server errors" table fits.
+    pub fn tables(cards: Markup) -> Self {
+        Self {
+            cards,
+            holds_tables: true,
+        }
+    }
+}
+
+/// A dashboard: the headline figures, then rows of cards.
 ///
-/// `top_card` renders between the stat row and `dashboard-grid` — e.g. the
-/// admin dashboard's chart cards. The name is positional relative to
-/// `dashboard-grid` (the two-column primary/secondary row below it), not
-/// relative to the page as a whole: stats always render first, matching the
-/// mockup's stats → charts → tables order.
-pub fn dashboard_page(
-    stats: Vec<Stat<'_>>,
-    primary_card: Markup,
-    secondary_card: Markup,
-    full_width_card: Option<Markup>,
-    top_card: Option<Markup>,
-) -> Markup {
+/// `stats` are laid out by [`stat_row`] as the first thing on the page.
+/// `rows` follow top to bottom in the order given. A row's cards share its
+/// width in equal columns of one height while each gets its row's minimum
+/// ([`DashboardRow`]), and stack below that. The caller decides what shares
+/// a row; the page decides how a row is laid out.
+pub fn dashboard_page(stats: Vec<Stat<'_>>, rows: Vec<DashboardRow>) -> Markup {
     html! {
-        div .page .page--dashboard {
+        div .page {
             (stat_row(stats))
-            @if let Some(tc) = top_card { div .dashboard-top { (tc) } }
-            div .dashboard-grid {
-                div .dashboard-grid__primary { (primary_card) }
-                div .dashboard-grid__secondary { (secondary_card) }
+            @for row in rows {
+                div .dashboard-row .dashboard-row--tables[row.holds_tables] { (row.cards) }
             }
-            @if let Some(fw) = full_width_card { div .dashboard-wide { (fw) } }
         }
     }
 }
@@ -541,13 +558,18 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_renders_stats_and_cards() {
+    fn dashboard_renders_the_stats_then_each_row_in_order() {
         let stats = vec![Stat::new("Users", "142"), Stat::new("Storage", "1.2 GB")];
-        let primary = html! { section .card { "Quick actions" } };
-        let secondary = html! { section .card { "Recent activity" } };
-        let s = dashboard_page(stats, primary, secondary, None, None).into_string();
+        let s = dashboard_page(
+            stats,
+            vec![
+                DashboardRow::charts(html! { section #charts-a {} section #charts-b {} }),
+                DashboardRow::tables(html! { section #recent {} }),
+            ],
+        )
+        .into_string();
         assert!(
-            s.starts_with(r#"<div class="page page--dashboard"><div class="stat-row"><div class="stat-row__grid"><div class="stat"><div class="stat__label">Users</div><div class="stat__value">142</div></div>"#),
+            s.starts_with(r#"<div class="page"><div class="stat-row"><div class="stat-row__grid"><div class="stat"><div class="stat__label">Users</div><div class="stat__value">142</div></div>"#),
             "the stat row is the first thing on the page: {s}"
         );
         assert!(
@@ -558,32 +580,10 @@ mod tests {
             !s.contains("<svg"),
             "a stat draws no icon and no sparkline: {s}"
         );
-        assert!(s.contains("Quick actions"));
-        assert!(s.contains("Recent activity"));
-        assert!(!s.contains("dashboard-wide"));
-    }
-
-    #[test]
-    fn dashboard_page_renders_optional_top_card_between_stats_and_grid() {
-        let m = dashboard_page(
-            vec![Stat::new("Users", "1")],
-            html! { div #primary {} },
-            html! { div #secondary {} },
-            None,
-            Some(html! { div #top-card { "QA" } }),
-        );
-        let s = m.into_string();
-        let stats = s.find("stat-row").expect("stat-row div present");
-        let top = s.find("dashboard-top").expect("dashboard-top div present");
-        let grid = s
-            .find("dashboard-grid")
-            .expect("dashboard-grid div present");
-        assert!(stats < top, "stats must render before the mid card");
         assert!(
-            top < grid,
-            "mid card must render before the primary/secondary grid"
+            s.ends_with(r#"</div><div class="dashboard-row"><section id="charts-a"></section><section id="charts-b"></section></div><div class="dashboard-row dashboard-row--tables"><section id="recent"></section></div></div>"#),
+            "each row is one `.dashboard-row`, in the order given, after the stats; a row of tables says so: {s}"
         );
-        assert!(s.contains(r#"id="top-card""#));
     }
 
     fn pane(label: &str, body: Markup) -> ChatPane<'_> {

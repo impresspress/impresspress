@@ -84,18 +84,6 @@
 .btn--ghost-danger { background: transparent; color: var(--accent-danger-text); }
 .btn--ghost-danger:hover:not(:disabled) { background: var(--bg-hover); }
 
-/* ── Quick actions card ────────────────────────────────── */
-.dashboard-top { margin-bottom: var(--space-4); }
-.quick-actions__grid {
-	display: grid;
-	grid-template-columns: repeat(4, 1fr);
-	gap: var(--space-2);
-}
-.quick-actions__grid .btn { width: 100%; }
-@media (max-width: 720px) {
-	.quick-actions__grid { grid-template-columns: repeat(2, 1fr); }
-}
-
 /* A button is as wide as its label at every width; nothing widens buttons
    globally. A row whose buttons span the screen on a phone says so on the
    row -- `.modal__footer` (modal.css), `.form-actions` (form.css),

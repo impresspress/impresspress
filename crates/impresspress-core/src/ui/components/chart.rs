@@ -1,17 +1,22 @@
 //! Dashboard charts: the 30-day line and bar chart cards.
 //!
-//! Both chart cards are one component ([`chart_card`]) with two plot kinds,
+//! Both chart kinds are one component ([`ChartCard`]) with two plot kinds,
 //! so they share the value axis, the gridlines, the per-day tooltips, the
 //! date range, the history note and the accessible table of
 //! values. The drawing is decorative (`aria-hidden`): what a screen reader,
 //! a keyboard or a touch user reads is the "Show values" disclosure under it,
 //! a real `<table>` with a caption.
+//!
+//! A chart is drawn only when its series has data (layout rule 10). A window
+//! that is zero every day renders one [`empty_note`] sentence in place of the
+//! drawing, so a fresh install shows four short sentences rather than four
+//! flat lines.
 
 use maud::{html, Markup};
 
-use super::Card;
+use super::{empty_note, Card};
 
-/// How a [`chart_card`] draws its series.
+/// How a [`ChartCard`] draws its series.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Plot {
     /// A line with a shaded area under it and a dot on the last day.
@@ -20,49 +25,42 @@ enum Plot {
     Bars,
 }
 
-/// Render a 30-day column bar chart card. `data` is ordered chronologically,
-/// one `(YYYY-MM-DD, count)` per day; the columns are drawn against the same
-/// value axis as [`line_chart_card`].
-pub fn bar_chart_card(
-    title: &str,
-    subtitle: &str,
-    data: &[(String, i64)],
-    history: ChartHistory,
-    color_var: &str,
-    view_href: &str,
-) -> Markup {
-    chart_card(
-        Plot::Bars,
-        title,
-        subtitle,
-        data,
-        history,
-        color_var,
-        view_href,
-    )
+/// A 30-day chart card: a titled [`Card`] with a head link, holding the
+/// drawing of `data`, or the sentence that says it is zero throughout.
+///
+/// `data` is ordered chronologically, one `(YYYY-MM-DD, count)` per day.
+/// Render it as a line ([`line`](ChartCard::line)) or as columns
+/// ([`bars`](ChartCard::bars)); both share the same value axis.
+pub struct ChartCard<'a> {
+    /// The card's `h2`: "Server errors".
+    pub title: &'a str,
+    /// The window, under the title: "Last 30 days".
+    pub subtitle: &'a str,
+    /// What the series counts, as running text ("server errors"). It names
+    /// the zero in an all-zero window: "No server errors in the last 30
+    /// days". Written out rather than derived from `title`, which would lose
+    /// an acronym's case to a lowercase.
+    pub counts: &'a str,
+    pub data: &'a [(String, i64)],
+    pub history: ChartHistory,
+    /// The CSS colour of the drawing: `var(--accent-danger)`.
+    pub color_var: &'a str,
+    /// The head link as `(label, href)`. The label is the link's accessible
+    /// name, so it names the destination ("View server errors"), not just
+    /// the verb.
+    pub link: (&'a str, &'a str),
 }
 
-/// 30-day line + area chart with gridlines and y-axis ticks.
-///
-/// `bar_chart_card` renders the same data as columns; pick per series —
-/// the dashboard uses bars for Requests and lines for New users / errors.
-pub fn line_chart_card(
-    title: &str,
-    subtitle: &str,
-    data: &[(String, i64)],
-    history: ChartHistory,
-    color_var: &str,
-    view_href: &str,
-) -> Markup {
-    chart_card(
-        Plot::Line,
-        title,
-        subtitle,
-        data,
-        history,
-        color_var,
-        view_href,
-    )
+impl ChartCard<'_> {
+    /// Draw the series as a line with a shaded area under it.
+    pub fn line(self) -> Markup {
+        chart_card(Plot::Line, self)
+    }
+
+    /// Draw the series as one column per day.
+    pub fn bars(self) -> Markup {
+        chart_card(Plot::Bars, self)
+    }
 }
 
 /// How far back the data behind a chart's series goes — which is not the
@@ -74,7 +72,8 @@ pub enum ChartHistory {
     Since(chrono::NaiveDate),
     /// Nothing has been recorded yet.
     Empty,
-    /// Could not be read; the card makes no claim about it.
+    /// Could not be read; the card makes no claim about how far back the
+    /// records go.
     Unknown,
 }
 
@@ -85,44 +84,65 @@ fn short_day(day: &str) -> String {
         .unwrap_or_else(|_| day.to_string())
 }
 
-/// The note above a chart, or `None` when the series speaks for itself.
-///
-/// - Nothing recorded yet: "Collecting data — nothing recorded yet".
-/// - Records reach back fewer days than the window: "Collecting data — N
-///   days so far" (with "none yet" when those days are all zero), because the
-///   flat line before them is not data.
-/// - The whole window is covered and every day is zero: "None in the last N
-///   days" — zero is data, and the note says so in words, since an all-zero
-///   plot is easy to misread as an empty one.
-fn history_note(data: &[(String, i64)], history: ChartHistory) -> Option<String> {
-    let window = data.len();
+/// How many days of the window the records cover, when the records start
+/// inside it: `Some(n)` with `n` below the window's length. `None` when they
+/// cover it all, or when the history makes no claim.
+fn days_so_far(data: &[(String, i64)], history: ChartHistory) -> Option<usize> {
+    let ChartHistory::Since(first) = history else {
+        return None;
+    };
     let last = data
         .last()
-        .and_then(|(d, _)| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
-    let all_zero = data.iter().all(|(_, v)| *v == 0);
-    let covered = match (history, last) {
-        (ChartHistory::Unknown, _) | (_, None) => return None,
-        (ChartHistory::Empty, _) => {
-            return Some("Collecting data — nothing recorded yet".to_string())
-        }
-        (ChartHistory::Since(first), Some(last)) => ((last - first).num_days() + 1).max(1) as usize,
-    };
-    if covered < window {
-        let days = if covered == 1 {
-            "1 day".to_string()
-        } else {
-            format!("{covered} days")
-        };
-        let none = if all_zero { "; none yet" } else { "" };
-        Some(format!("Collecting data — {days} so far{none}"))
-    } else if all_zero {
-        Some(format!("None in the last {window} days"))
+        .and_then(|(d, _)| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())?;
+    let covered = ((last - first).num_days() + 1).max(1) as usize;
+    (covered < data.len()).then_some(covered)
+}
+
+/// `"1 day"` / `"3 days"`.
+fn days(n: usize) -> String {
+    if n == 1 {
+        "1 day".to_string()
     } else {
-        None
+        format!("{n} days")
     }
 }
 
-/// The shared chart card.
+/// The note above a drawn chart, or `None` when the series speaks for itself.
+///
+/// Records reaching back fewer days than the window: "Collecting data — N
+/// days so far", because the flat line before them is not data. `Empty`
+/// meets a series with data only across a race between the two reads, and
+/// `Unknown` makes no claim; neither adds a note.
+fn history_note(data: &[(String, i64)], history: ChartHistory) -> Option<String> {
+    days_so_far(data, history).map(|n| format!("Collecting data — {} so far", days(n)))
+}
+
+/// The sentence a chart card holds in place of a series that is zero every
+/// day. Zero is data once recording has begun, so the sentence says which:
+///
+/// - Nothing recorded yet: "No server errors recorded yet".
+/// - Records reach back fewer days than the window: "No server errors yet —
+///   collecting data, N days so far", because the days before them were not
+///   measured.
+/// - Records cover the window: "No server errors in the last 30 days".
+/// - The history could not be read: "No server errors recorded in the last
+///   30 days". The series is zero-filled, so its zeros may predate the
+///   records; "nothing was recorded" is true however far back they go, where
+///   "none in the last 30 days" would claim the whole window was measured.
+fn zero_note(counts: &str, data: &[(String, i64)], history: ChartHistory) -> String {
+    let window = data.len();
+    match history {
+        ChartHistory::Empty => format!("No {counts} recorded yet"),
+        ChartHistory::Unknown => format!("No {counts} recorded in the last {window} days"),
+        ChartHistory::Since(_) => match days_so_far(data, history) {
+            Some(n) => format!("No {counts} yet — collecting data, {} so far", days(n)),
+            None => format!("No {counts} in the last {window} days"),
+        },
+    }
+}
+
+/// The shared chart card: the drawing when the series has data, else the
+/// [`zero_note`] sentence under the same head.
 ///
 /// The plot, its gridlines, its y-axis labels, its bars and its endpoint dot
 /// are all placed from one [`ValueAxis`]: a gridline and its label share the
@@ -135,15 +155,25 @@ fn history_note(data: &[(String, i64)], history: ChartHistory) -> Option<String>
 /// on focus — the columns take focus from a tap (`tabindex="-1"`) without
 /// adding thirty tab stops. Keyboard and screen-reader users get the same
 /// values from the "Show values" table.
-fn chart_card(
-    plot: Plot,
-    title: &str,
-    subtitle: &str,
-    data: &[(String, i64)],
-    history: ChartHistory,
-    color_var: &str,
-    view_href: &str,
-) -> Markup {
+fn chart_card(plot: Plot, card: ChartCard<'_>) -> Markup {
+    let ChartCard {
+        title,
+        subtitle,
+        counts,
+        data,
+        history,
+        color_var,
+        link: (link_label, link_href),
+    } = card;
+    let head = |body: Markup| {
+        Card::titled(title, body)
+            .subtitle(subtitle)
+            .link(link_label, link_href)
+            .render()
+    };
+    if data.iter().all(|(_, v)| *v == 0) {
+        return head(empty_note(&zero_note(counts, data, history), None));
+    }
     let axis = ValueAxis::for_max(data.iter().map(|(_, v)| *v).max().unwrap_or(0));
     // Distance from the top of the plot as a percentage, the unit the labels
     // and the dot are positioned in; the SVG uses the same value scaled to its
@@ -247,10 +277,7 @@ fn chart_card(
             }
         }
     };
-    Card::titled(title, body)
-        .subtitle(subtitle)
-        .link("View", view_href)
-        .render()
+    head(body)
 }
 
 /// The first / last date labels under a 30-day chart.
@@ -274,12 +301,13 @@ fn date_range(data: &[(String, i64)]) -> Markup {
     }
 }
 
-/// The value axis of a [`line_chart_card`]: integer ticks from 0 to `top`,
+/// The value axis of a [`ChartCard`]'s drawing: integer ticks from 0 to `top`,
 /// `step` apart, where every tick sits on its own gridline.
 #[derive(Debug, PartialEq, Eq)]
 struct ValueAxis {
     /// The value at the top of the plot. 0 only for a series that is zero
-    /// throughout, which is then plotted along the baseline.
+    /// throughout, which [`chart_card`] never draws: it says so in a
+    /// sentence instead.
     top: i64,
     /// The distance between two ticks; 0 exactly when `top` is.
     step: i64,
@@ -296,8 +324,8 @@ impl ValueAxis {
     /// at most [`MAX_AXIS_INTERVALS`] intervals, and `top` is the first multiple
     /// of it at or above `max`. Every tick is therefore a distinct whole number
     /// placed at its true height, and the axis never labels a value above the
-    /// data it has no reason to show: a series that is zero throughout gets the
-    /// single tick 0, not a "1" the data never reaches.
+    /// data it has no reason to show: a series that peaks at 1 gets the ticks
+    /// 1 and 0, not a padded axis the data never reaches.
     fn for_max(max: i64) -> Self {
         if max <= 0 {
             return ValueAxis { top: 0, step: 0 };
@@ -341,18 +369,33 @@ impl ValueAxis {
 
 #[cfg(test)]
 mod tests {
+    use super::{ChartCard, ChartHistory};
+
+    /// A "New users" chart card over `data`, ready to draw.
+    fn card(data: &[(String, i64)], history: ChartHistory) -> ChartCard<'_> {
+        ChartCard {
+            title: "New users",
+            subtitle: "Last 30 days",
+            counts: "new users",
+            data,
+            history,
+            color_var: "var(--x)",
+            link: ("View users", "/b/admin/users"),
+        }
+    }
+
+    /// Both drawings of `data`: the line, then the bars.
+    fn both(data: &[(String, i64)], history: ChartHistory) -> [String; 2] {
+        [
+            card(data, history).line().into_string(),
+            card(data, history).bars().into_string(),
+        ]
+    }
+
     #[test]
     fn line_chart_card_has_gridlines_and_axis_labels() {
         let data = vec![("2026-08-01".to_string(), 1), ("2026-08-02".to_string(), 3)];
-        let m = super::line_chart_card(
-            "New users",
-            "Last 30 days",
-            &data,
-            super::ChartHistory::Unknown,
-            "var(--primary-color)",
-            "/b/admin/users",
-        )
-        .into_string();
+        let m = card(&data, ChartHistory::Unknown).line().into_string();
         assert!(m.contains("chart__gridline"), "gridlines missing");
         assert!(m.contains("chart__ytick"), "y-axis ticks missing");
         assert!(
@@ -368,26 +411,7 @@ mod tests {
     #[test]
     fn chart_date_range_labels_are_time_elements() {
         let data = vec![("2026-08-27".to_string(), 0), ("2026-09-25".to_string(), 4)];
-        let cards = [
-            super::line_chart_card(
-                "Errors",
-                "Last 30 days",
-                &data,
-                super::ChartHistory::Unknown,
-                "var(--x)",
-                "/x",
-            ),
-            super::bar_chart_card(
-                "Requests",
-                "Last 30 days",
-                &data,
-                super::ChartHistory::Unknown,
-                "var(--x)",
-                "/x",
-            ),
-        ];
-        for card in cards {
-            let m = card.into_string();
+        for m in both(&data, ChartHistory::Unknown) {
             assert!(
                 m.contains(r#"<time datetime="2026-08-27">Aug 27</time>"#)
                     && m.contains(r#"<time datetime="2026-09-25">Sep 25</time>"#),
@@ -405,30 +429,12 @@ mod tests {
     }
 
     /// Both chart kinds are a titled `Card`: the h2 is the series, the
-    /// subtitle is the window, and "View" is the card's head link, not a
-    /// button. Nothing card-level sits inside it (the values table is a
-    /// `.chart__table`, not a framed data table).
+    /// subtitle is the window, and the head link is a link named for where
+    /// it goes, not a button. Nothing card-level sits inside it (the values
+    /// table is a `.chart__table`, not a framed data table).
     #[test]
     fn a_chart_card_is_a_titled_card_with_a_head_link() {
-        for card in [
-            super::line_chart_card(
-                "New users",
-                "Last 30 days",
-                &days(&[1, 3]),
-                super::ChartHistory::Unknown,
-                "var(--x)",
-                "/b/admin/users",
-            ),
-            super::bar_chart_card(
-                "New users",
-                "Last 30 days",
-                &days(&[1, 3]),
-                super::ChartHistory::Unknown,
-                "var(--x)",
-                "/b/admin/users",
-            ),
-        ] {
-            let m = card.into_string();
+        for m in both(&days(&[1, 3]), ChartHistory::Unknown) {
             assert!(
                 m.starts_with(r#"<section class="card"><header class="card__head">"#),
                 "{m}"
@@ -438,7 +444,7 @@ mod tests {
                 "{m}"
             );
             assert!(
-                m.contains(r#"<a class="card__link" href="/b/admin/users">View<svg"#),
+                m.contains(r#"<a class="card__link" href="/b/admin/users">View users<svg"#),
                 "{m}"
             );
             assert!(!m.contains("btn"), "{m}");
@@ -457,25 +463,7 @@ mod tests {
     /// caption, inside a disclosure keyboard and touch users can open.
     #[test]
     fn chart_values_are_an_accessible_table_and_the_drawing_is_hidden() {
-        for card in [
-            super::line_chart_card(
-                "New users",
-                "Last 30 days",
-                &days(&[1, 3]),
-                super::ChartHistory::Unknown,
-                "var(--x)",
-                "/x",
-            ),
-            super::bar_chart_card(
-                "New users",
-                "Last 30 days",
-                &days(&[1, 3]),
-                super::ChartHistory::Unknown,
-                "var(--x)",
-                "/x",
-            ),
-        ] {
-            let m = card.into_string();
+        for m in both(&days(&[1, 3]), ChartHistory::Unknown) {
             assert!(
                 m.contains(r#"<div class="chart" aria-hidden="true">"#),
                 "{m}"
@@ -500,15 +488,7 @@ mod tests {
     #[test]
     fn every_day_has_a_tap_focusable_tooltip_column() {
         let data = days(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let m = super::line_chart_card(
-            "Requests",
-            "Last 30 days",
-            &data,
-            super::ChartHistory::Unknown,
-            "var(--x)",
-            "/x",
-        )
-        .into_string();
+        let m = card(&data, ChartHistory::Unknown).line().into_string();
         assert_eq!(m.matches(r#"tabindex="-1""#).count(), 10, "{m}");
         assert!(
             m.contains(r#"<div class="chart__col chart__col--start" tabindex="-1" data-tooltip="Sep 1: 0">"#),
@@ -533,24 +513,7 @@ mod tests {
     #[test]
     fn bar_chart_shares_the_line_chart_axis() {
         let data = days(&[0, 3, 5]);
-        let bars = super::bar_chart_card(
-            "Requests",
-            "Last 30 days",
-            &data,
-            super::ChartHistory::Unknown,
-            "var(--x)",
-            "/x",
-        )
-        .into_string();
-        let line = super::line_chart_card(
-            "Requests",
-            "Last 30 days",
-            &data,
-            super::ChartHistory::Unknown,
-            "var(--x)",
-            "/x",
-        )
-        .into_string();
+        let [line, bars] = both(&data, ChartHistory::Unknown);
         assert_eq!(axis_of(&bars), axis_of(&line));
         assert_eq!(
             axis_of(&bars)
@@ -566,21 +529,13 @@ mod tests {
         assert!(bars.contains(r#"style="--size: 0.0000""#), "{bars}");
     }
 
-    /// The note follows how far the records go back, not which days are
-    /// non-zero: zero is data once logging has begun.
+    /// The note over a drawing follows how far the records go back, not
+    /// which days are non-zero: the flat line before the first record is
+    /// not data, and the note says so.
     #[test]
     fn the_history_note_follows_how_far_the_records_go_back() {
-        use super::ChartHistory;
         let note = |values: &[i64], history: ChartHistory| {
-            let m = super::line_chart_card(
-                "Errors",
-                "Last 30 days",
-                &days(values),
-                history,
-                "var(--x)",
-                "/x",
-            )
-            .into_string();
+            let m = card(&days(values), history).line().into_string();
             m.split(r#"<p class="chart__note">"#)
                 .nth(1)
                 .map(|rest| rest.split("</p>").next().unwrap().to_string())
@@ -589,10 +544,6 @@ mod tests {
             |d: u32| ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 9, d).unwrap());
         // `days(..)` runs from Sep 1.
         assert_eq!(
-            note(&[0, 0, 0], ChartHistory::Empty).as_deref(),
-            Some("Collecting data — nothing recorded yet")
-        );
-        assert_eq!(
             note(&[0, 0, 4], day(3)).as_deref(),
             Some("Collecting data — 1 day so far")
         );
@@ -600,26 +551,68 @@ mod tests {
             note(&[0, 2, 4], day(2)).as_deref(),
             Some("Collecting data — 2 days so far")
         );
-        assert_eq!(
-            note(&[0, 0, 0], day(2)).as_deref(),
-            Some("Collecting data — 2 days so far; none yet")
-        );
-        // A healthy, fully covered window of zeros: zero is the answer.
-        assert_eq!(
-            note(&[0, 0, 0], day(1)).as_deref(),
-            Some("None in the last 3 days")
-        );
+        // Covered, unknown, or an `Empty` history read before a record that
+        // the series then saw: the drawing speaks for itself.
+        assert_eq!(note(&[0, 0, 1], day(1)), None);
         assert_eq!(
             note(
-                &[0, 0, 0],
+                &[0, 0, 1],
                 ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
-            )
-            .as_deref(),
-            Some("None in the last 3 days")
+            ),
+            None
         );
-        // Covered and non-zero, or unknown: no note.
-        assert_eq!(note(&[0, 0, 1], day(1)), None);
-        assert_eq!(note(&[0, 0, 0], ChartHistory::Unknown), None);
+        assert_eq!(note(&[0, 0, 1], ChartHistory::Unknown), None);
+        assert_eq!(note(&[0, 0, 1], ChartHistory::Empty), None);
+    }
+
+    /// A window that is zero every day is not drawn (layout rule 10): the
+    /// card keeps its head and holds one `empty_note` sentence, which says
+    /// whether the zero was measured. A flat line along the axis read as a
+    /// chart with nothing in it, and four of them were a fresh install's
+    /// whole dashboard.
+    #[test]
+    fn an_all_zero_window_is_a_sentence_not_a_drawing() {
+        let day =
+            |d: u32| ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 9, d).unwrap());
+        let cases = [
+            (ChartHistory::Empty, "No new users recorded yet"),
+            (day(3), "No new users yet — collecting data, 1 day so far"),
+            (day(2), "No new users yet — collecting data, 2 days so far"),
+            (day(1), "No new users in the last 3 days"),
+            (
+                ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+                "No new users in the last 3 days",
+            ),
+            (
+                ChartHistory::Unknown,
+                "No new users recorded in the last 3 days",
+            ),
+        ];
+        for (history, sentence) in cases {
+            for m in both(&days(&[0, 0, 0]), history) {
+                assert!(
+                    m.contains(&format!(
+                        r#"<div class="card__body"><p class="empty-note">{sentence}</p></div>"#
+                    )),
+                    "{history:?}: {m}"
+                );
+                for drawn in ["chart", "chart__note", "chart__range", "chart__values"] {
+                    assert!(
+                        !m.contains(&format!(r#"class="{drawn}""#)),
+                        "{history:?}: an all-zero window draws no {drawn}: {m}"
+                    );
+                }
+                assert!(
+                    m.contains(r#"<a class="card__link" href="/b/admin/users">View users<svg"#)
+                        && m.contains(r#"<p class="card__subtitle">Last 30 days</p>"#),
+                    "the head is the drawn card's: {m}"
+                );
+                assert!(
+                    crate::test_support::dom::card_level_inside_card(&m).is_empty(),
+                    "{m}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -677,15 +670,7 @@ mod tests {
     #[test]
     fn line_chart_labels_sit_on_the_gridline_for_their_value() {
         let data = vec![("2026-08-01".to_string(), 0), ("2026-08-02".to_string(), 1)];
-        let m = super::line_chart_card(
-            "New users",
-            "Last 30 days",
-            &data,
-            super::ChartHistory::Unknown,
-            "var(--x)",
-            "/x",
-        )
-        .into_string();
+        let m = card(&data, ChartHistory::Unknown).line().into_string();
         let (labels, gridlines) = axis_of(&m);
         assert_eq!(
             labels,
@@ -698,34 +683,6 @@ mod tests {
         assert!(
             m.contains(r#"points="0.00,60.00 100.00,0.00""#),
             "the zero is plotted on the baseline, the one at the top: {m}"
-        );
-    }
-
-    /// The Errors series on a healthy deployment is zero every day. Its axis
-    /// labelled a "1" the data never reaches, because the scale was clamped to
-    /// at least 1; it shows the one value there is.
-    #[test]
-    fn line_chart_all_zero_series_labels_only_zero() {
-        let data = vec![("2026-08-01".to_string(), 0), ("2026-08-02".to_string(), 0)];
-        let m = super::line_chart_card(
-            "Errors",
-            "Last 30 days",
-            &data,
-            super::ChartHistory::Unknown,
-            "var(--x)",
-            "/x",
-        )
-        .into_string();
-        let (labels, gridlines) = axis_of(&m);
-        assert_eq!(labels, vec![("0".to_string(), 100.0)], "{m}");
-        assert_eq!(gridlines, vec![60.0], "{m}");
-        assert!(
-            m.contains(r#"points="0.00,60.00 100.00,60.00""#),
-            "an all-zero series is drawn along the baseline: {m}"
-        );
-        assert!(
-            m.contains("--dot-y: 100.00%"),
-            "the endpoint dot sits on the baseline: {m}"
         );
     }
 }
