@@ -599,8 +599,7 @@ export interface paths {
                                 role: string;
                                 /**
                                  * @description Roles granted to this user. Admins manage grants through
-                                 *     `/b/admin/api/iam/user-roles`, but not every grant is made there: the
-                                 *     configured bootstrap admin is granted `admin` when they sign in.
+                                 *     `/b/admin/api/iam/user-roles`; no sign-in grants a role.
                                  */
                                 roles: string[];
                                 /** @description RFC 3339 timestamp of the last modification. */

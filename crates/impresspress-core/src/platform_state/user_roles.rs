@@ -7,11 +7,10 @@
 //! and managed by admin's IAM surface.
 //!
 //! Runtime flavour only (spec 2.1.2): nothing reads these rows before WRAP.
-//! [`assign`] is the single writer — the login-time admin grant
-//! (`auth::helpers::TokenGrant::resolve`) and admin's assign endpoint both go through it, so
-//! every row has the same shape. Signup writes no row: the initial role is
-//! the inline `users.role`, and a row here means "granted beyond it" (spec
-//! 2.2.3).
+//! [`assign`] is the single writer, and admin's IAM assign endpoint is its
+//! only production caller: no sign-in grants a role. Signup and bootstrap
+//! provisioning write no row: the initial role is the inline `users.role`,
+//! and a row here means "granted beyond it" (spec 2.2.3).
 
 use std::collections::HashMap;
 
@@ -36,7 +35,8 @@ pub struct UserRoleRow {
     pub role: String,
     /// When the grant was made; nullable in the schema.
     pub assigned_at: Option<String>,
-    /// The admin who granted it; empty for a grant the system made.
+    /// The admin who granted it; empty when no admin is behind the grant
+    /// (see [`assign`]).
     pub assigned_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -234,12 +234,13 @@ async fn holds(ctx: &dyn Context, user_id: &str, role: &str) -> Result<bool, Waf
 }
 
 /// Grant `role` to `user_id` unless they already hold it. `assigned_by` is
-/// the granting admin's id, or empty for a grant the system makes. The
+/// the granting admin's id, or empty when no admin is behind the grant (the
+/// rows the retired sign-in grant of `admin` wrote, and test fixtures). The
 /// single writer for this table.
 ///
 /// The unique index over `(user_id, role)` (admin migration 004, where it
-/// has run) is what makes this safe to run concurrently — two logins of the bootstrap admin
-/// both reach it through `TokenGrant::resolve`. The read first is only the
+/// has run) is what makes this safe to run concurrently — two admins
+/// assigning one role at once both reach it. The read first is only the
 /// cheap answer for the common repeat; two callers can both pass it, and the
 /// insert of whichever comes second is then refused by the index and
 /// reported as [`Assigned::AlreadyAssigned`] rather than as a failure.
@@ -357,8 +358,8 @@ mod tests {
         );
     }
 
-    /// `TokenGrant::resolve` grants with no admin behind it; the column keeps
-    /// its empty default.
+    /// A grant with no admin behind it (`assigned_by` empty) keeps the
+    /// column's empty default.
     #[tokio::test]
     async fn assign_by_the_system_leaves_assigned_by_empty() {
         let ctx = TestContext::with_admin()

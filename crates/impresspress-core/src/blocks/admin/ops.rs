@@ -2697,8 +2697,8 @@ mod tests {
             !crate::config_vars::is_provisioning_only_key(
                 crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY
             ),
-            "the bootstrap EMAIL stays live after provisioning (TokenGrant::resolve reads it \
-             on every token mint), so it is not provisioning-only"
+            "the bootstrap EMAIL is ordinary config (dev one-click entry reads it at \
+             request time), so it is not provisioning-only"
         );
     }
 

@@ -80,11 +80,9 @@ pub struct AdminUserView {
     /// also granted.
     pub role: String,
     // Read from `impresspress__admin__user_roles`. Writers: the IAM
-    // endpoints (`iam.rs`, including a role rename) and the bootstrap-admin
-    // grant in `auth::grant_bootstrap_admin`.
+    // endpoints (`iam.rs`, including a role rename) only.
     /// Roles granted to this user. Admins manage grants through
-    /// `/b/admin/api/iam/user-roles`, but not every grant is made there: the
-    /// configured bootstrap admin is granted `admin` when they sign in.
+    /// `/b/admin/api/iam/user-roles`; no sign-in grants a role.
     pub roles: Vec<String>,
     /// Whether the email address has been verified.
     pub email_verified: bool,

@@ -717,11 +717,10 @@ mod tests {
     /// The other direction, and the evidence spec 2.2.3 rests on: a user
     /// whose ONLY admin claim is the inline `users.role` column — no
     /// `user_roles` row at all — still resolves as admin everywhere
-    /// authorization is decided. Both signup paths write exactly this shape
-    /// (`helpers::initial_role_for` feeds `NewUser.role`; neither writes a
-    /// `user_roles` row), which is why the OAuth callback's roles insert
-    /// could be deleted rather than copied into password signup. If this
-    /// test ever fails, an OAuth-created admin has stopped being an admin.
+    /// authorization is decided. Bootstrap provisioning writes exactly this
+    /// shape (`NewUser.role` is `"admin"`; no `user_roles` row), as both
+    /// signup paths do for `"user"`. If this test ever fails, a bootstrapped
+    /// admin has stopped being an admin.
     #[tokio::test]
     async fn inline_admin_role_alone_satisfies_require_role() {
         use crate::platform_state::user_roles;

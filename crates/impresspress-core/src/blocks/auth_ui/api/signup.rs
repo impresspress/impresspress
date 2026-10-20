@@ -10,8 +10,8 @@ use crate::{
         auth::{
             hash_new_password,
             helpers::{
-                email_domain_allowed, initial_role_for, issue_tokens_and_cookie, signup_allowed,
-                RoleSource, Rotation, SessionLifetime, TokenGrant,
+                email_domain_allowed, issue_tokens_and_cookie, signup_allowed, Rotation,
+                SessionLifetime, TokenGrant,
             },
             repo::users,
         },
@@ -20,7 +20,7 @@ use crate::{
                 AuthenticatedUser, EmailVerified, PendingSignupUser, SignupRequest, SignupResponse,
                 TokenType,
             },
-            redirect::{configured_admin_default, default_post_login_redirect},
+            redirect::USER_PORTAL_HOME,
         },
         crud,
         errors::{error_response, ErrorCode},
@@ -147,19 +147,15 @@ pub async fn handle(
         String::new()
     };
 
-    // Determine the role: admin if the email matches the configured bootstrap
-    // admin email (re-uses the same key as bootstrap for consistency).
-    let role = match initial_role_for(ctx, &email_lower).await {
-        Ok(role) => role,
-        Err(e) => return crud::db_error_internal(e, "Could not read the bootstrap admin email"),
-    };
-
     // The account row and its `local_credentials` row in one atomic write —
     // as two, a failure between them left an account with no password whose
-    // address answered "already registered" to every retry. No `user_roles`
-    // row: the initial role is the inline `users.role` column `NewUser.role`
-    // writes, which is what `helpers::get_user_roles` reads first. The
-    // verification state rides on the insert too.
+    // address answered "already registered" to every retry. Every signup is a
+    // `user`, whatever its address: no sign-in grants a role, so the bootstrap
+    // admin email grants nothing here (the first admin comes from Init or a
+    // bootstrap token). The role is the inline `users.role` column
+    // `NewUser.role` writes, which is what `helpers::get_user_roles` reads
+    // first; no `user_roles` row is written. The verification state rides on
+    // the insert too.
     //
     // A taken address fails the write with `AlreadyExists` (`users.email` is
     // UNIQUE) and writes nothing; that is the registered answer. Any other
@@ -185,7 +181,7 @@ pub async fn handle(
             email: email_lower.clone(),
             display_name: body.name.unwrap_or_default(),
             avatar_url: None,
-            role: role.to_string(),
+            role: "user".to_string(),
             email_verified: !require_verification,
             // Persist only `sha256_hex(raw)`; the raw token goes out solely
             // in the verification email below.
@@ -235,7 +231,7 @@ pub async fn handle(
 
     // The new account's roles, as stored, and the `auth_version` of the row
     // just inserted (see `TokenGrant`).
-    let grant = match TokenGrant::resolve(ctx, &user, RoleSource::Stored).await {
+    let grant = match TokenGrant::resolve(ctx, &user).await {
         Ok(grant) => grant,
         Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
     };
@@ -259,17 +255,10 @@ pub async fn handle(
         Err(r) => return r,
     };
 
-    // Role-aware post-login default (Fix 2 / signup UX): a brand-new signup
-    // is (almost) never an admin, so this sends them to `/b/userportal/`
-    // instead of the silent bounce to `/b/auth/login` the page used to do —
-    // same single-sourced rule Fix 1 applies to login/OAuth/bootstrap.
-    let admin_default = match configured_admin_default(ctx).await {
-        Ok(admin_default) => admin_default,
-        Err(e) => return crud::db_error_internal(e, "Could not read the post-login redirect"),
-    };
-    let roles = grant.into_roles();
-    let is_admin = roles.iter().any(|r| r == "admin");
-    let default_redirect = default_post_login_redirect(is_admin, &admin_default);
+    // Post-login default (Fix 2 / signup UX): a brand-new signup is a `user`
+    // (written above), so it lands on the user portal instead of the silent
+    // bounce to `/b/auth/login` the page used to do.
+    let default_redirect = USER_PORTAL_HOME.to_string();
 
     ResponseBuilder::new()
         .status(201)
@@ -284,7 +273,7 @@ pub async fn handle(
             user: AuthenticatedUser {
                 id: user.id,
                 email: email_lower,
-                roles,
+                roles: grant.into_roles(),
                 name: user.display_name,
             },
         })
@@ -341,15 +330,31 @@ mod tests {
         );
     }
 
+    /// Registering the configured bootstrap admin address grants nothing:
+    /// with verification off, anyone could otherwise claim an unclaimed
+    /// bootstrap address and be admin. The account is a `user`, on the row
+    /// and in the token, and no grant row is written.
     #[tokio::test]
-    async fn admin_email_signup_defaults_to_admin_home() {
+    async fn bootstrap_admin_email_signup_is_a_plain_user() {
         let mut ctx = ctx_with_crypto().await;
         ctx.set_config(BOOTSTRAP_ADMIN_EMAIL_KEY, "admin@example.com");
 
         let resp = signup(&ctx, "admin@example.com", "correct-horse-battery").await;
 
-        assert_eq!(resp["user"]["roles"], serde_json::json!(["admin"]));
-        assert_eq!(resp["default_redirect"], "/b/admin/");
+        assert_eq!(resp["user"]["roles"], serde_json::json!(["user"]), "{resp}");
+        assert_eq!(resp["default_redirect"], "/b/userportal/");
+        let user = users::find_by_email(&ctx, "admin@example.com")
+            .await
+            .expect("read the account")
+            .expect("signup created the account");
+        assert_eq!(user.role, "user");
+        assert!(
+            crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
+                .await
+                .expect("list the grants")
+                .is_empty(),
+            "signup must write no role grant"
+        );
     }
 
     #[tokio::test]

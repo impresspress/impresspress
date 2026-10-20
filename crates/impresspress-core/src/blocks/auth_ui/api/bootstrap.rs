@@ -18,7 +18,7 @@ use crate::{
     blocks::{
         auth::{
             bootstrap, hash_new_password,
-            helpers::{issue_tokens_and_cookie, RoleSource, Rotation, SessionLifetime, TokenGrant},
+            helpers::{issue_tokens_and_cookie, Rotation, SessionLifetime, TokenGrant},
             repo::{bootstrap_tokens, users},
             service::hash_token,
         },
@@ -135,7 +135,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     // 6. Mint a session — same shared token-issuance tail as login/signup,
     //    for the roles the account holds and the `auth_version` of the row
     //    step 5 read (see `TokenGrant`).
-    let grant = match TokenGrant::resolve(ctx, &user, RoleSource::Stored).await {
+    let grant = match TokenGrant::resolve(ctx, &user).await {
         Ok(grant) => grant,
         Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
     };

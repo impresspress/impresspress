@@ -26,7 +26,7 @@ use crate::{
     blocks::{
         auth::{
             credential_check_failed,
-            helpers::{issue_tokens_and_cookie, RoleSource, Rotation, SessionLifetime, TokenGrant},
+            helpers::{issue_tokens_and_cookie, Rotation, SessionLifetime, TokenGrant},
             repo::{tokens, users},
         },
         auth_ui::contracts::{RefreshRequest, RefreshResponse, TokenType},
@@ -181,17 +181,11 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     }
 
     let email = user.email.clone();
-    // The new access token's roles and the `auth_version` of the row read
-    // above (see `TokenGrant`). A WRAP denial or DB error here must not
-    // silently resolve to "no roles" — that would 403 an admin or
-    // double-grant on the next login (SB-3).
-    let grant = match TokenGrant::resolve(
-        ctx,
-        &user,
-        RoleSource::CheckBootstrapAdmin { email: &email },
-    )
-    .await
-    {
+    // The new access token's stored roles and the `auth_version` of the row
+    // read above (see `TokenGrant`). A refresh grants nothing, whatever the
+    // address. A WRAP denial or DB error here must not silently resolve to
+    // "no roles" — that would 403 an admin (SB-3).
+    let grant = match TokenGrant::resolve(ctx, &user).await {
         Ok(grant) => grant,
         Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
     };
@@ -403,6 +397,45 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("login must return a refresh token: {resp}"))
             .to_string()
+    }
+
+    /// Refreshing a session of the configured bootstrap admin address grants
+    /// nothing: the rotated access token carries `user` only, and no grant
+    /// row is written. Before, every refresh re-checked the email and granted
+    /// `admin`.
+    #[tokio::test]
+    async fn bootstrap_admin_email_refresh_grants_nothing() {
+        let mut ctx = TestContext::with_auth_and_crypto().await;
+        ctx.set_config(
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
+            "reuse@example.com",
+        );
+        let token = fresh_refresh_token(&ctx).await;
+
+        let rotated = output_json(handle(&ctx, refresh_with(&token)).await).await;
+
+        let access = rotated["access_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the rotation succeeded: {rotated}"));
+        let claims = wafer_core::clients::crypto::verify(&ctx, access)
+            .await
+            .expect("the minted token's signature verifies");
+        assert_eq!(
+            claims.get("roles"),
+            Some(&serde_json::json!(["user"])),
+            "a refresh must not grant admin: {claims:?}"
+        );
+        let user = users::find_by_email(&ctx, "reuse@example.com")
+            .await
+            .expect("read the account")
+            .expect("the account exists");
+        assert!(
+            crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
+                .await
+                .expect("list the grants")
+                .is_empty(),
+            "a refresh must write no role grant"
+        );
     }
 
     /// Rotate once, so `first` is a revoked row whose family still has a

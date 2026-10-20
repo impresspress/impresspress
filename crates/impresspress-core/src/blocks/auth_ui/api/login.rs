@@ -7,7 +7,7 @@ use crate::{
         auth::{
             burn_timing_equalization, check_password,
             helpers::{
-                issue_tokens_and_cookie, touch_last_login_after_response, RoleSource, Rotation,
+                issue_tokens_and_cookie, touch_last_login_after_response, Rotation,
                 SessionLifetime, TokenGrant,
             },
             repo::{local_credentials, users},
@@ -146,20 +146,12 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
         return error_response(ErrorCode::EmailNotVerified, "Please verify your email before logging in. Check your inbox for the verification link.");
     }
 
-    // The token's roles, granting admin idempotently when ADMIN_EMAIL
-    // matches, and the `auth_version` of the row read above — the version
-    // the checks above passed at. A WRAP denial or DB error here must not
-    // silently resolve to "no roles" — that would 403 an admin or
-    // double-grant on the next login (SB-3).
-    let grant = match TokenGrant::resolve(
-        ctx,
-        &user,
-        RoleSource::CheckBootstrapAdmin {
-            email: &email_lower,
-        },
-    )
-    .await
-    {
+    // The token's stored roles, and the `auth_version` of the row read
+    // above — the version the checks above passed at. Login grants nothing:
+    // an address matching the bootstrap admin email is not made admin here.
+    // A WRAP denial or DB error must not silently resolve to "no roles" —
+    // that would 403 an admin (SB-3).
+    let grant = match TokenGrant::resolve(ctx, &user).await {
         Ok(grant) => grant,
         Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
     };
@@ -226,15 +218,16 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
 /// caller's role, so a brand-new non-admin's login script sent them straight
 /// into an admin-only route and hit a 403 dead-end. `default_redirect` is
 /// now role-aware (`redirect::default_post_login_redirect`) — these tests
-/// drive the real [`handle`] end-to-end through a seeded user (via the real
-/// signup handler, so the password hash + role assignment are the same code
-/// path production uses).
+/// drive the real [`handle`] end-to-end through a seeded user: a `user` via
+/// the real signup handler, an admin via Init's real provisioning
+/// (`bootstrap::bootstrap_with_email_password`), so the password hash and
+/// role are the ones production writes.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         blocks::{
-            auth::{config::BOOTSTRAP_ADMIN_EMAIL_KEY, TIMING_EQUALIZATION_PASSWORD},
+            auth::{bootstrap, config::BOOTSTRAP_ADMIN_EMAIL_KEY, TIMING_EQUALIZATION_PASSWORD},
             auth_ui::api::signup,
         },
         config_vars::POST_LOGIN_REDIRECT_KEY,
@@ -265,6 +258,13 @@ mod tests {
         collect_or_panic(out).await;
     }
 
+    /// Provision the first admin the way Init does on an empty users table.
+    async fn provision_admin(ctx: &TestContext, email: &str, password: &str) {
+        bootstrap::bootstrap_with_email_password(ctx, email, password)
+            .await
+            .expect("provision the admin");
+    }
+
     async fn login(ctx: &TestContext, email: &str, password: &str) -> serde_json::Value {
         let body = serde_json::json!({"email": email, "password": password}).to_string();
         let out = handle(ctx, InputStream::from_bytes(body.into_bytes())).await;
@@ -290,13 +290,36 @@ mod tests {
         );
     }
 
+    /// Logging in as the configured bootstrap admin address grants nothing:
+    /// the account stays a `user`, and no grant row is written. Before, every
+    /// login re-checked the email and granted `admin`, with no proof of the
+    /// mailbox behind the password.
     #[tokio::test]
-    async fn admin_login_still_defaults_to_configured_admin_default() {
+    async fn bootstrap_admin_email_login_grants_nothing() {
         let mut ctx = ctx_with_crypto().await;
-        // Matches the signup-time `initial_role_for` rule, so the seeded user
-        // is created with role "admin" directly.
         ctx.set_config(BOOTSTRAP_ADMIN_EMAIL_KEY, "admin@example.com");
         signup_user(&ctx, "admin@example.com", "correct-horse-battery").await;
+
+        let resp = login(&ctx, "admin@example.com", "correct-horse-battery").await;
+
+        assert_eq!(resp["user"]["roles"], serde_json::json!(["user"]), "{resp}");
+        assert_eq!(resp["default_redirect"], "/b/userportal/");
+        let user_id = resp["user"]["id"]
+            .as_str()
+            .expect("the login names the user");
+        assert!(
+            crate::platform_state::user_roles::list_for_user(&ctx, user_id)
+                .await
+                .expect("list the grants")
+                .is_empty(),
+            "login must write no role grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_login_still_defaults_to_configured_admin_default() {
+        let ctx = ctx_with_crypto().await;
+        provision_admin(&ctx, "admin@example.com", "correct-horse-battery").await;
 
         let resp = login(&ctx, "admin@example.com", "correct-horse-battery").await;
 
@@ -314,9 +337,8 @@ mod tests {
     #[tokio::test]
     async fn admin_login_honors_custom_configured_admin_default() {
         let mut ctx = ctx_with_crypto().await;
-        ctx.set_config(BOOTSTRAP_ADMIN_EMAIL_KEY, "admin@example.com");
         ctx.set_config(POST_LOGIN_REDIRECT_KEY, "/b/admin/reports");
-        signup_user(&ctx, "admin@example.com", "correct-horse-battery").await;
+        provision_admin(&ctx, "admin@example.com", "correct-horse-battery").await;
 
         let resp = login(&ctx, "admin@example.com", "correct-horse-battery").await;
 

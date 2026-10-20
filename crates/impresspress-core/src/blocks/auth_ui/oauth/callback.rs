@@ -11,8 +11,8 @@ use crate::{
         auth::{
             config::REQUIRE_VERIFICATION_KEY,
             helpers::{
-                email_domain_allowed, initial_role_for, issue_tokens_and_cookie, signup_allowed,
-                touch_last_login_after_response, RoleSource, Rotation, SessionLifetime, TokenGrant,
+                email_domain_allowed, issue_tokens_and_cookie, signup_allowed,
+                touch_last_login_after_response, Rotation, SessionLifetime, TokenGrant,
             },
             repo::{oauth_pkce, provider_links, users},
         },
@@ -210,24 +210,12 @@ pub async fn handle(
     // Update last_login_at on the users row (best-effort, after the response).
     touch_last_login_after_response(ctx, &user_id);
 
-    // Bootstrap-admin promotion needs BOTH halves to be true, and neither is
-    // free. The address compared is the ACCOUNT's, never the one the provider
-    // reported — otherwise anyone able to name an address at a provider names
-    // the one in `BOOTSTRAP_ADMIN_EMAIL` and is granted admin, on a fresh
-    // account or grafted onto the one they already had. And the provider must
-    // actually assert that address: Microsoft's `email` claim is a mutable
-    // tenant attribute (`spec::EmailAssertion::None`), so a sign-in there
-    // proves nothing that should move a role.
-    //
-    // A WRAP denial or DB error in either read must not silently resolve to
-    // "no roles" — that would 403 an admin or double-grant on the next login
-    // (SB-3).
-    let source = if info.email_verified {
-        RoleSource::CheckBootstrapAdmin { email: &email }
-    } else {
-        RoleSource::Stored
-    };
-    let grant = match TokenGrant::resolve(ctx, &user, source).await {
+    // The token's stored roles. An OAuth sign-in grants nothing, whatever
+    // address the provider asserts: the bootstrap admin email is not read
+    // here, so naming it at a provider moves no role. A WRAP denial or DB
+    // error must not silently resolve to "no roles" — that would 403 an
+    // admin (SB-3).
+    let grant = match TokenGrant::resolve(ctx, &user).await {
         Ok(grant) => grant,
         Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
     };
@@ -600,8 +588,8 @@ async fn resolve_user(
             Ok(Some(existing_user)) => (existing_user.id, false),
             Ok(None) => {
                 // Brand-new user — enforce signup gates. Shared with the JSON
-                // signup handler so the ALLOW_SIGNUP / ALLOWED_EMAIL_DOMAINS /
-                // bootstrap-admin rules can't drift between the two flows.
+                // signup handler so the ALLOW_SIGNUP / ALLOWED_EMAIL_DOMAINS
+                // rules can't drift between the two flows.
                 let signup_allowed = signup_allowed(ctx)
                     .await
                     .map_err(|e| crud::db_error_internal(e, "Could not read the signup switch"))?;
@@ -624,19 +612,6 @@ async fn resolve_user(
                     ));
                 }
 
-                // Determine role: admin if the address matches the
-                // bootstrap-admin email AND the provider actually asserts
-                // that address. Without the assertion this is "whoever can
-                // type the admin's address at a provider that never checks
-                // one" — an admin account for the asking.
-                let role = if info.email_verified {
-                    initial_role_for(ctx, &info.email).await.map_err(|e| {
-                        crud::db_error_internal(e, "Could not read the bootstrap admin email")
-                    })?
-                } else {
-                    "user"
-                };
-
                 let require_verification =
                     crate::config_vars::get_bool(ctx, REQUIRE_VERIFICATION_KEY, false)
                         .await
@@ -656,7 +631,10 @@ async fn resolve_user(
                     } else {
                         Some(info.avatar.clone())
                     },
-                    role: role.to_string(),
+                    // Every new account is a `user`, as password signup
+                    // writes it: no sign-in grants a role, whatever address
+                    // the provider asserts.
+                    role: "user".to_string(),
                     // The policy flag, written exactly as `api::signup`
                     // writes it: the provider's assertion satisfies the
                     // policy, and so does a deployment that asks for no
@@ -951,8 +929,8 @@ mod tests {
 /// * **Account adoption** — an OAuth identity joins an existing local account
 ///   only when the provider asserts a verified address AND someone actually
 ///   proved the local one (pre-account takeover).
-/// * **Role grants** — a bootstrap-admin match keys on the account's own
-///   address and needs a provider assertion behind it.
+/// * **Role grants** — no sign-in grants a role: the bootstrap admin
+///   address, asserted by a provider, signs in as a plain `user`.
 /// * **Verification policy** — the callback applies
 ///   `WAFER_RUN__AUTH__REQUIRE_VERIFICATION` as login and refresh do, and
 ///   mails the link rather than stranding an account that has no other way
@@ -1858,77 +1836,70 @@ mod security_regression_tests {
     // Role grants
     // ---------------------------------------------------------------
 
-    /// Bootstrap-admin escalation. `BOOTSTRAP_ADMIN_EMAIL` names the account
-    /// that gets admin; a provider that asserts nothing about the address it
-    /// reports must not be able to name it. Microsoft's `email` is a tenant
-    /// attribute an administrator can point at anything, so a sign-in
-    /// claiming the admin address is a claim, not a proof.
-    #[tokio::test]
-    async fn an_unasserted_provider_address_cannot_claim_the_bootstrap_admin_role() {
-        let admin_email = "admin@example.com";
-        let ctx = OauthFlow::microsoft(admin_email)
-            .config(BOOTSTRAP_ADMIN_EMAIL_KEY, admin_email)
-            .ctx()
-            .await;
-
-        let location = crate::test_support::output_header(
-            handle(&limiter(), &ctx, &callback_msg(&ctx).await).await,
-            "Location",
-        )
-        .await
-        .expect("302 redirect must set a Location header");
-        assert!(
-            location.ends_with("/b/userportal/"),
-            "an unasserted address must not land in the admin home: {location}"
-        );
-
-        let created = users::find_by_email(&ctx, admin_email)
+    /// Whether `user_id` holds `admin`, on the row or as a grant.
+    async fn holds_admin(ctx: &TestContext, user_id: &str) -> bool {
+        crate::blocks::auth::helpers::get_user_roles(ctx, user_id)
             .await
-            .expect("user lookup ok")
-            .expect("the account is still created");
-        assert_eq!(
-            created.role, "user",
-            "the initial role must not be admin when nothing asserted the address"
-        );
-        let roles = crate::blocks::auth::helpers::get_user_roles(&ctx, &created.id)
-            .await
-            .expect("roles read ok");
-        assert!(
-            !roles.iter().any(|r| r == "admin"),
-            "no admin grant may follow an unasserted address: {roles:?}"
-        );
+            .expect("roles read ok")
+            .iter()
+            .any(|r| r == "admin")
     }
 
-    /// And the grant keys on the ACCOUNT's address, not the provider's claim
-    /// about it. A linked account keeps its own address; a provider reporting
-    /// a different one — even one it asserts — is describing a mailbox, not
-    /// this account.
+    /// No OAuth sign-in grants admin, even for the configured bootstrap
+    /// admin address with a provider asserting it: the first admin comes from
+    /// Init or a bootstrap token, never from a sign-in. A new account is a
+    /// `user`, on the row and with no grant.
     #[tokio::test]
-    async fn the_bootstrap_admin_grant_keys_on_the_account_address() {
+    async fn an_asserted_bootstrap_admin_address_creates_a_plain_user() {
         let admin_email = "admin@example.com";
-        let account_email = "bob@example.com";
-        // Google asserts `admin@example.com`, but the linked account is Bob's.
         let ctx = OauthFlow::google(admin_email)
             .config(BOOTSTRAP_ADMIN_EMAIL_KEY, admin_email)
             .ctx()
             .await;
 
-        signup_password_account(&ctx, account_email).await;
-        let bob = users::find_by_email(&ctx, account_email)
-            .await
-            .expect("user lookup ok")
-            .expect("signup created the row");
-        provider_links::upsert(
-            &ctx,
-            provider_links::NewLink {
-                provider: "google",
-                provider_ref: GOOGLE_ID,
-                user_id: &bob.id,
-                provider_login: "bob",
-            },
+        let location = crate::test_support::output_header(
+            handle(&limiter(), &ctx, &callback_msg(&ctx).await).await,
+            "Location",
         )
         .await
-        .expect("seed provider link");
+        .expect("302 redirect must set a Location header");
+        assert!(
+            location.ends_with("/b/userportal/"),
+            "the bootstrap address must not land in the admin home: {location}"
+        );
+
+        let created = users::find_by_email(&ctx, admin_email)
+            .await
+            .expect("user lookup ok")
+            .expect("the account is created");
+        assert!(
+            created.email_is_proven(),
+            "precondition: Google asserted the address, so the account is proven"
+        );
+        assert_eq!(created.role, "user");
+        assert!(
+            !holds_admin(&ctx, &created.id).await,
+            "an OAuth signup must not be granted admin"
+        );
+    }
+
+    /// The same for an existing account whose address is proven: adopting it
+    /// through a provider that asserts the bootstrap admin address grants
+    /// nothing.
+    #[tokio::test]
+    async fn an_asserted_bootstrap_admin_address_does_not_promote_a_proven_account() {
+        let admin_email = "admin@example.com";
+        let (ctx, mail) = OauthFlow::google(admin_email)
+            .config(BOOTSTRAP_ADMIN_EMAIL_KEY, admin_email)
+            .require_verification()
+            .ctx_and_mail()
+            .await;
+        signup_password_account(&ctx, admin_email).await;
+        prove_address_by_email_link(&ctx, &mail, admin_email).await;
+        let existing = users::find_by_email(&ctx, admin_email)
+            .await
+            .expect("user lookup ok")
+            .expect("user present");
 
         let location = crate::test_support::output_header(
             handle(&limiter(), &ctx, &callback_msg(&ctx).await).await,
@@ -1938,15 +1909,18 @@ mod security_regression_tests {
         .expect("302 redirect must set a Location header");
         assert!(
             location.ends_with("/b/userportal/"),
-            "the admin grant must read the account's address, not the provider's: {location}"
+            "the bootstrap address must not land in the admin home: {location}"
         );
-        let roles = crate::blocks::auth::helpers::get_user_roles(&ctx, &bob.id)
-            .await
-            .expect("roles read ok");
         assert!(
-            !roles.iter().any(|r| r == "admin"),
-            "Bob's account must not become admin because a provider named the \
-             admin address: {roles:?}"
+            provider_links::find_by_provider_ref(&ctx, "google", GOOGLE_ID)
+                .await
+                .expect("link lookup ok")
+                .is_some_and(|link| link.user_id == existing.id),
+            "precondition: the sign-in adopted the proven account"
+        );
+        assert!(
+            !holds_admin(&ctx, &existing.id).await,
+            "an OAuth sign-in must not grant admin to an existing account"
         );
     }
 
@@ -2458,16 +2432,36 @@ mod security_regression_tests {
         );
     }
 
-    /// Companion to the above: an admin — the bootstrap-admin address, on a
-    /// provider that asserts it — still gets the operator-configured admin
-    /// default. The fix is role-aware, not a blanket redirect change.
+    /// Companion to the above: an admin — provisioned the way Init does,
+    /// then linked to the provider identity — still gets the
+    /// operator-configured admin default. The fix is role-aware, not a
+    /// blanket redirect change.
     #[tokio::test]
-    async fn oauth_login_admin_email_redirects_to_admin_home() {
+    async fn oauth_login_admin_redirects_to_admin_home() {
         let email = "oauthadmin@example.com";
-        let ctx = OauthFlow::google(email)
-            .config(BOOTSTRAP_ADMIN_EMAIL_KEY, email)
-            .ctx()
-            .await;
+        let ctx = OauthFlow::google(email).ctx().await;
+        crate::blocks::auth::bootstrap::bootstrap_with_email_password(
+            &ctx,
+            email,
+            FIXTURE_PASSWORD,
+        )
+        .await
+        .expect("provision the admin");
+        let admin = users::find_by_email(&ctx, email)
+            .await
+            .expect("user lookup ok")
+            .expect("provisioning created the admin");
+        provider_links::upsert(
+            &ctx,
+            provider_links::NewLink {
+                provider: "google",
+                provider_ref: GOOGLE_ID,
+                user_id: &admin.id,
+                provider_login: "admin",
+            },
+        )
+        .await
+        .expect("seed provider link");
 
         let location = crate::test_support::output_header(
             handle(&limiter(), &ctx, &callback_msg(&ctx).await).await,

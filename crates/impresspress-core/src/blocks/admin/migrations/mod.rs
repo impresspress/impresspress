@@ -60,11 +60,11 @@ const SQL_003_SQLITE: &str = include_str!("003_block_settings_seed_hash.sqlite.s
 const SQL_003_POSTGRES: &str = include_str!("003_block_settings_seed_hash.postgres.sql");
 // 004 makes `user_roles` hold at most one grant per `(user_id, role)`.
 //
-// `platform_state::user_roles::assign` is a read-then-insert, and the login
-// path runs it concurrently: `auth::helpers::TokenGrant::resolve` grants `admin`
-// on every login of the bootstrap-admin address that does not already hold
-// it, so two logins racing on a fresh account could both find no grant and
-// both insert one. A duplicate is not harmless. `get_user_roles` folds the
+// `platform_state::user_roles::assign` is a read-then-insert, so two callers
+// can race it: two admins assigning one role at once, and — when this
+// migration was written — two logins of the bootstrap-admin address, which
+// the login path then granted `admin` (no sign-in grants a role any more).
+// Both racers could find no grant and both insert one. A duplicate is not harmless. `get_user_roles` folds the
 // twins into one role, while `iam::handle_remove_role` deletes ONE row by id —
 // so a revoke answered `{"deleted": true}`, bumped the auth version and wrote
 // its audit row, and the surviving twin kept granting the role on the very
