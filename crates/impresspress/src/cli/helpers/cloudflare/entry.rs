@@ -13,14 +13,15 @@
 //! and the shared state, whose global, field and export names this module must
 //! keep in step with.
 //!
-//! The line's wasm id, generation and stack figure come from that module's
-//! synchronous `__impresspressExecutorProbe` export, which worker-build
-//! installs on its entrypoint class like every export, called through `super`
-//! after the shim's re-initialization check has run. They therefore name the
-//! instance that serves the request, a freshly reset one included. A probe
-//! that throws (a trap in a broken instance) still leaves the line, with `-`
-//! for what it would have said, and its error reaches the shim's catch exactly
-//! as a trap in `fetch` would.
+//! The line's wasm id, generation, stack figure and `wbi` (worker 0.8's own
+//! instance counter; `-` on worker 0.7.5, which creates no global for it)
+//! come from that module's synchronous `__impresspressExecutorProbe` export,
+//! which worker-build installs on its entrypoint class like every export,
+//! called through `super` after the shim's re-initialization check has run.
+//! They therefore name the instance that serves the request, a freshly reset
+//! one included. A probe that throws (a trap in a broken instance) still
+//! leaves the line, with `-` for what it would have said, and its error
+//! reaches the shim's catch exactly as a trap in `fetch` would.
 //!
 //! The line is logged in `fetch`, not in a constructor before `super()`.
 //! Before `super()` the shim's re-initialization has not run, so the probe
@@ -76,7 +77,7 @@ export default class extends Shim {{
       try {{
         wasm = super.__impresspressExecutorProbe();
       }} finally {{
-        console.log(`ip-entry ${{trace.isolateId}} ${{wasm?.wasm ?? '-'}} ${{wasm?.generation ?? '-'}} ${{trace.seq}} ${{wasm?.stack ?? '-'}}`);
+        console.log(`ip-entry ${{trace.isolateId}} ${{wasm?.wasm ?? '-'}} ${{wasm?.generation ?? '-'}} ${{trace.seq}} ${{wasm?.stack ?? '-'}} wbi=${{wasm?.wbi ?? '-'}}`);
       }}
     }}
     return super.fetch(request);
@@ -141,7 +142,8 @@ mod tests {
         }
         assert!(branch.contains(
             "console.log(`ip-entry ${trace.isolateId} ${wasm?.wasm ?? '-'} \
-             ${wasm?.generation ?? '-'} ${trace.seq} ${wasm?.stack ?? '-'}`);"
+             ${wasm?.generation ?? '-'} ${trace.seq} ${wasm?.stack ?? '-'} \
+             wbi=${wasm?.wbi ?? '-'}`);"
         ));
     }
 
@@ -159,6 +161,7 @@ mod tests {
             "wasm?.wasm",
             "wasm?.generation",
             "wasm?.stack",
+            "wasm?.wbi",
         ] {
             assert!(source.contains(name), "{name} missing:\n{source}");
         }
