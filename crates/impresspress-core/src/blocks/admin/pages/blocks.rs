@@ -957,6 +957,49 @@ mod card_tests {
         assert!(!html.contains("btn--sm"), "{html}");
     }
 
+    /// The detail dialog of a block with an admin UI: its one primary is
+    /// "Open admin UI", a link; its badges and code chips take their size
+    /// from their own rules; an empty default reads as the no-value dash.
+    #[tokio::test]
+    async fn the_detail_dialogs_one_primary_opens_the_admin_ui() {
+        use crate::test_support::dom;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.register_block_info(
+            "impresspress/aaa",
+            wafer_run::BlockInfo::new("impresspress/aaa", "1.0.0", "http.handler", "a block")
+                .category(wafer_run::BlockCategory::Feature)
+                .can_disable(true)
+                .admin_url("/b/aaa/admin/")
+                .config_keys(vec![wafer_block::ConfigVar::new(
+                    "IMPRESSPRESS__AAA__KEY",
+                    "A key",
+                    "",
+                )]),
+        );
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            "/b/admin/blocks/impresspress--aaa/detail",
+        ));
+        let html = String::from_utf8(output_body(handle_block_detail(&ctx, &msg).await).await)
+            .expect("UTF-8");
+        let (page, dialogs) = dom::visible_primaries(&html);
+        assert!(page.is_empty(), "{html}");
+        assert_eq!(
+            dialogs,
+            [vec![r#"a.btn.btn--primary "Open admin UI""#.to_string()]],
+            "{html}"
+        );
+        assert!(html.contains(r#"href="/b/aaa/admin/""#), "{html}");
+        assert!(
+            !html.contains("text-11") && !html.contains("text-xs"),
+            "{html}"
+        );
+        assert!(html.contains("<code>\u{2014}</code>"), "{html}");
+    }
+
     /// The runtime filter ends the tab row, with its visible label; the
     /// Custom tab, which lists no blocks, has none.
     #[tokio::test]

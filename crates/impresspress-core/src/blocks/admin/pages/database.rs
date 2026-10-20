@@ -145,9 +145,14 @@ fn table_group(
 ) -> Markup {
     html! {
         details .db-table-group open data-db-group=(key) {
+            // The name and the org wrap as whole words onto a second line
+            // when the column is narrow; the count keeps its own column.
             summary .db-table-group__head {
-                span .db-table-group__title { (title) }
-                span .db-table-group__org { (org) }
+                span .db-table-group__name {
+                    span .db-table-group__title { (title) }
+                    " "
+                    span .db-table-group__org { (org) }
+                }
                 span .db-count { (tables.len()) }
             }
             ul .db-table-group__list {
@@ -779,8 +784,9 @@ mod tests {
         assert!(
             html.contains(concat!(
                 r#"<details class="db-table-group" open data-db-group="impresspress__admin">"#,
-                r#"<summary class="db-table-group__head"><span class="db-table-group__title">admin</span>"#,
-                r#"<span class="db-table-group__org">impresspress</span><span class="db-count">"#,
+                r#"<summary class="db-table-group__head"><span class="db-table-group__name">"#,
+                r#"<span class="db-table-group__title">admin</span> "#,
+                r#"<span class="db-table-group__org">impresspress</span></span><span class="db-count">"#,
             )),
             "{html}"
         );
@@ -792,6 +798,25 @@ mod tests {
         assert!(
             html.contains(r#"<div id="db-filter-empty" hidden><p class="empty-note">No tables match.</p></div>"#),
             "{html}"
+        );
+    }
+
+    /// The list folds where the two cards stack: the media query in
+    /// `TABLE_FILTER_JS` is the one `table.css` stacks `.db-layout` under.
+    /// The breakpoint is written in both (CSS cannot read a Rust constant),
+    /// so this keeps them one value.
+    #[test]
+    fn the_list_folds_at_the_width_the_cards_stack() {
+        const CSS: &str = include_str!("../../../ui/styles/components/table.css");
+        let stack = CSS
+            .find(".db-layout { grid-template-columns: minmax(0, 1fr); }")
+            .expect("the stacking rule");
+        let media = &CSS[CSS[..stack].rfind("@media ").expect("its media query") + 7..stack];
+        let media = media[..media.find('{').expect("the query's block")].trim();
+        assert_eq!(media, "(max-width: 900px)");
+        assert!(
+            TABLE_FILTER_JS.contains(&format!("window.matchMedia('{media}')")),
+            "TABLE_FILTER_JS folds the list at another width than {media}"
         );
     }
 

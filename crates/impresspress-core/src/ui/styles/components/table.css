@@ -184,12 +184,17 @@ a.pagination__link:hover { background: var(--bg-hover); }
 /* Each block's tables: one collapsible row (name, org, count) with no frame
    of its own, over its list. */
 .db-table-groups { display: flex; flex-direction: column; gap: var(--space-1); }
+/* Three columns: the chevron, the name, the count. The name (the block,
+   then its org) wraps between the two as whole words when the column is
+   narrow, and the count keeps its own column, so neither runs into it. A
+   single word wider than the column is the only thing that breaks. */
 .db-table-group__head {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-2);
+  column-gap: var(--space-2);
   min-height: var(--target-min);
-  padding: 0 var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-md);
   cursor: pointer;
   list-style: none;
@@ -198,23 +203,25 @@ a.pagination__link:hover { background: var(--bg-hover); }
 .db-table-group__head:hover { background: var(--bg-hover); }
 /* The fold's chevron: points right when closed, down when open. */
 .db-table-group__head::before {
-  content: ""; flex: 0 0 auto;
+  content: "";
   width: 0.4rem; height: 0.4rem; margin: 0 var(--space-1);
   border-right: 2px solid var(--text-muted); border-bottom: 2px solid var(--text-muted);
   transform: rotate(-45deg);
 }
 .db-table-group[open] > .db-table-group__head::before { transform: rotate(45deg); }
+.db-table-group__name { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-2); min-width: 0; }
 .db-table-group__title {
   font-weight: 600;
   font-size: var(--text-sm);
   color: var(--text-primary);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  min-width: 0;
 }
 .db-table-group__org {
-  flex: 1 1 auto;
-  min-width: 0;
   font-size: var(--text-sm);
   color: var(--text-secondary);
+  overflow-wrap: break-word;
+  min-width: 0;
 }
 .db-table-group__list {
   list-style: none;

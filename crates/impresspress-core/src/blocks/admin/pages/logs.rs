@@ -180,10 +180,15 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
         (false, false) if search.is_empty() => "No request logs yet",
         (false, false) => "No requests found",
     };
-    let empty_body = if errors.server || errors.client || !search.is_empty() {
-        "No logged request matches these filters."
-    } else {
-        "Requests appear here as the server answers them."
+    let narrowing = [errors.server, errors.client, !search.is_empty()]
+        .iter()
+        .filter(|on| **on)
+        .count();
+    let empty_body = match narrowing {
+        0 => "Requests appear here as the server answers them.",
+        1 if !search.is_empty() => "No logged request matches this search.",
+        1 => "No logged request matches this filter.",
+        _ => "No logged request matches these filters.",
     };
 
     Ok(html! {
@@ -552,6 +557,10 @@ mod tests {
         for (query, title) in [
             (vec![("search", "nothing-matches")], "No requests found"),
             (vec![("server_errors", "1")], "No server errors logged"),
+            (
+                vec![("server_errors", "1"), ("client_errors", "1")],
+                "No server or client errors logged",
+            ),
             (vec![("tab", "audit")], "No audit logs yet"),
             (
                 vec![("tab", "audit"), ("search", "nothing-matches")],
@@ -566,6 +575,43 @@ mod tests {
             );
             assert!(!html.contains("empty__action"), "{query:?}: {html}");
             assert!(!html.contains("text-center"), "{query:?}: {html}");
+        }
+    }
+
+    /// The empty system log's sentence names what narrowed it: one search,
+    /// one filter, or several.
+    #[tokio::test]
+    async fn the_empty_log_says_what_narrowed_it() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for (query, body) in [
+            (
+                vec![("search", "nothing-matches")],
+                "No logged request matches this search.",
+            ),
+            (
+                vec![("server_errors", "1")],
+                "No logged request matches this filter.",
+            ),
+            (
+                vec![("client_errors", "1")],
+                "No logged request matches this filter.",
+            ),
+            (
+                vec![("server_errors", "1"), ("search", "nothing-matches")],
+                "No logged request matches these filters.",
+            ),
+            (
+                vec![("server_errors", "1"), ("client_errors", "1")],
+                "No logged request matches these filters.",
+            ),
+        ] {
+            let html = render_logs(&ctx, &query).await;
+            assert!(
+                html.contains(&format!(r#"<p class="empty__body">{body}</p>"#)),
+                "{query:?}: {html}"
+            );
         }
     }
 
