@@ -64,8 +64,8 @@ const SQL_003_POSTGRES: &str = include_str!("003_block_settings_seed_hash.postgr
 // can race it: two admins assigning one role at once, and — when this
 // migration was written — two logins of the bootstrap-admin address, which
 // the login path then granted `admin` (no sign-in grants a role any more).
-// Both racers could find no grant and both insert one. A duplicate is not harmless. `get_user_roles` folds the
-// twins into one role, while `iam::handle_remove_role` deletes ONE row by id —
+// Both racers could find no grant and both insert one. A duplicate is not
+// harmless. `get_user_roles` folds the twins into one role, while `iam::handle_remove_role` deletes ONE row by id —
 // so a revoke answered `{"deleted": true}`, bumped the auth version and wrote
 // its audit row, and the surviving twin kept granting the role on the very
 // next token. The index makes the insert itself the claim: the losing racer

@@ -699,7 +699,9 @@ mod tests {
         .expect("insert user");
 
         // Grant admin ONLY via the roles table.
-        user_roles::assign(&*ctx, &user.id, "admin", "")
+        // Staged as the fixture: the auth block holds read-only on the
+        // grants table, as in production, where only admin's IAM writes it.
+        user_roles::assign(&ctx.fixture(), &user.id, "admin", "")
             .await
             .expect("assign admin via roles table");
 
@@ -732,8 +734,8 @@ mod tests {
             .await
             .expect("auth init applies user-table migrations");
 
-        // Exactly what `resolve_user`'s brand-new-user branch and
-        // `signup::handle` write for a bootstrap-admin email.
+        // Exactly what `bootstrap::create_admin` writes for the first admin
+        // (Init provisioning or token redemption).
         let user = users::insert(
             &*ctx,
             users::NewUser {
@@ -753,7 +755,8 @@ mod tests {
                 .await
                 .expect("list grants")
                 .is_empty(),
-            "signup writes no user_roles row — the initial role is the inline column"
+            "bootstrap provisioning writes no user_roles row — the initial role is the \
+             inline column"
         );
 
         let roles = crate::blocks::auth::helpers::get_user_roles(&*ctx, &user.id)
@@ -807,7 +810,9 @@ mod tests {
         .await
         .expect("insert user");
 
-        user_roles::assign(&*ctx, &user.id, "admin", "")
+        // Staged as the fixture: the auth block holds read-only on the
+        // grants table, as in production, where only admin's IAM writes it.
+        user_roles::assign(&ctx.fixture(), &user.id, "admin", "")
             .await
             .expect("assign admin via roles table");
 

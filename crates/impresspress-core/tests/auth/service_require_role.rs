@@ -136,8 +136,9 @@ async fn require_role_admin_comes_from_the_roles_table_not_the_token_claim() {
         .expect_err("an `admin` roles claim must not grant admin on its own");
     assert!(matches!(err, AuthError::Forbidden), "got {err:?}");
 
-    // Grant admin in the roles table; the same token now satisfies the check.
-    impresspress_core::platform_state::user_roles::assign(ctx.as_ref(), &u.id, "admin", "")
+    // Grant admin in the roles table, as admin's IAM does (the auth block
+    // holds read-only on it); the same token now satisfies the check.
+    impresspress_core::platform_state::user_roles::assign(&raw_ctx.fixture(), &u.id, "admin", "")
         .await
         .expect("grant admin through the roles table");
     let got = svc

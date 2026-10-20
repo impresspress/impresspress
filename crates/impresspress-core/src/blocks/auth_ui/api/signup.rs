@@ -284,8 +284,8 @@ pub async fn handle(
 /// (tokens issued, cookie set) but the page's JS ignored that and
 /// unconditionally navigated to `/b/auth/login` — a silent bounce with no
 /// feedback. These tests drive the real [`handle`] end-to-end and assert on
-/// the `default_redirect` the (now role-aware) auto-login response carries,
-/// plus that the verification-required path still does NOT auto-login.
+/// the `default_redirect` the auto-login response carries (always the user
+/// portal: a new account is a `user`), plus that the verification-required path still does NOT auto-login.
 #[cfg(test)]
 mod tests {
 

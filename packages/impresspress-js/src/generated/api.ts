@@ -1103,7 +1103,10 @@ export interface paths {
                     content: {
                         "application/json": {
                             access_token: string;
-                            /** @description Role-aware post-login redirect path */
+                            /**
+                             * @description Post-login redirect path: always the user portal, since a new
+                             *     account is a `user`
+                             */
                             default_redirect: string;
                             /** @constant */
                             email_verified: true;

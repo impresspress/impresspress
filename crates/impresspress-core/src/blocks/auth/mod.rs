@@ -2188,7 +2188,7 @@ mod get_user_roles_error_surfacing_tests {
     async fn denied_roles_table_read_is_an_error_not_empty_roles() {
         // `impresspress__admin__user_roles` is admin-owned. In production,
         // admin's own block-level grant
-        // (`ResourceGrant::read_write(AUTH_BLOCK_ID, user_roles::TABLE)` in
+        // (`ResourceGrant::read(AUTH_BLOCK_ID, user_roles::TABLE)` in
         // `blocks/admin/mod.rs`) makes the auth block's read succeed; a block
         // the deployment grants nothing stands in for that grant regressing.
         let ctx = TestContext::with_auth().await.running_as("test/ungranted");
