@@ -76,17 +76,21 @@
 /* The stat row (`.stat-row`, `components::stat_row`) is defined once, in
  * components/stat.css. */
 
-/* One row of cards (`templates::dashboard_page`). The page's own gap spaces
+/* One row of cards (`templates::DashboardRow`). The page's own gap spaces
    the rows. A row's cards share it in equal columns of one height while
-   each gets at least 27rem, and stack below that: the row's width decides,
-   not the viewport's. 27rem is the narrowest card the "Recent server
-   errors" table fits in — a status, a method, a path that breaks at its
-   slashes and an unbroken `.datetime` — so 1024px (a 736px row) stacks,
-   where two 360px columns clipped the time. */
+   each gets the row's minimum, and stack below that: the row's width
+   decides, not the viewport's.
+   - Charts: 22rem, so two share the 736px row at 1024px, and a chart's
+     title and its head link still fit on one line.
+   - Tables (`--tables`): 27rem, the narrowest card the "Recent server
+     errors" table fits in (a status, a method, a path that breaks at its
+     slashes and an unbroken `.datetime`); at 1024px two 360px columns
+     clipped the time, so that row stacks there. */
 .dashboard-row {
 	display: grid; gap: var(--space-4);
-	grid-template-columns: repeat(auto-fit, minmax(min(100%, 27rem), 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
 }
+.dashboard-row--tables { grid-template-columns: repeat(auto-fit, minmax(min(100%, 27rem), 1fr)); }
 /* The grid's gap spaces the cards: a card's own bottom margin, which spaces
    cards stacked in flow (card.css), would add to it under every row. */
 .dashboard-row > .card { margin-bottom: 0; }

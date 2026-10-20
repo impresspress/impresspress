@@ -10,7 +10,7 @@ use crate::{
     ui::{
         components::{self, empty_note, AvatarSize, Badge, Card, ChartCard, DataTable, TableRow},
         shell::Topbar,
-        templates::dashboard_page,
+        templates::{dashboard_page, DashboardRow},
     },
 };
 
@@ -172,8 +172,10 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         first_request_fut,
     );
 
-    // How far back each chart's records go. A failed read makes no claim
-    // (`Unknown`): the chart is still drawn, without the history note.
+    // How far back each chart's records go. A failed read is `Unknown`,
+    // which makes no claim about it: a series with data is drawn without the
+    // history note, and an all-zero one says only that nothing was recorded
+    // in the window (`ChartCard`).
     let history = |first: Result<Option<String>, WaferError>, what: &str| match first {
         Ok(Some(at)) => at
             .get(..10)
@@ -366,51 +368,51 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     // Each chart is drawn when its window has data; a window that is zero
     // every day is one sentence in the card (`ChartCard`, layout rule 10).
-    let new_users_chart = chart_panel(
-        |card| card.line(),
-        "New users",
-        "new users",
-        new_users_daily.as_deref(),
-        users_history,
-        "var(--primary-color)",
-        USERS,
-    );
-    let requests_chart = chart_panel(
-        |card| card.bars(),
-        "Requests",
-        "requests",
-        requests_daily.as_deref(),
-        requests_history,
-        NEUTRAL_SERIES,
-        LOGS,
-    );
+    let new_users_chart = ChartPanel {
+        title: "New users",
+        counts: "new users",
+        history: users_history,
+        color_var: "var(--primary-color)",
+        link: USERS,
+        draw: |card| card.line(),
+    }
+    .render(new_users_daily.as_deref());
+    let requests_chart = ChartPanel {
+        title: "Requests",
+        counts: "requests",
+        history: requests_history,
+        color_var: NEUTRAL_SERIES,
+        link: LOGS,
+        draw: |card| card.bars(),
+    }
+    .render(requests_daily.as_deref());
     // Drawn only when the window holds a server error, so always in the
     // danger red; a quiet window is the sentence, not a grey line.
-    let server_errors_chart = chart_panel(
-        |card| card.line(),
-        "Server errors",
-        "server errors",
-        server_errors_daily.as_deref(),
-        requests_history,
-        "var(--accent-danger)",
-        SERVER_ERRORS_LOGS,
-    );
-    let client_errors_chart = chart_panel(
-        |card| card.line(),
-        "Client errors",
-        "client errors",
-        client_errors_daily.as_deref(),
-        requests_history,
-        QUIET_SERIES,
-        CLIENT_ERRORS_LOGS,
-    );
+    let server_errors_chart = ChartPanel {
+        title: "Server errors",
+        counts: "server errors",
+        history: requests_history,
+        color_var: "var(--accent-danger)",
+        link: SERVER_ERRORS_LOGS,
+        draw: |card| card.line(),
+    }
+    .render(server_errors_daily.as_deref());
+    let client_errors_chart = ChartPanel {
+        title: "Client errors",
+        counts: "client errors",
+        history: requests_history,
+        color_var: QUIET_SERIES,
+        link: CLIENT_ERRORS_LOGS,
+        draw: |card| card.line(),
+    }
+    .render(client_errors_daily.as_deref());
 
     let body = dashboard_page(
         stats,
         vec![
-            html! { (new_users_chart) (requests_chart) },
-            html! { (server_errors_chart) (client_errors_chart) },
-            html! { (recent_users_card) (recent_errors_card) },
+            DashboardRow::charts(html! { (new_users_chart) (requests_chart) }),
+            DashboardRow::charts(html! { (server_errors_chart) (client_errors_chart) }),
+            DashboardRow::tables(html! { (recent_users_card) (recent_errors_card) }),
         ],
     );
 
@@ -428,29 +430,35 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-/// One chart panel: the series drawn by `draw` (or its all-zero sentence),
-/// or, when the series could not be read, the unavailable marker under the
-/// same head.
-fn chart_panel(
-    draw: fn(ChartCard<'_>) -> Markup,
-    title: &str,
-    counts: &str,
-    series: Option<&[(String, i64)]>,
+/// One chart panel: everything but its series, by name, so no two of its
+/// strings can trade places at a call site.
+struct ChartPanel {
+    title: &'static str,
+    /// What the series counts, in running text: [`ChartCard::counts`].
+    counts: &'static str,
     history: components::ChartHistory,
-    color_var: &str,
+    color_var: &'static str,
     link: Destination,
-) -> Markup {
-    match series {
-        Some(data) => draw(ChartCard {
-            title,
-            subtitle: CHART_WINDOW,
-            counts,
-            data,
-            history,
-            color_var,
-            link: (link.label, link.href),
-        }),
-        None => chart_unavailable_card(title, link),
+    /// [`ChartCard::line`] or [`ChartCard::bars`].
+    draw: fn(ChartCard<'_>) -> Markup,
+}
+
+impl ChartPanel {
+    /// The series drawn (or its all-zero sentence), or, when the series could
+    /// not be read (`None`), the unavailable marker under the same head.
+    fn render(self, series: Option<&[(String, i64)]>) -> Markup {
+        match series {
+            Some(data) => (self.draw)(ChartCard {
+                title: self.title,
+                subtitle: CHART_WINDOW,
+                counts: self.counts,
+                data,
+                history: self.history,
+                color_var: self.color_var,
+                link: (self.link.label, self.link.href),
+            }),
+            None => chart_unavailable_card(self.title, self.link),
+        }
     }
 }
 
@@ -1046,6 +1054,21 @@ mod outage_tests {
             "{fresh}"
         );
         assert!(dom::card_level_inside_card(&fresh).is_empty(), "{fresh}");
+        // Two rows of charts, which stay 2-up down to a 45rem row, then the
+        // recent pair, whose errors table needs the wider minimum.
+        let rows: Vec<String> = scraper::Html::parse_document(&fresh)
+            .select(&scraper::Selector::parse(".dashboard-row").unwrap())
+            .map(|row| row.value().attr("class").unwrap().to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "dashboard-row",
+                "dashboard-row",
+                "dashboard-row dashboard-row--tables"
+            ],
+            "{fresh}"
+        );
 
         ctx.seed_auth_user("u-1").await;
         request_logs::insert(

@@ -72,7 +72,8 @@ pub enum ChartHistory {
     Since(chrono::NaiveDate),
     /// Nothing has been recorded yet.
     Empty,
-    /// Could not be read; the card makes no claim about it.
+    /// Could not be read; the card makes no claim about how far back the
+    /// records go.
     Unknown,
 }
 
@@ -123,14 +124,20 @@ fn history_note(data: &[(String, i64)], history: ChartHistory) -> Option<String>
 /// - Records reach back fewer days than the window: "No server errors yet —
 ///   collecting data, N days so far", because the days before them were not
 ///   measured.
-/// - Otherwise: "No server errors in the last 30 days".
+/// - Records cover the window: "No server errors in the last 30 days".
+/// - The history could not be read: "No server errors recorded in the last
+///   30 days". The series is zero-filled, so its zeros may predate the
+///   records; "nothing was recorded" is true however far back they go, where
+///   "none in the last 30 days" would claim the whole window was measured.
 fn zero_note(counts: &str, data: &[(String, i64)], history: ChartHistory) -> String {
-    if history == ChartHistory::Empty {
-        return format!("No {counts} recorded yet");
-    }
-    match days_so_far(data, history) {
-        Some(n) => format!("No {counts} yet — collecting data, {} so far", days(n)),
-        None => format!("No {counts} in the last {} days", data.len()),
+    let window = data.len();
+    match history {
+        ChartHistory::Empty => format!("No {counts} recorded yet"),
+        ChartHistory::Unknown => format!("No {counts} recorded in the last {window} days"),
+        ChartHistory::Since(_) => match days_so_far(data, history) {
+            Some(n) => format!("No {counts} yet — collecting data, {} so far", days(n)),
+            None => format!("No {counts} in the last {window} days"),
+        },
     }
 }
 
@@ -576,7 +583,10 @@ mod tests {
                 ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
                 "No new users in the last 3 days",
             ),
-            (ChartHistory::Unknown, "No new users in the last 3 days"),
+            (
+                ChartHistory::Unknown,
+                "No new users recorded in the last 3 days",
+            ),
         ];
         for (history, sentence) in cases {
             for m in both(&days(&[0, 0, 0]), history) {

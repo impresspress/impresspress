@@ -137,19 +137,47 @@ pub fn tabbed_page(
     }
 }
 
+/// One row of a [`dashboard_page`]: its cards, and what they hold, which
+/// sets how narrow a card may get before the row stacks them (page.css).
+pub struct DashboardRow {
+    cards: Markup,
+    holds_tables: bool,
+}
+
+impl DashboardRow {
+    /// Chart cards: side by side while each gets 22rem, so two share a row
+    /// from 1024px.
+    pub fn charts(cards: Markup) -> Self {
+        Self {
+            cards,
+            holds_tables: false,
+        }
+    }
+
+    /// Cards holding a table: side by side while each gets 27rem, the
+    /// narrowest the admin dashboard's "Recent server errors" table fits.
+    pub fn tables(cards: Markup) -> Self {
+        Self {
+            cards,
+            holds_tables: true,
+        }
+    }
+}
+
 /// A dashboard: the headline figures, then rows of cards.
 ///
 /// `stats` are laid out by [`stat_row`] as the first thing on the page.
-/// Each of `rows` is the markup of one row's cards, top to bottom in the
-/// order given: a row's cards share its width in equal columns of one
-/// height while each gets at least 27rem, and stack below that (page.css).
-/// The caller decides what shares a row; the page decides how a row is
-/// laid out.
-pub fn dashboard_page(stats: Vec<Stat<'_>>, rows: Vec<Markup>) -> Markup {
+/// `rows` follow top to bottom in the order given. A row's cards share its
+/// width in equal columns of one height while each gets its row's minimum
+/// ([`DashboardRow`]), and stack below that. The caller decides what shares
+/// a row; the page decides how a row is laid out.
+pub fn dashboard_page(stats: Vec<Stat<'_>>, rows: Vec<DashboardRow>) -> Markup {
     html! {
         div .page {
             (stat_row(stats))
-            @for row in rows { div .dashboard-row { (row) } }
+            @for row in rows {
+                div .dashboard-row .dashboard-row--tables[row.holds_tables] { (row.cards) }
+            }
         }
     }
 }
@@ -535,8 +563,8 @@ mod tests {
         let s = dashboard_page(
             stats,
             vec![
-                html! { section #charts-a {} section #charts-b {} },
-                html! { section #recent {} },
+                DashboardRow::charts(html! { section #charts-a {} section #charts-b {} }),
+                DashboardRow::tables(html! { section #recent {} }),
             ],
         )
         .into_string();
@@ -553,8 +581,8 @@ mod tests {
             "a stat draws no icon and no sparkline: {s}"
         );
         assert!(
-            s.ends_with(r#"</div><div class="dashboard-row"><section id="charts-a"></section><section id="charts-b"></section></div><div class="dashboard-row"><section id="recent"></section></div></div>"#),
-            "each row is one `.dashboard-row`, in the order given, after the stats: {s}"
+            s.ends_with(r#"</div><div class="dashboard-row"><section id="charts-a"></section><section id="charts-b"></section></div><div class="dashboard-row dashboard-row--tables"><section id="recent"></section></div></div>"#),
+            "each row is one `.dashboard-row`, in the order given, after the stats; a row of tables says so: {s}"
         );
     }
 
