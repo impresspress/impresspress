@@ -162,7 +162,7 @@ async fn revoking_an_api_key_from_the_tab_answers_with_the_tab() {
 }
 
 /// The two forms a review reported as posting a form body to a JSON-only
-/// handler: the roles tab's Create Role modal and the SQL tab's editor. Both
+/// handler: the roles tab's Create role modal and the SQL tab's editor. Both
 /// target the block's form routes (`POST /b/admin/iam/roles`,
 /// `POST /b/admin/database/query`), not the JSON API rows the report paired
 /// them with, and both routes parse form bodies. This pins that with the
@@ -176,7 +176,7 @@ async fn the_create_role_and_sql_forms_post_to_routes_that_read_their_bytes() {
         .await
         .into_iter()
         .find(|c| c.url == "/b/admin/iam/roles" && c.form.is_some())
-        .expect("the roles tab renders the Create Role form");
+        .expect("the roles tab renders the Create role form");
     assert_eq!(
         encoded_fields(&create_role, OPERATOR_INPUT),
         "name=probe-typed-name&description=",

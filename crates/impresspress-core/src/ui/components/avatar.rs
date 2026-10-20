@@ -31,6 +31,23 @@ pub fn avatar(seed: &str, size: AvatarSize) -> maud::Markup {
     }
 }
 
+/// A person as a list of accounts shows them: the avatar beside the email,
+/// one `span.user-identity` (styled in `table.css`). The admin dashboard's
+/// "Recent users" and the Users table both render an account this way.
+///
+/// The email is a [`breakable_id`](super::breakable_id), and the CSS lets an
+/// address with no break opportunity wrap too, so a long one wraps beside
+/// its avatar rather than pushing the row past its table. The avatar is
+/// decorative, so the cell reads as the email alone.
+pub fn user_identity(email: &str) -> maud::Markup {
+    maud::html! {
+        span .user-identity {
+            (avatar(email, AvatarSize::Md))
+            span { (super::breakable_id(email)) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +75,20 @@ mod tests {
         assert_eq!(
             avatar("alice@example.com", AvatarSize::Md).into_string(),
             r#"<span class="avatar avatar--md" aria-hidden="true">A</span>"#
+        );
+    }
+
+    /// The avatar first, then the email with its break opportunities; the
+    /// avatar is hidden, so the email is the cell's whole accessible name.
+    #[test]
+    fn a_user_identity_is_the_avatar_beside_the_email() {
+        assert_eq!(
+            user_identity("ann@example.com").into_string(),
+            concat!(
+                r#"<span class="user-identity">"#,
+                r#"<span class="avatar avatar--md" aria-hidden="true">A</span>"#,
+                r#"<span>ann<wbr>@example<wbr>.com</span></span>"#,
+            )
         );
     }
 
