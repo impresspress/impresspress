@@ -19,8 +19,9 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   at narrow widths, with a seeded grant, are in `admin-core-pages.spec.ts`,
  *   which may write.)
  * - The card head rule on the pages it reaches most, at 375, 721, 1024 and
- *   1200: on the dashboard and on Products › Stripe, nothing after a card's
- *   title block drops onto a line of its own.
+ *   1200: on the dashboard and on Products › Stripe a head wraps only when
+ *   its title's longest word and its other parts cannot share the line, and
+ *   no dashboard head wraps at all.
  * - Settings › Variables: the value column keeps its share (`VAR_COLUMNS`),
  *   and "Add variable" ends the search's row.
  * The widths: 800 (the filter wraps; the database cards stack; the settings
@@ -169,7 +170,7 @@ test.describe('admin core pages at in-between widths', () => {
 
   for (const width of [375, 721, 1024, 1200]) {
     for (const path of ['/b/admin/', '/b/products/admin/stripe']) {
-      test(`card heads at ${width}px on ${path}: nothing after the title drops to its own line`, async ({
+      test(`card heads at ${width}px on ${path}: a head wraps only when its parts cannot share a line`, async ({
         page,
       }) => {
         await open(page, width, path);
@@ -177,16 +178,41 @@ test.describe('admin core pages at in-between widths', () => {
           all
             .filter((head) => head.children.length > 1)
             .map((head) => {
-              const title = head.querySelector('.card__title, h2, h3')!.getBoundingClientRect();
-              const rest = [...head.children].slice(1).map((el) => el.getBoundingClientRect());
-              return {
-                title: head.querySelector('.card__title, h2, h3')!.textContent!.trim(),
-                onTitleRow: rest.every((r) => r.top < title.bottom),
+              const [first, ...rest] = [...head.children] as HTMLElement[];
+              const title = head.querySelector('.card__title, h2, h3')!;
+              const titleBottom = title.getBoundingClientRect().bottom;
+              const wrapped = rest.some((el) => el.getBoundingClientRect().top >= titleBottom);
+              // What the line would need: the title block at its narrowest
+              // (its longest word) and every other part at its natural width.
+              // Measured on an out-of-flow copy in the head itself, so the
+              // flex sizing of the real one does not stand in for it.
+              const natural = (el: HTMLElement, size: string) => {
+                const copy = el.cloneNode(true) as HTMLElement;
+                Object.assign(copy.style, { position: 'absolute', visibility: 'hidden', width: size, flex: 'none' });
+                head.appendChild(copy);
+                const w = copy.getBoundingClientRect().width;
+                copy.remove();
+                return w;
               };
+              const cs = getComputedStyle(head);
+              const gap = parseFloat(cs.columnGap) || 0;
+              const inner = head.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+              const needs =
+                natural(first, 'min-content') +
+                rest.reduce((sum, el) => sum + natural(el, 'max-content') + gap, 0);
+              return { title: title.textContent!.trim(), wrapped, couldShare: needs <= inner - 1 };
             }),
         );
         expect(heads.length).toBeGreaterThan(0);
-        expect(heads.filter((h) => !h.onTitleRow).map((h) => h.title)).toEqual([]);
+        expect(
+          heads.filter((h) => h.wrapped && h.couldShare).map((h) => h.title),
+          'a head whose title and actions fit on one line wrapped anyway',
+        ).toEqual([]);
+        // The dashboard's heads are a title and a short link: they always
+        // share the line (PR-15 review F1 measured all of them wrapping).
+        if (path === '/b/admin/') {
+          expect(heads.filter((h) => h.wrapped).map((h) => h.title)).toEqual([]);
+        }
       });
     }
   }
