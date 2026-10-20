@@ -863,6 +863,10 @@ mod card_tests {
     use super::*;
     use crate::test_support::{admin_msg, output_body, TestContext};
 
+    /// The one config key the fixture block declares, so its detail dialog
+    /// has a configuration row with an empty default.
+    const FIXTURE_KEY: &str = "IMPRESSPRESS__AAA__KEY";
+
     /// Two feature blocks with an admin UI: `impresspress/aaa` enabled,
     /// `impresspress/bbb` disabled. The rendered Features tab.
     async fn features_html() -> String {
@@ -973,11 +977,7 @@ mod card_tests {
                 .category(wafer_run::BlockCategory::Feature)
                 .can_disable(true)
                 .admin_url("/b/aaa/admin/")
-                .config_keys(vec![wafer_block::ConfigVar::new(
-                    "IMPRESSPRESS__AAA__KEY",
-                    "A key",
-                    "",
-                )]),
+                .config_keys(vec![wafer_block::ConfigVar::new(FIXTURE_KEY, "A key", "")]),
         );
         let msg = crate::blocks::admin::test_support::routed(admin_msg(
             "retrieve",
