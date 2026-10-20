@@ -103,8 +103,7 @@ impl SearchInput<'_> {
                     { (icons::x()) " Clear" }
                 }
             }
-            div .search-input role="search" {
-                span .search-input-icon { (icons::search()) }
+            (search_box(html! {
                 input .form-input
                     type="search"
                     id=(self.id)
@@ -125,7 +124,53 @@ impl SearchInput<'_> {
                     data-search-input
                     data-search-status=(self.status())
                     autocomplete="off";
-            }
+            }))
+        }
+    }
+}
+
+/// A search box that filters what is already on the page, in the browser,
+/// with no request: the page's own script listens for `input` on
+/// `data-action="<action>"` and hides what does not match.
+///
+/// For a list the server renders whole (the variables, every owner's group
+/// at once), where a search across closed groups has to answer as the
+/// operator types. A list the server pages or searches is a
+/// [`SearchInput`] instead. Both draw the same box ([`search_box`]).
+pub struct FilterInput<'a> {
+    /// The `data-action` verb the page's script keys on.
+    pub action: &'static str,
+    /// The box's accessible name.
+    pub label: &'a str,
+    /// What the empty box shows.
+    pub placeholder: &'a str,
+    /// The id of the region the filter narrows (`aria-controls`).
+    pub controls: &'a str,
+}
+
+impl FilterInput<'_> {
+    pub fn render(&self) -> Markup {
+        search_box(html! {
+            input .form-input
+                type="search"
+                data-action=(self.action)
+                placeholder=(self.placeholder)
+                aria-label=(self.label)
+                aria-controls=(self.controls)
+                autocomplete="off"
+                spellcheck="false";
+        })
+    }
+}
+
+/// The one writer of `.search-input`: a `search` landmark holding the
+/// magnifier and the field, shared by [`SearchInput`] and [`FilterInput`] so
+/// the two boxes cannot drift apart.
+fn search_box(input: Markup) -> Markup {
+    html! {
+        div .search-input role="search" {
+            span .search-input-icon { (icons::search()) }
+            (input)
         }
     }
 }
@@ -206,6 +251,33 @@ pub fn password_field(id: &str, placeholder: &str, purpose: PasswordPurpose) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-page filter is the same box as the server search (one writer
+    /// of `.search-input`, a `search` landmark), but sends nothing: no
+    /// `hx-*`, no `name`, and the page's script finds it by its verb.
+    #[test]
+    fn a_filter_box_is_the_search_box_without_a_request() {
+        let s = FilterInput {
+            action: "var-filter",
+            label: "Search variables",
+            placeholder: "Search by key",
+            controls: "variables-content",
+        }
+        .render()
+        .into_string();
+        assert!(
+            s.starts_with(
+                r#"<div class="search-input" role="search"><span class="search-input-icon">"#
+            ),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"<input class="form-input" type="search" data-action="var-filter" placeholder="Search by key" aria-label="Search variables" aria-controls="variables-content""#),
+            "{s}"
+        );
+        assert!(!s.contains("hx-"), "{s}");
+        assert!(!s.contains("name="), "{s}");
+    }
 
     #[test]
     fn a_current_password_field_is_filled_by_managers_and_has_no_length_rule() {

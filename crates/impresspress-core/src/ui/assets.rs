@@ -2185,7 +2185,8 @@ mod tests {
         (".thread-card__date", None),
         (".legal-editor__meta", None),
         (".ticket-event__head", None),
-        (".network-group__totals", None),
+        (".group-fold__stats", None),
+        (".group-fold__lead", None),
         (".data-table tbody td", None),
         // Named rules.
         (".network-route__method", Some(".data-table tbody td")),

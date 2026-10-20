@@ -11,9 +11,18 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * - Database: each block's fold head keeps the block's name on one line and
  *   the name and org clear of the count, however narrow the Tables column
  *   (table.css `.db-table-group__head`).
- * The widths: 800 (the filter wraps; the database cards stack), and 960 and
- * 1024 (the database cards side by side, the Tables column at its
- * narrowest). Writes nothing (see `e2e:visual`).
+ * - Settings › Network: each block's route table fits its card with the
+ *   route keeping a real share of the row, because the table drops columns
+ *   by its own width (table.css `.network-routes`); checked at 1280 too,
+ *   where it drops only the two per-run columns.
+ * - Settings › Permissions: "Add grant" stays on the Custom grants title's
+ *   row beside the long subtitle (card.css `.card__head`).
+ * - Settings › Variables: the value column keeps its share (`VAR_COLUMNS`),
+ *   and "Add variable" ends the search's row.
+ * The widths: 800 (the filter wraps; the database cards stack; the settings
+ * rail is a tab row), and 960 and 1024 (the database cards side by side, the
+ * Tables column at its narrowest). Writes nothing beyond the page loads'
+ * own request-log rows (see `e2e:visual`).
  */
 
 const WIDTHS = [800, 960, 1024] as const;
@@ -91,6 +100,61 @@ test.describe('admin core pages at in-between widths', () => {
         'a block name broke mid-word or ran into the count',
       ).toEqual([]);
       expect(heads.map((h) => h.name)).toContain('legalpages impresspress');
+    });
+
+    test(`permissions at ${width}px: Add grant stays on the custom grants title's row`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/settings/permissions?subtab=database');
+      const card = page.locator('section.card', { has: page.locator('h2.card__title', { hasText: 'Custom grants' }) });
+      const title = await card.locator('h2.card__title').boundingBox();
+      const action = await card.locator('.card__actions .btn').boundingBox();
+      expect(title && action, 'the title and its action').toBeTruthy();
+      expect(action!.y, JSON.stringify({ title, action })).toBeLessThan(title!.y + title!.height);
+      expect(action!.x).toBeGreaterThan(title!.x + title!.width);
+    });
+
+    test(`variables at ${width}px: the value column keeps its share and Add variable ends the search row`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/settings/variables');
+      const share = await page
+        .locator('[data-fold="variable"] table')
+        .first()
+        .evaluate((table) => {
+          const value = [...table.querySelectorAll('thead th')].find((th) => th.textContent === 'Value')!;
+          return value.getBoundingClientRect().width / table.getBoundingClientRect().width;
+        });
+      expect(share).toBeGreaterThanOrEqual(0.3);
+      const search = await page.locator('.filter-bar .search-input').boundingBox();
+      const add = await page.getByRole('button', { name: 'Add variable' }).boundingBox();
+      expect(Math.abs(search!.y + search!.height / 2 - (add!.y + add!.height / 2))).toBeLessThanOrEqual(1);
+    });
+  }
+
+  for (const width of [...WIDTHS, 1280]) {
+    test(`network at ${width}px: each route table fits its card and the route keeps its share`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/settings/network');
+      // A second load, so the first one's own request is listed.
+      await page.reload({ waitUntil: 'networkidle' });
+      const tables = await page.locator('.network-routes').evaluateAll((all) =>
+        all.map((routes) => {
+          const scroller = routes.querySelector<HTMLElement>(':scope > .data-table')!;
+          const table = scroller.querySelector('table')!.getBoundingClientRect();
+          const route = scroller.querySelector('tbody td.data-table__cell--primary')!.getBoundingClientRect();
+          return {
+            fits: table.width <= scroller.clientWidth + 0.5,
+            routeShare: Math.round((route.width / table.width) * 100) / 100,
+          };
+        }),
+      );
+      expect(tables.length).toBeGreaterThan(0);
+      expect(
+        tables.filter((t) => !t.fits || t.routeShare < 0.4),
+        'a route table scrolled sideways or squeezed its route',
+      ).toEqual([]);
     });
   }
 });

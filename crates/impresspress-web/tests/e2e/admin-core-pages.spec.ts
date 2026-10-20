@@ -49,17 +49,20 @@ test.describe('core admin pages', () => {
     await expect(detail).toBeHidden();
   });
 
-  test('the network group heading collapses its routes', async ({ page }) => {
+  test('the network group heading folds its routes', async ({ page }) => {
     await loginAsAdmin(page);
     await page.request.get('/b/admin/network/detail/inbound?method=GET&path=/e2e-group');
     await page.goto('/b/admin/settings/network', { waitUntil: 'networkidle' });
-    const group = page.locator('.network-group').first();
-    const head = group.locator('button[data-action="network-group-toggle"]');
-    const body = page.locator(`#${await head.getAttribute('aria-controls')}`);
+    const group = page.locator('[data-fold="route"]').first();
+    const fold = group.locator('details.group-fold');
+    const body = group.locator('.network-routes');
+    await expect(fold).toHaveAttribute('open', '');
     await expect(body).toBeVisible();
-    await head.click();
-    await expect(head).toHaveAttribute('aria-expanded', 'false');
+    await group.locator('summary.group-fold__summary').click();
+    await expect(fold).not.toHaveAttribute('open', '');
     await expect(body).toBeHidden();
+    // The fold's head still says what it holds.
+    await expect(group.locator('.group-fold__stats')).toContainText('request');
   });
 
   test('the variables search finds a key in any group and restores the groups when cleared', async ({
@@ -68,26 +71,29 @@ test.describe('core admin pages', () => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/settings/variables', { waitUntil: 'networkidle' });
 
-    const groups = page.locator('[data-var-group]');
+    // Each group is a card (`data-fold`) holding its `<details>`; the filter
+    // hides the card, frame and all, and opens or closes the fold.
+    const groups = page.locator('[data-fold="variable"]');
     expect(await groups.count()).toBeGreaterThan(1);
-    const shared = groups.first();
+    const shared = groups.first().locator('details');
     await expect(shared).toHaveAttribute('open', '');
-    const closedBefore = await page.locator('[data-var-group]:not([open])').count();
+    const closed = page.locator('[data-fold="variable"] > .card__body > details:not([open])');
+    const closedBefore = await closed.count();
     expect(closedBefore, 'per-block groups start closed').toBeGreaterThan(0);
 
     const search = page.getByRole('searchbox', { name: 'Search variables by key, name or description' });
     await search.fill('APP_NAME');
     await expect(page.getByRole('button', { name: 'Edit WAFER_RUN_SHARED__APP_NAME' })).toBeVisible();
-    await expect(page.locator('[data-var-group]:not([hidden])')).toHaveCount(1);
+    await expect(page.locator('[data-fold="variable"]:not([hidden])')).toHaveCount(1);
     await expect(page.locator('#var-filter-empty')).toBeHidden();
 
     await search.fill('zzz-no-such-variable');
     await expect(page.locator('#var-filter-empty')).toBeVisible();
-    await expect(page.locator('[data-var-group]:not([hidden])')).toHaveCount(0);
+    await expect(page.locator('[data-fold="variable"]:not([hidden])')).toHaveCount(0);
 
     await search.fill('');
-    await expect(page.locator('[data-var-group]:not([hidden])')).toHaveCount(await groups.count());
-    await expect(page.locator('[data-var-group]:not([open])')).toHaveCount(closedBefore);
+    await expect(page.locator('[data-fold="variable"]:not([hidden])')).toHaveCount(await groups.count());
+    await expect(closed).toHaveCount(closedBefore);
     await expect(page.locator('#var-filter-empty')).toBeHidden();
   });
 

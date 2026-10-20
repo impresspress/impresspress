@@ -179,16 +179,24 @@ pub async fn settings_body(
     };
 
     Ok(NetworkBody::Page(html! {
+        // The toolbar: the search with Refresh at the end of its row, then
+        // the view's controls on a row of their own (`.network-controls`).
+        // The settings header is shared by every tab and sits outside
+        // `#content`, so the tab's own action lives here. Refresh precedes
+        // the controls in the source as it does on screen.
         div .filter-bar {
             (search_box.render())
+            div .filter-bar__actions {
+                (components::Action::secondary(
+                    "Refresh",
+                    components::ActionTarget::HxGet { url: &page_href, target: "#content" },
+                )
+                .icon(icons::refresh_cw())
+                .render())
+            }
             div .network-controls {
                 (sort_links)
                 (components::filter_toggle("Errors only", query.errors_only, &errors_href))
-                button .btn .btn--secondary
-                    type="button"
-                    hx-get=(page_href)
-                    hx-target="#content"
-                { (icons::refresh_cw()) " Refresh" }
             }
         }
 
@@ -254,44 +262,37 @@ fn count_of(n: i64, one: &str, many: &str) -> String {
     }
 }
 
-/// One block's routes on this page: a heading whose button collapses them,
-/// the block's totals over every route the search matches (`totals`, from
-/// [`request_logs::block_totals`]), and the table.
+/// One block's routes on this page, as a fold ([`super::group_fold`]): the
+/// block's path heads it, beside the block's totals over every route the
+/// search matches (`totals`, from [`request_logs::block_totals`]), and the
+/// table unfolds under it. Drawn open; folding one block's routes away is
+/// the reader's choice.
 fn group_section(group: &Group, totals: Option<&request_logs::BlockTotals>) -> Markup {
-    let body_id = format!("network-group-{:08x}", components::fnv1a(&group.block));
     let rows: Vec<components::TableRow> = group.rows.iter().map(inbound_row).collect();
-    html! {
-        section .network-group {
-            h2 .network-group__head {
-                button .network-group__toggle
-                    type="button"
-                    aria-expanded="true"
-                    aria-controls=(body_id)
-                    data-action="network-group-toggle"
-                {
-                    span .network-group__chevron aria-hidden="true" { (icons::chevron_down()) }
-                    @if group.block.is_empty() {
-                        span .network-group__name { "Other paths" }
-                    } @else {
-                        span .network-group__name { "/b/" (group.block) "/" }
-                    }
-                }
+    super::group_fold(
+        "route",
+        true,
+        html! {
+            @if group.block.is_empty() {
+                "Other paths"
+            } @else {
+                code { "/b/" (group.block) "/" }
             }
+        },
+        html! {
             @if let Some(t) = totals {
-                p .network-group__totals {
-                    (count_of(t.requests, "request", "requests"))
-                    " \u{b7} " (count_of(t.server_errors, "server error", "server errors"))
-                    " \u{b7} " (count_of(t.client_errors, "client error", "client errors"))
-                    @if !t.last_seen.is_empty() {
-                        " \u{b7} last " (components::timestamp(&t.last_seen))
-                    }
+                (count_of(t.requests, "request", "requests"))
+                " \u{b7} " (count_of(t.server_errors, "server error", "server errors"))
+                " \u{b7} " (count_of(t.client_errors, "client error", "client errors"))
+                @if !t.last_seen.is_empty() {
+                    " \u{b7} last " (components::timestamp(&t.last_seen))
                 }
             }
-            div id=(body_id) {
-                (components::DataTable::new(&INBOUND_COLUMNS).rows(rows).render())
-            }
-        }
-    }
+        },
+        html! {
+            div .network-routes { (components::DataTable::new(&INBOUND_COLUMNS).rows(rows).render()) }
+        },
+    )
 }
 
 /// The detail endpoint for one route, every value form-encoded: a path is
@@ -352,10 +353,10 @@ fn inbound_row(route: &PathSummary) -> components::TableRow {
                 data-detail-url=(detail_url(&route.method, &route.path, None))
             { (icons::chevron_right()) }
         },
-        // Below 720px the row is a two-line card: the route, then this
-        // line, which stands in for the count cells CSS hides there
-        // (`.network-route__meta`); the last-seen time is in the group's
-        // totals and the route's detail.
+        // Where the table is narrow (`.network-routes`, table.css) the row
+        // is two lines: the route, then this line, which stands in for the
+        // count cells CSS hides there (`.network-route__meta`); the
+        // last-seen time is in the group's totals and the route's detail.
         html! {
             span .network-route__method { (method) }
             " "
@@ -382,8 +383,8 @@ fn inbound_row(route: &PathSummary) -> components::TableRow {
     })
 }
 
-/// The route expand and group collapse buttons, delegated and bound once
-/// per document. Each button names what it controls in `aria-controls` (an
+/// The route expand buttons, delegated and bound once per document. Each
+/// button names what it controls in `aria-controls` (an
 /// id derived by hashing, so it is a plain `[a-z0-9-]` id whatever the path
 /// held) and states its state in `aria-expanded`; a route's detail is loaded
 /// on its first opening from the button's own `data-detail-url`, an
@@ -393,14 +394,14 @@ const NETWORK_JS: &str = r#"
   if (window.__networkBound) return;
   window.__networkBound = true;
   document.addEventListener('click', function (e) {
-    var btn = e.target instanceof Element && e.target.closest('[data-action="network-detail"], [data-action="network-group-toggle"]');
+    var btn = e.target instanceof Element && e.target.closest('[data-action="network-detail"]');
     if (!btn) return;
     var target = document.getElementById(btn.getAttribute('aria-controls'));
     if (!target) return;
     var open = btn.getAttribute('aria-expanded') !== 'true';
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     target.hidden = !open;
-    if (open && btn.getAttribute('data-action') === 'network-detail') {
+    if (open) {
       var pane = target.querySelector('[data-network-detail]');
       if (pane && !pane.hasChildNodes()) {
         htmx.ajax('GET', btn.getAttribute('data-detail-url'), { target: pane, swap: 'innerHTML' });
@@ -480,18 +481,16 @@ pub async fn network_inbound_detail(ctx: &dyn Context, msg: &Message) -> OutputS
         Err(e) => return crate::blocks::crud::db_error_internal(e, "Network inbound detail"),
     };
 
-    let rows: Vec<Vec<Markup>> = display_rows
+    let rows: Vec<components::TableRow> = display_rows
         .iter()
-        .map(|row| detail_row(row, &emails))
+        .map(|row| components::TableRow::new(detail_row(row, &emails)))
         .collect();
 
     let markup = html! {
-        (components::data_table::<fn(usize) -> Option<String>>(
-            &DETAIL_COLUMNS,
-            rows,
-            None,
-            html! { p .text-center .text-muted { "No requests logged for this path" } },
-        ))
+        (components::DataTable::new(&DETAIL_COLUMNS)
+            .rows(rows)
+            .empty_note("No requests are logged for this path.")
+            .render())
         @if has_more {
             div .text-center .p-2 {
                 button .btn .btn--secondary .btn--sm
@@ -705,7 +704,7 @@ mod tests {
         for group in ["/b/admin/", "/b/auth/", "/b/storage/"] {
             assert!(
                 all.contains(&format!(
-                    r#"<span class="network-group__name">{group}</span>"#
+                    r#"<h2 class="group-fold__title"><code>{group}</code></h2>"#
                 )),
                 "{group}: {all}"
             );
@@ -768,8 +767,8 @@ mod tests {
             "{second}"
         );
         assert!(
-            second.contains(r#"<span class="network-group__name">/b/admin/</span>"#)
-                && second.contains(r#"<span class="network-group__name">/b/auth/</span>"#),
+            second.contains(r#"<h2 class="group-fold__title"><code>/b/admin/</code></h2>"#)
+                && second.contains(r#"<h2 class="group-fold__title"><code>/b/auth/</code></h2>"#),
             "the page that crosses blocks heads both: {second}"
         );
         assert!(
@@ -831,10 +830,10 @@ mod tests {
         assert!(!by_requests.contains("/b/zeta/broken"), "{by_requests}");
         let by_errors = page(&ctx, &[("sort", "errors")]).await;
         let zeta = by_errors
-            .find(r#"<span class="network-group__name">/b/zeta/</span>"#)
+            .find(r#"<h2 class="group-fold__title"><code>/b/zeta/</code></h2>"#)
             .unwrap_or_else(|| panic!("the zeta heading on page 1: {by_errors}"));
         let admin = by_errors
-            .find(r#"<span class="network-group__name">/b/admin/</span>"#)
+            .find(r#"<h2 class="group-fold__title"><code>/b/admin/</code></h2>"#)
             .expect("the admin heading");
         assert!(
             zeta < admin,
@@ -844,6 +843,54 @@ mod tests {
             by_errors.contains("1 request \u{b7} 1 server error"),
             "{by_errors}"
         );
+    }
+
+    /// Each block's routes are a flush fold card: the block's path is the
+    /// card's `h2` in the summary, the totals beside it, and the table is the
+    /// card's one card-level surface, held in the `.network-routes`
+    /// container its column rules key on. The toolbar's Refresh is a
+    /// secondary at the end of the search's row, before the view controls,
+    /// and the tab has no primary.
+    #[tokio::test]
+    async fn each_block_is_a_fold_card_and_refresh_ends_the_search_row() {
+        use crate::test_support::dom;
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        seed(&ctx, "GET", "/b/admin/ok", 200).await;
+        seed(&ctx, "POST", "/b/auth/fails", 500).await;
+        let html = page(&ctx, &[]).await;
+
+        assert!(
+            html.contains(concat!(
+                r#"<div data-fold="route" class="card card--flush"><div class="card__body">"#,
+                r#"<details class="group-fold" open data-default-open><summary class="group-fold__summary">"#,
+                r#"<h2 class="group-fold__title"><code>/b/admin/</code></h2>"#,
+                r#"<span class="group-fold__stats">1 request · 0 server errors · 0 client errors · last "#,
+            )),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"data-fold="route""#).count(), 2, "{html}");
+        assert_eq!(
+            html.matches(r#"<div class="network-routes"><div class="data-table">"#)
+                .count(),
+            2,
+            "{html}"
+        );
+        assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
+        assert!(!html.contains("network-group"), "{html}");
+
+        let search = html.find(r#"id="network-search""#).expect("search box");
+        let refresh = html
+            .find(r##"<div class="filter-bar__actions"><button class="btn btn--secondary" type="button" hx-get="/b/admin/settings/network" hx-target="#content">"##)
+            .unwrap_or_else(|| panic!("Refresh is a secondary at the row's end: {html}"));
+        let controls = html
+            .find(r#"<div class="network-controls">"#)
+            .expect("controls");
+        assert!(search < refresh && refresh < controls, "{html}");
+        let (page_primaries, _) = dom::visible_primaries(&html);
+        assert!(page_primaries.is_empty(), "{page_primaries:?}");
     }
 
     /// The sort is a set of links, the current one `aria-current`, not three

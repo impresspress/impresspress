@@ -29,6 +29,9 @@
 }
 
 .filter-bar .search-input { flex: 1; min-width: 200px; }
+/* A toolbar's own actions, at the end of its row: secondaries first, the
+   one primary last. When the row wraps they keep to its right edge. */
+.filter-bar__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
 
 /* ===== Forms ===== */
 .form-group { margin-bottom: var(--space-5); }

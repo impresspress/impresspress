@@ -166,6 +166,45 @@ pub(crate) fn user_cell(
     }
 }
 
+/// One collapsible group of rows on a settings tab (one owner's variables,
+/// one block's routes): a flush [`ui::components::Card`] whose body is a
+/// `<details>`, the summary its whole head.
+///
+/// - The summary is the `h2` title beside `stats`, a muted line that still
+///   says what the group holds while it is folded ("25 variables", a block's
+///   request totals).
+/// - `body` is what unfolds: an optional `.group-fold__lead` sentence, then
+///   the group's `DataTable`, whose frame the flush card absorbs (layout
+///   rule 2).
+/// - `kind` marks the card for the page's script and its specs
+///   (`data-fold="variable"`), so a filter can hide a whole group, frame
+///   and all. `open` is how the page draws the group, kept in
+///   `data-default-open` so a filter that opened it can put it back.
+///
+/// A plain card rather than a titled one because the title is the
+/// disclosure's own control, the shape `settings_form`'s collapsible
+/// sections take.
+pub(crate) fn group_fold(
+    kind: &'static str,
+    open: bool,
+    title: Markup,
+    stats: Markup,
+    body: Markup,
+) -> Markup {
+    ui::components::Card::plain(maud::html! {
+        details .group-fold open[open] data-default-open[open] {
+            summary .group-fold__summary {
+                h2 .group-fold__title { (title) }
+                span .group-fold__stats { (stats) }
+            }
+            (body)
+        }
+    })
+    .data("fold", kind)
+    .flush()
+    .render()
+}
+
 /// Convenience: a single top-level breadcrumb with no link.
 pub(crate) fn crumb(label: &'static str) -> Vec<Crumb<'static>> {
     vec![Crumb { label, href: None }]

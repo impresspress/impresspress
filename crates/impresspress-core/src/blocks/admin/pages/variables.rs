@@ -37,38 +37,45 @@ pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, 
     let offer_reset = variables::deployment_seeds_from_process_env(ctx).await?;
     let upgrade_pins = bulk_release_count(&rows, offer_reset);
 
+    // One toolbar row: the search, then the actions at its end, secondaries
+    // first and the tab's one primary last (layout rule 6). The settings
+    // header is shared by every tab and sits outside `#content`, so a tab's
+    // own actions live here rather than in it.
     Ok(html! {
-        div .mb-3 .flex .gap-1 {
-            button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target=(CREATE_MODAL_ID) {
-                (icons::plus()) " Add Variable"
-            }
-            @if upgrade_pins > 0 {
-                (reset_pinned_at_upgrade_button(upgrade_pins))
-            }
-        }
-
         div .filter-bar {
-            div .search-input {
-                span .search-input-icon { (icons::search()) }
-                input .form-input
-                    type="search"
-                    data-action="var-filter"
-                    placeholder="Search by key, name or description"
-                    aria-label="Search variables by key, name or description"
-                    aria-controls="variables-content"
-                    autocomplete="off"
-                    spellcheck="false";
+            (components::FilterInput {
+                action: "var-filter",
+                label: "Search variables by key, name or description",
+                placeholder: "Search by key, name or description",
+                controls: "variables-content",
+            }
+            .render())
+            div .filter-bar__actions {
+                @if upgrade_pins > 0 {
+                    (reset_pinned_at_upgrade_button(upgrade_pins))
+                }
+                (components::Action::primary("Add variable", components::ActionTarget::Modal(CREATE_MODAL_ID))
+                    .icon(icons::plus())
+                    .render())
             }
         }
 
         div #variables-content {
             (variable_groups(ctx, &rows, offer_reset))
-            p #var-filter-empty .text-muted .text-sm role="status" hidden { "No variable matches." }
+            // A status region, so a search that leaves nothing is announced.
+            div #var-filter-empty role="status" hidden {
+                (components::empty_state(
+                    icons::search(),
+                    "No matching variables",
+                    "No variable's key, name or description contains this search.",
+                    None,
+                ))
+            }
         }
         script { (maud::PreEscaped(VAR_FILTER_JS)) }
 
         // Create variable modal
-        (components::modal(CREATE_MODAL_ID, "Add Variable", create_variable_form(&CreateVarForm::default())))
+        (components::modal(CREATE_MODAL_ID, "Add variable", create_variable_form(&CreateVarForm::default())))
 
         // Where a row's Edit button swaps the edit modal
         // ([`handle_edit_variable_form`] answers with the whole `<dialog>`).
@@ -77,8 +84,9 @@ pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, 
 }
 
 /// The search box over the variable groups. A query hides the rows whose
-/// text does not contain it, hides the groups left with none, and opens the
-/// groups that still have one, so a key named in a boot warning is found
+/// text does not contain it, hides the groups (each a card,
+/// `[data-fold="variable"]`) left with none, and opens the groups that still
+/// have one, so a key named in a boot warning is found
 /// whichever block owns it; clearing it puts every group back the way the
 /// page drew it (`data-default-open`). `#var-filter-empty` says when nothing
 /// matches. The query survives a row control's redraw of `#content`.
@@ -91,7 +99,8 @@ const VAR_FILTER_JS: &str = r#"
     if (!(el instanceof Element) || el.getAttribute('data-action') !== 'var-filter') return;
     var query = el.value.trim().toLowerCase();
     var matched = 0;
-    document.querySelectorAll('[data-var-group]').forEach(function (group) {
+    document.querySelectorAll('[data-fold="variable"]').forEach(function (group) {
+      var fold = group.querySelector('details');
       var rows = group.querySelectorAll('tbody > tr');
       var hits = 0;
       rows.forEach(function (row) {
@@ -101,7 +110,7 @@ const VAR_FILTER_JS: &str = r#"
       });
       matched += hits;
       group.hidden = query !== '' && hits === 0;
-      group.open = query ? hits > 0 : group.hasAttribute('data-default-open');
+      fold.open = query ? hits > 0 : fold.hasAttribute('data-default-open');
     });
     var empty = document.getElementById('var-filter-empty');
     if (empty) empty.hidden = !query || matched !== 0;
@@ -123,7 +132,7 @@ const VAR_FILTER_JS: &str = r#"
 })();
 "#;
 
-/// What the Add Variable form holds: empty on the page, and what the operator
+/// What the Add variable form holds: empty on the page, and what the operator
 /// submitted, plus the refusal, when [`handle_create_variable`] answers with
 /// the form again.
 struct CreateVarForm<'a> {
@@ -147,7 +156,7 @@ impl Default for CreateVarForm<'_> {
     }
 }
 
-/// The Add Variable form. Rendered into the modal by [`settings_body`], and
+/// The Add variable form. Rendered into the modal by [`settings_body`], and
 /// by [`handle_create_variable`] in place of itself when the create is
 /// refused for one of its fields: htmx 2 swaps only a 2xx, so a refusal that
 /// is to appear under the field it is about comes back as this form, carrying
@@ -235,7 +244,7 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
             }
             (components::modal_footer(html! {
                 (components::modal_cancel())
-                button .btn .btn--primary type="submit" { "Create" }
+                (components::Action::primary("Create", components::ActionTarget::Submit { form: None }).render())
             }))
         }
     }
@@ -333,21 +342,21 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
         variable_cell(row.key, row.name, row.description, row.pin, row.warning),
         html! {
             div .var-cell {
-                span .text-13 .cell-wrap {
+                span .cell-wrap {
                     @match &row.value {
                         ValueState::Masked => code { "********" },
-                        ValueState::Plain(v) => code { (v) },
+                        ValueState::Plain(v) => code { (components::breakable_id(v)) },
                         ValueState::NotSet => span .text-muted { "(not set)" },
                     }
                 }
                 @if row.show_default {
                     @match row.default {
                         Some(d) if !d.is_empty() => span .var-cell__note .cell-wrap {
-                            "Default: " code { (d) }
+                            "Default: " code { (components::breakable_id(d)) }
                         },
                         _ => @if row.auto_generate {
                             span .var-cell__note {
-                                (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { "auto-generated" }))
+                                (Badge::new(BadgeVariant::Info).render(html! { "Auto-generated" }))
                             }
                         },
                     }
@@ -479,9 +488,18 @@ fn config_var_row(
 /// The variable tables' columns, the three [`var_row`] emits. The last column
 /// only carries the controls; it keeps the 50px width the old `th .w-50` gave
 /// it.
+///
+/// The value column has a share of its own. A value may break anywhere
+/// (`.cell-wrap`, so a long CSP directive cannot push the table past its
+/// card), which leaves it no minimum width, and the automatic layout gave
+/// all the room to the variable's description: at 1280px a URL broke after
+/// every few letters. At 35% beside the settings rail a URL fits on its
+/// line, and a longer path wraps between its parts (after a `/`, `:` or `_`,
+/// before a `.`; [`components::breakable_id`]), while the keys in the
+/// first column still fit theirs.
 const VAR_COLUMNS: [components::TableCol<'static>; 3] = [
     components::TableCol::new("Variable").primary(),
-    components::TableCol::new("Value"),
+    components::TableCol::new("Value").width("35%"),
     components::TableCol::new("Actions").actions().width("50px"),
 ];
 
@@ -619,7 +637,7 @@ fn bulk_release_count(rows: &[variables::VariableRow], offer_reset: bool) -> usi
 fn reset_pinned_at_upgrade_button(count: usize) -> Markup {
     let keys = pluralize_keys(count);
     html! {
-        button .btn .btn--secondary .btn--sm type="button"
+        button .btn .btn--secondary type="button"
             hx-post="/b/admin/variables/reset-pinned-at-upgrade"
             hx-swap="none"
             hx-confirm={
@@ -629,7 +647,7 @@ fn reset_pinned_at_upgrade_button(count: usize) -> Markup {
             }
             data-error-label="Could not hand the keys pinned at upgrade back to the environment"
             title="Reset every key the upgrade boot pinned"
-        { (icons::refresh_cw()) " Reset all keys pinned at upgrade (" (count) ")" }
+        { (icons::refresh_cw()) "Reset all keys pinned at upgrade (" (count) ")" }
     }
 }
 
@@ -665,7 +683,7 @@ fn pin_badge(pin: variables::Pin) -> Markup {
     };
     html! {
         span title=(title) {
-            (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { (label) }))
+            (Badge::new(BadgeVariant::Secondary).render(html! { (label) }))
         }
     }
 }
@@ -816,7 +834,7 @@ fn variable_groups(
                             @for (grantee, write) in matches {
                                 @if *grantee != block.name {
                                     " "
-                                    (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! {
+                                    (Badge::new(BadgeVariant::Secondary).render(html! {
                                         (grantee) ": "
                                         (match write {
                                             wafer_block::GrantWrite::Full => "read+write",
@@ -894,24 +912,29 @@ fn variable_groups(
 
     html! {
         @if groups.is_empty() {
-            p .text-center .text-muted { "No variables are set." }
+            (components::empty_state(
+                icons::settings(),
+                "No variables are set",
+                "The settings blocks declare, and any you add, are listed here.",
+                None,
+            ))
         }
         @for group in groups {
-            details .var-group data-var-group open[group.open] data-default-open[group.open] {
-                summary .var-group__summary {
-                    h2 .var-group__title { (group.title) }
-                    span .var-group__stats {
-                        (group.rows.len())
-                        @if group.rows.len() == 1 { " variable" } @else { " variables" }
-                        @if group.edited > 0 { " \u{b7} " (group.edited) " edited here" }
-                        @if group.pinned > 0 { " \u{b7} " (group.pinned) " pinned at upgrade" }
-                    }
-                }
-                div .var-group__body {
-                    p .var-group__access { (group.access) }
+            (super::group_fold(
+                "variable",
+                group.open,
+                group.title,
+                html! {
+                    (group.rows.len())
+                    @if group.rows.len() == 1 { " variable" } @else { " variables" }
+                    @if group.edited > 0 { " \u{b7} " (group.edited) " edited here" }
+                    @if group.pinned > 0 { " \u{b7} " (group.pinned) " pinned at upgrade" }
+                },
+                html! {
+                    p .group-fold__lead { (group.access) }
                     (components::DataTable::new(&VAR_COLUMNS).rows(group.rows.into_iter().map(components::TableRow::new).collect()).render())
-                }
-            }
+                },
+            ))
         }
     }
 }
@@ -1022,7 +1045,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
 
     let markup = components::modal(
         EDIT_MODAL_ID,
-        "Edit Variable",
+        "Edit variable",
         html! {
             form hx-put={"/b/admin/variables/" (url_path_encode(&key))} hx-target="#content" {
                 div .form-group {
@@ -1077,7 +1100,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                 div .form-group {
                     label .form-checkbox {
                         // A hidden field carries the answer and the checkbox
-                        // overrides it, exactly as the Add Variable modal does:
+                        // overrides it, exactly as the Add variable modal does:
                         // `parse_form_body` keeps the LAST value for a repeated
                         // key, so `sensitive` is always posted and the handler
                         // never has to guess whether the field was on the form.
@@ -1122,7 +1145,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Save" }
+                    (components::Action::primary("Save", components::ActionTarget::Submit { form: None }).render())
                 }))
             }
         },
@@ -1131,7 +1154,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
     ui::html_response_opening_modal(markup, EDIT_MODAL_ID)
 }
 
-/// The Add Variable modal's element id: its trigger's `data-modal-target`,
+/// The Add variable modal's element id: its trigger's `data-modal-target`,
 /// and what a landed create closes.
 const CREATE_MODAL_ID: &str = "create-var";
 
@@ -2422,6 +2445,138 @@ mod tests {
                 "and label it the way the pin badge names the state: {html}"
             );
         }
+    }
+
+    /// The toolbar is one row: the filter box (a `search` landmark, the same
+    /// box as every list's search), then the actions at its end — the bulk
+    /// release as a full-size secondary, then "Add variable", the tab's one
+    /// primary, last.
+    #[tokio::test]
+    async fn the_toolbar_ends_with_the_tabs_one_primary() {
+        use crate::test_support::dom;
+
+        let ctx = ctx_with_every_pin_state(true).await;
+        let html = variables_page_html(&ctx).await;
+        assert!(
+            html.contains(concat!(
+                r#"<div class="filter-bar"><div class="search-input" role="search">"#,
+                r#"<span class="search-input-icon">"#,
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input class="form-input" type="search" data-action="var-filter" placeholder="Search by key, name or description" aria-label="Search variables by key, name or description" aria-controls="variables-content""#),
+            "{html}"
+        );
+        let actions = html
+            .find(r#"<div class="filter-bar__actions"><button class="btn btn--secondary" type="button" hx-post="/b/admin/variables/reset-pinned-at-upgrade""#)
+            .unwrap_or_else(|| panic!("the bulk release opens the actions, full size: {html}"));
+        let add = html
+            .find(r#"<button class="btn btn--primary" type="button" data-action="modal-open" data-modal-target="create-var">"#)
+            .expect("Add variable");
+        assert!(actions < add, "{html}");
+        let (page, dialogs) = dom::visible_primaries(&html);
+        assert_eq!(
+            page,
+            [r#"button.btn.btn--primary "Add variable""#],
+            "{html}"
+        );
+        assert!(
+            dialogs
+                .iter()
+                .any(|d| d == &[r#"button.btn.btn--primary "Create""#.to_string()]),
+            "{dialogs:?}"
+        );
+        assert!(
+            html.contains(r#"<h2 class="modal__title" id="create-var-title">Add variable</h2>"#),
+            "{html}"
+        );
+        // The pin badges take their size from `.badge` alone.
+        assert!(html.contains(">Pinned at upgrade</span>"), "{html}");
+        assert!(!html.contains("text-11"), "{html}");
+    }
+
+    /// Each owner's variables are a flush fold card, the shared config drawn
+    /// open and a block's closed, so the table is the card's one card-level
+    /// surface; the filter keys on the card (`data-fold`) to hide a group
+    /// frame and all. No running text is set below 14px.
+    #[tokio::test]
+    async fn each_owner_is_a_fold_card_holding_its_table() {
+        use crate::test_support::dom;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for info in crate::blocks::all_block_infos() {
+            let name = info.name.clone();
+            ctx.register_block_info(&name, info);
+        }
+        let html = variables_page_html(&ctx).await;
+        assert!(
+            html.contains(concat!(
+                r#"<div data-fold="variable" class="card card--flush"><div class="card__body">"#,
+                r#"<details class="group-fold" open data-default-open><summary class="group-fold__summary">"#,
+                r#"<h2 class="group-fold__title">Shared platform config</h2>"#,
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(concat!(
+                r#"<details class="group-fold"><summary class="group-fold__summary">"#,
+                r#"<h2 class="group-fold__title"><code>impresspress/auth-ui</code></h2>"#,
+            )),
+            "a block's group starts closed: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"<p class="group-fold__lead">Any block can read. Only admin can write.</p>"#
+            ),
+            "{html}"
+        );
+        assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
+        assert!(VAR_FILTER_JS.contains(r#"querySelectorAll('[data-fold="variable"]')"#));
+        for small in ["text-13", "text-11", "text-xs", "var-group"] {
+            assert!(!html.contains(small), "{small}: {html}");
+        }
+    }
+
+    /// The value column has its own share of the row (`VAR_COLUMNS`), and a
+    /// value or default breaks only between its parts: at 1280px a URL in the
+    /// starved column broke after every few letters.
+    #[test]
+    fn a_value_has_its_column_and_breaks_between_its_parts() {
+        assert!(components::DataTable::new(&VAR_COLUMNS)
+            .rows(vec![components::TableRow::new(vec![
+                html! {},
+                html! {},
+                html! {}
+            ])])
+            .render()
+            .into_string()
+            .contains(r#"<th class="data-table__col-w" style="--col-width:35%">Value</th>"#));
+        let cells = var_row(&VarRow {
+            key: crate::config_vars::FRONTEND_URL_KEY,
+            name: Some("Frontend URL"),
+            value: ValueState::Plain("http://localhost:5173/b/x".into()),
+            default: Some("/b/static/logo.png"),
+            auto_generate: false,
+            description: "",
+            warning: "",
+            show_default: true,
+            deletable: false,
+            declared: true,
+            pin: None,
+            offer_reset: false,
+        });
+        let value = cells[1].clone().into_string();
+        assert!(
+            value.contains(r#"<span class="cell-wrap"><code>http://localhost:<wbr>5173/<wbr>b/<wbr>x</code></span>"#),
+            "{value}"
+        );
+        assert!(
+            value.contains(r#"Default: <code>/b/<wbr>static/<wbr>logo<wbr>.png</code>"#),
+            "{value}"
+        );
     }
 
     /// An admin edit is not an upgrade pin, and must not make the bulk control

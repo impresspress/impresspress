@@ -342,22 +342,10 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.data-table:not(.data-table--scroll) .data-table__row-href a { margin: -0.5rem -0.5rem -0.5rem 0; }
 }
 /* ── Network (Settings › Network, blocks/admin/pages/network.rs) ───── */
-.network-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+/* The sort and the error filter take the toolbar's second row, under the
+   search and Refresh. */
+.network-controls { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
 .network-summary { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.network-group { margin-top: var(--space-4); }
-.network-group__head { margin: 0; font-size: var(--text-base); }
-/* The group's collapse control: the heading's whole text, held to the
-   target floor. */
-.network-group__toggle {
-	display: inline-flex; align-items: center; gap: var(--space-2);
-	min-height: var(--target-min); padding: var(--space-1) var(--space-2) var(--space-1) 0;
-	background: none; border: none; border-radius: var(--radius-md);
-	font: inherit; font-weight: 600; color: var(--text-primary); cursor: pointer;
-}
-.network-group__name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.network-group__chevron { display: inline-flex; line-height: 0; transition: transform 150ms ease-out; }
-.network-group__toggle[aria-expanded="false"] .network-group__chevron { transform: rotate(-90deg); }
-.network-group__totals { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .network-row__toggle svg { transition: transform 150ms ease-out; }
 .network-row__toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
 .network-route__method { font-weight: 600; letter-spacing: 0.02em; }
@@ -366,12 +354,24 @@ a.pagination__link:hover { background: var(--bg-hover); }
 /* Card mode lays every row out as a grid, which would override `hidden`. */
 .data-table tr.network-detail-row[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) {
-	.network-group__chevron, .network-row__toggle svg { transition: none; }
+	.network-row__toggle svg { transition: none; }
 }
-/* Below 720px a route is a two-line card: the route, then one line of its
-   counts (`.network-route__meta`), which stands in for the separate cells
-   hidden here. */
-@media (max-width: 720px) {
+/* Seven columns need about 60rem; a group's table usually has less (about
+   46rem beside the settings rail at 1280px), and the route, the one column
+   that can give, was squeezed to a word per line. So the table follows its
+   own width, not the viewport's:
+   - below 60rem it drops the two per-run columns, the average duration and
+     the last-seen time (the group's head and the route's detail say when);
+   - below 36rem (a tablet, a phone) a route is two lines: the route, then
+     one line of its counts (`.network-route__meta`), which stands in for
+     the count cells hidden here. */
+.network-routes { container: network-routes / inline-size; }
+@container network-routes (max-width: 60rem) {
+	.network-routes > .data-table > table > thead > tr > th:nth-child(n+6),
+	.network-routes > .data-table > table > tbody > tr.network-row > td:nth-child(n+6) { display: none; }
+}
+@container network-routes (max-width: 36rem) {
+	.network-routes > .data-table > table > thead > tr > th:nth-child(n+3),
 	.network-row td:not(.data-table__cell--primary):not(.data-table__cell--actions) { display: none; }
 	.network-route__meta {
 		display: block; margin-top: var(--space-1);

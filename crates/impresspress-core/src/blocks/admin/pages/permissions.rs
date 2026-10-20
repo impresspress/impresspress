@@ -5,10 +5,14 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     platform_state::wrap_grants,
     ui::{
-        components::{self, badge, Badge, BadgeVariant, Card},
+        components::{self, badge, Action, ActionTarget, Badge, BadgeVariant, Card},
         icons,
     },
 };
+
+/// The Add access grant modal's id: the Custom grants card's trigger names
+/// it in `data-modal-target`.
+const ADD_GRANT_MODAL_ID: &str = "add-grant-modal";
 
 /// Render JUST the permissions settings body. The parent `settings_page`
 /// handler wraps this in the form-less `tabbed_page` shell — the
@@ -73,9 +77,9 @@ pub async fn permissions_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
 /// carry the difference.
 fn access_badge(write: GrantWrite) -> Markup {
     let label = match write {
-        GrantWrite::Full => "read + write",
-        GrantWrite::Append => "append only",
-        GrantWrite::None => "read only",
+        GrantWrite::Full => "Read + write",
+        GrantWrite::Append => "Append only",
+        GrantWrite::None => "Read only",
     };
     badge(BadgeVariant::Secondary, label)
 }
@@ -99,11 +103,11 @@ fn access_verb(write: GrantWrite) -> &'static str {
 fn grants_code_tab(ctx: &dyn Context) -> Markup {
     let blocks = ctx.registered_blocks();
 
-    let rows: Vec<Vec<Markup>> = blocks
+    let rows: Vec<components::TableRow> = blocks
         .iter()
         .flat_map(|block| {
             block.grants.iter().map(move |grant| {
-                vec![
+                components::TableRow::new(vec![
                     Badge::new(BadgeVariant::Info).render(components::breakable_id(&block.name)),
                     html! {
                         @if grant.grantee == "*" {
@@ -114,35 +118,33 @@ fn grants_code_tab(ctx: &dyn Context) -> Markup {
                     },
                     html! {
                         @if let Some(ref rt) = grant.resource_type {
-                            (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { (rt) }))
+                            (badge(BadgeVariant::Info, human_resource_type(&rt.to_string())))
                         } @else {
-                            (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { "all" }))
+                            (badge(BadgeVariant::Secondary, "All"))
                         }
                     },
-                    html! { code .text-xs { (components::breakable_id(&grant.resource)) } },
+                    html! { code { (components::breakable_id(&grant.resource)) } },
                     access_badge(grant.write),
-                ]
+                ])
             })
         })
         .collect();
-    let has_rows = !rows.is_empty();
-    let table = components::data_table::<fn(usize) -> Option<String>>(
-        &CODE_GRANT_COLUMNS,
-        rows,
-        None,
-        // The raw table this replaced rendered its header over an empty body
-        // when no block declared a grant, which read as a broken table. The
-        // component renders the empty slot in place of the whole table, so
-        // the slot has to say it.
-        html! { p .text-center .text-muted { "No grants are declared in block source code." } },
-    );
-    // A card holding a table is flush, so the table's frame is the card's
-    // (layout rule 2); a card holding the empty sentence keeps its padding.
-    let card = Card::titled("Grants declared in code", table).subtitle(
+    // Flush whether or not a block declares a grant: the table's frame is the
+    // card's (layout rule 2), and with no rows the note takes the card's
+    // inset in its place.
+    Card::titled(
+        "Grants declared in code",
+        components::DataTable::new(&CODE_GRANT_COLUMNS)
+            .rows(rows)
+            .empty_note("No grants are declared in block source code.")
+            .render(),
+    )
+    .subtitle(
         "These grants are declared in block source code via BlockInfo.grants and cannot be \
          modified here.",
-    );
-    if has_rows { card.flush() } else { card }.render()
+    )
+    .flush()
+    .render()
 }
 
 pub(crate) async fn grants_custom_tab(
@@ -155,70 +157,64 @@ pub(crate) async fn grants_custom_tab(
     let blocks = ctx.registered_blocks();
     let block_names: Vec<&str> = blocks.iter().map(|b| b.name.as_str()).collect();
 
-    Ok(html! {
-        div .card .mt-4 {
-            header .card__head {
-                div {
-                    h2 .card__title { "Custom Grants" }
-                    p .card__subtitle {
-                        "Add grants for third-party or WASM blocks. These are loaded at startup alongside code-declared grants."
+    let rows: Vec<components::TableRow> = grants
+        .iter()
+        .map(|grant| {
+            let grantee = grant.grantee.as_str();
+            let rt = grant.resource_type.as_str();
+            components::TableRow::new(vec![
+                html! {
+                    @if grantee == "*" {
+                        (badge(BadgeVariant::Secondary, "* (all blocks)"))
+                    } @else {
+                        code { (components::breakable_id(grantee)) }
                     }
-                }
-                div .card__actions {
-                    button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="add-grant-modal" {
-                        (icons::plus()) " Add Grant"
+                },
+                html! {
+                    @if rt.is_empty() {
+                        (badge(BadgeVariant::Secondary, "All"))
+                    } @else {
+                        (badge(BadgeVariant::Info, human_resource_type(rt)))
                     }
-                }
-            }
-            div .card__body {
-                @if grants.is_empty() {
-                    p .text-muted { "No custom grants configured." }
-                } @else {
-                    @let rows: Vec<Vec<Markup>> = grants.iter().map(|grant| {
-                        let grantee = grant.grantee.as_str();
-                        let rt = grant.resource_type.as_str();
-                        vec![
-                            html! {
-                                @if grantee == "*" {
-                                    (badge(BadgeVariant::Secondary, "* (all blocks)"))
-                                } @else {
-                                    code { (components::breakable_id(grantee)) }
-                                }
-                            },
-                            html! {
-                                @if rt.is_empty() {
-                                    (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { "all" }))
-                                } @else {
-                                    (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { (rt) }))
-                                }
-                            },
-                            html! { code .text-xs { (components::breakable_id(&grant.resource)) } },
-                            html! {
-                                (access_badge(grant.write))
-                            },
-                            html! { span .text-13 { (grant.description) } },
-                            html! {
-                                button .btn .btn--ghost-danger .btn--icon
-                                    type="button"
-                                    title="Delete grant"
-                                    aria-label=(format!("Delete grant of {} to {grantee}", grant.resource))
-                                    hx-delete={"/b/admin/grants/rules/" (grant.id)}
-                                    hx-target="#content"
-                                    hx-confirm="Delete this grant?"
-                                { (icons::trash()) }
-                            },
-                        ]
-                    }).collect();
+                },
+                html! { code { (components::breakable_id(&grant.resource)) } },
+                access_badge(grant.write),
+                html! { (grant.description) },
+                html! {
+                    button .btn .btn--ghost-danger .btn--icon
+                        type="button"
+                        title="Delete grant"
+                        aria-label=(format!("Delete grant of {} to {grantee}", grant.resource))
+                        hx-delete={"/b/admin/grants/rules/" (grant.id)}
+                        hx-target="#content"
+                        hx-confirm="Delete this grant?"
+                    { (icons::trash()) }
+                },
+            ])
+        })
+        .collect();
 
-                    (components::data_table::<fn(usize) -> Option<String>>(
-                        &CUSTOM_GRANT_COLUMNS,
-                        rows,
-                        None,
-                        html! {},
-                    ))
-                }
-            }
-        }
+    // "Add grant" is the card's own action, so a Secondary: a card head is
+    // never where a page's primary lives (`Card::action`). The modal's
+    // submit is the dialog's one primary.
+    Ok(html! {
+        (Card::titled(
+            "Custom grants",
+            components::DataTable::new(&CUSTOM_GRANT_COLUMNS)
+                .rows(rows)
+                .empty_note("No custom grants configured.")
+                .render(),
+        )
+        .subtitle(
+            "Add grants for third-party or WASM blocks. These are loaded at startup alongside \
+             code-declared grants.",
+        )
+        .action(
+            Action::secondary("Add grant", ActionTarget::Modal(ADD_GRANT_MODAL_ID))
+                .icon(icons::plus()),
+        )
+        .flush()
+        .render())
 
         // Build JSON data for the grant form JS
         script {
@@ -311,7 +307,7 @@ pub(crate) async fn grants_custom_tab(
             "#))
         }
 
-        (components::modal("add-grant-modal", "Add Access Grant", html! {
+        (components::modal(ADD_GRANT_MODAL_ID, "Add access grant", html! {
             form hx-post="/b/admin/grants/rules" hx-target="#content" {
                 div .form-group {
                     label .form-label for="grantee" { "Which block needs access?" }
@@ -322,7 +318,7 @@ pub(crate) async fn grants_custom_tab(
                             option value=(name) { (name) }
                         }
                     }
-                    p .text-muted .text-xs .mt-1 {
+                    p .form-hint {
                         "The block that will receive this access permission."
                     }
                 }
@@ -336,7 +332,7 @@ pub(crate) async fn grants_custom_tab(
                             option value=(b.name) { (b.name) }
                         }
                     }
-                    p .text-muted .text-xs .mt-1 {
+                    p .form-hint {
                         "Each block owns its own database tables, config keys, and storage. Pick the block whose data you want to share."
                     }
                 }
@@ -377,7 +373,7 @@ pub(crate) async fn grants_custom_tab(
                         input type="checkbox" #write name="write" value="on";
                         " Allow write access"
                     }
-                    p .text-muted .text-xs .mt-1 {
+                    p .form-hint {
                         "If unchecked, the block can only read the data."
                     }
                 }
@@ -388,7 +384,7 @@ pub(crate) async fn grants_custom_tab(
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Add Grant" }
+                    (Action::primary("Add grant", ActionTarget::Submit { form: None }).render())
                 }))
             }
         }))
@@ -504,43 +500,35 @@ async fn permissions_all_tab(
             .then_with(|| a.sort_key.cmp(&b.sort_key))
     });
 
-    if all_rows.is_empty() {
-        return Ok(Card::plain(html! {
-            p .text-muted .p-8 .text-center {
-                "No permissions configured yet."
-            }
-        })
-        .render());
-    }
     // The type is a category, not a status: one neutral badge for all of
     // them (D5) — status colours (amber, green) read as "warning" and "OK".
-    let rows: Vec<Vec<Markup>> = all_rows
+    let rows: Vec<components::TableRow> = all_rows
         .iter()
         .map(|row| {
-            vec![
-                Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { (row.type_label) }),
-                html! { span .text-13 { (row.sentence) } },
-                html! {
-                    @if row.origin == "code" {
-                        (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "code" }))
-                    } @else {
-                        (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "custom" }))
-                    }
-                },
-            ]
+            components::TableRow::new(vec![
+                badge(BadgeVariant::Secondary, &row.type_label),
+                html! { (row.sentence) },
+                badge(
+                    BadgeVariant::Secondary,
+                    if row.origin == "code" {
+                        "Code"
+                    } else {
+                        "Custom"
+                    },
+                ),
+            ])
         })
         .collect();
-    // The table is the card's whole body: flush, so its frame is the card's.
-    Ok(
-        Card::plain(components::data_table::<fn(usize) -> Option<String>>(
-            &PERMISSION_COLUMNS,
-            rows,
-            None,
-            html! {},
-        ))
-        .flush()
-        .render(),
+    // The table is the card's whole body: flush, so its frame is the card's,
+    // and with no rows the note takes the card's inset in its place.
+    Ok(Card::plain(
+        components::DataTable::new(&PERMISSION_COLUMNS)
+            .rows(rows)
+            .empty_note("No permissions configured yet.")
+            .render(),
     )
+    .flush()
+    .render())
 }
 
 /// "Database & config" tab: wraps the existing grants_code_tab and grants_custom_tab.
@@ -561,17 +549,17 @@ async fn permissions_database_tab(
 /// `.w-110` utility classes gave those headers, and the unlabelled column is
 /// the one that only carries the delete control.
 const CODE_GRANT_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol::new("Block (Owner)"),
+    components::TableCol::new("Block (owner)"),
     components::TableCol::new("Grantee").primary(),
     components::TableCol::new("Type"),
-    components::TableCol::new("Resource Pattern"),
+    components::TableCol::new("Resource pattern"),
     components::TableCol::new("Access"),
 ];
 
 const CUSTOM_GRANT_COLUMNS: [components::TableCol<'static>; 6] = [
     components::TableCol::new("Grantee").primary(),
     components::TableCol::new("Type"),
-    components::TableCol::new("Resource Pattern"),
+    components::TableCol::new("Resource pattern"),
     components::TableCol::new("Access"),
     components::TableCol::new("Description").optional(),
     components::TableCol::new("Actions").actions().width("60px"),
@@ -692,6 +680,135 @@ mod wording_tests {
         assert!(
             dom::card_level_inside_card(&database).is_empty(),
             "{database}"
+        );
+    }
+    async fn database_subtab(ctx: &TestContext) -> String {
+        let mut msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        msg.set_meta("req.query.subtab", "database");
+        output_html(settings_page(ctx, &msg, "permissions").await).await
+    }
+
+    /// "Custom grants" is a titled flush card whose head holds "Add grant" as
+    /// a Secondary (`Card::action`: a card head never holds a page's
+    /// primary). The tab's one primary is the dialog's own "Add grant"
+    /// submit, so the page shows none. With no grants the table is a note in
+    /// the card's inset.
+    #[tokio::test]
+    async fn custom_grants_is_a_card_whose_head_opens_the_grant_dialog() {
+        use crate::test_support::dom;
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = database_subtab(&ctx).await;
+        assert!(
+            html.contains(concat!(
+                r#"<section class="card card--flush"><header class="card__head"><div>"#,
+                r#"<h2 class="card__title">Custom grants</h2><p class="card__subtitle">Add grants for third-party or WASM blocks."#,
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<div class="card__actions"><button class="btn btn--secondary" type="button" data-action="modal-open" data-modal-target="add-grant-modal">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="card__body"><p class="empty-note">No custom grants configured.</p></div>"#),
+            "{html}"
+        );
+        let (page, dialogs) = dom::visible_primaries(&html);
+        assert!(page.is_empty(), "{page:?}");
+        assert!(
+            dialogs
+                .iter()
+                .any(|d| d == &[r#"button.btn.btn--primary "Add grant""#.to_string()]),
+            "{dialogs:?}"
+        );
+        assert!(
+            html.contains(
+                r#"<h2 class="modal__title" id="add-grant-modal-title">Add access grant</h2>"#
+            ),
+            "{html}"
+        );
+        assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
+        for small in ["text-13", "text-11", "text-10", "text-xs", "text-center"] {
+            assert!(!html.contains(small), "{small}: {html}");
+        }
+    }
+
+    /// A stored grant is a row of the custom card's table, its columns and
+    /// badges in sentence case; the code-declared card is flush with no rows
+    /// as with rows.
+    #[tokio::test]
+    async fn a_custom_grant_is_a_row_in_sentence_case() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::platform_state::wrap_grants::create(
+            &ctx,
+            crate::platform_state::wrap_grants::NewWrapGrant {
+                grantee: "impresspress/files".to_string(),
+                resource: "impresspress__admin__audit_logs".to_string(),
+                write: wafer_block::GrantWrite::Append,
+                resource_type: "db".to_string(),
+                description: "Audit the uploads".to_string(),
+            },
+        )
+        .await
+        .expect("seed a grant");
+        let html = database_subtab(&ctx).await;
+        for text in [
+            "<th>Resource pattern</th>",
+            "<th>Grantee</th>",
+            r#"<span class="badge badge-info">DB</span>"#,
+            r#"<span class="badge badge-secondary">Append only</span>"#,
+            r#"<td data-label="Description">Audit the uploads</td>"#,
+        ] {
+            assert!(html.contains(text), "{text}: {html}");
+        }
+        assert!(!html.contains("Resource Pattern"), "{html}");
+        // No block declares a grant in this fixture: the code card is still
+        // flush, its note in place of the table.
+        assert!(
+            html.contains(
+                r#"<p class="empty-note">No grants are declared in block source code.</p>"#
+            ),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches(r#"<section class="card card--flush">"#)
+                .count(),
+            2,
+            "{html}"
+        );
+
+        let msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        let all = output_html(settings_page(&ctx, &msg, "permissions").await).await;
+        assert!(
+            all.contains(r#"<span class="badge badge-secondary">Custom</span>"#),
+            "{all}"
+        );
+    }
+
+    /// The code-declared table names the owning block's column in sentence
+    /// case.
+    #[test]
+    fn the_code_grant_columns_are_sentence_case() {
+        let labels: Vec<&str> = super::CODE_GRANT_COLUMNS
+            .iter()
+            .map(|c| c.label())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Block (owner)",
+                "Grantee",
+                "Type",
+                "Resource pattern",
+                "Access"
+            ]
         );
     }
 }
