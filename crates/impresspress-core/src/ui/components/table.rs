@@ -504,12 +504,16 @@ fn row_class(extra: &str, linked: bool) -> Cow<'_, str> {
 /// separate words: after each `/`, after each run of `_`, after the `?`, `&`
 /// and `=` of a query string and after a `:`; and *before* an `@` or a `.`,
 /// so a domain or an extension starts the next line rather than ending the
-/// last one. Such an identifier has no spaces, so without these a long one
+/// last one. The exception is a short final part (`.png`, `.com`: at most
+/// five bytes from the `.` to the end): it stays on the word before it, so
+/// an extension never wraps onto a line of its own. Such an identifier has no spaces, so without these a long one
 /// sets its column's minimum width and pushes the table past its card; with
 /// them it wraps between its words, never inside one, and only where the
 /// column is too narrow for it. No break is offered at either end, and the
 /// text content is unchanged: `<wbr>` adds no characters.
 pub fn breakable_id(id: &str) -> Markup {
+    /// The longest final `.`-part kept on the word before it: `.json`.
+    const SHORT_FINAL_PART: usize = 5;
     // Byte offsets at which a new part starts. Every separator is ASCII, so
     // each offset is a char boundary.
     let bytes = id.as_bytes();
@@ -536,6 +540,11 @@ pub fn breakable_id(id: &str) -> Markup {
             _ => {}
         }
         i += 1;
+    }
+    if let Some(&last) = cuts.last() {
+        if bytes.get(last) == Some(&b'.') && bytes.len() - last <= SHORT_FINAL_PART {
+            cuts.pop();
+        }
     }
     let mut parts: Vec<&str> = Vec::new();
     let mut start = 0;
@@ -1032,8 +1041,20 @@ mod breakable_id_tests {
             ("acme___x", "acme___<wbr>x"),
             ("trailing/", "trailing/"),
             ("plain", "plain"),
-            // An email breaks before the `@` and the domain's dots.
-            ("reviewer41@example.com", "reviewer41<wbr>@example<wbr>.com"),
+            // An email breaks before the `@` and the domain's dots, but its
+            // short final part (the top-level domain) stays on the word
+            // before it, as a file's extension does.
+            ("reviewer41@example.com", "reviewer41<wbr>@example.com"),
+            (
+                "a@mail.example.co.uk",
+                "a<wbr>@mail<wbr>.example<wbr>.co.uk",
+            ),
+            (
+                "/b/static/logo-e38c.png",
+                "/b/<wbr>static/<wbr>logo-e38c.png",
+            ),
+            // A longer final part is a word of its own.
+            ("report.markdown", "report<wbr>.markdown"),
             // A query string breaks after `?`, `&` and `=`; a scheme's `://`
             // stays whole.
             (

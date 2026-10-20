@@ -436,11 +436,14 @@ const INBOUND_COLUMNS: [components::TableCol<'static>; 7] = [
     components::TableCol::new("Route").primary(),
     // Fixed widths for every column but the route, so the per-block tables
     // stacked on the page line their columns up.
-    components::TableCol::new("Requests").width("96px"),
-    components::TableCol::new("Server errors").width("96px"),
-    components::TableCol::new("Client errors").width("96px"),
-    components::TableCol::new("Avg duration").width("96px"),
-    components::TableCol::new("Last seen").width("180px"),
+    // Each is held to its header's longest word (or the time it shows), so
+    // beside the settings rail at 1280px all seven columns fit and the route
+    // keeps about 11rem (table.css `.network-routes`).
+    components::TableCol::new("Requests").width("80px"),
+    components::TableCol::new("Server errors").width("72px"),
+    components::TableCol::new("Client errors").width("72px"),
+    components::TableCol::new("Avg duration").width("80px"),
+    components::TableCol::new("Last seen").width("160px"),
 ];
 
 const DETAIL_COLUMNS: [components::TableCol<'static>; 5] = [

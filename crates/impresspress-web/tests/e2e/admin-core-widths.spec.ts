@@ -12,11 +12,15 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   the name and org clear of the count, however narrow the Tables column
  *   (table.css `.db-table-group__head`).
  * - Settings › Network: each block's route table fits its card with the
- *   route keeping a real share of the row, because the table drops columns
- *   by its own width (table.css `.network-routes`); checked at 1280 too,
- *   where it drops only the two per-run columns.
+ *   route keeping at least 10rem, because the table drops columns by its own
+ *   width (table.css `.network-routes`); at 1280 it shows all seven.
  * - Settings › Permissions: "Add grant" stays on the Custom grants title's
- *   row beside the long subtitle (card.css `.card__head`).
+ *   row beside the long subtitle (card.css `.card__head`). (Its grant tables
+ *   at narrow widths, with a seeded grant, are in `admin-core-pages.spec.ts`,
+ *   which may write.)
+ * - The card head rule on the pages it reaches most, at 375, 721, 1024 and
+ *   1200: on the dashboard and on Products › Stripe, nothing after a card's
+ *   title block drops onto a line of its own.
  * - Settings › Variables: the value column keeps its share (`VAR_COLUMNS`),
  *   and "Add variable" ends the search's row.
  * The widths: 800 (the filter wraps; the database cards stack; the settings
@@ -144,17 +148,46 @@ test.describe('admin core pages at in-between widths', () => {
           const scroller = routes.querySelector<HTMLElement>(':scope > .data-table')!;
           const table = scroller.querySelector('table')!.getBoundingClientRect();
           const route = scroller.querySelector('tbody td.data-table__cell--primary')!.getBoundingClientRect();
-          return {
-            fits: table.width <= scroller.clientWidth + 0.5,
-            routeShare: Math.round((route.width / table.width) * 100) / 100,
-          };
+          const columns = [...scroller.querySelectorAll('thead th')].filter(
+            (th) => getComputedStyle(th).display !== 'none',
+          ).length;
+          return { fits: table.width <= scroller.clientWidth + 0.5, route: Math.round(route.width), columns };
         }),
       );
       expect(tables.length).toBeGreaterThan(0);
       expect(
-        tables.filter((t) => !t.fits || t.routeShare < 0.4),
+        tables.filter((t) => !t.fits || t.route < 160),
         'a route table scrolled sideways or squeezed its route',
       ).toEqual([]);
+      if (width === 1280) {
+        expect(tables.map((t) => t.columns), 'all seven columns beside the rail at 1280').toEqual(
+          tables.map(() => 7),
+        );
+      }
     });
+  }
+
+  for (const width of [375, 721, 1024, 1200]) {
+    for (const path of ['/b/admin/', '/b/products/admin/stripe']) {
+      test(`card heads at ${width}px on ${path}: nothing after the title drops to its own line`, async ({
+        page,
+      }) => {
+        await open(page, width, path);
+        const heads = await page.locator('.card__head').evaluateAll((all) =>
+          all
+            .filter((head) => head.children.length > 1)
+            .map((head) => {
+              const title = head.querySelector('.card__title, h2, h3')!.getBoundingClientRect();
+              const rest = [...head.children].slice(1).map((el) => el.getBoundingClientRect());
+              return {
+                title: head.querySelector('.card__title, h2, h3')!.textContent!.trim(),
+                onTitleRow: rest.every((r) => r.top < title.bottom),
+              };
+            }),
+        );
+        expect(heads.length).toBeGreaterThan(0);
+        expect(heads.filter((h) => !h.onTitleRow).map((h) => h.title)).toEqual([]);
+      });
+    }
   }
 });

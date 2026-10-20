@@ -29,11 +29,12 @@
 	gap: var(--space-2) var(--space-4);
 	margin-bottom: var(--space-4);
 }
-/* The title block takes the room the link and action leave, so a long
-   subtitle wraps beside them rather than pushing them onto a line of their
-   own; they drop under it only once the title would be narrower than
-   16rem. */
-.card__head > :first-child { flex: 1 1 16rem; min-width: 0; }
+/* The title block grows into the room the link and action leave, from a
+   zero basis, so a long subtitle wraps beside them rather than pushing them
+   onto a line of their own. Its automatic minimum (its longest word) still
+   holds, so the head wraps only when that word and the actions no longer
+   fit on one line: a short title never sends its link under it. */
+.card__head > :first-child { flex: 1 1 0%; }
 .card__title { margin: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
 .card__subtitle { margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--text-secondary); }
 .card__actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
@@ -762,15 +763,27 @@
    owner's variables, one block's routes): a flush card whose body is a
    `<details>`. The summary is the whole head, at the card's inset, its
    title with the counts beside it; under it the lead line, and the table,
-   whose frame is the card's. */
+   whose frame is the card's. The chevron sits in the summary's left inset,
+   beside the first line, so when the counts wrap they start under the
+   title rather than under the chevron. */
 .group-fold__summary {
+	position: relative;
 	display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3);
-	min-height: var(--target-min); padding: var(--space-3) var(--card-pad);
+	min-height: var(--target-min);
+	padding: var(--space-3) var(--card-pad) var(--space-3) calc(var(--card-pad) + 0.5rem + var(--space-3));
 	cursor: pointer; list-style: none; border-radius: var(--radius-lg);
+}
+/* The summary meets the flush card's clipped edge, so its focus ring is
+   drawn inside it (an outer ring would be cut off on three sides); the
+   transparent outline is what forced-colors mode paints. */
+.group-fold__summary:focus-visible {
+	outline: 2px solid transparent; outline-offset: -2px;
+	box-shadow: var(--focus-ring-inset);
 }
 .group-fold__summary::-webkit-details-marker { display: none; }
 .group-fold__summary::before {
-	content: ""; align-self: center; width: 0.5rem; height: 0.5rem; flex: none;
+	content: ""; position: absolute; left: var(--card-pad); top: calc(var(--space-3) + 0.5rem);
+	width: 0.5rem; height: 0.5rem;
 	border-right: 2px solid var(--text-muted); border-bottom: 2px solid var(--text-muted);
 	transform: rotate(-45deg); transition: transform 150ms ease-out;
 }

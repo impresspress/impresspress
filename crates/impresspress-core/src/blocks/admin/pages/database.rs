@@ -104,12 +104,14 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
                 h2 .section-header__title { "Tables" }
                 span .db-count { (tables.len()) }
             }
-            input .form-input .db-tables__filter #db-filter type="text"
-                placeholder="Filter tables…"
-                aria-label="Filter tables"
-                autocomplete="off"
-                data-action="db-table-filter";
-            div .db-table-groups {
+            (components::FilterInput {
+                action: "db-table-filter",
+                label: "Filter tables",
+                placeholder: "Filter tables…",
+                controls: "db-table-groups",
+            }
+            .render())
+            div #db-table-groups .db-table-groups {
                 @if tables.is_empty() {
                     (empty_note("No tables yet.", None))
                 }
@@ -797,6 +799,17 @@ mod tests {
         assert!(!html.contains("text-xs"), "{html}");
         assert!(
             html.contains(r#"<div id="db-filter-empty" hidden><p class="empty-note">No tables match.</p></div>"#),
+            "{html}"
+        );
+        // The filter is the shared in-page filter box (`FilterInput`): a
+        // `search` landmark naming the list it narrows.
+        assert!(
+            html.contains(r#"<div class="search-input" role="search"><span class="search-input-icon">"#)
+                && html.contains(r#"data-action="db-table-filter" placeholder="Filter tables…" aria-label="Filter tables" aria-controls="db-table-groups""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="db-table-groups" id="db-table-groups">"#),
             "{html}"
         );
     }

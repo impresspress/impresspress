@@ -915,7 +915,7 @@ fn variable_groups(
             (components::empty_state(
                 icons::settings(),
                 "No variables are set",
-                "The settings blocks declare, and any you add, are listed here.",
+                "Variables that blocks declare, and any you add, are listed here.",
                 None,
             ))
         }
@@ -2574,7 +2574,7 @@ mod tests {
             "{value}"
         );
         assert!(
-            value.contains(r#"Default: <code>/b/<wbr>static/<wbr>logo<wbr>.png</code>"#),
+            value.contains(r#"Default: <code>/b/<wbr>static/<wbr>logo.png</code>"#),
             "{value}"
         );
     }

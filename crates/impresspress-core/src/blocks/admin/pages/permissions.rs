@@ -86,9 +86,25 @@ fn access_badge(write: GrantWrite) -> Markup {
 
 /// A code-declared grant as the "All" tab words it: the grantee, what it may
 /// do, and whose resource — `block` declared the grant, so the resource is
-/// the owning block's.
-fn code_grant_sentence(grantee: &str, verb: &str, owner: &str, resource: &str) -> String {
-    format!("{grantee} {verb} {owner}'s {resource}")
+/// the owning block's. The resource breaks between its parts
+/// ([`components::breakable_id`]): a table name has no spaces, and unbroken
+/// it set the column's minimum width and pushed the table past its card.
+fn code_grant_sentence(grantee: &str, verb: &str, owner: &str, resource: &str) -> Markup {
+    html! { (grantee) " " (verb) " " (owner) "'s " (components::breakable_id(resource)) }
+}
+
+/// What a grant row's hidden columns say, as one line under its grantee
+/// (`.grant-table__meta`), shown only where the table is too narrow for its
+/// columns (table.css `.grant-table`): the parts joined by a middle dot.
+fn grant_meta(parts: Vec<Markup>) -> Markup {
+    html! {
+        span .grant-table__meta {
+            @for (i, part) in parts.into_iter().enumerate() {
+                @if i > 0 { " \u{b7} " }
+                (part)
+            }
+        }
+    }
 }
 
 /// The access a grant confers, as the permissions summary words it.
@@ -107,6 +123,11 @@ fn grants_code_tab(ctx: &dyn Context) -> Markup {
         .iter()
         .flat_map(|block| {
             block.grants.iter().map(move |grant| {
+                let resource_type = match &grant.resource_type {
+                    Some(rt) => badge(BadgeVariant::Info, human_resource_type(&rt.to_string())),
+                    None => badge(BadgeVariant::Secondary, "All"),
+                };
+                let resource = html! { code { (components::breakable_id(&grant.resource)) } };
                 components::TableRow::new(vec![
                     Badge::new(BadgeVariant::Info).render(components::breakable_id(&block.name)),
                     html! {
@@ -115,15 +136,14 @@ fn grants_code_tab(ctx: &dyn Context) -> Markup {
                         } @else {
                             code { (components::breakable_id(&grant.grantee)) }
                         }
+                        (grant_meta(vec![
+                            html! { (components::breakable_id(&block.name)) "'s" },
+                            resource_type.clone(),
+                            resource.clone(),
+                        ]))
                     },
-                    html! {
-                        @if let Some(ref rt) = grant.resource_type {
-                            (badge(BadgeVariant::Info, human_resource_type(&rt.to_string())))
-                        } @else {
-                            (badge(BadgeVariant::Secondary, "All"))
-                        }
-                    },
-                    html! { code { (components::breakable_id(&grant.resource)) } },
+                    resource_type,
+                    resource,
                     access_badge(grant.write),
                 ])
             })
@@ -134,10 +154,14 @@ fn grants_code_tab(ctx: &dyn Context) -> Markup {
     // inset in its place.
     Card::titled(
         "Grants declared in code",
-        components::DataTable::new(&CODE_GRANT_COLUMNS)
-            .rows(rows)
-            .empty_note("No grants are declared in block source code.")
-            .render(),
+        html! {
+            div .grant-table .grant-table--code {
+                (components::DataTable::new(&CODE_GRANT_COLUMNS)
+                    .rows(rows)
+                    .empty_note("No grants are declared in block source code.")
+                    .render())
+            }
+        },
     )
     .subtitle(
         "These grants are declared in block source code via BlockInfo.grants and cannot be \
@@ -162,6 +186,16 @@ pub(crate) async fn grants_custom_tab(
         .map(|grant| {
             let grantee = grant.grantee.as_str();
             let rt = grant.resource_type.as_str();
+            let resource_type = if rt.is_empty() {
+                badge(BadgeVariant::Secondary, "All")
+            } else {
+                badge(BadgeVariant::Info, human_resource_type(rt))
+            };
+            let resource = html! { code { (components::breakable_id(&grant.resource)) } };
+            let mut meta = vec![resource_type.clone(), resource.clone()];
+            if !grant.description.is_empty() {
+                meta.push(html! { (grant.description) });
+            }
             components::TableRow::new(vec![
                 html! {
                     @if grantee == "*" {
@@ -169,15 +203,10 @@ pub(crate) async fn grants_custom_tab(
                     } @else {
                         code { (components::breakable_id(grantee)) }
                     }
+                    (grant_meta(meta))
                 },
-                html! {
-                    @if rt.is_empty() {
-                        (badge(BadgeVariant::Secondary, "All"))
-                    } @else {
-                        (badge(BadgeVariant::Info, human_resource_type(rt)))
-                    }
-                },
-                html! { code { (components::breakable_id(&grant.resource)) } },
+                resource_type,
+                resource,
                 access_badge(grant.write),
                 html! { (grant.description) },
                 html! {
@@ -200,10 +229,14 @@ pub(crate) async fn grants_custom_tab(
     Ok(html! {
         (Card::titled(
             "Custom grants",
-            components::DataTable::new(&CUSTOM_GRANT_COLUMNS)
-                .rows(rows)
-                .empty_note("No custom grants configured.")
-                .render(),
+            html! {
+                div .grant-table .grant-table--custom {
+                    (components::DataTable::new(&CUSTOM_GRANT_COLUMNS)
+                        .rows(rows)
+                        .empty_note("No custom grants configured.")
+                        .render())
+                }
+            },
         )
         .subtitle(
             "Add grants for third-party or WASM blocks. These are loaded at startup alongside \
@@ -418,7 +451,7 @@ struct PermRow {
     /// Resource-type badge: "DB" / "Config" / "Storage" / "Network" / "Crypto" / etc.
     type_label: String,
     /// Human-readable sentence ("`<grantee>` can read `<owner>`'s `<resource>`").
-    sentence: String,
+    sentence: Markup,
     /// Origin: "code" (declared in BlockInfo.grants) or "custom"
     /// (DB-backed WRAP grants).
     origin: &'static str,
@@ -483,7 +516,8 @@ async fn permissions_all_tab(
             grantee
         };
         let verb = access_verb(grant.write);
-        let sentence = format!("{grantee_display} {verb} {resource}");
+        let sentence =
+            html! { (grantee_display) " " (verb) " " (components::breakable_id(resource)) };
         all_rows.push(PermRow {
             type_label: type_label.to_string(),
             sentence,
@@ -507,7 +541,7 @@ async fn permissions_all_tab(
         .map(|row| {
             components::TableRow::new(vec![
                 badge(BadgeVariant::Secondary, &row.type_label),
-                html! { (row.sentence) },
+                row.sentence.clone(),
                 badge(
                     BadgeVariant::Secondary,
                     if row.origin == "code" {
@@ -677,6 +711,23 @@ mod wording_tests {
             dom::heading_outline(&database).contains(&(2, "Grants declared in code".to_string())),
             "{database}"
         );
+        // The code table narrows by its own width (table.css `.grant-table`):
+        // the owner, type and resource are one line under the grantee there.
+        assert!(
+            database
+                .contains(r#"<div class="grant-table grant-table--code"><div class="data-table">"#),
+            "{database}"
+        );
+        assert!(
+            database.contains(r#"<span class="grant-table__meta">impresspress/<wbr>admin's · "#),
+            "{database}"
+        );
+        // A table name in the All tab's sentence breaks between its parts,
+        // so it no longer sets the column's minimum width.
+        assert!(
+            all.contains("impresspress/admin's impresspress__<wbr>admin__"),
+            "{all}"
+        );
         assert!(
             dom::card_level_inside_card(&database).is_empty(),
             "{database}"
@@ -715,7 +766,7 @@ mod wording_tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<div class="card__body"><p class="empty-note">No custom grants configured.</p></div>"#),
+            html.contains(r#"<div class="card__body"><div class="grant-table grant-table--custom"><p class="empty-note">No custom grants configured.</p></div></div>"#),
             "{html}"
         );
         let (page, dialogs) = dom::visible_primaries(&html);
@@ -765,6 +816,13 @@ mod wording_tests {
             r#"<span class="badge badge-info">DB</span>"#,
             r#"<span class="badge badge-secondary">Append only</span>"#,
             r#"<td data-label="Description">Audit the uploads</td>"#,
+            // Where the table is narrow its hidden columns are one line
+            // under the grantee (table.css `.grant-table`).
+            concat!(
+                r#"<code>impresspress/<wbr>files</code><span class="grant-table__meta">"#,
+                r#"<span class="badge badge-info">DB</span> · <code>impresspress__<wbr>admin__<wbr>audit_<wbr>logs</code> · Audit the uploads</span>"#,
+            ),
+            r#"<div class="grant-table grant-table--custom"><div class="data-table">"#,
         ] {
             assert!(html.contains(text), "{text}: {html}");
         }

@@ -128,6 +128,57 @@ test.describe('core admin pages', () => {
     await expect(page.locator('#var-filter-empty')).toBeVisible();
   });
 
+  /**
+   * The grant tables narrow by their own width (table.css `.grant-table`):
+   * from 721 to about 1150px, beside the settings rail, a card is too
+   * narrow for five or six columns, and the table used to scroll sideways
+   * with the custom grant's Delete out of view. Seeds one custom grant
+   * through the modal and deletes it again.
+   */
+  test('every grant table fits its card with Delete in view from 721 to 1100px', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.setViewportSize({ width: 1024, height: 900 });
+    const description = `E2E widths ${Date.now()}: a description long enough to wrap`;
+    await page.goto('/b/admin/settings/permissions?subtab=database', { waitUntil: 'networkidle' });
+    await page.locator('[data-action="modal-open"][data-modal-target="add-grant-modal"]').click();
+    const dialog = page.locator('dialog#add-grant-modal');
+    await dialog.locator('#grantee').selectOption('impresspress/files');
+    await dialog.locator('#grant_owner').selectOption('impresspress/admin');
+    await dialog.locator('#resource_type').selectOption('db');
+    await dialog.locator('#description').fill(description);
+    await dialog.getByRole('button', { name: 'Add grant' }).click();
+    const row = page.locator('tr', { hasText: description });
+    await expect(row).toHaveCount(1);
+
+    try {
+      for (const width of [721, 1024, 1100]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const path of ['/b/admin/settings/permissions?subtab=database', '/b/admin/settings/permissions']) {
+          await page.goto(path, { waitUntil: 'networkidle' });
+          const tables = await page.locator('.card .data-table').evaluateAll((all) =>
+            all.map((scroller) => {
+              const box = scroller.getBoundingClientRect();
+              return {
+                fits: scroller.querySelector('table')!.getBoundingClientRect().width <= (scroller as HTMLElement).clientWidth + 0.5,
+                deleteInView: [...scroller.querySelectorAll('button[aria-label^="Delete grant"]')].every(
+                  (b) => b.getBoundingClientRect().right <= box.right + 0.5,
+                ),
+              };
+            }),
+          );
+          expect(tables.length, `${path} at ${width}`).toBeGreaterThan(0);
+          expect(tables.filter((t) => !t.fits || !t.deleteInView), `${path} at ${width}`).toEqual([]);
+        }
+      }
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto('/b/admin/settings/permissions?subtab=database', { waitUntil: 'networkidle' });
+      page.once('dialog', (d) => void d.accept());
+      await row.locator('button[aria-label^="Delete grant"]').click();
+      await expect(row).toHaveCount(0);
+    }
+  });
+
   test('the logs page filters server and client errors through two pressed toggles', async ({
     page,
   }) => {
