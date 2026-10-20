@@ -143,6 +143,9 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
         );
     }
 
+    // The error passes through as it is: `sw.js` reads its `name` to tell a
+    // database that could not be read (`DatabaseUnreadable`, its stage
+    // `open`) from one that was read and failed (`initialize`).
     impresspress_browser::db_init().await?;
 
     let factory = RuntimeFactory::new(
@@ -275,4 +278,36 @@ fn describe_option(value: &JsValue) -> String {
 #[wasm_bindgen]
 pub async fn handle_request(request: web_sys::Request) -> Result<JsValue, JsValue> {
     impresspress_browser::dispatch_fetch(request).await
+}
+
+/// `initialize()` against an in-memory OPFS whose database file holds data
+/// and cannot be read this time.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod initialize_tests {
+    use impresspress_browser::database::test_support::{fail_next_opfs_read, fresh_db};
+    use wafer_core::interfaces::database::service::DatabaseService;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    /// **The worker sees the open failure by name.** `sw.js` reports an
+    /// `initialize()` rejection whose `name` is `DatabaseUnreadable` as its
+    /// non-erasing stage `open`, so the rejection must reach it as the error
+    /// `dbInit` made, not re-wrapped or turned into text on the way.
+    #[wasm_bindgen_test]
+    async fn an_unreadable_database_rejects_initialize_by_name() {
+        let db = fresh_db().await;
+        db.exec_raw("CREATE TABLE initialize_unreadable_t (id TEXT)", &[])
+            .await
+            .expect("a file with data in it");
+
+        fail_next_opfs_read("NotReadableError");
+        let err = initialize(JsValue::UNDEFINED)
+            .await
+            .expect_err("an unreadable database fails initialize()");
+
+        let name = js_sys::Reflect::get(&err, &"name".into()).expect("an Error");
+        assert_eq!(name.as_string().as_deref(), Some("DatabaseUnreadable"));
+        assert!(!impresspress_browser::is_initialized());
+    }
 }

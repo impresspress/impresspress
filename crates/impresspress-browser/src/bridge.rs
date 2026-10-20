@@ -4,9 +4,17 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     // ─── Database (sql.js) ────────────────────────────────────────────────────
 
-    /// Load sql.js WASM, try to load existing DB from OPFS, create new if none.
-    /// Sets PRAGMA foreign_keys=ON. Rejects if the sql.js WASM fails to load
-    /// or OPFS is unavailable.
+    /// Load sql.js WASM and open the database stored in OPFS, or an empty one
+    /// on a first run. Sets PRAGMA foreign_keys=ON. Opening has three
+    /// outcomes (`dbInit` in `js/bridge.js` states them in full):
+    /// - no file (`getFileHandle` rejects with `NotFoundError`), or an empty
+    ///   one: a first run, and the database opens empty;
+    /// - any other failure before the bytes reach sql.js (sql.js not loading,
+    ///   OPFS unavailable, the file unreadable): rejects with an `Error` named
+    ///   `DatabaseUnreadable` whose `cause` is the original, and leaves no
+    ///   database open, so no flush can write over the file;
+    /// - bytes that are not a database: opens, and the first statement that
+    ///   reads the schema fails with SQLite's own error.
     #[wasm_bindgen(catch)]
     pub async fn dbInit() -> Result<JsValue, JsValue>;
 

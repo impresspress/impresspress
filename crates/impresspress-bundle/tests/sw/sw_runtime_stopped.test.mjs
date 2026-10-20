@@ -28,6 +28,17 @@ const ERASES =
 
 const TRAPPED = 'error handling request: Error: unreachable executed';
 
+// What `initialize()` rejects with when the database this browser stores
+// could not be read: the error `dbInit` makes (impresspress-browser's
+// `js/bridge.js`), which the runtime hands back untouched.
+const UNREADABLE_MESSAGE = 'the stored database could not be read: NotReadableError: the file could not be read';
+const unreadable = () => async () => {
+  const error = new Error(UNREADABLE_MESSAGE);
+  error.name = 'DatabaseUnreadable';
+  throw error;
+};
+const UNREADABLE = `runtime initialize() failed: DatabaseUnreadable: ${UNREADABLE_MESSAGE}`;
+
 // What a worker built with no sandbox ('none', the default rendering) says
 // over a runtime compiled as `compiled`.
 const builtFor = (compiled) =>
@@ -244,8 +255,9 @@ test('a host with no shell at its address is passed on as it answered', async (t
 });
 
 // The last sentence of the answer says what a reload does, and it follows
-// the same gate as the loader's recovery: only a failure of `initialize()`,
-// in a build rendered to erase, costs data.
+// the same gate as the loader's recovery: only a failure of `initialize()`
+// on the data it read (stage `initialize`, not `open`), in a build rendered
+// to erase, costs data.
 test('the answer says what a reload will do, and erasing is said only where it happens', async (t) => {
   captureConsole(t);
   const post = (worker) => worker.request(LOGIN, { method: 'POST' });
@@ -253,6 +265,7 @@ test('the answer says what a reload will do, and erasing is said only where it h
     [{ handle_request: trap() }, TRAPPED, 'request'],
     [{ init: trap() }, 'wasm module load failed: Error: unreachable executed', 'load'],
     [{ initialize: trap() }, 'runtime initialize() failed: Error: unreachable executed', 'initialize'],
+    [{ initialize: unreadable() }, UNREADABLE, 'open'],
     [{ compiledSandboxMode: 'workspace' }, builtFor('workspace'), 'build']
   ];
   for (const [runtime, cause, stage] of cases) {
@@ -274,6 +287,34 @@ test('a runtime that fails to initialize answers with the cause and sends the pa
 
   await assertStoppedAnswer(response, cause, 'initialize');
   assertSentToBootShell(worker, cause, 'initialize');
+});
+
+// A database that could not be read is not one found unusable: nothing was
+// learned about it, so it is stage `open`, which no recovery erases for —
+// in a build rendered to erase on recovery too.
+test('a database that could not be read stops the worker at stage `open`, and erases nothing', async (t) => {
+  captureConsole(t);
+  for (const wipe of [false, true]) {
+    const worker = await loadWorker({ initialize: unreadable() }, { wipe });
+
+    const { response } = await worker.request('/', { method: 'GET' });
+
+    await assertStoppedAnswer(response, UNREADABLE, 'open', RESTART);
+    assertSentToBootShell(worker, UNREADABLE, 'open');
+    assert.equal(worker.leftForBootShell().stage, 'open');
+  }
+});
+
+// The `open` stage rests on the error's `name`, which `dbInit` sets, not on
+// its text: an initialize() failure whose message happens to say
+// "DatabaseUnreadable" is still stage `initialize`.
+test('the open stage comes from the error’s name, not its message', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({ initialize: trap(`DatabaseUnreadable: ${UNREADABLE_MESSAGE}`) });
+
+  await worker.request('/', { method: 'GET' });
+
+  assert.equal(worker.leftForBootShell().stage, 'initialize');
 });
 
 test('a wasm module that fails to load does the same, as its own stage', async (t) => {

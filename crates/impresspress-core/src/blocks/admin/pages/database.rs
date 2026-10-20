@@ -1,8 +1,9 @@
 //! Database admin page — table browser + schema viewer + SQL editor.
 //!
-//! Layout: two-pane.
-//! * Left pane (~32%): table list with row counts + filter input.
-//! * Right pane: tabs (Schema / SQL editor). Schema is the default tab.
+//! Layout: two sibling cards on the page background.
+//! * "Tables" (~32%): the table list, grouped by block, with row counts and a
+//!   filter input.
+//! * The workbench: tabs (Schema / SQL editor). Schema is the default tab.
 //!
 //! Backend status badge in the page header.
 //!
@@ -23,7 +24,9 @@ use crate::{
         },
     },
     ui::{
-        components::{self, empty_note, Badge, BadgeVariant, HeaderStatus},
+        components::{
+            self, empty_note, Action, ActionTarget, Badge, BadgeVariant, Card, HeaderStatus,
+        },
         html_response, icons,
         shell::Topbar,
         templates::list_page,
@@ -58,10 +61,9 @@ fn backend_badge(backend: wafer_sql_utils::Backend, table_count: usize) -> Heade
         wafer_sql_utils::Backend::Sqlite => "SQLite",
         wafer_sql_utils::Backend::Postgres => "PostgreSQL",
     };
+    // Neutral: a fact about the deployment, not a state that is good or bad.
     HeaderStatus::badge(
-        Badge::new(BadgeVariant::Info)
-            .classes("text-xs")
-            .title("Database backend"),
+        Badge::new(BadgeVariant::Secondary).title("Database backend"),
         &format!("{label} · {table_count} tables"),
     )
 }
@@ -69,10 +71,10 @@ fn backend_badge(backend: wafer_sql_utils::Backend, table_count: usize) -> Heade
 fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Markup {
     // Group tables by their `org__block` prefix (first two `__`-separated
     // segments). Tables without `__` (e.g. legacy `variables`) go in their
-    // own "Other" section. Each group renders as a small card with an
-    // org/block heading, a count badge, and an always-visible table list —
-    // no more collapsible `<details>` carets. The filter input below hides
-    // matching rows without needing to expand/collapse anything.
+    // own "Other" group. Each group is a collapsible row (a `<details>`,
+    // open by default) holding the block's name, its org and its table
+    // count; the filter input above hides rows that do not match and the
+    // groups left with none.
     use std::collections::BTreeMap;
     let mut groups: BTreeMap<String, Vec<&TableSummary>> = BTreeMap::new();
     let mut ungrouped: Vec<&TableSummary> = Vec::new();
@@ -86,95 +88,92 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
         }
     }
 
-    // On a phone the list sits above the panel, 62 tables tall on a full
-    // deployment, so once there is a panel to read — a selected table's
-    // schema, or the SQL editor — it starts collapsed behind its summary
-    // (`TABLE_FILTER_JS` closes it below 720px); with nothing selected the
-    // list is what the visitor came for and stays open.
+    // Below 900px the list sits above the panel (table.css stacks the two
+    // cards there), 62 tables tall on a full deployment, so once there is a
+    // panel to read — a selected table's schema, or the SQL editor — it
+    // starts collapsed behind its summary (`TABLE_FILTER_JS` closes it);
+    // with nothing selected the list is what the visitor came for and stays
+    // open.
     let collapse_on_phone = selected.is_some() || tab == Tab::Sql;
-    html! {
-        details .db-pane .db-pane--left .db-tables open data-db-tables data-db-collapse-narrow[collapse_on_phone] {
+    // A plain card whose body is the `<details>`: its summary is the card's
+    // heading, so the card folds on a phone by its own title (the
+    // collapsible settings section's shape, `ui::settings_form`).
+    Card::plain(html! {
+        details .db-tables open data-db-tables data-db-collapse-narrow[collapse_on_phone] {
             summary .db-tables__summary {
-                span { "Tables" }
-                span .db-table-group__count { (tables.len()) }
+                h2 .section-header__title { "Tables" }
+                span .db-count { (tables.len()) }
             }
-            div .db-pane__head {
-                input #db-filter type="text"
-                    placeholder="Filter tables…"
-                    aria-label="Filter tables"
-                    autocomplete="off"
-                    data-action="db-table-filter";
-            }
+            input .form-input .db-tables__filter #db-filter type="text"
+                placeholder="Filter tables…"
+                aria-label="Filter tables"
+                autocomplete="off"
+                data-action="db-table-filter";
             div .db-table-groups {
                 @if tables.is_empty() {
-                    div .db-table-list__empty .text-muted .text-sm { "No tables yet" }
+                    (empty_note("No tables yet.", None))
                 }
                 @for (group_key, group_tables) in &groups {
                     @let (org, block) = group_label(group_key);
-                    section .db-table-group data-db-group=(group_key) {
-                        header .db-table-group__head {
-                            span .db-table-group__icon { (icons::package()) }
-                            div .db-table-group__title-wrap {
-                                span .db-table-group__title { (block) }
-                                span .db-table-group__org .text-muted { (org) }
-                            }
-                            span .db-table-group__count { (group_tables.len()) }
-                        }
-                        ul .db-table-group__list {
-                            @for t in group_tables {
-                                @let active = selected == Some(t.name.as_str());
-                                @let encoded_name = pct_encode(&t.name);
-                                @let leaf = t.name.rsplit("__").next().unwrap_or(&t.name);
-                                li data-db-table=(t.name.to_lowercase()) {
-                                    a .db-table-list__item .(if active { "is-active" } else { "" })
-                                        aria-current=[active.then_some("page")]
-                                        href={"/b/admin/database?table=" (encoded_name) "&tab=" (tab.as_query())}
-                                        hx-get={"/b/admin/database?table=" (encoded_name) "&tab=" (tab.as_query())}
-                                        hx-target="#content"
-                                        hx-push-url="true"
-                                    {
-                                        span .db-table-list__name { (leaf) }
-                                        span .db-table-list__count .text-muted .text-xs { (t.row_count) }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    (table_group(group_key, &block, &org, group_tables, selected, tab, true))
                 }
                 @if !ungrouped.is_empty() {
-                    section .db-table-group data-db-group="_other" {
-                        header .db-table-group__head {
-                            span .db-table-group__icon { (icons::database()) }
-                            div .db-table-group__title-wrap {
-                                span .db-table-group__title { "Other" }
-                                span .db-table-group__org .text-muted { "no block prefix" }
-                            }
-                            span .db-table-group__count { (ungrouped.len()) }
-                        }
-                        ul .db-table-group__list {
-                            @for t in &ungrouped {
-                                @let active = selected == Some(t.name.as_str());
-                                @let encoded_name = pct_encode(&t.name);
-                                li data-db-table=(t.name.to_lowercase()) {
-                                    a .db-table-list__item .(if active { "is-active" } else { "" })
-                                        aria-current=[active.then_some("page")]
-                                        href={"/b/admin/database?table=" (encoded_name) "&tab=" (tab.as_query())}
-                                        hx-get={"/b/admin/database?table=" (encoded_name) "&tab=" (tab.as_query())}
-                                        hx-target="#content"
-                                        hx-push-url="true"
-                                    {
-                                        span .db-table-list__name { (t.name) }
-                                        span .db-table-list__count .text-muted .text-xs { (t.row_count) }
-                                    }
-                                }
-                            }
+                    (table_group("_other", "Other", "no block prefix", &ungrouped, selected, tab, false))
+                }
+                // `empty_note` takes no attributes; the wrapper carries the
+                // id and the `hidden` the filter toggles.
+                div #db-filter-empty hidden { (empty_note("No tables match.", None)) }
+            }
+            script { (maud::PreEscaped(TABLE_FILTER_JS)) }
+        }
+    })
+    .render()
+}
+
+/// One block's tables: a collapsible row (`<details>`, open) with the
+/// block's name, its org and its table count, over the list of its tables.
+/// `leaf_names` shows each table by its last `__` segment, which is unique
+/// within an `org__block` group; the ungrouped tables show their whole name.
+fn table_group(
+    key: &str,
+    title: &str,
+    org: &str,
+    tables: &[&TableSummary],
+    selected: Option<&str>,
+    tab: Tab,
+    leaf_names: bool,
+) -> Markup {
+    html! {
+        details .db-table-group open data-db-group=(key) {
+            // The name and the org wrap as whole words onto a second line
+            // when the column is narrow; the count keeps its own column.
+            summary .db-table-group__head {
+                span .db-table-group__name {
+                    span .db-table-group__title { (title) }
+                    " "
+                    span .db-table-group__org { (org) }
+                }
+                span .db-count { (tables.len()) }
+            }
+            ul .db-table-group__list {
+                @for t in tables {
+                    @let active = selected == Some(t.name.as_str());
+                    @let href = format!("/b/admin/database?table={}&tab={}", pct_encode(&t.name), tab.as_query());
+                    @let name = if leaf_names { t.name.rsplit("__").next().unwrap_or(&t.name) } else { t.name.as_str() };
+                    li data-db-table=(t.name.to_lowercase()) {
+                        a .db-table-list__item .is-active[active]
+                            aria-current=[active.then_some("page")]
+                            href=(href)
+                            hx-get=(href)
+                            hx-target="#content"
+                            hx-push-url="true"
+                        {
+                            span .db-table-list__name { (name) }
+                            span .db-table-list__count { (t.row_count) }
                         }
                     }
                 }
-                div #db-filter-empty .db-table-list__empty .text-muted .text-sm
-                    hidden { "No tables match." }
             }
-            script { (maud::PreEscaped(TABLE_FILTER_JS)) }
         }
     }
 }
@@ -185,15 +184,17 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
 /// one with `format!`. (The specification's figure of 430 was a miscount and
 /// is corrected here rather than copied.) Wherever it sat it was unreadable,
 /// unlintable and untestable. It hides `[data-db-table]` rows that do not match,
-/// collapses a `[data-db-group]` whose rows are all hidden, and reveals
-/// `#db-filter-empty` when nothing matches at all.
+/// hides a `[data-db-group]` whose rows are all hidden, opens a folded group
+/// that holds a match, and reveals `#db-filter-empty` when nothing matches at
+/// all.
 ///
-/// It also closes the table list on a narrow screen when the page drew it
+/// It also closes the table list where the cards stack (below 900px, the
+/// breakpoint `.db-layout` in table.css stacks at) when the page drew it
 /// `data-db-collapse-narrow` (see [`left_pane`]); that part runs on every
 /// render, the listener only once.
 const TABLE_FILTER_JS: &str = r#"
 (function () {
-  if (window.matchMedia('(max-width: 720px)').matches) {
+  if (window.matchMedia('(max-width: 900px)').matches) {
     document.querySelectorAll('[data-db-collapse-narrow]').forEach(function (d) { d.open = false; });
   }
   if (window.__dbTableFilterInit) return;
@@ -210,7 +211,10 @@ const TABLE_FILTER_JS: &str = r#"
       if (show) visible++;
     });
     document.querySelectorAll('[data-db-group]').forEach(function (group) {
-      group.hidden = !group.querySelector('[data-db-table]:not([hidden])');
+      var matches = !!group.querySelector('[data-db-table]:not([hidden])');
+      group.hidden = !matches;
+      // A group folded by hand still shows what the filter found in it.
+      if (query && matches) group.open = true;
     });
     var empty = document.getElementById('db-filter-empty');
     if (empty) empty.hidden = visible !== 0;
@@ -298,18 +302,16 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
         .collect();
 
     Ok(html! {
-        div .db-panel {
-            (components::section_header(
-                name,
-                Some(html! { span .text-muted .text-sm .tabular-nums { (rows_label(row_count)) } }),
-            ))
-            (components::data_table::<fn(usize) -> Option<String>>(
-                &SCHEMA_COLUMNS,
-                rows,
-                None,
-                html! {},
-            ))
-        }
+        (components::section_header(
+            name,
+            Some(html! { span .text-muted .text-sm .tabular-nums { (rows_label(row_count)) } }),
+        ))
+        (components::data_table::<fn(usize) -> Option<String>>(
+            &SCHEMA_COLUMNS,
+            rows,
+            None,
+            html! {},
+        ))
     })
 }
 
@@ -343,12 +345,17 @@ async fn right_pane(
         Tab::Schema => schema_panel(ctx, selected).await?,
         Tab::Sql => sql_panel(selected, None, None),
     };
-    Ok(html! {
-        section .db-pane .db-pane--right {
+    // Flush: the schema grid and the query results are tables, whose frame
+    // the card absorbs (layout rule 2); everything else in the panel takes
+    // the card's inset back (`.db-workbench`, table.css).
+    Ok(Card::plain(html! {
+        div .db-workbench {
             (right_pane_tabs(selected, tab))
-            div .db-panel-body { (panel) }
+            (panel)
         }
     })
+    .flush()
+    .render())
 }
 
 fn sql_panel(selected: Option<&str>, query: Option<&str>, result: Option<Markup>) -> Markup {
@@ -365,31 +372,30 @@ fn sql_panel(selected: Option<&str>, query: Option<&str>, result: Option<Markup>
         _ => "SELECT 1;".to_string(),
     };
     html! {
-        div .db-panel {
-            form .db-sql
-                hx-post="/b/admin/database/query"
-                hx-target="#db-sql-results"
-                hx-swap="innerHTML"
-            {
-                @if let Some(t) = selected {
-                    input type="hidden" name="table" value=(t);
-                }
-                @if let Some(entry) = refused {
-                    p .text-muted .text-sm { (entry.refusal()) }
-                }
-                textarea name="query" rows="6" .db-sql__input
-                    spellcheck="false"
-                    placeholder="SELECT … FROM …"
-                { (initial) }
-                div .db-sql__actions {
-                    button .btn .btn--primary type="submit" { "Run" }
-                    span .text-muted .text-sm { "Read-only: SELECT, PRAGMA, EXPLAIN, WITH" }
-                }
+        form .db-sql
+            hx-post="/b/admin/database/query"
+            hx-target="#db-sql-results"
+            hx-swap="innerHTML"
+        {
+            @if let Some(t) = selected {
+                input type="hidden" name="table" value=(t);
             }
-            div #db-sql-results .db-sql-results {
-                @if let Some(r) = result { (r) } @else {
-                    p .text-muted .text-sm { "Run a query to see results." }
-                }
+            @if let Some(entry) = refused {
+                p .text-muted .text-sm { (entry.refusal()) }
+            }
+            textarea name="query" rows="6" .db-sql__input
+                spellcheck="false"
+                placeholder="SELECT … FROM …"
+            { (initial) }
+            div .db-sql__actions {
+                // The page's one primary.
+                (Action::primary("Run", ActionTarget::Submit { form: None }).render())
+                span .text-muted .text-sm { "Read-only: SELECT, PRAGMA, EXPLAIN, WITH" }
+            }
+        }
+        div #db-sql-results .db-sql-results {
+            @if let Some(r) = result { (r) } @else {
+                (empty_note("Run a query to see results.", None))
             }
         }
     }
@@ -690,6 +696,128 @@ mod tests {
         let html = String::from_utf8(parts.body).expect("UTF-8 body");
         assert!(html.contains(" rows<"), "{html}");
         assert!(html.contains(">name<"), "{html}");
+    }
+
+    /// The database page over `ctx` for `query`.
+    async fn database_html(ctx: &TestContext, query: &[(&str, &str)]) -> String {
+        let mut msg = admin_msg("retrieve", "/b/admin/database");
+        for (name, value) in query {
+            msg.set_meta(format!("req.query.{name}"), *value);
+        }
+        let parts = browser_request(ctx, msg).await;
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert_eq!(parts.status, 200, "{html}");
+        html
+    }
+
+    /// The backend badge is a neutral fact about the deployment, at the
+    /// badge's own size.
+    #[tokio::test]
+    async fn the_backend_badge_is_neutral() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = database_html(&ctx, &[]).await;
+        assert!(
+            html.contains(
+                r#"<span class="badge badge-secondary" title="Database backend">SQLite · "#
+            ),
+            "{html}"
+        );
+    }
+
+    /// "Tables" and the workbench are two sibling cards on the page
+    /// background. The workbench is flush, so the schema grid and the query
+    /// results are its one card-level surface (rule 2), and the SQL tab's
+    /// Run is the page's one primary.
+    #[tokio::test]
+    async fn the_tables_and_the_workbench_are_sibling_cards() {
+        use crate::test_support::dom;
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for query in [
+            vec![("table", crate::blocks::admin::ROLES_TABLE)],
+            vec![("tab", "sql")],
+        ] {
+            let html = database_html(&ctx, &query).await;
+            let doc = scraper::Html::parse_document(&html);
+            let cards: Vec<String> = doc
+                .select(&scraper::Selector::parse(".db-layout > .card").unwrap())
+                .map(|card| card.value().attr("class").unwrap_or("").to_string())
+                .collect();
+            assert_eq!(cards, ["card", "card card--flush"], "{query:?}: {html}");
+            assert!(
+                dom::card_level_inside_card(&html).is_empty(),
+                "{query:?}: {:?}",
+                dom::card_level_inside_card(&html)
+            );
+            assert_eq!(
+                dom::heading_outline(&html).first(),
+                Some(&(1, "Database".to_string())),
+                "{query:?}"
+            );
+            assert!(
+                dom::heading_outline(&html).contains(&(2, "Tables".to_string())),
+                "{query:?}: the Tables card is headed by its fold's summary: {html}"
+            );
+            let (primaries, _) = dom::visible_primaries(&html);
+            let expected: &[&str] = if query[0].0 == "tab" {
+                &[r#"button.btn.btn--primary "Run""#]
+            } else {
+                &[]
+            };
+            assert_eq!(primaries, expected, "{query:?}");
+        }
+    }
+
+    /// Each block's tables are one open fold headed by the block, its org and
+    /// its count, with no frame of its own; a table's row count is plain
+    /// running text, not the old 12px utility.
+    #[tokio::test]
+    async fn each_block_is_an_open_fold_with_its_name_org_and_count() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = database_html(&ctx, &[]).await;
+        assert!(
+            html.contains(concat!(
+                r#"<details class="db-table-group" open data-db-group="impresspress__admin">"#,
+                r#"<summary class="db-table-group__head"><span class="db-table-group__name">"#,
+                r#"<span class="db-table-group__title">admin</span> "#,
+                r#"<span class="db-table-group__org">impresspress</span></span><span class="db-count">"#,
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="db-table-list__count">"#),
+            "{html}"
+        );
+        assert!(!html.contains("text-xs"), "{html}");
+        assert!(
+            html.contains(r#"<div id="db-filter-empty" hidden><p class="empty-note">No tables match.</p></div>"#),
+            "{html}"
+        );
+    }
+
+    /// The list folds where the two cards stack: the media query in
+    /// `TABLE_FILTER_JS` is the one `table.css` stacks `.db-layout` under.
+    /// The breakpoint is written in both (CSS cannot read a Rust constant),
+    /// so this keeps them one value.
+    #[test]
+    fn the_list_folds_at_the_width_the_cards_stack() {
+        const CSS: &str = include_str!("../../../ui/styles/components/table.css");
+        let stack = CSS
+            .find(".db-layout { grid-template-columns: minmax(0, 1fr); }")
+            .expect("the stacking rule");
+        let media = &CSS[CSS[..stack].rfind("@media ").expect("its media query") + 7..stack];
+        let media = media[..media.find('{').expect("the query's block")].trim();
+        assert_eq!(media, "(max-width: 900px)");
+        assert!(
+            TABLE_FILTER_JS.contains(&format!("window.matchMedia('{media}')")),
+            "TABLE_FILTER_JS folds the list at another width than {media}"
+        );
     }
 
     #[test]

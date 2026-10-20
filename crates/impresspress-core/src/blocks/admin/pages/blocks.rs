@@ -11,8 +11,8 @@ use crate::{
     ui::{
         self,
         components::{
-            self, empty_state, tab_navigation, ActionTarget, Badge, BadgeVariant, Card,
-            HeaderAction, Modal, ModalSize, Tab,
+            self, badge, empty_state, tab_navigation, Action, ActionTarget, Badge, BadgeVariant,
+            Card, HeaderAction, Modal, ModalSize, Tab,
         },
         icons,
         shell::Topbar,
@@ -140,35 +140,53 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             .icon(icons::globe()),
     ];
 
+    let runtime_filter = msg.query("runtime");
     let tabs_and_body = html! {
-        (tab_navigation(vec![
-            Tab {
-                active: active_tab == "features",
-                href: "/b/admin/blocks",
-                label: "Features",
-            },
-            Tab {
-                active: active_tab == "services",
-                href: "/b/admin/blocks?tab=services",
-                label: "Services",
-            },
-            Tab {
-                active: active_tab == "infrastructure",
-                href: "/b/admin/blocks?tab=infrastructure",
-                label: "Infrastructure",
-            },
-            Tab {
-                active: active_tab == "custom",
-                href: "/b/admin/blocks?tab=custom",
-                label: "Custom",
-            },
-        ]))
+        // The tab row, with the runtime filter at its end: the filter
+        // narrows the tab's cards, so it sits with the tabs rather than over
+        // the grid. The Custom tab lists no blocks, so it has none.
+        div .block-tabs {
+            (tab_navigation(vec![
+                Tab {
+                    active: active_tab == "features",
+                    href: "/b/admin/blocks",
+                    label: "Features",
+                },
+                Tab {
+                    active: active_tab == "services",
+                    href: "/b/admin/blocks?tab=services",
+                    label: "Services",
+                },
+                Tab {
+                    active: active_tab == "infrastructure",
+                    href: "/b/admin/blocks?tab=infrastructure",
+                    label: "Infrastructure",
+                },
+                Tab {
+                    active: active_tab == "custom",
+                    href: "/b/admin/blocks?tab=custom",
+                    label: "Custom",
+                },
+            ]))
+            @if active_tab != "custom" {
+                div .block-tabs__filter {
+                    label .form-label for="blocks-runtime-filter" { "Runtime" }
+                    select .form-input #blocks-runtime-filter
+                        data-action="blocks-runtime-filter"
+                        data-blocks-tab=(active_tab)
+                    {
+                        option value="" selected[runtime_filter.is_empty()] { "All runtimes" }
+                        option value="native" selected[runtime_filter == "native"] { "Native only" }
+                        option value="wasm" selected[runtime_filter == "wasm"] { "WASM only" }
+                    }
+                }
+            }
+        }
 
         div #blocks-tab-content {
             @if active_tab == "custom" {
                 (custom_tab_content())
             } @else {
-                @let runtime_filter = msg.query("runtime");
                 @let filtered: Vec<_> = all_blocks.iter().filter(|b| {
                     let cat_match = match active_tab {
                         "services" => b.category == wafer_run::BlockCategory::Service,
@@ -181,19 +199,6 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         _ => true,
                     }
                 }).collect();
-
-                // Runtime filter dropdown
-                div .block-cards__filter {
-                    label .form-label for="blocks-runtime-filter" { "Runtime" }
-                    select .form-input #blocks-runtime-filter
-                        data-action="blocks-runtime-filter"
-                        data-blocks-tab=(active_tab)
-                    {
-                        option value="" selected[runtime_filter.is_empty()] { "All runtimes" }
-                        option value="native" selected[runtime_filter == "native"] { "Native only" }
-                        option value="wasm" selected[runtime_filter == "wasm"] { "WASM only" }
-                    }
-                }
 
                 @if filtered.is_empty() {
                     (empty_state(
@@ -215,7 +220,11 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         // Tab and Enter. Its id is stable across a re-render
                         // of `#content` (the modal's toggle), so focus can
                         // come back to it.
-                        div class={ "block-card" @if !is_enabled { " block-card--disabled" } } {
+                        //
+                        // Only the non-default state is marked (layout rule
+                        // 11): a disabled block carries a "Disabled" badge
+                        // and the set-aside look, an enabled one nothing.
+                        div .block-card .block-card--disabled[!is_enabled] {
                             div .block-card__head {
                                 h2 .block-card__title {
                                     button .block-card__title-button
@@ -226,16 +235,8 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                         hx-swap="innerHTML"
                                     { (block.name) }
                                 }
-                                @if is_enabled {
-                                    span .block-card__check title="Enabled" {
-                                        span aria-hidden="true" { (ui::icons::check()) }
-                                        span .sr-only { "Enabled" }
-                                    }
-                                } @else {
-                                    span .block-card__check .block-card__check--off title="Disabled" {
-                                        span aria-hidden="true" { (ui::icons::x()) }
-                                        span .sr-only { "Disabled" }
-                                    }
+                                @if !is_enabled {
+                                    (badge(BadgeVariant::Secondary, "Disabled"))
                                 }
                             }
                             p .block-card__summary { (block.summary) }
@@ -246,11 +247,13 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                     span .block-card__runtime { "Native" }
                                 }
                                 span .block-card__version { "v" (block.version) }
+                                // A quiet text link, not a button: the card's
+                                // own control is its title.
                                 @if is_enabled && !block.admin_url.is_empty() {
-                                    a .btn .btn--sm .btn--secondary .block-card__open
+                                    a .block-card__open
                                         href=(block.admin_url)
                                         aria-label=(format!("Open {} admin", block.name))
-                                    { "Open" }
+                                    { "Open" (icons::arrow_right()) }
                                 }
                             }
                         }
@@ -449,17 +452,18 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
     };
 
     let meta = html! {
-        (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { "v" (block.version) }))
-        (Badge::new(BadgeVariant::ToneSlate).classes("text-11").render(html! { (format!("{:?}", block.category)) }))
+        (Badge::new(BadgeVariant::Info).render(html! { "v" (block.version) }))
+        (badge(BadgeVariant::ToneSlate, &format!("{:?}", block.category)))
     };
     let markup = Modal::new(DETAIL_MODAL_ID, &block.name).size(ModalSize::Large).focusable_body().render_with_meta(meta, html! {
         // Admin UI link + Block toggle (above description)
         div .flex .items-center .justify-between .mb-4 {
             div .flex .items-center .gap-2 {
+                // The dialog's one primary.
                 @if is_enabled && !block.admin_url.is_empty() {
-                    a .btn .btn--sm .btn--primary href=(block.admin_url) {
-                        (icons::settings()) " Open Admin UI"
-                    }
+                    (Action::primary("Open admin UI", ActionTarget::Link(&block.admin_url))
+                        .icon(icons::settings())
+                        .render())
                 }
             }
             @if block.can_disable {
@@ -494,9 +498,9 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
         @if !block.config_keys.is_empty() {
             h3 .modal-section-title { "Configuration" }
             @let rows: Vec<Vec<Markup>> = block.config_keys.iter().map(|ck| vec![
-                html! { code .text-xs { (ck.key) } },
+                html! { code { (ck.key) } },
                 html! { span .text-muted { (ck.description) } },
-                html! { code .text-11 { @if ck.default.is_empty() { "\u{2014}" } @else { (ck.default) } } },
+                html! { code { @if ck.default.is_empty() { (components::NO_VALUE) } @else { (ck.default) } } },
             ]).collect();
 
             (components::data_table::<fn(usize) -> Option<String>>(
@@ -512,13 +516,13 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
         div .modal-tech {
             div .mb-2 {
                 b { "Interface: " }
-                (Badge::new(BadgeVariant::ToneSlate).classes("text-11").render(html! { (block.interface) }))
+                (badge(BadgeVariant::ToneSlate, &block.interface))
             }
             @if !block.requires.is_empty() {
                 div .mb-2 {
                     b { "Requires: " }
                     @for req in &block.requires {
-                        (Badge::new(BadgeVariant::Primary).classes("text-11 mr-1").render(html! { (req) }))
+                        (Badge::new(BadgeVariant::Primary).classes("mr-1").render(html! { (req) }))
                     }
                 }
             }
@@ -526,7 +530,7 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
                 div .mb-2 {
                     b { "Database tables: " }
                     @for col in &block.collections {
-                        (Badge::new(BadgeVariant::ToneSlate).classes("text-11 mr-1").render(html! { (col.name) }))
+                        (Badge::new(BadgeVariant::ToneSlate).classes("mr-1").render(html! { (col.name) }))
                     }
                 }
             }
@@ -548,21 +552,21 @@ const DETAIL_MODAL_ID: &str = "block-detail";
 /// custom blocks from the `blocks/` directory at startup — there is no
 /// runtime install/upload surface.
 fn custom_tab_content() -> maud::Markup {
-    html! {
-        div .custom-tab {
-            (Card::titled("Custom blocks", html! {
-                p .custom-tab__hint {
-                    "Custom blocks are auto-discovered from the "
-                    code { "blocks/" }
-                    " directory. Use "
-                    code { "wafer build" }
-                    " to compile blocks locally, then restart the server. Browse the "
-                    a href="https://wafer.run/registry" target="_blank" { "WAFER registry" }
-                    " for available WASM blocks."
-                }
-            }).render())
-        }
-    }
+    Card::titled(
+        "Custom blocks",
+        html! {
+            p {
+                "Custom blocks are auto-discovered from the "
+                code { "blocks/" }
+                " directory. Use "
+                code { "wafer build" }
+                " to compile blocks locally, then restart the server. Browse the "
+                a href="https://wafer.run/registry" target="_blank" { "WAFER registry" }
+                " for available WASM blocks."
+            }
+        },
+    )
+    .render()
 }
 
 /// The block-detail modal's configuration table's columns, declared once so
@@ -855,6 +859,183 @@ mod outage_tests {
 }
 
 #[cfg(test)]
+mod card_tests {
+    use super::*;
+    use crate::test_support::{admin_msg, output_body, TestContext};
+
+    /// The one config key the fixture block declares, so its detail dialog
+    /// has a configuration row with an empty default.
+    const FIXTURE_KEY: &str = "IMPRESSPRESS__AAA__KEY";
+
+    /// Two feature blocks with an admin UI: `impresspress/aaa` enabled,
+    /// `impresspress/bbb` disabled. The rendered Features tab.
+    async fn features_html() -> String {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for name in ["impresspress/aaa", "impresspress/bbb"] {
+            ctx.register_block_info(
+                name,
+                wafer_run::BlockInfo::new(name, "1.0.0", "http.handler", "a block")
+                    .category(wafer_run::BlockCategory::Feature)
+                    .can_disable(true)
+                    .admin_url("/b/aaa/admin/"),
+            );
+        }
+        block_settings::set_enabled(&ctx, "impresspress/bbb", false)
+            .await
+            .expect("disable bbb");
+        let html =
+            output_body(blocks_page(&ctx, &admin_msg("retrieve", "/b/admin/blocks")).await).await;
+        String::from_utf8(html).expect("UTF-8 page")
+    }
+
+    /// The card of `name`: from its opening tag to the next card's, or to
+    /// the detail-modal slot after the last one.
+    fn card<'h>(html: &'h str, name: &str) -> &'h str {
+        let title = html
+            .find(&format!(r#"id="block-card-{}""#, encode_block_name(name)))
+            .unwrap_or_else(|| panic!("no card for {name}: {html}"));
+        let mut starts: Vec<usize> = [
+            r#"<div class="block-card">"#,
+            r#"<div class="block-card block-card--disabled">"#,
+        ]
+        .iter()
+        .flat_map(|open| html.match_indices(open).map(|(at, _)| at))
+        .collect();
+        starts.sort_unstable();
+        let start = *starts
+            .iter()
+            .rev()
+            .find(|&&at| at < title)
+            .expect("the card's div");
+        let end = starts
+            .iter()
+            .copied()
+            .find(|&at| at > title)
+            .unwrap_or_else(|| {
+                html.find(r#"<div id="block-detail-slot">"#)
+                    .expect("the slot")
+            });
+        &html[start..end]
+    }
+
+    /// Only the non-default state is marked (rule 11): a disabled block's
+    /// card carries a "Disabled" badge and the set-aside look; an enabled
+    /// block's card carries no state at all, neither a badge nor a check.
+    #[tokio::test]
+    async fn only_a_disabled_block_is_marked() {
+        let html = features_html().await;
+        let enabled = card(&html, "impresspress/aaa");
+        assert!(
+            enabled.starts_with(r#"<div class="block-card">"#),
+            "{enabled}"
+        );
+        assert!(!enabled.contains("badge"), "{enabled}");
+        assert!(!enabled.contains("Enabled"), "{enabled}");
+        let disabled = card(&html, "impresspress/bbb");
+        assert!(
+            disabled.starts_with(r#"<div class="block-card block-card--disabled">"#),
+            "{disabled}"
+        );
+        assert!(
+            disabled.contains(r#"<span class="badge badge-secondary">Disabled</span>"#),
+            "{disabled}"
+        );
+        assert!(!html.contains("block-card__check"), "{html}");
+    }
+
+    /// "Open" is a quiet text link named for its block, not a button; a
+    /// disabled block offers none.
+    #[tokio::test]
+    async fn open_is_a_quiet_link() {
+        let html = features_html().await;
+        let enabled = card(&html, "impresspress/aaa");
+        assert!(
+            enabled.contains(
+                r#"<a class="block-card__open" href="/b/aaa/admin/" aria-label="Open impresspress/aaa admin">Open<svg"#
+            ),
+            "{enabled}"
+        );
+        assert!(!card(&html, "impresspress/bbb").contains("block-card__open"));
+        assert!(!html.contains("btn--sm"), "{html}");
+    }
+
+    /// The detail dialog of a block with an admin UI: its one primary is
+    /// "Open admin UI", a link; its badges and code chips take their size
+    /// from their own rules; an empty default reads as the no-value dash.
+    #[tokio::test]
+    async fn the_detail_dialogs_one_primary_opens_the_admin_ui() {
+        use crate::test_support::dom;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.register_block_info(
+            "impresspress/aaa",
+            wafer_run::BlockInfo::new("impresspress/aaa", "1.0.0", "http.handler", "a block")
+                .category(wafer_run::BlockCategory::Feature)
+                .can_disable(true)
+                .admin_url("/b/aaa/admin/")
+                .config_keys(vec![wafer_block::ConfigVar::new(FIXTURE_KEY, "A key", "")]),
+        );
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            "/b/admin/blocks/impresspress--aaa/detail",
+        ));
+        let html = String::from_utf8(output_body(handle_block_detail(&ctx, &msg).await).await)
+            .expect("UTF-8");
+        let (page, dialogs) = dom::visible_primaries(&html);
+        assert!(page.is_empty(), "{html}");
+        assert_eq!(
+            dialogs,
+            [vec![r#"a.btn.btn--primary "Open admin UI""#.to_string()]],
+            "{html}"
+        );
+        assert!(html.contains(r#"href="/b/aaa/admin/""#), "{html}");
+        assert!(
+            !html.contains("text-11") && !html.contains("text-xs"),
+            "{html}"
+        );
+        assert!(html.contains("<code>\u{2014}</code>"), "{html}");
+    }
+
+    /// The runtime filter ends the tab row, with its visible label; the
+    /// Custom tab, which lists no blocks, has none.
+    #[tokio::test]
+    async fn the_runtime_filter_ends_the_tab_row() {
+        let html = features_html().await;
+        let row = &html[html
+            .find(r#"<div class="block-tabs">"#)
+            .expect("the tab row")..];
+        let row = &row[..row
+            .find(r#"<div id="blocks-tab-content">"#)
+            .unwrap_or_else(|| panic!("{row}"))];
+        assert!(
+            row.starts_with(r#"<div class="block-tabs"><div class="tabs">"#),
+            "{row}"
+        );
+        assert!(
+            row.contains(concat!(
+                r#"<div class="block-tabs__filter">"#,
+                r#"<label class="form-label" for="blocks-runtime-filter">Runtime</label>"#,
+            )),
+            "{row}"
+        );
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let mut msg = admin_msg("retrieve", "/b/admin/blocks");
+        msg.set_meta("req.query.tab", "custom");
+        let custom =
+            String::from_utf8(output_body(blocks_page(&ctx, &msg).await).await).expect("UTF-8");
+        assert!(custom.contains(r#"<div class="block-tabs">"#), "{custom}");
+        assert!(!custom.contains("block-tabs__filter"), "{custom}");
+    }
+}
+
+#[cfg(test)]
 mod custom_tab_tests {
     use super::custom_tab_content;
     use crate::test_support::dom;
@@ -864,10 +1045,7 @@ mod custom_tab_tests {
     #[test]
     fn the_custom_tab_is_a_titled_card() {
         let html = custom_tab_content().into_string();
-        assert!(
-            html.starts_with(r#"<div class="custom-tab"><section class="card">"#),
-            "{html}"
-        );
+        assert!(html.starts_with(r#"<section class="card">"#), "{html}");
         assert_eq!(
             dom::heading_outline(&html),
             vec![(2, "Custom blocks".to_string())],

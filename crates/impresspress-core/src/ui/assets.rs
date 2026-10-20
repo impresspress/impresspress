@@ -760,11 +760,6 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     const TALL_BOXES: &[(&str, &str, &str)] = &[
         (
-            ".db-pane--right",
-            "min-height",
-            "the database page's result pane, a panel",
-        ),
-        (
             ".form-textarea",
             "min-height",
             "a multi-line field: room for lines of text",
@@ -1601,11 +1596,6 @@ mod tests {
     /// each with its own reason -- not a silent pass.
     #[cfg(feature = "embed-assets")]
     const CONTRAST_EXEMPT_SELECTORS: &[&str] = &[
-        // `.db-table-group__icon` wraps `icons::package()`/`icons::database()`
-        // (database.rs) -- an SVG icon, not text; `color` only feeds the
-        // SVG's `currentColor`. WCAG's 3:1 non-text floor applies, and
-        // #fd3534 (3.66:1 on white) already clears it.
-        ".db-table-group__icon",
         // Disabled form controls. WCAG 2.x SC 1.4.3 explicitly exempts text
         // in "inactive user interface components" from the contrast minimum,
         // and the muted look is what communicates the disabled state. 4.39:1
@@ -2208,11 +2198,11 @@ mod tests {
         (".product-wizard-progress li", None),
         (".products-plain-details > summary", None),
         (".products-choice small", None),
-        (".db-pane__head input", None),
+        (".db-count", None),
         (".db-table-group__title", None),
         (".db-table-group__org", None),
-        (".db-table-group__count", None),
         (".db-table-list__name", Some(".db-table-list__item")),
+        (".db-table-list__count", None),
         (".block-card__runtime", Some(".block-card__meta")),
         (".block-card__version", Some(".block-card__meta")),
         (".var-cell__key", None),

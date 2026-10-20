@@ -1428,7 +1428,8 @@ fn the_worker_keeps_the_runtime_its_glue_loads() {
 }
 
 /// The boot shell acts on a cause only when it is about this load, erases
-/// local data only for a failure of the runtime's `initialize()`, never
+/// local data only for a failure of the runtime's `initialize()` on the
+/// data it read (never for a database it could not read), never
 /// restarts a boot that is merely slow, recovers automatically
 /// once per failure, and does not mistake a probe the runtime died on for a
 /// boot that worked — `tests/sw/loader_recovery.test.mjs`.

@@ -171,11 +171,24 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
         value: &search,
         result_count: u64::try_from(list.total_count).unwrap_or(0),
     };
-    let empty = match (errors.server, errors.client) {
+    // An empty list says which list is empty: the unfiltered log of a fresh
+    // deployment, or a filter or search that matched nothing.
+    let empty_title = match (errors.server, errors.client) {
         (true, true) => "No server or client errors logged",
         (true, false) => "No server errors logged",
         (false, true) => "No client errors logged",
-        (false, false) => "No request logs yet",
+        (false, false) if search.is_empty() => "No request logs yet",
+        (false, false) => "No requests found",
+    };
+    let narrowing = [errors.server, errors.client, !search.is_empty()]
+        .iter()
+        .filter(|on| **on)
+        .count();
+    let empty_body = match narrowing {
+        0 => "Requests appear here as the server answers them.",
+        1 if !search.is_empty() => "No logged request matches this search.",
+        1 => "No logged request matches this filter.",
+        _ => "No logged request matches these filters.",
     };
 
     Ok(html! {
@@ -187,25 +200,23 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
             }
         }
 
-        @let rows: Vec<Vec<Markup>> = list.rows.iter().map(|row| {
+        @let rows: Vec<components::TableRow> = list.rows.iter().map(|row| {
             let created = row.created_at.as_str();
             let status_code = row.status_code;
-            vec![
+            components::TableRow::new(vec![
                 Badge::new(status_code_badge_variant(status_code)).render(html! { (status_code) }),
                 html! { span .font-medium { (row.method) } },
                 request_path_cell(&row.path),
                 html! { span .text-muted .tabular-nums { (row.duration_ms) "ms" } },
                 user_cell(&row.user_id, &emails),
                 html! { span .text-muted { (components::timestamp(created)) } },
-            ]
+            ])
         }).collect();
 
-        (components::data_table::<fn(usize) -> Option<String>>(
-            &SYSTEM_LOG_COLUMNS,
-            rows,
-            None,
-            html! { p .text-center .text-muted { (empty) } },
-        ))
+        (components::DataTable::new(&SYSTEM_LOG_COLUMNS)
+            .rows(rows)
+            .empty_state(empty_title, empty_body, None)
+            .render())
 
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) {
             (pagination(list.page as u32, per_page, list.total_count as u32, &page_href))
@@ -246,6 +257,17 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
         .map(|record| record.str_field("user_id"))
         .collect();
     let emails = users::emails_by_id(ctx, &user_ids).await?;
+    let (empty_title, empty_body) = if search.is_empty() {
+        (
+            "No audit logs yet",
+            "Admin actions are recorded here as they happen.",
+        )
+    } else {
+        (
+            "No audit logs found",
+            "No logged action's resource matches this search.",
+        )
+    };
     let search_box = components::SearchInput {
         id: "audit-logs-search",
         name: "search",
@@ -260,23 +282,21 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
             (search_box.render())
         }
 
-        @let rows: Vec<Vec<Markup>> = list.records.iter().map(|record| {
+        @let rows: Vec<components::TableRow> = list.records.iter().map(|record| {
             let created = record.str_field("created_at");
-            vec![
+            components::TableRow::new(vec![
                 badge(BadgeVariant::Info, record.str_field("action")),
                 html! { (record.str_field("resource")) },
                 user_cell(record.str_field("user_id"), &emails),
                 html! { span .text-muted { (record.str_field("ip_address")) } },
                 html! { span .text-muted { (components::timestamp(created)) } },
-            ]
+            ])
         }).collect();
 
-        (components::data_table::<fn(usize) -> Option<String>>(
-            &AUDIT_LOG_COLUMNS,
-            rows,
-            None,
-            html! { p .text-center .text-muted { "No audit logs yet" } },
-        ))
+        (components::DataTable::new(&AUDIT_LOG_COLUMNS)
+            .rows(rows)
+            .empty_state(empty_title, empty_body, None)
+            .render())
 
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) {
             (pagination(list.page as u32, per_page, list.total_count as u32, &search_box.results_href()))
@@ -525,6 +545,74 @@ mod tests {
         assert!(html.contains("/b/admin/logs?server_errors=1"), "{html}");
         assert!(html.contains("/b/admin/logs?client_errors=1"), "{html}");
         assert!(html.contains("3 total"), "{html}");
+    }
+
+    /// An empty log is the framed empty state with no action, saying which
+    /// list is empty: never a bare centred sentence.
+    #[tokio::test]
+    async fn each_empty_log_is_an_empty_state_without_an_action() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for (query, title) in [
+            (vec![("search", "nothing-matches")], "No requests found"),
+            (vec![("server_errors", "1")], "No server errors logged"),
+            (
+                vec![("server_errors", "1"), ("client_errors", "1")],
+                "No server or client errors logged",
+            ),
+            (vec![("tab", "audit")], "No audit logs yet"),
+            (
+                vec![("tab", "audit"), ("search", "nothing-matches")],
+                "No audit logs found",
+            ),
+            (vec![("tab", "storage")], "No storage access logs yet"),
+        ] {
+            let html = render_logs(&ctx, &query).await;
+            assert!(
+                html.contains(&format!(r#"<h2 class="empty__title">{title}</h2>"#)),
+                "{query:?}: {html}"
+            );
+            assert!(!html.contains("empty__action"), "{query:?}: {html}");
+            assert!(!html.contains("text-center"), "{query:?}: {html}");
+        }
+    }
+
+    /// The empty system log's sentence names what narrowed it: one search,
+    /// one filter, or several.
+    #[tokio::test]
+    async fn the_empty_log_says_what_narrowed_it() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for (query, body) in [
+            (
+                vec![("search", "nothing-matches")],
+                "No logged request matches this search.",
+            ),
+            (
+                vec![("server_errors", "1")],
+                "No logged request matches this filter.",
+            ),
+            (
+                vec![("client_errors", "1")],
+                "No logged request matches this filter.",
+            ),
+            (
+                vec![("server_errors", "1"), ("search", "nothing-matches")],
+                "No logged request matches these filters.",
+            ),
+            (
+                vec![("server_errors", "1"), ("client_errors", "1")],
+                "No logged request matches these filters.",
+            ),
+        ] {
+            let html = render_logs(&ctx, &query).await;
+            assert!(
+                html.contains(&format!(r#"<p class="empty__body">{body}</p>"#)),
+                "{query:?}: {html}"
+            );
+        }
     }
 
     /// The collapsed unmatched-path label reads as what it stands for, and a

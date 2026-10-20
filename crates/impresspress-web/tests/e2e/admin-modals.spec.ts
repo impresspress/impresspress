@@ -91,7 +91,11 @@ test.describe('admin modals', () => {
   test('the close button and Cancel close the modal and hand focus back', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/users?tab=api-keys', { waitUntil: 'networkidle' });
-    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-api-key"]');
+    // The tab's toolbar trigger: with no keys yet, the empty state offers a
+    // second one (a secondary copy of the same action).
+    const trigger = page.locator(
+      '.section-header__action [data-action="modal-open"][data-modal-target="create-api-key"]',
+    );
 
     let dialog = await openVia(page, trigger, 'create-api-key');
     await expectModal(dialog);

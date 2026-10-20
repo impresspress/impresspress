@@ -158,8 +158,8 @@ let poisoned = false;
 // every request this worker refuses from then on can say what happened —
 // see `runtimeStopped`.
 let poisonReason = '';
-// WHERE it failed — `STAGE_LOAD`, `STAGE_BUILD`, `STAGE_INITIALIZE` or
-// `STAGE_REQUEST` —
+// WHERE it failed — `STAGE_LOAD`, `STAGE_BUILD`, `STAGE_OPEN`,
+// `STAGE_INITIALIZE` or `STAGE_REQUEST` —
 // stated by the code that caught the failure and sent beside the cause on
 // every road to `loader.js` (the message, the Cache Storage entry, the 503).
 // It is what the loader's recovery decides on, so it is a field of its own:
@@ -185,9 +185,19 @@ const STAGE_LOAD = 'load';
 // before anything has opened the database: a defect of the build, never of
 // the data this browser stores for the app, and no recovery erases for it.
 const STAGE_BUILD = 'build';
-// The runtime's `initialize()` failed: opening the database, migrating it,
-// importing the seed. The one failure that can mean the stored data is not
-// what this build can use.
+// The runtime's `initialize()` could not read the database this browser
+// stores for the app: sql.js would not load, OPFS was unavailable, or the
+// file was there and its read failed. `dbInit` (impresspress-browser's
+// `js/bridge.js`) rejects with an `Error` named `DatabaseUnreadable` for all
+// of them, and only for them; `initialize()` hands it back untouched. Says
+// nothing about the data — the file was never read, and may read whole next
+// time — so no recovery erases for it, even in a build rendered to erase on
+// recovery: erasing is for data that was read and found unusable, and this
+// data was not looked at.
+const STAGE_OPEN = 'open';
+// The runtime's `initialize()` failed after the database was read: opening
+// it (bytes that are not a database), migrating it, importing the seed. The
+// one failure that can mean the stored data is not what this build can use.
 const STAGE_INITIALIZE = 'initialize';
 // A started runtime died handling a request. The data was good enough to
 // start on, so this says nothing about it either.
@@ -354,7 +364,10 @@ async function ensureInitialized() {
         try {
             await initialize({ exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
         } catch (e) {
-            await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
+            // Decided on the error's `name`, which `dbInit` sets, never on its
+            // message: see `STAGE_OPEN`.
+            const stage = e && e.name === 'DatabaseUnreadable' ? STAGE_OPEN : STAGE_INITIALIZE;
+            await selfDestruct(`runtime initialize() failed: ${e}`, stage, true);
             throw e;
         }
         initialized = true;
@@ -773,7 +786,9 @@ async function beingReset(request) {
 /**
  * Whether the recovery `loader.js` runs for this worker's failure erases the
  * data this browser stores for the app. The same rule as `erasesFor` there:
- * the build allows it, and the failure was the runtime's `initialize()`.
+ * the build allows it, and the failure was the runtime's `initialize()` on
+ * data it read (`STAGE_INITIALIZE`) — never a database it could not read
+ * (`STAGE_OPEN`), nor any other stage.
  */
 function recoveryErases() {
     return OPFS_WIPE_ON_RECOVERY && poisonStage === STAGE_INITIALIZE;

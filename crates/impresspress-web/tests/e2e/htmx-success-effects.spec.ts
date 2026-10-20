@@ -158,12 +158,12 @@ test.describe('htmx after-success effects under the served CSP', () => {
   });
 
   /**
-   * The `closeModal` channel end to end: the Create Role form's answer carries
+   * The `closeModal` channel end to end: the Create role form's answer carries
    * `HX-Trigger: {"closeModal":…,"showToast":…}` and the re-rendered roles tab
    * for `#iam-content` — which holds both the modal and the button that opened
    * it. The modal closes, the toast is drawn (in the top layer, above where the
    * modal was), the new row is there, and focus lands on the re-rendered
-   * Create Role button rather than on nothing.
+   * Create role button rather than on nothing.
    */
   test('creating a role closes its modal, toasts, and returns focus to the new trigger', async ({
     page,

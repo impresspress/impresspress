@@ -77,7 +77,7 @@ pub(super) async fn storage_logs_tab(
     .await?
     .records;
 
-    let rows: Vec<Vec<Markup>> = logs
+    let rows: Vec<components::TableRow> = logs
         .iter()
         .enumerate()
         .map(|(i, log)| {
@@ -85,7 +85,7 @@ pub(super) async fn storage_logs_tab(
             let path = log.str_field("path");
             let status = log.str_field("status");
             let full_id = format!("storage-log-path-{i}");
-            vec![
+            components::TableRow::new(vec![
                 html! {
                     @if !source.is_empty() {
                         (badge(BadgeVariant::Info, source))
@@ -112,7 +112,7 @@ pub(super) async fn storage_logs_tab(
                     }
                 },
                 html! { span .text-muted { (components::timestamp(log.str_field("created_at"))) } },
-            ]
+            ])
         })
         .collect();
 
@@ -123,12 +123,14 @@ pub(super) async fn storage_logs_tab(
             "."
         }
 
-        (components::data_table::<fn(usize) -> Option<String>>(
-            &STORAGE_LOG_COLUMNS,
-            rows,
-            None,
-            html! { p .text-center .text-muted { "No storage access logs yet." } },
-        ))
+        (components::DataTable::new(&STORAGE_LOG_COLUMNS)
+            .rows(rows)
+            .empty_state(
+                "No storage access logs yet",
+                "Each read and write a block makes to storage is recorded here.",
+                None,
+            )
+            .render())
     })
 }
 
