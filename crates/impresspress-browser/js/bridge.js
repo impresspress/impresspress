@@ -13,34 +13,81 @@ const DB_FILENAME = 'impresspress.db';
 // ─── Database (sql.js) ────────────────────────────────────────────────────────
 
 /**
- * Load sql.js WASM, try to load existing DB from OPFS, create new if none exists.
- * Then sets the connection up — see `configureConnection`.
+ * Load sql.js WASM and open the database stored in OPFS at `impresspress.db`,
+ * or an empty one on a first run. Then sets the connection up — see
+ * `configureConnection`.
+ *
+ * Opening has three outcomes, and only the first starts empty:
+ * - **First run.** `getFileHandle` rejects with `NotFoundError`: there is no
+ *   file, so the database is new. So is a zero-length file. `createWritable()`
+ *   writes a swap file that replaces the original only on `close()`, so a
+ *   flush killed halfway never leaves an empty file behind; the only
+ *   zero-length one is the file `exportToOpfs`'s `getFileHandle(…,
+ *   {create: true})` made before its first write was committed, which never
+ *   held data.
+ * - **Unreadable.** Anything else that fails before the bytes reach sql.js:
+ *   loading sql.js, `navigator.storage.getDirectory()`, any other
+ *   `getFileHandle` rejection, `getFile()`, `arrayBuffer()`. Rejects with an
+ *   `Error` whose `name` is `'DatabaseUnreadable'` and whose `cause` is the
+ *   original. This says nothing about the data — the file may be whole and
+ *   readable next time — so the database is neither opened empty nor ever
+ *   written over: sw.js reports it as the non-erasing stage `open`, keyed on
+ *   that `name` (`STAGE_OPEN` in `sw.js.tmpl`). (`arrayBuffer()` resolves
+ *   with the whole file or rejects; there is no short read to detect.)
+ * - **Corrupt.** The bytes were read but are not a database SQLite can use.
+ *   sql.js opens them without looking, and so does `configureConnection`
+ *   (neither of its statements reads the file); the first statement that
+ *   reads the schema — the runtime's migrations — throws SQLite's own error
+ *   ("file is not a database"). That fails the runtime's `initialize()`, which
+ *   sw.js reports as stage `initialize`: the one failure that is evidence the
+ *   stored data is unusable.
+ *
+ * `_db` is cleared first and set only once the connection is set up, so after
+ * any failed call it is `null` and `exportToOpfs` writes nothing: no flush
+ * can replace the file this call could not open.
  */
 export async function dbInit() {
-    const SQL = await initSqlJs({
-        locateFile: () => SQL_WASM_PATH,
-    });
-
-    const root = await navigator.storage.getDirectory();
-    let existingData = null;
+    _db = null;
+    let SQL;
+    let existingData;
     try {
-        const fileHandle = await root.getFileHandle(DB_FILENAME);
-        const file = await fileHandle.getFile();
-        const buffer = await file.arrayBuffer();
-        if (buffer.byteLength > 0) {
-            existingData = new Uint8Array(buffer);
-        }
-    } catch (_e) {
-        // File does not exist yet — start fresh
+        SQL = await initSqlJs({
+            locateFile: () => SQL_WASM_PATH,
+        });
+        existingData = await readDatabaseFile();
+    } catch (cause) {
+        throw databaseUnreadable(cause);
     }
 
-    if (existingData) {
-        _db = new SQL.Database(existingData);
-    } else {
-        _db = new SQL.Database();
-    }
+    const db = existingData ? new SQL.Database(existingData) : new SQL.Database();
+    configureConnection(db);
+    _db = db;
+}
 
-    configureConnection();
+/**
+ * The bytes of `impresspress.db` in OPFS, or `null` when there is no file or
+ * it is empty — a first run (see `dbInit`). Rejects with the browser's own
+ * error on every other failure.
+ */
+async function readDatabaseFile() {
+    const root = await navigator.storage.getDirectory();
+    let fileHandle;
+    try {
+        fileHandle = await root.getFileHandle(DB_FILENAME);
+    } catch (e) {
+        if (e && e.name === 'NotFoundError') return null;
+        throw e;
+    }
+    const file = await fileHandle.getFile();
+    const buffer = await file.arrayBuffer();
+    return buffer.byteLength > 0 ? new Uint8Array(buffer) : null;
+}
+
+/** The error `dbInit` rejects with when the stored database could not be read. */
+function databaseUnreadable(cause) {
+    const error = new Error(`the stored database could not be read: ${cause}`, { cause });
+    error.name = 'DatabaseUnreadable';
+    return error;
 }
 
 /**
@@ -52,14 +99,14 @@ export async function dbInit() {
  * one on the same in-memory file, and drops every registered function on the
  * way, so the connection after a flush starts from SQLite's defaults.
  */
-function configureConnection() {
-    _db.run('PRAGMA foreign_keys = ON;');
+function configureConnection(db) {
+    db.run('PRAGMA foreign_keys = ON;');
 
     // Custom scalar fn used by BrowserVectorService.upsert to ship f32 blobs
     // through JSON params (params can't carry binary). Rust packs the vector
     // as little-endian f32 BLOB → base64 → string param → BLOB column via
     // base64_decode() inside the INSERT.
-    _db.create_function('base64_decode', (b64) => {
+    db.create_function('base64_decode', (b64) => {
         if (!b64) return new Uint8Array(0);
         const bin = atob(b64);
         const out = new Uint8Array(bin.length);
@@ -165,13 +212,19 @@ export function dbFlush() {
 /** The last `dbFlush` queued, settled or not; see `dbFlush`. */
 let _flushTail = Promise.resolve();
 
-/** One export of the whole database, written to OPFS. Run only by `dbFlush`. */
+/**
+ * One export of the whole database, written to OPFS. Run only by `dbFlush`.
+ *
+ * Writes nothing while no database is open: `dbInit` leaves `_db` `null`
+ * after any failed call, so a flush that follows one cannot put an empty or
+ * half-opened database over the file it could not open.
+ */
 async function exportToOpfs() {
     if (!_db) return;
     const data = _db.export();
     // `export()` reopened the connection; set the new one up before anything
     // can run on it.
-    configureConnection();
+    configureConnection(_db);
     const root = await navigator.storage.getDirectory();
     const fileHandle = await root.getFileHandle(DB_FILENAME, { create: true });
     const writable = await fileHandle.createWritable();
