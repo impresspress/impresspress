@@ -757,6 +757,10 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
             ("requirements_json", json!(r#"{"currently_due":["individual.verification.document","external_account"]}"#)),
             ("fee_basis_points", json!(250)), ("dashboard_type", json!("express")),
             ("disabled_reason", json!(reason)),
+            (
+                "sync_error",
+                json!("No such account: 'acct_1NvQh2KZp7a9XyTqLongAccountIdentifier'"),
+            ),
             ("created_at", when.clone()), ("updated_at", when.clone()),
         ])).await;
     }
@@ -768,7 +772,7 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
             ("id", json!("prod_pending")),
             (
                 "name",
-                json!("Hand-thrown ceramic mug with a very long listing title"),
+                json!("Microcrystalline-glazed ceramic mug with a very long listing title"),
             ),
             ("owner_id", json!("seller_1")),
             ("created_by", json!("seller_1")),
@@ -805,21 +809,32 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
                 (
                     "buyer_email",
                     json!(if i == 1 {
-                        "someone.with.a.really.long.address@example-company.co.nz"
+                        "someone.with.a.really.long.address@acme.co.nz"
                     } else {
                         "ana@example.com"
                     }),
                 ),
                 ("status", json!(status)),
                 ("currency", json!(if i == 5 { "JPY" } else { "NZD" })),
-                ("total_cents", json!(1_234_567)),
+                // Large totals, the failed seller order's largest, so the order
+                // and failure tables need their narrow layouts at 721px in
+                // any font.
+                (
+                    "total_cents",
+                    json!(match i {
+                        3 => 12_345_678_901_i64,
+                        // JPY has no minor unit: the same figure.
+                        5 => 1_234_567,
+                        _ => 123_456_789,
+                    }),
+                ),
                 ("subtotal_cents", json!(1_200_000)),
                 ("tax_cents", json!(34_567)),
                 (
                     "refunded_total_cents",
                     json!(match i {
                         1 => 200_000,
-                        2 => 1_234_567,
+                        2 => 123_456_789,
                         _ => 0,
                     }),
                 ),
@@ -848,6 +863,15 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
                 ),
                 ("stripe_customer_id", json!("cus_1NvQh2KZp7a9XyTq")),
                 ("reconciliation_status", json!("reconciled")),
+                // The failed order's error quotes an id, as Stripe's do.
+                (
+                    "reconciliation_error",
+                    json!(if i == 3 {
+                        "No such customer: 'cus_1NvQh2KZp7a9XyTqAbCdEfGh'"
+                    } else {
+                        ""
+                    }),
+                ),
                 ("provider_payment_status", json!("succeeded")),
                 (
                     "stripe_payment_intent_id",
@@ -925,6 +949,30 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
             ("currency", json!("NZD")),
             ("reason", json!("product_not_received")),
             ("evidence_due_by", json!("2026-11-18T03:33:20+00:00")),
+            ("created_at", when.clone()),
+            ("updated_at", when.clone()),
+        ]),
+    )
+    .await;
+    // A second dispute with no evidence deadline, a large amount and a
+    // long dispute id.
+    seed(
+        &ctx,
+        super::super::repo::disputes::TABLE,
+        "dp_2",
+        record(&[
+            ("purchase_id", json!(COMMERCE_ORDER)),
+            ("seller_account_id", json!("seller_account_1")),
+            ("stripe_account_id", json!("acct_seller_account_1")),
+            (
+                "provider_dispute_id",
+                json!("du_1NvQh2KZp7a9XyTqAbCdEfGhIjKl"),
+            ),
+            ("payment_intent_id", json!("pi_3NvQh2KZp7a9XyTq1abcdef")),
+            ("status", json!("warning_needs_response")),
+            ("amount_minor", json!(123_456_789)),
+            ("currency", json!("NZD")),
+            ("reason", json!("incorrect_account_details")),
             ("created_at", when.clone()),
             ("updated_at", when.clone()),
         ]),
@@ -1096,5 +1144,43 @@ async fn the_commerce_fixture_is_what_the_pages_render() {
     assert_eq!(
         on_disk, expected,
         "{path} is out of date; write the expected text to it"
+    );
+}
+
+/// An order page's header marks the payment mode as a neutral badge in
+/// words ("Test mode"), not the raw `test` as a status badge; a dispute's
+/// reason reads as a phrase; and Commerce's callout no longer repeats the
+/// page's one way to the purchases.
+#[tokio::test]
+async fn the_order_header_names_the_mode_and_a_dispute_reason_reads_as_words() {
+    let ctx = commerce_ctx().await;
+    let order = admin_page(
+        &ctx,
+        &format!("/b/products/admin/purchases/{COMMERCE_ORDER}"),
+    )
+    .await;
+    assert!(
+        topbar_actions(&order).contains(r#"<span class="badge badge-secondary">Test mode</span>"#),
+        "{order}"
+    );
+    let body = body(&order);
+    assert!(
+        body.contains(r#"<span class="text-sm">Product not received</span>"#),
+        "{body}"
+    );
+    assert!(!body.contains("product_not_received"), "{body}");
+    // No deadline: the line under the amount is the dispute id alone.
+    assert!(
+        body.contains(r#"<span class="commerce-table__meta"><code class="cell-wrap">du_1NvQh2KZp7a9XyTqAbCdEfGhIjKl</code></span>"#),
+        "{body}"
+    );
+    let commerce = page_as(&ctx, "/b/products/", Some("seller_1")).await;
+    assert!(!commerce.contains("View order history"), "{commerce}");
+    assert_eq!(
+        commerce
+            .matches(r#"href="/b/products/my-purchases""#)
+            .count(),
+        2,
+        "the Purchases section link and the one primary: {commerce}"
     );
 }

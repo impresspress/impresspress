@@ -24,10 +24,6 @@
    columns need, and one stat always spans the row. The row sets no outer
    margin: the page layout around it spaces it like any other block. */
 .stat-row { container: stat-row / inline-size; }
-/* A card, or a grid of cards, that follows a stat row in flow (a page with
-   no `.page` gap, such as the products commerce pages) sits the gap below
-   it that a card leaves under the card above it. */
-.stat-row + :is(.card, .products-card-grid) { margin-top: var(--space-4); }
 
 .stat-row__grid {
 	display: grid;

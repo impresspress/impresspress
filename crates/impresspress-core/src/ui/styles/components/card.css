@@ -81,6 +81,16 @@
    no head, it is padded on every side like a framed card's content. */
 .card--flush .empty-note { padding: 0 var(--card-pad) var(--card-pad); }
 .card--flush > .card__body:first-child .empty-note { padding-top: var(--card-pad); }
+/* Cards side by side (`.card-grid`, with the `.grid` utilities): the grid's
+   gap spaces them, so their own bottom margin goes and the grid takes it
+   instead. */
+.card-grid { margin-bottom: var(--space-4); }
+.card-grid > .card { margin-bottom: 0; }
+/* A page with no `.page` gap (the products commerce pages) lays its blocks
+   out in flow, and a stat row sets no outer margin: a card or a card grid
+   after one sits the gap below it that a card leaves under the card above
+   it. */
+.stat-row + :is(.card, .card-grid) { margin-top: var(--space-4); }
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 
@@ -844,17 +854,11 @@
 .product-template-card strong, .product-template-card span { grid-column: 2; }
 .product-template-card strong { margin: 0 !important; }
 /* The commerce pages (orders, sellers, Stripe, the seller dashboard) lay
-   their sections out in flow on the page background.
-   - A currency's analytics (`analytics_currency`): its heading, the stat
-     row, then the card of other figures a gap under the row, and the top
-     products' card; the next currency a section's gap below.
-   - A grid of side-by-side cards (`.products-card-grid`, with the `.grid`
-     utilities) spaces its cards by its gap, so their own bottom margin
-     goes and the grid takes it instead. */
+   their sections out in flow on the page background. A currency's
+   analytics (`analytics_currency`) are its heading, the stat row, the card
+   of other figures and the top products' card; the next currency sits a
+   section's gap below. */
 .products-currency + .products-currency { margin-top: var(--space-8); }
-.products-currency > .stat-row { margin-bottom: var(--space-4); }
-.products-card-grid { margin-bottom: var(--space-4); }
-.products-card-grid > .card { margin-bottom: 0; }
 /* The Stripe page's recovery tools: a disclosure on the page background
    (not a frame, so the cards it opens onto are not inside one), its summary
    a muted line with the cards a gap under it. */

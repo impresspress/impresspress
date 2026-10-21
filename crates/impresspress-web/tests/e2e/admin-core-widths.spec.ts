@@ -357,7 +357,9 @@ test.describe('admin core pages at in-between widths', () => {
       .slice(1)
       .reduce<string[][]>((pairs, part, i, all) => (i % 2 === 0 ? [...pairs, [part, all[i + 1]]] : pairs), []),
   );
-  /** As `layout`, plus anything drawn past the content column's right edge. */
+  /** As `layout`, plus anything drawn past the content column's right edge
+   * (an element's box) and any card whose content is wider than it (a long
+   * unbroken word overflows its line without moving any box). */
   const commerceLayout = (page: Page) =>
     page.evaluate(() => {
       const edge = document.querySelector('main#content')!.getBoundingClientRect().right;
@@ -371,6 +373,9 @@ test.describe('admin core pages at in-between widths', () => {
           .filter((e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().right > edge + 1)
           .map((e) => `${e.tagName.toLowerCase()}.${e.className}`)
           .slice(0, 4),
+        cards: [...document.querySelectorAll<HTMLElement>('main#content .card')]
+          .filter((c) => c.checkVisibility() && c.scrollWidth > c.clientWidth + 1)
+          .map((c) => `${c.querySelector('.card__title')?.textContent ?? 'card'} ${c.scrollWidth}/${c.clientWidth}`),
         primaries: [...document.querySelectorAll<HTMLElement>('.btn--primary')]
           .filter((b) => b.checkVisibility() && !b.closest('dialog'))
           .map((b) => b.textContent!.trim()),
@@ -393,7 +398,7 @@ test.describe('admin core pages at in-between widths', () => {
       for (const [path, primaries] of Object.entries(COMMERCE_PAGES)) {
         await page.goto(path, { waitUntil: 'networkidle' });
         const r = await commerceLayout(page);
-        if (r.page > 0 || r.tables.length || r.past.length || JSON.stringify(r.primaries) !== JSON.stringify(primaries)) {
+        if (r.page > 0 || r.tables.length || r.past.length || r.cards.length || JSON.stringify(r.primaries) !== JSON.stringify(primaries)) {
           found[path] = r;
         }
       }
@@ -409,7 +414,8 @@ test.describe('admin core pages at in-between widths', () => {
           records: [{
             id: 'evt_1NvQh2KZp7a9XyTqLongEventIdentifier', event_type: 'checkout.session.async_payment_succeeded',
             status: 'dead_letter', livemode: false, attempts: 5, updated_at: '2026-10-01T10:00:00Z',
-            last_error: 'Purchase ord_123 is not in a state that accepts this event (completed)',
+            // Stripe's errors quote the object they name: one unbroken word.
+            last_error: "No such subscription: 'sub_1NvQh2KZp7a9XyTqAbCdEfGh'",
             stripe_account_id: 'acct_1NvQh2KZp7a9XyTqLong',
           }],
         });
@@ -418,14 +424,14 @@ test.describe('admin core pages at in-between widths', () => {
           records: [{
             id: 'op_1', operation_type: 'archive_payment_link', aggregate_id: 'plink_1NvQh2KZp7a9XyTqLongPaymentLinkId',
             status: 'failed', attempts: 3, next_attempt_at: '2026-10-01T10:05:00Z',
-            last_error: 'Stripe returned 500 while archiving the payment link', stripe_account_id: 'acct_1NvQh2KZp7a9XyTqLong',
+            last_error: "No such price: 'price_1NvQh2KZp7a9XyTqAbCdEfGhIj'", stripe_account_id: 'acct_1NvQh2KZp7a9XyTqLong',
           }],
         });
       });
       await expect(page.locator('#stripe-webhook-events table.data-table')).toBeVisible();
       await expect(page.locator('#stripe-provider-operations-list table.data-table')).toBeVisible();
       const tools = await commerceLayout(page);
-      if (tools.page > 0 || tools.past.length) found['stripe tools'] = tools;
+      if (tools.page > 0 || tools.tables.length || tools.past.length || tools.cards.length) found['stripe tools'] = tools;
 
       // The seeded pages, each mounted alone in this page's content column.
       await page.goto('/b/products/admin/purchases', { waitUntil: 'networkidle' });
@@ -435,7 +441,7 @@ test.describe('admin core pages at in-between widths', () => {
           main.querySelectorAll('details').forEach((d) => (d.open = true));
         }, html);
         const r = await commerceLayout(page);
-        if (r.page > 0 || r.tables.length || r.past.length) found[name] = r;
+        if (r.page > 0 || r.tables.length || r.past.length || r.cards.length) found[name] = r;
       }
       expect(Object.keys(COMMERCE_FIXTURE).length).toBe(10);
       expect(found, 'a page or a table scrolled sideways').toEqual({});

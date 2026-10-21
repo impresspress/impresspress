@@ -21,9 +21,13 @@ function stripeWebhookElement(tag,text,className){
   return element;
 }
 // A dotted or snake_case name (`checkout.session.completed`) that may break
-// after each `.` and `_` but never inside a word, as the server's
-// `components::breakable_id` does: a `<wbr>` after each separator. An id is
-// an opaque token instead, so it takes `cell-wrap` and breaks anywhere.
+// after each `.` and `_` but never inside a word: a `<wbr>` after each
+// separator, so a narrow cell shows `checkout.` / `session.` / `completed`.
+// (The server's `components::breakable_id` breaks *before* a `.`, for
+// domains and file names; an event name reads better split after it.) An
+// id is an opaque token instead, so it takes `cell-wrap` and breaks
+// anywhere, as does the Last result cell, whose errors quote ids
+// (`No such subscription: 'sub_…'`).
 function stripeBreakableName(tag,text){
   var element=document.createElement(tag);
   text.split(/(?<=[._])/).forEach(function(part,index){
@@ -72,7 +76,7 @@ function renderStripeWebhookEvents(data){
     var statusCell=document.createElement('td');statusCell.dataset.label='Status';
     var badgeClass=event.status==='processed'?'badge-success':event.status==='dead_letter'?'badge-danger':event.status==='failed'?'badge-warning':'badge-info';
     statusCell.appendChild(stripeWebhookElement('span',stripeWebhookStatus(event.status),'badge '+badgeClass));row.appendChild(statusCell);
-    var result=document.createElement('td');result.dataset.label='Last result';
+    var result=document.createElement('td');result.dataset.label='Last result';result.className='cell-wrap';
     result.appendChild(stripeWebhookElement('span',event.last_error||'No processing error recorded.',event.last_error?'':'text-muted'));
     result.appendChild(document.createElement('br'));
     result.appendChild(stripeWebhookElement('span',event.next_retry_at?'Retry '+stripeWebhookDate(event.next_retry_at):stripeWebhookDate(event.updated_at),'text-muted text-sm'));
@@ -147,7 +151,7 @@ function renderStripeProviderOperations(data){
     var state=document.createElement('td');state.dataset.label='Status';
     var badgeClass=operation.status==='succeeded'?'badge-success':operation.status==='dead_letter'?'badge-danger':operation.status==='failed'?'badge-warning':'badge-info';
     state.appendChild(stripeWebhookElement('span',stripeWebhookStatus(operation.status),'badge '+badgeClass));row.appendChild(state);
-    var result=document.createElement('td');result.dataset.label='Last result';
+    var result=document.createElement('td');result.dataset.label='Last result';result.className='cell-wrap';
     result.appendChild(stripeWebhookElement('span',operation.last_error||'No reconciliation error recorded.',operation.last_error?'':'text-muted'));
     result.appendChild(document.createElement('br'));
     result.appendChild(stripeWebhookElement('span',operation.next_attempt_at?'Retry '+stripeWebhookDate(operation.next_attempt_at):stripeWebhookDate(operation.updated_at),'text-muted text-sm'));

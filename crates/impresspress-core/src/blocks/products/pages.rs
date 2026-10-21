@@ -108,6 +108,9 @@ fn analytics_currency(currency: &CommerceAnalytics, seller_view: bool) -> Markup
             (analytics_headline(currency, seller_view))
             (components::Card::plain(figures).render())
             @if !currency.top_products.is_empty() {
+                // Named for its currency: each currency's group repeats the
+                // card, and a heading list should tell them apart.
+                @let top_title = format!("Top {} products by gross sales", currency.currency);
                 @let cols = [
                     components::TableCol::new("Product"),
                     components::TableCol::new("Quantity"),
@@ -119,7 +122,7 @@ fn analytics_currency(currency: &CommerceAnalytics, seller_view: bool) -> Markup
                     html! { (display_money(product.revenue_minor, &currency.currency)) },
                 ]).collect();
                 (components::Card::titled(
-                    "Top products by gross sales",
+                    &top_title,
                     components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}),
                 )
                 .flush()
@@ -144,7 +147,9 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
                         span .commerce-table__meta { (components::timestamp(&failure.created_at)) }
                     },
                     html! { (display_money(failure.total_minor, &failure.currency)) },
-                    html! { span .text-sm { (if failure.error.is_empty() { "Payment did not complete" } else { &failure.error }) } },
+                    // Stripe's errors quote ids (`No such customer: 'cus_…'`), one
+                    // unbroken word each: it may break anywhere.
+                    html! { span .text-sm .cell-wrap { (if failure.error.is_empty() { "Payment did not complete" } else { &failure.error }) } },
                     components::timestamp(&failure.created_at),
                 ]).collect();
                 div .commerce-table .commerce-table--failures {
@@ -1382,7 +1387,7 @@ pub async fn admin_seller_detail(
                 @if !seller.disabled_reason.is_empty() { p { strong { "Disabled reason: " } (friendly_requirement(&seller.disabled_reason)) } }
             }
         }
-        @if !seller.sync_error.is_empty() { p .login-error { "Stripe connection: " (&seller.sync_error) } }
+        @if !seller.sync_error.is_empty() { p .login-error .products-provider-note { "Stripe connection: " (&seller.sync_error) } }
         h3 .products-subheading { "What this seller still needs to do" }
         @if seller.capabilities.requirements_due.is_empty() {
             p .text-muted .text-sm { "Nothing — Stripe has no outstanding requirements." }
@@ -2938,7 +2943,10 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
             vec![
                 html! {
                     code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) }
-                    span .commerce-table__meta { (customer) " · " (components::timestamp(r.str_field("created_at"))) }
+                    span .commerce-table__meta {
+                        (components::status_badge(r.str_field("status"))) " "
+                        (customer) " · " (components::timestamp(r.str_field("created_at")))
+                    }
                 },
                 html! { span .text-sm { (customer) } },
                 components::status_badge(r.str_field("status")),
@@ -2965,9 +2973,9 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
 }
 
 /// Administration's order list. It narrows by its own width (table.css
-/// `.commerce-table--orders`): where five columns do not fit, the customer
-/// and the date leave their columns for one line under the order
-/// (`.commerce-table__meta`).
+/// `.commerce-table--orders`): where five columns do not fit, the status,
+/// the customer and the date leave their columns for one line under the
+/// order (`.commerce-table__meta`), so the total keeps its room.
 ///
 /// Column order is part of that rule, which hides the narrow layout's
 /// headers by position (`th:nth-child`): reorder both together.
@@ -3210,7 +3218,7 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
             ))
         }
         (stripe_connection_card(&status))
-        div .grid .grid-auto-320 .gap-4 .products-card-grid {
+        div .grid .grid-auto-320 .gap-4 .card-grid {
             (components::Card::titled("Go-live checklist", html! {
                 ul .products-checklist {
                     (setup_check("Secret key", status.configured, "Stored server-side and never rendered back into this page."))
@@ -3426,10 +3434,10 @@ fn seller_status_card(
                 }
             }
             @if !account.disabled_reason.is_empty() {
-                p .text-sm .text-danger { "Stripe restriction: " (friendly_requirement(&account.disabled_reason)) }
+                p .text-sm .text-danger .products-provider-note { "Stripe restriction: " (friendly_requirement(&account.disabled_reason)) }
             }
             @if !account.sync_error.is_empty() {
-                p .text-muted .text-sm { "Last refresh: " (account.sync_error) }
+                p .text-muted .text-sm .products-provider-note { "Last refresh: " (account.sync_error) }
             }
         }
         div .products-form-actions {
@@ -3805,6 +3813,21 @@ const REFUND_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Provider refund"),
 ];
 
+/// A dispute's reason as a label: Stripe sends a snake_case code
+/// (`product_not_received`), shown as a sentence-case phrase ("Product not
+/// received") so it reads, and wraps, like the rest of the row.
+fn dispute_reason(code: &str) -> String {
+    if code.is_empty() {
+        return "Not supplied".to_string();
+    }
+    let words = code.replace('_', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => words,
+    }
+}
+
 /// An order's disputes, each titled by its amount. Narrow (table.css
 /// `.commerce-table--disputes`), the evidence deadline and Stripe's dispute
 /// id become the line under it. Column order is part of that rule (headers
@@ -4030,7 +4053,7 @@ async fn order_detail(
             components::Stat::new("Customer", if buyer.is_empty() { "Guest" } else { buyer }),
             components::Stat::new("Items", &line_items.len().to_string()),
         ]))
-        div .grid .grid-auto-280 .gap-4 .products-card-grid {
+        div .grid .grid-auto-280 .gap-4 .card-grid {
             (components::Card::titled("Totals", html! {
                 dl .products-status-list .mt-0 {
                     @for (label, amount) in [
@@ -4149,7 +4172,7 @@ async fn order_detail(
         @if !refunds.is_empty() {
             @let rows: Vec<Vec<Markup>> = refunds.iter().map(|refund| vec![
                 html! {
-                    (display_money(refund.i64_field("amount_minor"), currency))
+                    strong { (display_money(refund.i64_field("amount_minor"), currency)) }
                     span .commerce-table__meta { (components::timestamp(refund.str_field("created_at"))) " · " code .cell-wrap { (refund.str_field("provider_refund_id")) } }
                 },
                 components::status_badge(refund.str_field("status")),
@@ -4170,16 +4193,18 @@ async fn order_detail(
         }
         @if !disputes.is_empty() {
             @let rows: Vec<Vec<Markup>> = disputes.iter().map(|dispute| {
-                let due = html! { @if dispute.str_field("evidence_due_by").is_empty() { (components::NO_VALUE) } @else { (components::timestamp(dispute.str_field("evidence_due_by"))) } };
+                let due_by = dispute.str_field("evidence_due_by");
+                let due = html! { @if due_by.is_empty() { (components::NO_VALUE) } @else { (components::timestamp(due_by)) } };
                 vec![
                     html! {
                         strong { (display_money(dispute.i64_field("amount_minor"), dispute.str_field("currency"))) }
-                        span .commerce-table__meta { "Evidence due " (due) " · " code .cell-wrap { (dispute.str_field("provider_dispute_id")) } }
+                        span .commerce-table__meta {
+                            @if !due_by.is_empty() { "Evidence due " (components::timestamp(due_by)) " · " }
+                            code .cell-wrap { (dispute.str_field("provider_dispute_id")) }
+                        }
                     },
                     components::status_badge(dispute.str_field("status")),
-                    // Stripe's reason is a snake_case code (`product_not_received`):
-                    // shown as words, so it wraps like the rest of the row.
-                    html! { span .text-sm { (if dispute.str_field("reason").is_empty() { "Not supplied".to_string() } else { dispute.str_field("reason").replace('_', " ") }) } },
+                    html! { span .text-sm { (dispute_reason(dispute.str_field("reason"))) } },
                     due,
                     html! { code .text-sm .cell-wrap { (dispute.str_field("provider_dispute_id")) } },
                 ]

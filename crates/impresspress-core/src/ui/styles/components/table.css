@@ -533,7 +533,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
    column and the cells a reader acts on, and moves the rest into one line
    under the title (`.commerce-table__meta`) below the width its full grid
    needs in the CI font. Without these the tables scrolled sideways between
-   721 and about 1000px: the content column beside the sidebar, or a card
+   721 and about 1100px: the content column beside the sidebar, or a card
    in it, is narrower than five or six columns.
 
    The headers are hidden by position, the cells by their label: a column
@@ -550,8 +550,8 @@ a.pagination__link:hover { background: var(--bg-hover); }
    column's minimum and the narrow table still scrolled at 721px. */
 .commerce-table__meta .datetime { white-space: normal; }
 @container commerce-table (max-width: 44rem) {
-	.commerce-table--orders td:is([data-label="Customer"], [data-label="Placed"]),
-	.commerce-table--orders > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(5)) { display: none; }
+	.commerce-table--orders td:is([data-label="Customer"], [data-label="Status"], [data-label="Placed"]),
+	.commerce-table--orders > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(5)) { display: none; }
 	.commerce-table--orders .commerce-table__meta { display: block; }
 	.commerce-table--disputes td:is([data-label="Evidence due"], [data-label="Provider dispute"]),
 	.commerce-table--disputes > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
@@ -583,7 +583,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.commerce-table--items > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
 	.commerce-table--items .commerce-table__meta { display: block; }
 }
-@container commerce-table (max-width: 30rem) {
+@container commerce-table (max-width: 34rem) {
 	.commerce-table--owned td[data-label="Updated"],
 	.commerce-table--owned > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
 	.commerce-table--owned .commerce-table__meta { display: block; }
