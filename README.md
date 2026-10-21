@@ -22,6 +22,8 @@ IMPRESSPRESS_LISTEN=127.0.0.1:8090 \
 
 Open <http://127.0.0.1:8090/b/auth/login> and sign in with `admin@example.com` and `admin123`. Local data is stored under `data/` by default.
 
+The email and password are read only on the first start, while there are no accounts: they create the admin, and are ignored after that. Set the email without the password (or a `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_TOKEN`) and that first start refuses to run.
+
 Every start applies the database's pending block migrations before the server takes a request, and refuses to start if a block fails to initialize. Before 1.0 an upgrade may require wiping `data/`; a change to auth's migrations signs every user out.
 
 To pepper password hashes with a key kept outside the database, export

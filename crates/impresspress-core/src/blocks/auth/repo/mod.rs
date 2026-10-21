@@ -232,6 +232,24 @@ pub(crate) mod test_faults {
         trigger
     }
 
+    /// [`fail_inserts_into`] for updates: every update of `table` fails
+    /// inside the database until the trigger is dropped. For a write whose
+    /// LAST statement updates the row an earlier one created.
+    pub(crate) async fn fail_updates_of(ctx: &TestContext, table: &str) -> String {
+        let trigger = format!("fail_{table}_update");
+        wafer_core::clients::database::exec_raw(
+            &ctx.fixture(),
+            &format!(
+                "CREATE TRIGGER {trigger} BEFORE UPDATE ON {table} \
+                 BEGIN SELECT RAISE(ABORT, 'simulated failure on the last write'); END"
+            ),
+            &[],
+        )
+        .await
+        .expect("install the failing trigger");
+        trigger
+    }
+
     pub(crate) async fn drop_trigger(ctx: &TestContext, trigger: &str) {
         wafer_core::clients::database::exec_raw(
             &ctx.fixture(),

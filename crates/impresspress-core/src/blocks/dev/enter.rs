@@ -31,10 +31,11 @@
 //! # When it does not work
 //!
 //! The seeded password stops opening the account the moment somebody changes
-//! it in this instance, and the config row can be cleared outright once the
-//! account exists (`config_vars::is_provisioning_only_key`). Neither is an
-//! error: the page says one-click entry is off and offers the normal login
-//! page, which still works with whatever the password now is.
+//! it in this instance, and either config row can be cleared outright once
+//! the account exists (the password through
+//! `config_vars::is_provisioning_only_key`; the email is ordinary config).
+//! Neither is an error: the page says one-click entry is off and offers the
+//! normal login page, which still works with whatever the password now is.
 //!
 //! # Where it exists
 //!

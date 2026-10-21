@@ -859,6 +859,13 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // `break_reads` cannot reach.
             "blocks/auth_ui/api/change_password.rs",
             "blocks/auth_ui/api/reset_password.rs",
+            // A fault injector: the bootstrap's account write is one batch
+            // whose last statement updates the row its first one created
+            // (the address proof), and the test fails exactly that update
+            // (`test_faults::fail_updates_of`) to prove the account and its
+            // password are undone with it. Only an in-database failure of
+            // the batch's last statement reaches that, and it names a table.
+            "blocks/auth/bootstrap.rs",
             // A fault injector: the security page reads the provider links
             // and THEN the user's `email_verified` flag, and the branch under
             // test is the flag read. `break_reads` fails the link list first;
