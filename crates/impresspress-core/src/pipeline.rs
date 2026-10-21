@@ -488,8 +488,9 @@ pub async fn handle_request(
     // `crate::csrf` module docs. One central check for every mutation made
     // WITH a session. The requests that hand a session out carry none, so
     // they are not this check's: their handlers must obtain a
-    // `csrf::SessionIssuance` (same origin, or no browser at all) before the
-    // issuance tail will mint a cookie. Both read `csrf::request_origin`. Routed
+    // `csrf::SessionIssuance` (same origin, no browser at all, or, for the
+    // OAuth callback, a consumed PKCE state) before the issuance tail will
+    // mint a cookie. Both origin checks read `csrf::request_origin`. Routed
     // through the same `stream` variable (rather than an early `return`) so a
     // rejection flows through the normal status-resolution + audit-log tail
     // below exactly like a dispatched response would.

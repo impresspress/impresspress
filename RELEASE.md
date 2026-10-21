@@ -34,13 +34,14 @@ session yet.
 
 - **"Another origin" includes origins listed in
   `WAFER_RUN_SHARED__CORS_ALLOWED_ORIGINS`.** CORS still lets such a page
-  read this site's API responses, but it can no longer obtain this site's
-  session cookie. A separate front end that signed users in cross-origin
+  read this site's API responses, but it can no longer sign users in at
+  all: the login, signup or refresh is refused outright, so it gets neither
+  the session cookie nor the tokens in the response body. A separate front end that signed users in cross-origin
   must now sign them in on this site's own origin. No client in this
   repository did; the storefront widget only reads products.
 - **A request with no browser headers at all is unaffected** (no
   `Sec-Fetch-Site`, `Origin` or `Referer`): API clients, `impresspress-js`
-  outside a browser, the CLI, `curl`. There is no visitor's browser to forge
+  outside a browser, scripts, `curl`. There is no visitor's browser to forge
   such a request from.
 - **The OAuth callback is unaffected.** The provider sends the browser back
   with a cross-site navigation by design; the single-use OAuth state is what

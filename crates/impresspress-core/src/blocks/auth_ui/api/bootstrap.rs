@@ -46,12 +46,15 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     };
     let form = parse_form_body(&raw);
 
-    // CSRF defense-in-depth: this is a plain (no-JS) `<form>` POST that runs
-    // before any session exists, so the cookie-authenticated layer
-    // (`crate::csrf::enforce_origin_policy`) never applies to it. The origin
-    // check above is one gate; the token the GET page embedded via
-    // `crate::csrf::hidden_field` is the other, and a request that strips its
-    // browser headers still cannot produce it.
+    // This is a plain (no-JS) `<form>` POST that runs before any session
+    // exists, so the cookie-authenticated layer
+    // (`crate::csrf::enforce_origin_policy`) never applies to it, and the
+    // origin check above is what keeps a cross-site page from driving it.
+    // The token the GET page embedded via `crate::csrf::hidden_field` is a
+    // second check on the browser's form post, not a secret: signed out,
+    // every visitor gets the same token, and any client can read it from
+    // `GET /b/auth/bootstrap`. A client without browser headers that holds a
+    // bootstrap token may redeem it, so that is not a gap.
     let submitted_csrf = form
         .get(crate::csrf::FIELD_NAME)
         .map(String::as_str)

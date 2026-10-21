@@ -39,8 +39,9 @@
 //!    token for the plain (non-JS, non-`htmx`) SSR `<form>` POSTs in this
 //!    app (bootstrap-admin redemption, profile update). Defense-in-depth on
 //!    top of layer 1: even an allowed-origin POST must also carry the
-//!    correct per-identity token, which nothing outside this same origin
-//!    could produce or read.
+//!    correct per-identity token. For a signed-in identity nothing outside
+//!    this origin can produce or read it; signed out it is one shared,
+//!    readable value (see [`ANONYMOUS_SUBJECT`]).
 //!
 //! `htmx`- and `fetch`-driven forms elsewhere in the app (admin variables,
 //! users, database explorer, portal buttons, chat composer, settings forms,
@@ -64,10 +65,12 @@ const CSRF_KEY_LABEL: &str = "impresspress/csrf";
 
 /// Subject used to key the token when no session is established yet (e.g.
 /// the bootstrap-admin form, rendered and submitted with no `auth_token`
-/// cookie at all). A constant subject is fine here — the anonymous case does
-/// not need per-visitor uniqueness to defeat CSRF, only unguessability, and
-/// an attacker's cross-site page can neither compute this HMAC (no master
-/// secret) nor read it off our page (Same-Origin Policy).
+/// cookie at all). The token is then the same for every signed-out visitor,
+/// and anyone can read it by fetching the form page, so it is not a secret:
+/// it only stops a cross-site page's script from reading it out of the
+/// victim's browser (Same-Origin Policy), and a signed-out route that needs
+/// a real cross-site defence has the origin check
+/// ([`SessionIssuance::verify`]).
 const ANONYMOUS_SUBJECT: &str = "anonymous";
 
 /// `<form>` field name every CSRF-protected plain-HTML form submits the
@@ -494,6 +497,52 @@ mod tests {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.origin", "http://impresspress.example.com");
         assert!(!origin_policy_refuses(&msg, true));
+    }
+
+    // -- SessionIssuance::verify: the signed-out cross-origin shapes --------
+
+    /// A request with no session to protect, as login, signup and refresh
+    /// receive it, from `impresspress.example.com`'s point of view.
+    fn signed_out_post() -> Message {
+        cookie_msg("create", "/b/auth/api/login", "")
+    }
+
+    async fn issuance_is_refused(msg: &Message) -> bool {
+        let ctx = TestContext::new().await;
+        match SessionIssuance::verify(&ctx, msg).await {
+            Ok(_) => false,
+            Err(out) => crate::test_support::output_is_error(out, "PermissionDenied").await,
+        }
+    }
+
+    /// `Origin: null` is what a sandboxed iframe, a page with
+    /// `Referrer-Policy: no-referrer` and a cross-origin redirect of a POST
+    /// send. It names no host, so it is not this one, and a Referer that does
+    /// match cannot rescue it: `Origin` is present, so it decides.
+    #[tokio::test]
+    async fn an_opaque_origin_is_refused_issuance() {
+        for referer in [None, Some("https://impresspress.example.com/b/auth/login")] {
+            let mut msg = signed_out_post();
+            msg.set_meta("http.header.origin", "null");
+            if let Some(referer) = referer {
+                msg.set_meta("http.header.referer", referer);
+            }
+            assert_eq!(request_origin(&msg), Origin::CrossOrigin, "{referer:?}");
+            assert!(issuance_is_refused(&msg).await, "{referer:?}");
+        }
+    }
+
+    /// With neither Fetch Metadata nor `Origin`, a `Referer` naming another
+    /// site is cross-origin, not "no browser signal".
+    #[tokio::test]
+    async fn a_foreign_referer_alone_is_refused_issuance() {
+        let mut msg = signed_out_post();
+        msg.set_meta(
+            "http.header.referer",
+            "https://evil.example/login-csrf.html",
+        );
+        assert_eq!(request_origin(&msg), Origin::CrossOrigin);
+        assert!(issuance_is_refused(&msg).await);
     }
 
     // -- token / hidden_field / verify ---------------------------------------
