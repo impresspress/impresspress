@@ -614,7 +614,7 @@ mod tests {
                 concat!(
                     r#"<div class="topbar__actions">"#,
                     r#"<span class="badge badge-info">Live</span>"#,
-                    r#"<span class="badge badge-warning">pending</span>"#,
+                    r#"<span class="badge badge-warning">Pending</span>"#,
                     r#"<a class="btn btn--secondary" href="/preview">Preview</a>"#,
                     r#"<button class="btn btn--secondary" type="button" data-action="dup">{plus}Duplicate</button>"#,
                     r#"<button class="btn btn--primary" type="submit">Publish</button>"#,
@@ -643,7 +643,7 @@ mod tests {
         .render()
         .into_string();
         assert!(
-            only_status.contains(r#"<div class="topbar__actions"><span class="badge badge-success">active</span></div>"#),
+            only_status.contains(r#"<div class="topbar__actions"><span class="badge badge-success">Active</span></div>"#),
             "{only_status}"
         );
         let nothing = Topbar {

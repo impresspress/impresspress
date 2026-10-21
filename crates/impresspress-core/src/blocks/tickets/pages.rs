@@ -37,13 +37,19 @@ const CREATE_TICKET_MODAL: &str = "create-ticket";
 /// The "New ticket type" modal on the types page.
 pub(super) const CREATE_TYPE_MODAL: &str = "create-type";
 /// The inbox's New ticket trigger: the header's primary and the empty
-/// inbox's secondary copy are drawn from this one label and target.
-const NEW_TICKET: (&str, ActionTarget<'static>) =
-    ("New ticket", ActionTarget::Modal(CREATE_TICKET_MODAL));
+/// inbox's secondary copy are drawn from this one label, target and icon.
+const NEW_TICKET: (&str, ActionTarget<'static>, fn() -> Markup) = (
+    "New ticket",
+    ActionTarget::Modal(CREATE_TICKET_MODAL),
+    icons::plus,
+);
 /// The types page's New type trigger, likewise for the header and the empty
 /// list.
-const NEW_TYPE: (&str, ActionTarget<'static>) =
-    ("New type", ActionTarget::Modal(CREATE_TYPE_MODAL));
+const NEW_TYPE: (&str, ActionTarget<'static>, fn() -> Markup) = (
+    "New type",
+    ActionTarget::Modal(CREATE_TYPE_MODAL),
+    icons::plus,
+);
 /// The element a ticket's workflow and note forms swap with the re-rendered
 /// ticket.
 pub(super) const DETAIL_REGION: &str = "ticket-detail";
@@ -105,13 +111,15 @@ pub async fn inbox(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ))
         (create_ticket_modal(&types))
     };
-    let (new_ticket, new_ticket_target) = NEW_TICKET;
+    let (new_ticket, new_ticket_target, new_ticket_icon) = NEW_TICKET;
     shell(
         ctx,
         msg,
         ui::Shell::admin("Tickets", "Tickets")
             .subtitle("Public reports and internal work items")
-            .primary_action(HeaderAction::new(new_ticket, new_ticket_target).icon(icons::plus())),
+            .primary_action(
+                HeaderAction::new(new_ticket, new_ticket_target).icon(new_ticket_icon()),
+            ),
         Section::Inbox,
         content,
     )
@@ -166,14 +174,14 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         }))
     };
-    let (new_type, new_type_target) = NEW_TYPE;
+    let (new_type, new_type_target, new_type_icon) = NEW_TYPE;
     shell(
         ctx,
         msg,
         ui::Shell::admin("Ticket types", "Types")
             .trail(tickets_trail("Types"))
             .subtitle("The categories every ticket is filed under")
-            .primary_action(HeaderAction::new(new_type, new_type_target).icon(icons::plus())),
+            .primary_action(HeaderAction::new(new_type, new_type_target).icon(new_type_icon())),
         Section::Types,
         content,
     )
@@ -326,10 +334,8 @@ const TICKET_COLUMNS: [TableCol<'static>; 6] = [
 /// The empty inbox's New ticket: the header's trigger again, as a secondary
 /// — the header holds the page's one primary.
 fn new_ticket_button() -> Markup {
-    let (label, target) = NEW_TICKET;
-    Action::secondary(label, target)
-        .icon(icons::plus())
-        .render()
+    let (label, target, icon) = NEW_TICKET;
+    Action::secondary(label, target).icon(icon()).render()
 }
 
 /// The inbox filters: one labelled control per filter, every option drawn
@@ -889,10 +895,8 @@ const TYPE_COLUMNS: [TableCol<'static>; 7] = [
 /// The empty type list's New type: the header's trigger again, as a
 /// secondary.
 fn new_type_button() -> Markup {
-    let (label, target) = NEW_TYPE;
-    Action::secondary(label, target)
-        .icon(icons::plus())
-        .render()
+    let (label, target, icon) = NEW_TYPE;
+    Action::secondary(label, target).icon(icon()).render()
 }
 
 /// The edit modal of the type `id`.

@@ -608,7 +608,6 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
 .llm-table__meta { display: none; }
-.llm-table__meta .datetime { white-space: normal; }
 @container llm-table (max-width: 54rem) {
 	.llm-table--providers td:is([data-label="Protocol"], [data-label="Models"], [data-label="Status"]),
 	.llm-table--providers > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
@@ -639,7 +638,9 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	display: none; margin-top: var(--space-1);
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
-.ticket-table__meta .datetime { white-space: normal; }
+/* A subject may be a pasted URL with no space: it breaks anywhere, or it
+   sets the narrowed grid's minimum and the inbox scrolls the page. */
+.ticket-table--inbox .data-table__title { overflow-wrap: anywhere; }
 @container ticket-table (max-width: 46rem) {
 	.ticket-table--inbox td:is([data-label="Type"], [data-label="Source"], [data-label="Created"]),
 	.ticket-table--inbox > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }

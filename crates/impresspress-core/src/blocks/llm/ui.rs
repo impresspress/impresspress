@@ -115,8 +115,8 @@ pub(super) async fn providers_page(
             "Read-only on this deployment"
         });
     let shell = if manages {
-        let (label, target) = ADD_PROVIDER;
-        shell.primary_action(components::HeaderAction::new(label, target).icon(icons::plus()))
+        let (label, target, icon) = ADD_PROVIDER;
+        shell.primary_action(components::HeaderAction::new(label, target).icon(icon()))
     } else {
         shell
     };
@@ -135,9 +135,12 @@ pub(super) async fn providers_page(
 const ADD_PROVIDER_MODAL_ID: &str = "add-provider";
 
 /// The Add provider trigger: the header's primary and the empty list's
-/// secondary copy are drawn from this one label and target.
-const ADD_PROVIDER: (&str, ActionTarget<'static>) =
-    ("Add provider", ActionTarget::Modal(ADD_PROVIDER_MODAL_ID));
+/// secondary copy are drawn from this one label, target and icon.
+const ADD_PROVIDER: (&str, ActionTarget<'static>, fn() -> Markup) = (
+    "Add provider",
+    ActionTarget::Modal(ADD_PROVIDER_MODAL_ID),
+    icons::plus,
+);
 
 /// The element id of provider `id`'s edit modal.
 fn edit_modal_id(id: &str) -> String {
@@ -147,10 +150,8 @@ fn edit_modal_id(id: &str) -> String {
 /// The empty provider list's call to action: the header's Add provider
 /// again, as a secondary — the header holds the page's one primary.
 fn add_provider_button() -> Markup {
-    let (label, target) = ADD_PROVIDER;
-    Action::secondary(label, target)
-        .icon(icons::plus())
-        .render()
+    let (label, target, icon) = ADD_PROVIDER;
+    Action::secondary(label, target).icon(icon()).render()
 }
 
 /// What the page says instead of offering controls when the runtime holds a

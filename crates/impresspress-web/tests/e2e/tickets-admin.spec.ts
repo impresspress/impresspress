@@ -167,6 +167,7 @@ test.describe('tickets admin', () => {
 
   // The pages with the long values a real deployment holds — a type title
   // in parentheses, a subject, an assignee id and a page path with no space,
+  // a subject that is a pasted URL,
   // an analysis quoting ids — at every width from the phone to 1280: no page
   // scrolls sideways, no record table scrolls inside its frame, no card
   // overflows, and each page shows its one primary or none.
@@ -201,6 +202,20 @@ test.describe('tickets admin', () => {
     });
     expect(ticket.ok(), await ticket.text()).toBe(true);
     const ticketId = ((await ticket.json()) as { id: string }).id;
+    // What a public reporter pastes as the subject: the page's URL, with no
+    // space to break at.
+    const pasted = await api.post('/b/tickets/api/admin/tickets', {
+      headers,
+      data: {
+        source: 'api',
+        type_id: typeId,
+        subject: 'https://northwind-traders-production.example.com/activities/wellington-cbd-store-lambton-quay/opening-hours?listing=listing_01HZX9Q2KZp7a9XyTqAbCdEfGh',
+        description: 'The opening hours on this page are wrong: Monday opens at 9am, not 8am.',
+        priority: 'high',
+      },
+    });
+    expect(pasted.ok(), await pasted.text()).toBe(true);
+    const pastedId = ((await pasted.json()) as { id: string }).id;
     const assigned = await api.patch(`/b/tickets/api/admin/tickets/${ticketId}`, {
       headers,
       data: { assignee_id: 'user_01HZX9Q2KZp7a9XyTqAbCdEfGh-ana.lucia.fernandez-gonzalez', reason: '' },
@@ -222,6 +237,7 @@ test.describe('tickets admin', () => {
     const pages: Record<string, string[]> = {
       '/b/tickets/admin/tickets': ['New ticket'],
       [`/b/tickets/admin/tickets/${ticketId}`]: ['Save changes'],
+      [`/b/tickets/admin/tickets/${pastedId}`]: ['Save changes'],
       '/b/tickets/admin/types': ['New type'],
       '/b/tickets/admin/settings': [],
       '/b/tickets/admin/endpoints': [],

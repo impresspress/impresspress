@@ -213,6 +213,9 @@ test.describe('LLM pages with long values', () => {
       for (const [role, content] of [
         ['user', "Why did invoice in_1NvQh2KZp7a9XyTqAbCdEfGhIjKlMn fail? Stripe said: No such customer: 'cus_1NvQh2KZp7a9XyTqAbCdEfGh'"],
         ['assistant', 'The customer was deleted before the retry. See https://dashboard.stripe.com/test/customers/cus_1NvQh2KZp7a9XyTqAbCdEfGh/payment_methods/pm_1NvQh2KZp7a9XyTqAbCdEfGh'],
+        // A one-line log in a fenced block: a `pre` keeps its line, so it
+        // must scroll inside itself rather than out of the message.
+        ['assistant', "The worker logged:\n\n```\nError: No such payment_intent: 'pi_1NvQh2KZp7a9XyTqAbCdEfGh'; request req_1NvQh2KZp7a9XyTq (POST /v1/payment_intents/pi_1NvQh2KZp7a9XyTqAbCdEfGh/confirm) at StripeClient.request (/srv/northwind/node_modules/stripe/lib/StripeResource.js:217:23)\n```"],
       ] as const) {
         const entry = await api.post(`/b/messages/api/contexts/${threadId}/entries`, {
           headers,

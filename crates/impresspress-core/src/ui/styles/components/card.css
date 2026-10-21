@@ -462,7 +462,7 @@
 }
 .messages-new__form .form-group { margin-bottom: 0; }
 @media (max-width: 720px) {
-	.messages-new__form { grid-template-columns: minmax(0, 1fr); }
+	.messages-new__form { grid-template-columns: 1fr; }
 }
 .messages-list {
 	display: flex; flex-direction: column;
@@ -546,6 +546,9 @@
 .message-card__content--markdown { white-space: normal; line-height: 1.6; }
 .message-card__content--markdown > :first-child { margin-top: 0; }
 .message-card__content--markdown > :last-child { margin-bottom: 0; }
+/* A code block (a log line, a stack trace) keeps its lines and scrolls
+   inside itself rather than run out of the message and scroll the chat. */
+.message-card__content--markdown pre { overflow-x: auto; max-width: 100%; }
 .message-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
 .message-card__date { margin-left: auto; font-size: var(--text-sm); color: var(--text-muted); }
 

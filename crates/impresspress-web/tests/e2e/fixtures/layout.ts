@@ -15,7 +15,8 @@ export interface Layout {
    * An endpoint reference is a labelled scroll region by design
    * (`components::endpoint_table`), so it is left out. */
   tables: string[];
-  /** Elements drawn past the content column's right edge. */
+  /** Elements drawn past the content column's right edge. A code block in
+   * a message scrolls inside itself, so what it holds is left out. */
   past: string[];
   /** Cards, the chat frame, message and thread cards whose content is wider
    * than they are: a long unbroken word overflows its line without moving
@@ -41,7 +42,7 @@ export function layout(page: Page): Promise<Layout> {
         .filter((t) => visible(t) && t.scrollWidth > t.clientWidth + 1)
         .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
       past: [...document.querySelectorAll<HTMLElement>('main#content *')]
-        .filter((e) => visible(e) && !e.closest('.subnav, .tabs, .filter-links, .data-table--scroll, dialog'))
+        .filter((e) => visible(e) && !e.closest('.subnav, .tabs, .filter-links, .data-table--scroll, .message-card__content pre, dialog'))
         .filter((e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().right > edge + 1)
         .map(name)
         .slice(0, 4),

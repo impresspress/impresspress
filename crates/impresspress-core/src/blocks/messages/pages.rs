@@ -312,8 +312,9 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
     };
 
     // A task or notification shows its type and status beside its title; a
-    // conversation is a chat, and needs neither. The type is written in
-    // sentence case here; the status is the shared `status_badge`.
+    // conversation is a chat, and needs neither. Both read in sentence case:
+    // the type through `humanize`, the status through `status_badge`, which
+    // labels with the same function.
     let shell = ui::Shell::admin(display_title, display_title).trail(detail_trail(display_title));
     let shell = if context.str_field("type") == "conversation" {
         shell
@@ -747,7 +748,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<span class="badge badge-success">active</span>"#),
+            html.contains(r#"<span class="badge badge-success">Active</span>"#),
             "{html}"
         );
     }
