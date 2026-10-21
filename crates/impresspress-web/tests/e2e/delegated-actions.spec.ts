@@ -239,8 +239,9 @@ test.describe('delegated actions', () => {
     await page.locator('#group-editor-name').fill('delegation guard');
     await page.locator('#group-editor button[type="submit"]').click();
 
-    // The refusal is painted once, from one request.
-    await expect(page.locator('#catalog-admin-error')).toBeVisible();
+    // The refusal is painted once, from one request, inside the editor's
+    // dialog (the page behind an open modal is inert).
+    await expect(page.locator('#group-editor-error')).toBeVisible();
     expect(groupPosts).toEqual(['POST']);
   });
 

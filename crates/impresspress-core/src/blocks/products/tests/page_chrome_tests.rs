@@ -168,11 +168,15 @@ async fn wizard_marks_the_current_step() {
 }
 
 /// A product page: its name is the title under an "All products" crumb, its
-/// lifecycle actions are the topbar's with one primary, the details form has
-/// its own one primary, a draft offer has one, and a product without pricing
-/// offers no link to create a different product.
+/// state is the topbar's status, its lifecycle actions are the topbar's, and
+/// the topbar's primary is the page's ONLY visible one (layout rule 6): the
+/// details card's Save, a draft offer's Publish and the revealed pricing
+/// editor's Save are secondary, so neither revealing the editor nor adding a
+/// draft puts a second primary beside it. Every section is one card level.
 #[tokio::test]
-async fn product_detail_has_one_primary_per_section() {
+async fn product_detail_has_one_visible_primary() {
+    use crate::test_support::dom;
+
     let ctx = ctx().await;
     let (msg, input) = admin_create_msg(
         "/b/products/api/admin/products",
@@ -191,8 +195,10 @@ async fn product_detail_has_one_primary_per_section() {
         "{html}"
     );
     let actions = topbar_actions(&html);
-    assert_eq!(actions.matches("btn--primary").count(), 1, "{actions}");
-    assert!(actions.contains("Publish product"), "{actions}");
+    assert!(
+        actions.starts_with(r#"<span class="badge badge-warning">draft</span>"#),
+        "the product's state is the header's status: {actions}"
+    );
     // `products-manager.js` reads the status each lifecycle action sets off
     // the button that carries it.
     assert!(
@@ -203,15 +209,44 @@ async fn product_detail_has_one_primary_per_section() {
         actions.contains(r#"<button data-product-status="active" class="btn btn--primary" type="button" data-action="pm-set-status">Publish product</button>"#),
         "{actions}"
     );
-    // The details card: everything before the (hidden) pricing editor, a
-    // section with its own Save.
-    let card = body(&html)
-        .split_once(r#"id="product-manager-visual-editor""#)
-        .map_or("", |(card, _)| card);
-    assert_eq!(card.matches("btn--primary").count(), 1, "{card}");
+    let (page, dialogs) = dom::visible_primaries(&html);
+    assert_eq!(
+        page,
+        [r#"button.btn.btn--primary "Publish product""#],
+        "{html}"
+    );
+    assert!(dialogs.is_empty(), "{dialogs:?}");
     assert!(
-        card.contains(r#"<div class="products-form-actions">"#),
-        "{card}"
+        body(&html).contains(r#"<section class="card"><header class="card__head"><div><h2 class="card__title">Product details</h2>"#),
+        "{html}"
+    );
+    assert!(
+        body(&html).contains(r#"<div class="products-form-actions"><button class="btn btn--secondary" type="submit">Save product details</button></div>"#),
+        "{html}"
+    );
+    // The pricing editor is a hidden card a script reveals: revealing it
+    // shows its Save, which is secondary, so the page still has one primary.
+    let editor = body(&html)
+        .split_once(r#"<section class="card" id="product-manager-visual-editor" hidden>"#)
+        .map(|(_, rest)| rest)
+        .expect("the hidden editor card");
+    let editor = editor
+        .split_once(r#"<template id="wizard-variable-row">"#)
+        .map_or("", |(e, _)| e);
+    assert!(!editor.contains("btn--primary"), "{editor}");
+    assert!(
+        editor.contains(r#"<button class="btn btn--secondary" id="manager-visual-save" type="button" data-action="pm-save-visual-offer">"#),
+        "{editor}"
+    );
+    let revealed = html.replace(
+        r#"id="product-manager-visual-editor" hidden"#,
+        r#"id="product-manager-visual-editor""#,
+    );
+    assert_eq!(dom::visible_primaries(&revealed).0.len(), 1, "{revealed}");
+    assert!(
+        dom::card_level_inside_card(&html).is_empty(),
+        "{:?}",
+        dom::card_level_inside_card(&html)
     );
     assert!(!html.contains("Create a product with pricing"), "{html}");
     assert!(
@@ -219,8 +254,8 @@ async fn product_detail_has_one_primary_per_section() {
         "the crumb is the way back: {html}"
     );
 
-    // A draft offer: Publish is its one primary; Edit visually and Save draft
-    // definition are secondary.
+    // A draft offer: a Card the manager script selects by its data
+    // attributes, its controls in its first row, every one secondary.
     let (msg, input) = admin_create_msg(
         &format!("/b/products/api/admin/products/{id}/offers"),
         serde_json::json!({
@@ -242,15 +277,37 @@ async fn product_detail_has_one_primary_per_section() {
             "checkout": {}
         }),
     );
-    output_to_json(dispatch(&ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&ctx, msg, input).await).await;
+    let offer_id = created["offer"]["id"].as_str().expect("offer id");
     let html = admin_page(&ctx, &format!("/b/products/admin/products/{id}")).await;
+    assert!(
+        html.contains(&format!(
+            concat!(
+                r#"<section data-offer-card="" data-offer-id="{offer}" "#,
+                r#"data-offer-url="/b/products/api/admin/products/{id}/offers/{offer}" "#,
+                r#"data-preview-url="/b/products/api/admin/products/{id}/offers/{offer}/preview" "#,
+                r#"data-presets-url="/b/products/api/admin/products/{id}/offers/{offer}/presets" "#,
+                r#"data-links-url="/b/products/api/admin/products/{id}/offers/{offer}/payment-links" "#,
+                r#"data-currency="NZD" class="card"><header class="card__head"><div><h2 class="card__title">Draft tier</h2>"#,
+                r#"<p class="card__subtitle">One-time payment · fixed pricing · NZD</p>"#,
+            ),
+            offer = offer_id,
+            id = id,
+        )),
+        "{html}"
+    );
     let offer = html
         .split_once("data-offer-card")
         .map_or("", |(_, offer)| offer);
-    assert_eq!(offer.matches("btn--primary").count(), 1, "{offer}");
     assert!(
-        offer.contains(r#"class="btn btn--primary btn--sm" type="button" data-action="pm-offer-action" data-offer-op="publish""#),
+        offer.contains(r#"class="btn btn--secondary btn--sm" type="button" data-action="pm-offer-action" data-offer-op="publish""#),
         "{offer}"
+    );
+    assert_eq!(dom::visible_primaries(&html).0.len(), 1, "{html}");
+    assert!(
+        dom::card_level_inside_card(&html).is_empty(),
+        "{:?}",
+        dom::card_level_inside_card(&html)
     );
 }
 
@@ -401,4 +458,237 @@ async fn portal_pages_carry_one_row_of_section_links() {
         assert!(!html.contains("Seller workspace"), "{path}\n{html}");
         assert!(!body(&html).contains("page-title"), "{path}\n{html}");
     }
+}
+
+/// Products' sub-pages follow the trail rule: `Products ›`, linking the
+/// overview, above the sub-page's own name as the `h1`. The overview is
+/// "Products" with no trail.
+#[tokio::test]
+async fn the_sub_pages_are_titled_under_the_products_trail() {
+    let ctx = ctx().await;
+    let overview = admin_page(&ctx, "/b/products/admin/").await;
+    assert!(
+        overview.contains(r#"<h1 class="topbar__title">Products</h1>"#),
+        "{overview}"
+    );
+    assert!(!overview.contains("topbar__crumbs"), "{overview}");
+    for (path, h1) in [
+        ("/b/products/admin/manage", "All products"),
+        ("/b/products/admin/manage?view=deleted", "All products"),
+        ("/b/products/admin/groups", "Groups"),
+    ] {
+        let html = admin_page(&ctx, path).await;
+        assert!(
+            html.contains(&format!(
+                concat!(
+                    r#"<nav class="topbar__crumbs" aria-label="Breadcrumb"><ol>"#,
+                    r#"<li><a href="/b/products/admin/">Products</a></li></ol></nav>"#,
+                    r#"<h1 class="topbar__title">{h1}</h1>"#
+                ),
+                h1 = h1
+            )),
+            "{path}: expected the trail Products › {h1}: {html}"
+        );
+    }
+}
+
+/// The overview: the three guide tiles are cards, the stat row and the guide
+/// sit on the page background, and the header's "New product" is the one
+/// primary (the empty catalog's prompt repeats it as a secondary).
+#[tokio::test]
+async fn the_overview_guide_is_three_cards_under_one_primary() {
+    use crate::test_support::dom;
+
+    let ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
+    let html = admin_page(&ctx, "/b/products/admin/").await;
+    let guide = html
+        .split_once(r#"<div class="products-guide">"#)
+        .and_then(|(_, rest)| rest.split_once("</section>"))
+        .map_or("", |(guide, _)| guide);
+    assert_eq!(
+        guide
+            .matches(
+                r#"<div class="card"><div class="card__body"><span class="products-guide__number">"#
+            )
+            .count(),
+        3,
+        "{guide}"
+    );
+    assert!(!html.contains("products-guide__item"), "{html}");
+    let (page, _) = dom::visible_primaries(&html);
+    assert_eq!(page, [r#"a.btn.btn--primary "New product""#], "{html}");
+    assert!(
+        dom::card_level_inside_card(&html).is_empty(),
+        "{:?}",
+        dom::card_level_inside_card(&html)
+    );
+}
+
+/// The wizard's steps are cards a script steps through: only the first is
+/// shown, and Continue is the one visible primary. The publish button is the
+/// other primary, hidden until the last step, when Continue hides.
+#[tokio::test]
+async fn the_wizard_steps_are_cards_with_one_visible_primary() {
+    use crate::test_support::dom;
+
+    let ctx = ctx().await;
+    let html = admin_page(&ctx, "/b/products/admin/new").await;
+    for step in 1..=5 {
+        let opening = if step == 1 {
+            format!(
+                r#"<section data-wizard-step="{step}" class="card"><header class="card__head">"#
+            )
+        } else {
+            format!(
+                r#"<section data-wizard-step="{step}" class="card" hidden><header class="card__head">"#
+            )
+        };
+        assert!(html.contains(&opening), "step {step}: {html}");
+    }
+    let (page, dialogs) = dom::visible_primaries(&html);
+    assert_eq!(page, [r#"button.btn.btn--primary "Continue""#], "{html}");
+    assert!(dialogs.is_empty());
+    assert!(
+        html.contains(r#"<button data-wizard-intent="publish" class="btn btn--primary" id="wizard-publish" hidden type="button" data-action="pw-submit">Create and publish</button>"#),
+        "{html}"
+    );
+    // Shipping is a divided part of the checkout step, not a card in it.
+    assert!(
+        html.contains(
+            r#"<div class="details-block--divider" id="wizard-shipping-settings" hidden>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        dom::card_level_inside_card(&html).is_empty(),
+        "{:?}",
+        dom::card_level_inside_card(&html)
+    );
+}
+
+/// The offer editor's rows are rendered once, as `<template>`s, and are not
+/// cards; the wizard's script clones them and writes no row markup of its
+/// own.
+#[tokio::test]
+async fn the_offer_rows_are_server_rendered_templates_not_cards() {
+    let ctx = ctx().await;
+    let html = admin_page(&ctx, "/b/products/admin/new").await;
+    for (template, row) in [
+        ("wizard-variable-row", "data-variable-row"),
+        ("wizard-component-row", "data-component-row"),
+    ] {
+        let body = html
+            .split_once(&format!(r#"<template id="{template}">"#))
+            .and_then(|(_, rest)| rest.split_once("</template>"))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| panic!("{template}: {html}"));
+        assert!(
+            body.starts_with(&format!(r#"<div class="offer-row" {row}>"#)),
+            "{template}: {body}"
+        );
+        assert!(!body.contains(r#"class="card"#), "{template}: {body}");
+        assert!(
+            body.contains(r#"data-action="pw-remove-row""#),
+            "{template}: {body}"
+        );
+    }
+    let js = include_str!("../assets/products-wizard.js");
+    assert!(!js.contains("innerHTML"), "the script writes no row markup");
+    assert!(!js.contains("card"), "the script names no card class");
+    assert!(js.contains("content.firstElementChild.cloneNode(true)"));
+}
+
+/// A seller whose policy allows no built-in template has nothing to step
+/// through: the first step's card says so in a one-line note (not a framed
+/// empty state inside the card), and there is no Continue and no wizard
+/// script to drive steps that are not there.
+#[tokio::test]
+async fn a_seller_with_no_template_sees_a_note_in_the_first_step() {
+    use crate::test_support::dom;
+
+    let ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        (
+            "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_TEMPLATES",
+            "custom_template",
+        ),
+    ])
+    .await;
+    let (mut msg, input) = get_msg("/b/products/my-products/new", "seller_1");
+    msg.set_meta("http.header.accept", "text/html");
+    let html = output_to_html(dispatch(&ctx, msg, input).await).await;
+    assert!(
+        html.contains(
+            r#"<div class="card__body"><p class="empty-note">No seller templates are available."#
+        ),
+        "{html}"
+    );
+    assert!(!html.contains(r#"class="empty""#), "{html}");
+    assert!(dom::visible_primaries(&html).0.is_empty(), "{html}");
+    assert!(!html.contains("data-wizard-step=\"2\""), "{html}");
+    assert!(!html.contains("products-wizard"), "{html}");
+}
+
+/// Groups: the editor is a `<dialog>`, so its "Save group" is the dialog's
+/// own primary and opening it never shows a second primary beside the
+/// topbar's "New group". Its refusals show inside it; the empty list repeats
+/// "New group" as a secondary.
+#[tokio::test]
+async fn the_group_editor_is_a_dialog_with_its_own_primary() {
+    use crate::test_support::dom;
+
+    let ctx = ctx().await;
+    let html = admin_page(&ctx, "/b/products/admin/groups").await;
+    let (page, dialogs) = dom::visible_primaries(&html);
+    assert_eq!(page, [r#"button.btn.btn--primary "New group""#], "{html}");
+    assert_eq!(
+        dialogs,
+        [vec![r#"button.btn.btn--primary "Save group""#.to_string()]],
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"<dialog class="modal" id="group-editor" aria-labelledby="group-editor-title">"#
+        ),
+        "{html}"
+    );
+    let dialog = html
+        .split_once(r#"id="group-editor""#)
+        .and_then(|(_, rest)| rest.split_once("</dialog>"))
+        .map_or("", |(dialog, _)| dialog);
+    assert!(
+        dialog.contains(r#"<p class="login-error" id="group-editor-error" role="alert""#),
+        "{dialog}"
+    );
+    assert!(
+        !html.contains(r#"class="card" id="group-editor""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<div class="empty__action"><button class="btn btn--secondary" type="button" data-action="pc-new"><svg"#),
+        "{html}"
+    );
+    assert_eq!(html.matches("New group</button>").count(), 2, "{html}");
+}
+
+/// The mocked browser specs (`products-wizard.spec.ts`,
+/// `products-manager.spec.ts`) clone the offer editor's rows from a fixture
+/// file rather than a served page; this keeps that file what the page
+/// renders. After a deliberate markup change, write the expected text to
+/// the path.
+#[test]
+fn the_offer_row_templates_fixture_is_what_the_page_renders() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../impresspress-web/tests/e2e/fixtures/offer-row-templates.html"
+    );
+    let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+    assert_eq!(
+        on_disk,
+        format!(
+            "{}\n",
+            super::super::pages::offer_row_templates().into_string()
+        ),
+        "{path} is out of date; write the expected text to it"
+    );
 }

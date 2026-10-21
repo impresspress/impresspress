@@ -18,6 +18,17 @@ function bundle(name: string) {
   return readFileSync(fileURLToPath(new URL(name, bundlesUrl)), "utf8");
 }
 
+/**
+ * The offer editor's row `<template>`s, as `pages::offer_row_templates`
+ * renders them on the wizard and the product page (a Rust test keeps the
+ * fixture equal to that). `addWizardVariable` and `addWizardComponent`
+ * clone them.
+ */
+const offerRowTemplates = readFileSync(
+  fileURLToPath(new URL("./fixtures/offer-row-templates.html", import.meta.url)),
+  "utf8",
+);
+
 const adminOrigin = "https://admin.example";
 
 const wizardFixture = `<!doctype html>
@@ -35,6 +46,7 @@ const wizardFixture = `<!doctype html>
     <input id="wizard-interval-count" value="1">
     <div id="wizard-variables"></div>
     <div id="wizard-components"></div>
+    ${offerRowTemplates}
     <input id="wizard-promotions" type="checkbox">
     <input id="wizard-automatic-tax" type="checkbox" checked>
     <input id="wizard-billing-address" type="checkbox">

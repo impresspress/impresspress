@@ -20,10 +20,20 @@ function bundle(name: string) {
 
 const adminOrigin = "https://admin.example";
 
+/**
+ * The shell's own script, which opens and closes every `components::Modal`
+ * dialog (the group editor is one) through its `openModal` door.
+ */
+const chromeJs = readFileSync(
+  fileURLToPath(new URL("../../../impresspress-core/src/ui/assets/chrome.js", import.meta.url)),
+  "utf8",
+);
+
 function shell(body: string) {
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
     <p id="catalog-admin-error" role="alert" aria-live="assertive" hidden></p>
     ${body}
+    <script>${chromeJs}</script>
     <script>${bundle("products-catalog-admin.js")}</script>
   </body></html>`;
 }
@@ -31,9 +41,10 @@ function shell(body: string) {
 function groupsHtml() {
   return shell(`
     <button type="button" data-action="pc-new">New group</button>
-    <section id="group-editor" hidden>
+    <dialog class="modal" id="group-editor" aria-labelledby="group-editor-title">
       <h2 id="group-editor-title">New group</h2>
       <form data-action="pc-save-group">
+        <p id="group-editor-error" role="alert" aria-live="assertive" hidden></p>
         <input id="group-editor-id" type="hidden">
         <label for="group-editor-name">Name</label>
         <input id="group-editor-name" required maxlength="160">
@@ -41,9 +52,10 @@ function groupsHtml() {
         <textarea id="group-editor-description"></textarea>
         <label for="group-editor-status">Status</label>
         <select id="group-editor-status"><option value="active">Active</option><option value="archived">Archived</option></select>
+        <button type="button" data-action="modal-close">Cancel</button>
         <button type="submit">Save group</button>
       </form>
-    </section>
+    </dialog>
     <button type="button" data-record-id="group/1" data-record-name="Consulting" data-record-description="Service packages" data-record-status="active" data-action="pc-edit-group">Edit Consulting</button>
     <button type="button" data-record-id="group/1" data-record-name="Consulting" data-action="pc-delete">Delete Consulting</button>
   `);
@@ -89,10 +101,14 @@ test.describe("products catalog admin lifecycle forms", () => {
 
     await page.goto(`${adminOrigin}/b/products/admin/groups`);
     await page.getByRole("button", { name: "New group" }).click();
+    // The editor is a dialog; its refusal shows inside it, since the page
+    // behind an open modal is inert.
+    const editor = page.getByRole("dialog", { name: "New group" });
+    await expect(editor).toBeVisible();
     await page.getByLabel("Name").fill("Consulting");
     await page.getByLabel("Description").fill("Service packages");
     await page.getByRole("button", { name: "Save group" }).click();
-    await expect(page.getByRole("alert")).toHaveText(
+    await expect(editor.getByRole("alert")).toHaveText(
       "A group with this name already exists",
     );
     await expect(page.getByLabel("Name")).toHaveValue("Consulting");
@@ -104,6 +120,7 @@ test.describe("products catalog admin lifecycle forms", () => {
     await expect.poll(() => createAttempts).toBe(2);
 
     await page.getByRole("button", { name: "Edit Consulting" }).click();
+    await expect(page.getByRole("dialog", { name: "Edit group" })).toBeVisible();
     await expect(page.getByLabel("Name")).toHaveValue("Consulting");
     await page.getByLabel("Description").fill("Updated packages");
     await page.getByRole("button", { name: "Save group" }).click();

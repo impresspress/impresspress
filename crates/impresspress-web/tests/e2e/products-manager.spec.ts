@@ -18,6 +18,17 @@ function bundle(name: string) {
   return readFileSync(fileURLToPath(new URL(name, bundlesUrl)), "utf8");
 }
 
+/**
+ * The offer editor's row `<template>`s, as `pages::offer_row_templates`
+ * renders them on the wizard and the product page (a Rust test keeps the
+ * fixture equal to that). `addWizardVariable` and `addWizardComponent`
+ * clone them.
+ */
+const offerRowTemplates = readFileSync(
+  fileURLToPath(new URL("./fixtures/offer-row-templates.html", import.meta.url)),
+  "utf8",
+);
+
 const adminOrigin = "https://admin.example";
 
 function managerHtml(syncStatus: "failed" | "synced") {
@@ -190,7 +201,7 @@ function visualDraftManagerHtml(savedName?: string) {
     <p id="product-manager-error" role="alert" aria-live="assertive" hidden></p>
     <section id="product-pricing"><h2>Prices and checkout</h2>${card}</section>
     <section id="product-manager-visual-editor" hidden>
-      <h2 id="manager-visual-title">Edit pricing draft</h2>
+      <h2 class="card__title">Edit pricing draft</h2>
       <label for="manager-visual-offer-name">Offer name</label><input id="manager-visual-offer-name">
       <label for="manager-visual-mode">Charge type</label><select id="manager-visual-mode" data-action="pm-visual-mode-changed"><option value="payment">Payment</option><option value="subscription">Subscription</option></select>
       <label for="manager-visual-currency">Currency</label><input id="manager-visual-currency">
@@ -203,6 +214,7 @@ function visualDraftManagerHtml(savedName?: string) {
       <p id="manager-visual-error" role="alert" hidden></p>
       <button type="button" id="manager-visual-save" data-action="pm-save-visual-offer">Save visual changes</button>
     </section>
+    ${offerRowTemplates}
     <script>window.__toasts=[];document.body.addEventListener('showToast',function(e){window.__toasts.push(e.detail)});</script>
     <script>${bundle("products-wizard.js")}</script>
     <script>${bundle("products-manager.js")}</script>
@@ -244,7 +256,7 @@ function addPriceManagerHtml(offerName?: string) {
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
     <p id="product-manager-error" role="alert" aria-live="assertive" hidden></p>
     <section id="product-manager-visual-editor" hidden>
-      <h2 id="manager-visual-title">Edit pricing draft</h2>
+      <h2 class="card__title">Edit pricing draft</h2>
       <label for="manager-visual-offer-name">Offer name</label><input id="manager-visual-offer-name">
       <label for="manager-visual-mode">Charge type</label><select id="manager-visual-mode" data-action="pm-visual-mode-changed"><option value="payment">Payment</option><option value="subscription">Subscription</option></select>
       <label for="manager-visual-currency">Currency</label><input id="manager-visual-currency">
@@ -256,6 +268,7 @@ function addPriceManagerHtml(offerName?: string) {
       <button type="button" id="manager-visual-save" data-action="pm-save-visual-offer">Save visual changes</button>
       <button type="button" data-action="pm-close-visual-editor">Cancel</button>
     </section>
+    ${offerRowTemplates}
     <section id="product-pricing">${pricing}</section>
     <script>window.__toasts=[];document.body.addEventListener('showToast',function(e){window.__toasts.push(e.detail)});</script>
     <script>window.__productManagerConfig=${JSON.stringify(config)};</script>
@@ -687,7 +700,7 @@ test.describe("products manager Stripe catalog actions", () => {
     await page.getByRole("button", { name: "Add a price" }).click();
     const editor = page.locator("#product-manager-visual-editor");
     await expect(editor).toBeVisible();
-    await expect(page.locator("#manager-visual-title")).toHaveText("Add a price");
+    await expect(page.locator("#product-manager-visual-editor .card__title")).toHaveText("Add a price");
     await expect(page.locator("#manager-visual-offer-name")).toHaveValue("Poster");
     await expect(page.locator("#manager-visual-currency")).toHaveValue("NZD");
     const rows = page.locator("[data-component-row]");
