@@ -3903,10 +3903,26 @@ impl TestContext {
 
 /// Seed an account through the production `repo::users::insert`.
 ///
-/// The one way test code creates an account: every test account outside the
-/// repo's own unit tests (`blocks/auth/repo/users.rs`) is built here, so a
-/// change to how an account is written is made once, in [`SeedUser::insert`],
-/// rather than in a `NewUser` literal per test module.
+/// The one path from test code into `repo::users::insert`: outside the
+/// repo's own unit tests (`blocks/auth/repo/users.rs`), no test builds a
+/// `NewUser`, so a change to what that insert writes is made once, in
+/// [`SeedUser::insert`], rather than in a literal per test module.
+///
+/// Not every test account comes through here. These write `users` rows
+/// directly, each because the repo insert cannot produce the row it needs,
+/// and a change to the table's columns must update them too:
+///
+/// - [`TestContext::seed_auth_user`] / [`TestContext::seed_auth_user_verified`]:
+///   raw SQL under a caller-chosen id with a fixed creation date, because
+///   the repo insert mints its own id and stamps the current time.
+/// - `seed_row` in `tests/dev_data_snapshot.rs`: a row under a fixed id,
+///   written through the generic record API for a snapshot round trip.
+/// - The legacy-map test in `tests/auth/bootstrap_run.rs`: a hand-built map
+///   in the shape `bootstrap.rs` wrote before it used the repo, compared
+///   with the repo's row.
+/// - The upgrade tests in `blocks/auth/migrations/mod.rs` and
+///   `tests/auth/migrations_012_sessions_family.rs`: raw inserts against
+///   historical schemas, before the later migrations run.
 ///
 /// Most cases want the same row: an unverified address with no verification
 /// token and no avatar, differing only in the email, the display name and
