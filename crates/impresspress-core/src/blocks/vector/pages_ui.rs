@@ -12,7 +12,8 @@ use crate::{
     ui::{
         self,
         components::{
-            self, Action, ActionTarget, BadgeVariant, DataTable, HeaderAction, TableCol, TableRow,
+            self, Action, ActionTarget, BadgeVariant, Card, DataTable, HeaderAction, TableCol,
+            TableRow,
         },
         icons,
         shell::Crumb,
@@ -63,7 +64,7 @@ pub fn render_create_index_modal() -> Markup {
                 }
                 (crate::ui::components::modal_footer(html! {
                     (crate::ui::components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Create" }
+                    (Action::primary("Create", ActionTarget::Submit { form: None }).render())
                 }))
             }
         },
@@ -78,10 +79,23 @@ const INDEX_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Keyword search"),
 ];
 
-/// The empty list's "Create index" call to action, which repeats the
-/// topbar's primary action.
-fn create_index_button() -> Markup {
-    Action::primary("Create index", ActionTarget::Modal("create-vector-index"))
+/// The "Create index" trigger: one label and one target, which both of its
+/// renderings take — the topbar's primary ([`create_index_action`]) and the
+/// empty list's secondary ([`create_index_secondary`]).
+const CREATE_INDEX: (&str, ActionTarget<'static>) =
+    ("Create index", ActionTarget::Modal("create-vector-index"));
+
+/// The trigger as the topbar's primary action, where a backend exists.
+fn create_index_action() -> HeaderAction<'static> {
+    let (label, target) = CREATE_INDEX;
+    HeaderAction::new(label, target).icon(icons::plus())
+}
+
+/// The trigger as the empty list's call to action: a secondary, because the
+/// header already offers it as the page's primary (layout rule 9).
+fn create_index_secondary() -> Markup {
+    let (label, target) = CREATE_INDEX;
+    Action::secondary(label, target)
         .icon(icons::plus())
         .render()
 }
@@ -128,7 +142,7 @@ pub fn render_index_list_table(rows: &[IndexRow], backend_available: bool) -> Ma
                 icons::database(),
                 "No vector indexes yet",
                 "An index stores embeddings for search. Create one to start adding documents.",
-                Some(create_index_button()),
+                Some(create_index_secondary()),
             ))
             .render()
     } else {
@@ -142,35 +156,33 @@ fn vector_count_text(count: Option<u64>) -> String {
     count.map_or_else(|| "—".to_string(), |n| n.to_string())
 }
 
-/// Render the body sections for an index detail page: a Stats section
-/// (counts/model/dimensions/keyword toggle) and a Schema section showing
-/// the underlying storage table name plus introspected columns. Pure
-/// helper so the markup can be unit-tested without spinning a `Context`.
 const SCHEMA_COLUMNS: [TableCol<'static>; 2] =
     [TableCol::new("Column").primary(), TableCol::new("Type")];
 
-/// Render the body of an index detail page: the Schema section (the storage
-/// table's name and its introspected columns) and the index's key facts
-/// (vector count, dimensions, model, keyword search) for the detail rail.
-/// Pure helper so the markup can be unit-tested without spinning a
-/// `Context`.
+/// Render the body of an index detail page: the Schema card (the storage
+/// table's introspected columns) and, in the detail rail beside it, the
+/// index's key facts (vector count, dimensions, model, keyword search, and
+/// the storage table the columns belong to). Pure helper so the markup can be
+/// unit-tested without spinning a `Context`.
+///
+/// The Schema card is flush: its table is the card's one card-level surface.
+/// With no columns to show (no vector backend in this build, or none
+/// reported for the index) it holds a one-line note instead.
 pub fn render_index_detail_body(row: &IndexRow, schema_cols: &[(String, String)]) -> Markup {
-    let schema = html! {
-        section {
-            (components::section_header("Schema", None))
-            p { "Storage table: " code { (components::breakable_id(&row.name)) } }
-            @if !schema_cols.is_empty() {
-                (DataTable::new(&SCHEMA_COLUMNS)
-                    .rows(
-                        schema_cols
-                            .iter()
-                            .map(|(n, t)| TableRow::new(vec![html! { code { (n) } }, html! { (t) }]))
-                            .collect(),
-                    )
-                    .render())
-            }
-        }
-    };
+    let schema = Card::titled(
+        "Schema",
+        DataTable::new(&SCHEMA_COLUMNS)
+            .rows(
+                schema_cols
+                    .iter()
+                    .map(|(n, t)| TableRow::new(vec![html! { code { (n) } }, html! { (t) }]))
+                    .collect(),
+            )
+            .empty_note("No columns to show.")
+            .render(),
+    )
+    .flush()
+    .render();
     let model = if row.model.is_empty() {
         "Default"
     } else {
@@ -197,6 +209,10 @@ pub fn render_index_detail_body(row: &IndexRow, schema_cols: &[(String, String)]
             DetailMeta {
                 key: "Keyword search",
                 value: keyword_badge(row.keyword_search),
+            },
+            DetailMeta {
+                key: "Storage table",
+                value: html! { code { (components::breakable_id(&row.name)) } },
             },
         ],
     )
@@ -263,10 +279,7 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let shell = list_shell();
     let shell = if backend_available {
-        shell.primary_action(
-            HeaderAction::new("Create index", ActionTarget::Modal("create-vector-index"))
-                .icon(icons::plus()),
-        )
+        shell.primary_action(create_index_action())
     } else {
         shell
     };
@@ -396,8 +409,11 @@ mod tests {
             "missing empty hint: {empty}"
         );
         assert!(
-            empty.contains(r#"data-modal-target="create-vector-index""#),
-            "the empty list offers to create one: {empty}"
+            empty.contains(concat!(
+                r#"<div class="empty__action"><button class="btn btn--secondary" type="button" "#,
+                r#"data-action="modal-open" data-modal-target="create-vector-index"><svg"#
+            )),
+            "the empty list repeats the header's Create index as a secondary: {empty}"
         );
 
         let rows = vec![sample_index("docs", "fastembed", 384, 1234, true)];
@@ -465,6 +481,48 @@ mod tests {
         );
         assert!(html.contains("vector"), "missing column name");
         assert!(html.contains("BLOB"), "missing column type");
+    }
+
+    /// The schema is a flush card around its table, beside the rail that
+    /// names the storage table; with no columns it is a note.
+    #[test]
+    fn the_schema_is_a_flush_card_beside_the_rail() {
+        let row = sample_index("impresspress__vector__docs", "fastembed", 384, 1, true);
+        let cols = vec![("id".to_string(), "TEXT".to_string())];
+        let html = render_index_detail_body(&row, &cols).into_string();
+        assert!(
+            html.contains(concat!(
+                r#"<div class="detail-body__main"><section class="card card--flush">"#,
+                r#"<header class="card__head"><div><h2 class="card__title">Schema</h2></div></header>"#,
+                r#"<div class="card__body"><div class="data-table">"#
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<dt>Storage table</dt><dd><code>impresspress__<wbr>vector__<wbr>docs</code></dd>"#),
+            "{html}"
+        );
+        assert!(
+            crate::test_support::dom::card_level_inside_card(&html).is_empty(),
+            "{html}"
+        );
+        let empty = render_index_detail_body(&row, &[]).into_string();
+        assert!(
+            empty.contains(
+                r#"<div class="card__body"><p class="empty-note">No columns to show.</p></div>"#
+            ),
+            "{empty}"
+        );
+    }
+
+    /// The create dialog's submit is its own primary, drawn by `Action`.
+    #[test]
+    fn the_create_dialog_submits_with_its_one_primary() {
+        let html = render_create_index_modal().into_string();
+        assert!(
+            html.contains(r#"<button class="btn btn--primary" type="submit">Create</button>"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -727,6 +785,16 @@ mod integration_tests {
         assert!(
             body.contains("No vector indexes yet"),
             "missing empty state copy: {body}"
+        );
+        // The header's "Create index" is the page's one primary; the empty
+        // state's copy is a secondary, and the dialog has its own.
+        let (page, dialogs) = crate::test_support::dom::visible_primaries(&body);
+        assert_eq!(page.len(), 1, "{page:?}");
+        assert!(page[0].contains("Create index"), "{page:?}");
+        assert_eq!(
+            dialogs.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![1],
+            "{dialogs:?}"
         );
     }
 

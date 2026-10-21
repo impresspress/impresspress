@@ -24,6 +24,13 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   no dashboard head wraps at all.
  * - Settings › Variables: the value column keeps its share (`VAR_COLUMNS`),
  *   and "Add variable" ends the search's row.
+ * - Storage, portal Files and Shares, and Vector indexes, at every width from
+ *   the phone to 1280: no page scrolls sideways and no table scrolls inside
+ *   its frame, because the file, share and share-link tables drop columns by
+ *   their own width (table.css `.object-table`, `.share-table`). This
+ *   server holds no share link and only short file names, so the tables'
+ *   narrow layouts are checked with seeded rows in
+ *   `files-messages-pages.spec.ts` (`e2e:writes`).
  * The widths: 800 (the filter wraps; the database cards stack; the settings
  * rail is a tab row), and 960 and 1024 (the database cards side by side, the
  * Tables column at its narrowest). Writes nothing beyond the page loads'
@@ -215,5 +222,37 @@ test.describe('admin core pages at in-between widths', () => {
         }
       });
     }
+  }
+
+  const STORAGE_PAGES = [
+    '/b/storage/',
+    '/b/storage/photos/',
+    '/b/cloudstorage/',
+    '/b/storage/admin/',
+    '/b/storage/admin/buckets',
+    '/b/storage/admin/shares',
+    '/b/storage/admin/quotas',
+    '/b/vector/',
+  ];
+  for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+    test(`storage and vector pages at ${width}px: nothing scrolls sideways`, async ({ page }) => {
+      await open(page, width, STORAGE_PAGES[0]);
+      const found: Record<string, unknown> = {};
+      for (const path of STORAGE_PAGES) {
+        await page.goto(path, { waitUntil: 'networkidle' });
+        const r = await page.evaluate(() => ({
+          page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
+            .filter((t) => t.scrollWidth > t.clientWidth + 1)
+            .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
+        }));
+        if (r.page > 0 || r.tables.length) found[path] = r;
+      }
+      expect(found, 'a page or a table scrolled sideways').toEqual({});
+      // The seeded bucket's file rows keep their menu in view.
+      await page.goto('/b/storage/photos/', { waitUntil: 'networkidle' });
+      const trigger = await page.getByRole('button', { name: 'Actions for a.png' }).boundingBox();
+      expect(trigger!.x + trigger!.width).toBeLessThanOrEqual(width);
+    });
   }
 });

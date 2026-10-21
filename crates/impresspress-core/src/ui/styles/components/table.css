@@ -414,6 +414,60 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	}
 }
 
+/* The share-link tables (`blocks/files`: the owner's on /b/cloudstorage/,
+   administration's on Storage › Shares) narrow by their own width, as the
+   grant tables do. Where a table is too narrow for its columns the row keeps
+   the file, the expiry, the access count and (the owner's) the revoke
+   control, and the rest is one line under the file (`.share-table__meta`):
+   the owner's table drops its 64-character token and the created date (the
+   line says when), administration's drops the token prefix and the owner
+   (the line names both). Without this the owner's table scrolled sideways
+   from 721 to about 900px with the revoke control out of view.
+
+   The thresholds are the tables' six- and five-column minimum widths in
+   CI's font (DejaVu Sans, wider than most): the owner's is about 43.5rem
+   with an expiry and a created date that do not wrap (695px in a 670px
+   container at 960 with a 40rem threshold), so it goes compact below
+   45rem.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `SHARE_COLUMNS` / `ADMIN_SHARE_COLUMNS` must move here too. */
+.share-table { container: share-table / inline-size; }
+.share-table__meta {
+	display: none; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+@container share-table (max-width: 45rem) {
+	.share-table--owner td:is([data-label="Token"], [data-label="Created"]),
+	.share-table--owner > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.share-table--owner .share-table__meta { display: block; }
+	/* The expiry is the row's one date left in a column: it wraps between
+	   the day and the time rather than push Revoke out of view. */
+	.share-table--owner td[data-label="Expires"] .datetime { white-space: normal; }
+}
+@container share-table (max-width: 34rem) {
+	.share-table--admin td:is([data-label="Token"], [data-label="Created by"]),
+	.share-table--admin > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(5)) { display: none; }
+	.share-table--admin .share-table__meta { display: block; }
+}
+
+/* A bucket's file list (`blocks/files/pages_user/objects.rs`) narrows by
+   its own width too: below 34rem the Modified date leaves its column for one
+   line under the file's name (`.object-table__meta`), so a long name is not
+   squeezed to a word per line. A size never breaks between its number and
+   its unit. The Modified header is hidden by position (`OBJECT_COLUMNS`). */
+.object-table { container: object-table / inline-size; }
+.object-table td[data-label="Size"] { white-space: nowrap; }
+.object-table__meta {
+	display: none; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+@container object-table (max-width: 34rem) {
+	.object-table td[data-label="Modified"],
+	.object-table > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
+	.object-table .object-table__meta { display: block; }
+}
+
 /* The database page's table list (`blocks/admin/pages/database.rs`) is a
    `<details>` headed by its summary, so where the cards stack (below 900px)
    it can fold away above the panel; the page folds it there itself once a

@@ -212,9 +212,13 @@ function volatileMasks(page: Page) {
   return [
     page
       .locator(
-        'td:has(time, [data-relative-time], .relative-time), :is([data-relative-time], .relative-time, time):not(td *)',
+        'td:has(time, [data-relative-time], .relative-time):not(:has(.object-table__meta, .share-table__meta)), :is([data-relative-time], .relative-time, time):not(td *)',
       )
       .filter({ visible: true }),
+    // A narrowing table's meta line (table.css `.object-table`,
+    // `.share-table`) carries the row's date under its name: mask the date,
+    // not the name's whole cell. Hidden where the table is wide.
+    page.locator(':is(.object-table__meta, .share-table__meta) time').filter({ visible: true }),
     page.locator('.chart__range'),
     page.locator('td:has([data-volatile-id])'),
     page.locator('td:has([data-volatile-metric]), .stat:has-text("Avg response") .stat__value'),
@@ -342,6 +346,13 @@ const MOBILE_ADMIN_ROUTES = [
   // Phase 5d Item C: seeded photos bucket — exercises the table-as-cards
   // mobile rendering of the file browser, not just the bucket list.
   { path: '/b/storage/photos/', name: 'storage-objects' },
+  // The share links' flush card and the quota card, and the admin storage
+  // overview and bucket list, at phone width.
+  { path: '/b/cloudstorage/', name: 'cloudstorage' },
+  { path: '/b/storage/admin/', name: 'storage-admin-overview' },
+  { path: '/b/storage/admin/buckets', name: 'storage-admin-buckets' },
+  // No vector backend on this server: the callout, at phone width.
+  { path: '/b/vector/', name: 'vector-list' },
 ];
 
 // ===== Phase 5b PR-1: vector index admin pages =====

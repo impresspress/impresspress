@@ -55,29 +55,40 @@ pub(crate) fn visibility_badge(public: bool) -> Markup {
     }
 }
 
-/// The "New bucket" trigger as the empty state's call to action: it opens
-/// the modal through chrome.js's `modal-open` verb.
-pub(crate) fn new_bucket_button() -> Markup {
-    Action::primary("New bucket", ActionTarget::Modal(NEW_BUCKET_MODAL_ID))
-        .icon(icons::plus())
-        .render()
-}
+/// The "New bucket" trigger: one label and one target, which both of its
+/// renderings take — the topbar's primary ([`new_bucket_action`]) and the
+/// empty list's secondary ([`no_buckets_empty_state`]). It opens the modal
+/// through chrome.js's `modal-open` verb.
+const NEW_BUCKET: (&str, ActionTarget<'static>) =
+    ("New bucket", ActionTarget::Modal(NEW_BUCKET_MODAL_ID));
 
-/// The same trigger as the topbar's primary action, on the user's bucket
-/// list and administration's.
+/// The "New bucket" label, for the storage overview's call to action, which
+/// leads to the bucket list (where the modal lives) rather than opening it.
+pub(crate) const NEW_BUCKET_LABEL: &str = NEW_BUCKET.0;
+
+/// The trigger as the topbar's primary action, on the user's bucket list and
+/// administration's.
 pub(crate) fn new_bucket_action() -> HeaderAction<'static> {
-    HeaderAction::new("New bucket", ActionTarget::Modal(NEW_BUCKET_MODAL_ID)).icon(icons::plus())
+    let (label, target) = NEW_BUCKET;
+    HeaderAction::new(label, target).icon(icons::plus())
 }
 
-/// The empty state a bucket list shows before any bucket exists, with the
-/// "New bucket" trigger as its call to action. One wording for the user's
-/// list and administration's.
+/// The empty state a bucket list shows before any bucket exists. The header
+/// already offers "New bucket" as the page's primary, so the empty state's
+/// copy of it is a secondary (layout rule 9).
 pub(crate) fn no_buckets_empty_state() -> Markup {
+    let (label, target) = NEW_BUCKET;
+    no_buckets_empty(Action::secondary(label, target).icon(icons::plus()))
+}
+
+/// "No buckets yet" with the caller's call to action: one wording for the
+/// user's list, administration's, and the storage overview.
+pub(crate) fn no_buckets_empty(action: Action<'_>) -> Markup {
     components::empty_state(
         icons::folder(),
         "No buckets yet",
         "Buckets hold uploaded files. Create one to start uploading.",
-        Some(new_bucket_button()),
+        Some(action.render()),
     )
 }
 
@@ -155,7 +166,7 @@ pub fn render_new_bucket_modal() -> Markup {
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Create bucket" }
+                    (Action::primary("Create bucket", ActionTarget::Submit { form: None }).render())
                 }))
             }
         },
@@ -403,6 +414,38 @@ mod integration_tests {
         assert!(
             body.contains("</svg>New bucket</button>"),
             "new-bucket button label missing: {body}"
+        );
+    }
+
+    /// The header's "New bucket" is the page's one primary; the empty list
+    /// offers the same trigger — same label, same modal — as a secondary.
+    /// The modal's submit is the dialog's own primary.
+    #[tokio::test]
+    async fn an_empty_list_repeats_new_bucket_as_a_secondary_under_the_one_primary() {
+        let ctx = TestContext::with_files().await;
+        let body =
+            output_html(bucket_list_page(&ctx, &admin_msg("retrieve", "/b/storage/")).await).await;
+        let (page, dialogs) = crate::test_support::dom::visible_primaries(&body);
+        assert_eq!(page.len(), 1, "one primary on the page: {page:?}");
+        assert!(page[0].contains("New bucket"), "{page:?}");
+        assert_eq!(
+            dialogs.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![1],
+            "{dialogs:?}"
+        );
+        assert!(
+            body.contains(concat!(
+                r#"<div class="empty__action"><button class="btn btn--secondary" type="button" "#,
+                r#"data-action="modal-open" data-modal-target="new-bucket"><svg"#
+            )),
+            "the empty state's trigger is a secondary opening the same modal: {body}"
+        );
+        assert!(body.contains("</svg>New bucket</button></div>"), "{body}");
+        assert!(
+            body.contains(
+                r#"<button class="btn btn--primary" type="submit">Create bucket</button>"#
+            ),
+            "{body}"
         );
     }
 
