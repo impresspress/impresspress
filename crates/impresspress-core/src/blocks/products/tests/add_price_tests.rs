@@ -70,8 +70,9 @@ async fn admin_product(ctx: &crate::test_support::TestContext, name: &str) -> St
     product["id"].as_str().expect("product id").to_string()
 }
 
-/// Without pricing, the section's empty state carries "Add a price" as the
-/// section's one primary, and the page config carries the create-mode seed:
+/// Without pricing, the section's empty state carries "Add a price" as a
+/// secondary (the topbar's lifecycle action is the page's one primary), and
+/// the page config carries the create-mode seed:
 /// named after the product, in its currency (canonical uppercase), with no
 /// price row for the editor to pre-fill.
 #[tokio::test]
@@ -82,10 +83,10 @@ async fn a_product_without_pricing_offers_add_a_price() {
     let html = admin_manager(&ctx, &id).await;
     let pricing = pricing_section(&html);
     assert!(pricing.contains("No prices yet"), "{pricing}");
-    assert_eq!(pricing.matches("btn--primary").count(), 1, "{pricing}");
+    assert_eq!(pricing.matches("btn--primary").count(), 0, "{pricing}");
     assert!(
         pricing.contains(
-            r#"class="btn btn--primary btn--sm" type="button" data-action="pm-add-price""#
+            r#"<button class="btn btn--secondary" type="button" data-action="pm-add-price"><svg"#
         ),
         "{pricing}"
     );
@@ -126,8 +127,9 @@ async fn the_seed_follows_the_automatic_tax_setting() {
     assert_eq!(config["new_offer"]["checkout"]["automatic_tax"], true);
 }
 
-/// Once the product has a price, adding another stays one click away but is
-/// secondary: the draft's Publish is the section's one primary.
+/// Once the product has a price, adding another stays one click away in the
+/// section's head, still secondary, and so is the draft's Publish: the
+/// section holds no primary.
 #[tokio::test]
 async fn with_a_price_add_a_price_is_secondary() {
     let ctx = ctx().await;
@@ -143,13 +145,14 @@ async fn with_a_price_add_a_price_is_secondary() {
     let pricing = pricing_section(&html);
     assert!(!pricing.contains("No prices yet"), "{pricing}");
     assert!(
-        pricing.contains(
-            r#"class="btn btn--secondary btn--sm" type="button" data-action="pm-add-price""#
-        ),
+        pricing.contains(r#"<div class="section-header__action"><button class="btn btn--secondary" type="button" data-action="pm-add-price">"#),
         "{pricing}"
     );
-    assert_eq!(pricing.matches("btn--primary").count(), 1, "{pricing}");
-    assert!(pricing.contains(r#"data-offer-op="publish""#), "{pricing}");
+    assert_eq!(pricing.matches("btn--primary").count(), 0, "{pricing}");
+    assert!(
+        pricing.contains(r#"class="btn btn--secondary btn--sm" type="button" data-action="pm-offer-action" data-offer-op="publish""#),
+        "{pricing}"
+    );
 }
 
 /// The seed plus the row the author prices is a definition the create
