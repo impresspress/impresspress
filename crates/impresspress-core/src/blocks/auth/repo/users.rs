@@ -36,7 +36,6 @@ pub struct UserRow {
     /// account an admin has renamed. Published as `AdminUserView.name`.
     pub name: Option<String>,
     pub avatar_url: Option<String>,
-    pub role: String,
     pub disabled: bool,
     /// Soft-delete timestamp (ISO-8601). `None`/empty when the account is live.
     /// Column exists since migration 006; a soft-deleted account keeps its row
@@ -99,14 +98,6 @@ pub struct NewUser {
     pub email: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
-    /// The account's initial role, written to the inline `users.role`
-    /// column: `"admin"` for a bootstrapped admin (Init provisioning or
-    /// token redemption), `"user"` for every signup, password or OAuth. This
-    /// — not a `user_roles` row — is what makes a bootstrapped admin an
-    /// admin: `helpers::get_user_roles` reads the inline column first and
-    /// merges the grant rows onto it, so a `user_roles` row means "granted
-    /// beyond the initial role" (spec 2.2.3). Neither path writes one.
-    pub role: String,
     /// Whether the address is already verified. `true` for a bootstrapped
     /// admin (the operator who set the password) and for a signup on a
     /// deployment that does not require verification; `false` when a
@@ -118,6 +109,34 @@ pub struct NewUser {
     pub verification_token_hash: Option<String>,
 }
 
+/// The role an account is created with. Every account holds one from the
+/// moment it exists: the insert family below writes it as a
+/// `user_roles` grant in the account's own atomic batch
+/// ([`crate::platform_state::user_roles::create_op`]), so there is no
+/// window, and no failure, that leaves an account without it.
+///
+/// A role is a grant row and nothing else (auth migration 016 dropped the
+/// inline `users.role` column): this is only which grant the account starts
+/// with. Every later change goes through admin's IAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialRole {
+    /// Every signup, password or OAuth, whatever its address.
+    User,
+    /// A bootstrapped admin: Init provisioning or bootstrap-token redemption.
+    Admin,
+}
+
+impl InitialRole {
+    /// The role name the grant carries — the name admin's IAM and every
+    /// token use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 fn row_from(id: String, m: &RecordData) -> Result<UserRow, WaferError> {
     Ok(UserRow {
         id,
@@ -125,7 +144,6 @@ fn row_from(id: String, m: &RecordData) -> Result<UserRow, WaferError> {
         display_name: map_str(m, "display_name"),
         name: map_opt_str(m, "name"),
         avatar_url: map_opt_str(m, "avatar_url"),
-        role: map_opt_str(m, "role").unwrap_or_else(|| "user".into()),
         disabled: map_bool(m, "disabled"),
         deleted_at: map_opt_str(m, "deleted_at"),
         email_verified: map_bool(m, "email_verified"),
@@ -210,7 +228,6 @@ fn new_row(new: NewUser) -> (String, HashMap<String, Value>) {
     if let Some(a) = new.avatar_url.as_deref() {
         data.insert("avatar_url".into(), json!(a));
     }
-    data.insert("role".into(), json!(new.role));
     data.insert("email_verified".into(), json!(new.email_verified));
     if let Some(hash) = new.verification_token_hash.as_deref() {
         data.insert("verification_token".into(), json!(hash));
@@ -220,37 +237,43 @@ fn new_row(new: NewUser) -> (String, HashMap<String, Value>) {
     (id, data)
 }
 
-/// Insert an account row alone. An account created for someone to sign in
-/// to needs a way in, written with it: [`insert_with_password`] for a
-/// password account, [`insert_with_ops`] for anything else.
-pub async fn insert(ctx: &dyn Context, new: NewUser) -> Result<UserRow, WaferError> {
-    let (_, data) = new_row(new);
-    let rec = db::create(ctx, TABLE, data)
-        .await
-        .map_err(|e| db_failed("insert", e))?;
-    row_from_map(&rec.data)
+/// Insert an account and the grant of its `role`, with no other companion
+/// rows. An account created for someone to sign in to needs a way in,
+/// written with it: [`insert_with_password`] for a password account,
+/// [`insert_with_ops`] for anything else.
+pub async fn insert(
+    ctx: &dyn Context,
+    new: NewUser,
+    role: InitialRole,
+) -> Result<UserRow, WaferError> {
+    insert_with_ops(ctx, new, role, |_| Vec::new()).await
 }
 
-/// Insert an account row and the rows `companions` builds for its id, as one
-/// atomic write: every row lands, or — when any of them fails — none does.
+/// Insert an account row, the grant of its `role`, and the rows
+/// `companions` builds for its id, as one atomic write: every row lands, or
+/// — when any of them fails — none does.
 ///
-/// Two separate writes leave an account without a way in whenever the
-/// second one fails, and the address is then taken: every retry is told it
-/// is already registered. `companions` gets the minted id so its rows can
-/// point at the account they belong to.
+/// Two separate writes leave an account without a way in, or without its
+/// role, whenever the second one fails, and the address is then taken: every
+/// retry is told it is already registered. `companions` gets the minted id
+/// so its rows can point at the account they belong to.
 ///
 /// A taken address fails the whole write with `AlreadyExists` (the
 /// `users.email` UNIQUE constraint), and nothing is written.
 pub async fn insert_with_ops(
     ctx: &dyn Context,
     new: NewUser,
+    role: InitialRole,
     companions: impl FnOnce(&str) -> Vec<wire::BatchWrite>,
 ) -> Result<UserRow, WaferError> {
     let (id, data) = new_row(new);
-    let mut ops = vec![wire::BatchWrite::Create {
-        collection: TABLE.to_string(),
-        data,
-    }];
+    let mut ops = vec![
+        wire::BatchWrite::Create {
+            collection: TABLE.to_string(),
+            data,
+        },
+        crate::platform_state::user_roles::create_op(&id, role.as_str()),
+    ];
     ops.extend(companions(&id));
     let results = db::batch(ctx, ops)
         .await
@@ -263,14 +286,15 @@ pub async fn insert_with_ops(
     }
 }
 
-/// Insert a password account — the account row and its
+/// Insert a password account — the account row, its grant and its
 /// `local_credentials` row — as one atomic write. See [`insert_with_ops`].
 pub async fn insert_with_password(
     ctx: &dyn Context,
     new: NewUser,
+    role: InitialRole,
     password_hash: &str,
 ) -> Result<UserRow, WaferError> {
-    insert_with_ops(ctx, new, |id| {
+    insert_with_ops(ctx, new, role, |id| {
         vec![super::local_credentials::create_op(
             id,
             password_hash,
@@ -1046,10 +1070,10 @@ mod lifecycle_and_listing_tests {
                 email: email.to_string(),
                 display_name: email.to_string(),
                 avatar_url: None,
-                role: "user".to_string(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .expect("seed user")
@@ -1064,10 +1088,10 @@ mod lifecycle_and_listing_tests {
                 email: "v@example.com".into(),
                 display_name: "V".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: true,
                 verification_token_hash: Some("tokhash".into()),
             },
+            InitialRole::User,
         )
         .await
         .expect("insert");
@@ -1239,7 +1263,6 @@ mod lifecycle_and_listing_tests {
         assert!(updated.disabled);
         assert_eq!(updated.avatar_url.as_deref(), Some("https://a/b.png"));
         assert_eq!(updated.email, "patch@example.com", "email is untouched");
-        assert_eq!(updated.role, "user", "role is untouched");
     }
 
     #[tokio::test]
@@ -1499,10 +1522,10 @@ mod auth_version_tests {
                 email: "av@example.com".into(),
                 display_name: "AV".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .unwrap()
@@ -1557,10 +1580,10 @@ mod auth_version_tests {
                 email: "other@example.com".into(),
                 display_name: "Other".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .unwrap()
@@ -1632,7 +1655,8 @@ mod typed_client_tests {
     use crate::test_support::TestContext;
 
     /// `repo::users::insert` must succeed when the auth block calls it under
-    /// WRAP enforcement (own-resource access). Today's `exec_raw` path
+    /// WRAP enforcement: its own table, plus the account's grant appended to
+    /// admin's `user_roles` in the same batch. Today's `exec_raw` path
     /// requires admin and would fail; this test guards the typed-client
     /// rewrite.
     #[tokio::test]
@@ -1644,15 +1668,21 @@ mod typed_client_tests {
                 email: "a@b.c".into(),
                 display_name: "A".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .expect("insert under wrap");
         assert_eq!(user.email, "a@b.c");
         assert!(!user.id.is_empty());
+        let grants = crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
+            .await
+            .expect("read the account's grants");
+        let roles: Vec<&str> = grants.iter().map(|g| g.role.as_str()).collect();
+        assert_eq!(roles, ["user"], "the account is created with its grant");
+        assert_eq!(grants[0].assigned_by, "", "no admin is behind it");
     }
 
     #[tokio::test]
@@ -1664,15 +1694,14 @@ mod typed_client_tests {
                 email: "x@y.z".into(),
                 display_name: "X".into(),
                 avatar_url: Some("https://example.com/a.png".into()),
-                role: "admin".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::Admin,
         )
         .await
         .unwrap();
         let got = find_by_email(&ctx, "x@y.z").await.unwrap().unwrap();
-        assert_eq!(got.role, "admin");
         assert_eq!(got.avatar_url.as_deref(), Some("https://example.com/a.png"));
     }
 
@@ -1686,10 +1715,10 @@ mod typed_client_tests {
                 email: "c@d.e".into(),
                 display_name: "C".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .unwrap();
@@ -1703,10 +1732,10 @@ mod typed_client_tests {
                 email: "tok@example.com".into(),
                 display_name: "Tok".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .unwrap()
@@ -1851,10 +1880,10 @@ mod typed_client_tests {
                 email: "life@example.com".into(),
                 display_name: "Life".into(),
                 avatar_url: None,
-                role: "user".into(),
                 email_verified: false,
                 verification_token_hash: None,
             },
+            InitialRole::User,
         )
         .await
         .unwrap()

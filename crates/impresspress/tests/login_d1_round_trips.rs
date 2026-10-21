@@ -491,8 +491,8 @@ async fn sign_in(site: &Site, email: &str, password: &str) -> Cost {
 /// statements: the account by email, its credential, its role grants, the
 /// refresh-token row and the device-list row. Each lookup is the one
 /// `SELECT … LIMIT 1` `db::get_by_field` sends, with no `COUNT(*)` beside it.
-/// The tokens' `auth_version` and inline role are the ones on the account row
-/// read first — the version must be read no later than the roles
+/// The tokens' `auth_version` is the one on the account row read first — the
+/// version must be read no later than the roles
 /// (`helpers::TokenGrant`), so the row is not read again for them.
 /// Everything else it writes — the last-login stamp, the retention throttle
 /// check, the audit row — runs after the response.

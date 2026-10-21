@@ -6,11 +6,14 @@
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{
-    blocks::dev::{
-        assets,
-        repo::seed_info::{self, SeedInfo},
-        test_support::{dev_with_accounts, signed_in_as, FakeControl},
-        validation::MAX_ARTIFACT_BYTES,
+    blocks::{
+        auth::repo::users::InitialRole,
+        dev::{
+            assets,
+            repo::seed_info::{self, SeedInfo},
+            test_support::{dev_with_accounts, signed_in_as, FakeControl},
+            validation::MAX_ARTIFACT_BYTES,
+        },
     },
     test_support::{
         admin_msg, anon_msg, output_html, output_http_header, output_http_status, TestContext,
@@ -52,8 +55,8 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
         impresspress_core::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
         "guide-seeded-password",
     );
-    let member = signed_in_as(&ctx, "user").await;
-    let operator = signed_in_as(&ctx, "admin").await;
+    let member = signed_in_as(&ctx, InitialRole::User).await;
+    let operator = signed_in_as(&ctx, InitialRole::Admin).await;
 
     // Anonymous navigation → the login page, not the workspace. The router
     // is the gate (the page route is declared `Admin` like every other
@@ -171,7 +174,7 @@ async fn other_pages_are_not_cross_origin_isolated() {
 #[tokio::test]
 async fn the_page_assets_are_served_admin_only_and_revalidated() {
     let ctx = dev_with_accounts(FakeControl::new()).await;
-    let operator = signed_in_as(&ctx, "admin").await;
+    let operator = signed_in_as(&ctx, InitialRole::Admin).await;
 
     for (path, content_type) in [
         (
@@ -443,7 +446,7 @@ fn the_adapter_speaks_every_message_the_protocol_defines() {
 #[tokio::test]
 async fn the_suggested_prompt_and_template_come_from_the_seed() {
     let ctx = dev_with_accounts(FakeControl::new()).await;
-    let operator = signed_in_as(&ctx, "admin").await;
+    let operator = signed_in_as(&ctx, InitialRole::Admin).await;
 
     let before = output_html(
         ctx.request(navigation(operator.cookie(anon_msg("retrieve", "/b/dev"))))

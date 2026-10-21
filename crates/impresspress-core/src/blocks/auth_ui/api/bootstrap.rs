@@ -234,7 +234,17 @@ mod tests {
             .await
             .unwrap()
             .expect("admin user created");
-        assert_eq!(user.role, "admin");
+        let roles: Vec<String> = crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
+            .await
+            .expect("read the admin's grants")
+            .into_iter()
+            .map(|g| g.role)
+            .collect();
+        assert_eq!(
+            roles,
+            ["admin"],
+            "the redeemed admin is created holding `admin`"
+        );
 
         // Bootstrap-token row consumed.
         assert!(!bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap());

@@ -227,7 +227,10 @@ mod tests {
     use super::*;
     use crate::{
         blocks::{
-            auth::{bootstrap, config::BOOTSTRAP_ADMIN_EMAIL_KEY, TIMING_EQUALIZATION_PASSWORD},
+            auth::{
+                bootstrap, config::BOOTSTRAP_ADMIN_EMAIL_KEY, repo::users::InitialRole,
+                TIMING_EQUALIZATION_PASSWORD,
+            },
             auth_ui::api::signup,
         },
         config_vars::POST_LOGIN_REDIRECT_KEY,
@@ -291,7 +294,7 @@ mod tests {
     }
 
     /// Logging in as the configured bootstrap admin address grants nothing:
-    /// the account stays a `user`, and no grant row is written. Before, every
+    /// the account keeps exactly the `user` grant signup wrote. Before, every
     /// login re-checked the email and granted `admin`, with no proof of the
     /// mailbox behind the password.
     #[tokio::test]
@@ -307,13 +310,13 @@ mod tests {
         let user_id = resp["user"]["id"]
             .as_str()
             .expect("the login names the user");
-        assert!(
-            crate::platform_state::user_roles::list_for_user(&ctx, user_id)
-                .await
-                .expect("list the grants")
-                .is_empty(),
-            "login must write no role grant"
-        );
+        let roles: Vec<String> = crate::platform_state::user_roles::list_for_user(&ctx, user_id)
+            .await
+            .expect("list the grants")
+            .into_iter()
+            .map(|g| g.role)
+            .collect();
+        assert_eq!(roles, ["user"], "login must write no role grant");
     }
 
     #[tokio::test]
@@ -695,7 +698,7 @@ mod tests {
             .with_admin_added()
             .await
             .with_sign_in_added();
-        let uid = ctx.seed_account(EMAIL, PASSWORD, "user").await;
+        let uid = ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
         user_roles::assign(&ctx.fixture(), &uid, "editor", "")
             .await
             .expect("grant editor");

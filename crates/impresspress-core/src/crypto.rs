@@ -193,21 +193,19 @@ pub async fn verify_access_token(
         }
     }
 
-    // Roles: prefer the structured `roles` array, fall back to the legacy
-    // `role` scalar.
-    let roles = if let Some(roles_arr) = claims.get("roles").and_then(|v| v.as_array()) {
-        roles_arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    } else {
-        claims
-            .get("role")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
+    // Roles: the `roles` array `generate_tokens` mints. A token without one
+    // carries no role.
+    let roles = claims
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
 
     Ok(Some(AccessClaims {
         sub: sub.map(str::to_owned),

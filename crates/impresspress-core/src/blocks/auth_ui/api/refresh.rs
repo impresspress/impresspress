@@ -366,7 +366,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        blocks::auth_ui::api::{login, signup},
+        blocks::{
+            auth::repo::users::InitialRole,
+            auth_ui::api::{login, signup},
+        },
         db_read,
         test_support::{
             collect_or_panic, output_http_json, output_is_error, output_json, FailingDbOpContext,
@@ -400,8 +403,9 @@ mod tests {
     }
 
     /// Refreshing a session of the configured bootstrap admin address grants
-    /// nothing: the rotated access token carries `user` only, and no grant
-    /// row is written. Before, every refresh re-checked the email and granted
+    /// nothing: the rotated access token carries `user` only, and the account
+    /// keeps exactly the `user` grant signup wrote. Before, every refresh
+    /// re-checked the email and granted
     /// `admin`.
     #[tokio::test]
     async fn bootstrap_admin_email_refresh_grants_nothing() {
@@ -429,13 +433,13 @@ mod tests {
             .await
             .expect("read the account")
             .expect("the account exists");
-        assert!(
-            crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
-                .await
-                .expect("list the grants")
-                .is_empty(),
-            "a refresh must write no role grant"
-        );
+        let roles: Vec<String> = crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
+            .await
+            .expect("list the grants")
+            .into_iter()
+            .map(|g| g.role)
+            .collect();
+        assert_eq!(roles, ["user"], "a refresh must write no role grant");
     }
 
     /// Rotate once, so `first` is a revoked row whose family still has a
@@ -930,7 +934,7 @@ mod tests {
             .with_admin_added()
             .await
             .with_sign_in_added();
-        let uid = ctx.seed_account(EMAIL, PASSWORD, "user").await;
+        let uid = ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
         user_roles::assign(&ctx.fixture(), &uid, "editor", "")
             .await
             .expect("grant editor");

@@ -19,6 +19,69 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: a role is a grant row; the upgrade ends every session
+
+**What changes.** An account's role lived in two places: the inline
+`wafer_run__auth__users.role` column, written once when the account was
+created, and the `impresspress__admin__user_roles` grant rows admin's IAM
+manages. Every role check read both, but IAM could change only the rows, so
+the first admin — whose `admin` was the inline column — could not be demoted,
+and the Users page showed them with no role at all.
+
+Now a role is a `user_roles` row and nothing else:
+
+- Auth migration 016 copies every account's inline role into a grant (unless
+  the account already holds it) and drops the column. Every existing admin
+  keeps admin, as a grant.
+- An account is created holding its first grant, in the same write as the
+  account: `user` at signup (password or OAuth), `admin` for the admin
+  created at first boot or by redeeming the bootstrap token. A later change
+  to anyone's roles, the first admin's included, is an IAM assign or removal.
+  The last admin still cannot lose it: an admin cannot remove their own
+  `admin`, and the `admin` role cannot be deleted.
+- The Users page and the admin users API now list every role an account
+  holds, `user` included.
+- An access token without a `roles` claim carries no role. Nothing in this
+  codebase mints the older single `role` claim, and it is no longer read.
+
+**Upgrading ends every session, once.** Adding 016 changes the auth
+migration list, so the deploy or boot that applies it re-runs the whole list,
+and its earlier migrations drop the refresh-token and session tables. No
+refresh token issued before the upgrade works afterwards, so every user signs
+in again once their access token runs out. The access tokens themselves are
+not revoked: they are self-contained, and 016 does not bump the
+`auth_version` they are checked against. One issued before the upgrade keeps
+authenticating, with the roles it was minted with, until it expires: 30
+minutes after it was issued by default
+(`WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS`, at most 24 hours). Nothing
+else is lost.
+
+**Cloudflare: this deploy needs a D1 budget of 1000.** `/_deploy/prepare`
+applies a block's pending migrations in one Worker invocation, and every D1
+statement counts against `[cloudflare].d1_queries_per_invocation`, a refused
+duplicate `ADD COLUMN` included. A change to the auth list re-runs all of it,
+not only the new file: 64 statements for 001–016, before prepare's own
+reads. A site that set the budget to 50 is refused partway through the auth
+list (around 010), prepare fails before 016 runs, and the deploy is not
+promoted; the live version keeps serving. Deploy this release with the
+budget unset (the default, 1000) or set to 1000. A site that wants 50 for
+day-to-day traffic can redeploy with it afterwards: that deploy re-runs
+nothing, because every migration list's hash then matches. Until migrations
+are recorded per file rather than per list, any later change to the auth
+list costs the whole list again.
+
+**API change.** `GET /b/admin/api/users` no longer returns `role` on each
+user. Read `roles`, which lists every role the account holds — the same list
+its session carries. The `@impresspress/sdk` types are regenerated without it.
+
+**Dev data snapshots are version 2.** A `seed/data.json` exported before this
+release (version 1) is refused on import: its users rows carry the dropped
+column. Export the sandbox again from a build that has applied 016.
+
+**Database support.** 016 needs `ALTER TABLE … DROP COLUMN`: SQLite 3.35 or
+later, which the native server, the browser build and Cloudflare D1 all are,
+or any supported PostgreSQL.
+
 ### Auth: the bootstrap admin email grants nothing at sign-in
 
 **What changes.** `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` no longer

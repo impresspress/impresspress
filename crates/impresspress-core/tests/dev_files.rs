@@ -7,15 +7,18 @@
 
 use base64ct::{Base64, Encoding};
 use impresspress_core::{
-    blocks::dev::{
-        activation::{self, ActivationIntent},
-        blobs, gc, paths,
-        repo::generations::GenerationCause,
-        test_support::{
-            dev_get, dev_post, dev_status, dev_with_accounts, fake_bypass_rules, signed_in_as,
-            FakeControl, FakeShell,
+    blocks::{
+        auth::repo::users::InitialRole,
+        dev::{
+            activation::{self, ActivationIntent},
+            blobs, gc, paths,
+            repo::generations::GenerationCause,
+            test_support::{
+                dev_get, dev_post, dev_status, dev_with_accounts, fake_bypass_rules, signed_in_as,
+                FakeControl, FakeShell,
+            },
+            workspace, BypassRules, DevBlock, DevShared,
         },
-        workspace, BypassRules, DevBlock, DevShared,
     },
     test_support::{
         admin_msg, anon_msg, output_http_header, output_http_json, output_http_status, output_json,
@@ -558,7 +561,7 @@ async fn file_size_quota_is_enforced() {
 #[tokio::test]
 async fn the_files_api_is_admin_only() {
     let ctx = dev_with_accounts(FakeControl::new()).await;
-    let member = signed_in_as(&ctx, "user").await;
+    let member = signed_in_as(&ctx, InitialRole::User).await;
     // No identity is told to sign in; a member is refused the admin tier.
     for (msg, status) in [
         (anon_msg("retrieve", "/b/dev/api/files"), 401),

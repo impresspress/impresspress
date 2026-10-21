@@ -101,7 +101,13 @@ use crate::{
 /// [`super::generation::SCHEMA_VERSION`] for the reason those two are
 /// separate from each other: this is the shape of one interchange format
 /// (rows per allowlisted table), free to move at its own pace.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// - **2:** auth migration 016 dropped `users.role`; an account's role is its
+///   `user_roles` rows, which the snapshot already carries. A v1 snapshot's
+///   users rows name the dropped column, and an account whose role was that
+///   column alone would arrive with none, so v1 is refused: re-export it from
+///   a build that has applied 016.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The on-disk shape of `seed/data.json`: every allowlisted table's rows,
 /// keyed by table name.

@@ -147,15 +147,13 @@ pub async fn handle(
         String::new()
     };
 
-    // The account row and its `local_credentials` row in one atomic write —
-    // as two, a failure between them left an account with no password whose
-    // address answered "already registered" to every retry. Every signup is a
-    // `user`, whatever its address: no sign-in grants a role, so the bootstrap
-    // admin email grants nothing here (the first admin comes from Init or a
-    // bootstrap token). The role is the inline `users.role` column
-    // `NewUser.role` writes, which is what `helpers::get_user_roles` reads
-    // first; no `user_roles` row is written. The verification state rides on
-    // the insert too.
+    // The account row, its `user` grant and its `local_credentials` row in
+    // one atomic write — as separate writes, a failure between them left an
+    // account with no password, or with no role, whose address answered
+    // "already registered" to every retry. Every signup is a `user`, whatever
+    // its address: no sign-in grants a role, so the bootstrap admin email
+    // grants nothing here (the first admin comes from Init or a bootstrap
+    // token). The verification state rides on the insert too.
     //
     // A taken address fails the write with `AlreadyExists` (`users.email` is
     // UNIQUE) and writes nothing; that is the registered answer. Any other
@@ -181,13 +179,13 @@ pub async fn handle(
             email: email_lower.clone(),
             display_name: body.name.unwrap_or_default(),
             avatar_url: None,
-            role: "user".to_string(),
             email_verified: !require_verification,
             // Persist only `sha256_hex(raw)`; the raw token goes out solely
             // in the verification email below.
             verification_token_hash: (!verification_token.is_empty())
                 .then(|| sha256_hex(verification_token.as_bytes())),
         },
+        users::InitialRole::User,
         &password_hash,
     )
     .await
@@ -332,8 +330,8 @@ mod tests {
 
     /// Registering the configured bootstrap admin address grants nothing:
     /// with verification off, anyone could otherwise claim an unclaimed
-    /// bootstrap address and be admin. The account is a `user`, on the row
-    /// and in the token, and no grant row is written.
+    /// bootstrap address and be admin. The account holds the `user` grant
+    /// every signup writes and no other, and its token says so.
     #[tokio::test]
     async fn bootstrap_admin_email_signup_is_a_plain_user() {
         let mut ctx = ctx_with_crypto().await;
@@ -347,13 +345,16 @@ mod tests {
             .await
             .expect("read the account")
             .expect("signup created the account");
-        assert_eq!(user.role, "user");
-        assert!(
-            crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
-                .await
-                .expect("list the grants")
-                .is_empty(),
-            "signup must write no role grant"
+        let roles: Vec<String> = crate::platform_state::user_roles::list_for_user(&ctx, &user.id)
+            .await
+            .expect("list the grants")
+            .into_iter()
+            .map(|g| g.role)
+            .collect();
+        assert_eq!(
+            roles,
+            ["user"],
+            "signup writes the `user` grant and no other"
         );
     }
 
@@ -546,6 +547,41 @@ mod tests {
             retry["access_token"].is_string(),
             "the retry must create the account and sign it in, not be told the \
              address is already registered: {retry}"
+        );
+    }
+
+    /// The account row and its `user` grant are one write too. Written
+    /// apart, a failure between them would keep an account holding no role
+    /// — and an address that answers "already registered" to every retry.
+    #[tokio::test]
+    async fn a_failure_writing_the_role_grant_leaves_no_account_and_the_retry_succeeds() {
+        use crate::{
+            blocks::auth::repo::test_faults::{drop_trigger, fail_inserts_into},
+            platform_state::user_roles,
+        };
+
+        let ctx = ctx_with_crypto().await;
+        let trigger = fail_inserts_into(&ctx, user_roles::TABLE).await;
+
+        let failed = signup_on_the_wire(&ctx, "no-role@example.com", "correct-horse-battery").await;
+        assert_eq!(
+            failed.status, 500,
+            "a new address whose write failed is told so"
+        );
+        assert!(
+            users::find_by_email(&ctx, "no-role@example.com")
+                .await
+                .expect("user lookup ok")
+                .is_none(),
+            "the account row must not outlive its failed grant write"
+        );
+
+        drop_trigger(&ctx, &trigger).await;
+        let retry = signup(&ctx, "no-role@example.com", "correct-horse-battery").await;
+        assert_eq!(
+            retry["user"]["roles"],
+            serde_json::json!(["user"]),
+            "the retry creates the account, holding its grant: {retry}"
         );
     }
 

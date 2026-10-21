@@ -14,6 +14,19 @@ use impresspress_core::{
 
 use crate::common::auth_fixture;
 
+/// The roles `user_id`'s grants name: the whole of an account's role.
+async fn roles_of(
+    ctx: &impresspress_core::test_support::TestContext,
+    user_id: &str,
+) -> Vec<String> {
+    impresspress_core::platform_state::user_roles::list_for_user(ctx, user_id)
+        .await
+        .expect("list grants")
+        .into_iter()
+        .map(|grant| grant.role)
+        .collect()
+}
+
 fn cfg_email_pw(email: &str, pw: &str) -> AuthConfig {
     AuthConfig::from_env_for_test(&[
         ("WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL", email),
@@ -46,7 +59,7 @@ async fn email_password_path_creates_admin_with_local_credentials() {
         .await
         .expect("find admin")
         .expect("admin created");
-    assert_eq!(u.role, "admin");
+    assert_eq!(roles_of(&ctx, &u.id).await, ["admin"]);
     let creds = local_credentials::find_by_user_id(&ctx, &u.id)
         .await
         .expect("find creds")
@@ -193,7 +206,9 @@ async fn skipped_when_users_already_exist() {
 /// three with the defaults the map wrote, so the row `users::insert` produces
 /// is the same row. This test writes the OLD map by hand and compares the two
 /// column-for-column; if a future migration changes a default, it fails here
-/// rather than in production.
+/// rather than in production. The old map's `role` entry is left out: auth
+/// migration 016 dropped that column, and a role is a grant row now
+/// (`bootstrap_writes_the_admin_grant` below).
 #[tokio::test]
 async fn bootstrap_row_matches_the_hand_built_map_it_replaced() {
     use std::collections::HashMap;
@@ -212,14 +227,14 @@ async fn bootstrap_row_matches_the_hand_built_map_it_replaced() {
         .expect("lookup")
         .expect("bootstrapped admin");
 
-    // The map exactly as `bootstrap.rs` built it before this PR.
+    // The map as `bootstrap.rs` built it before it used the repo, less the
+    // dropped `role` column.
     let now = "2026-01-01T00:00:00Z";
     let mut legacy: HashMap<String, Value> = HashMap::new();
     legacy.insert("id".into(), Value::String("legacy-admin".into()));
     legacy.insert("email".into(), Value::String("legacy@x.io".into()));
     legacy.insert("display_name".into(), Value::String("Admin".into()));
     legacy.insert("avatar_url".into(), Value::String(String::new()));
-    legacy.insert("role".into(), Value::String("admin".into()));
     legacy.insert("email_verified".into(), Value::Bool(true));
     legacy.insert("created_at".into(), Value::String(now.into()));
     legacy.insert("updated_at".into(), Value::String(now.into()));
@@ -236,7 +251,6 @@ async fn bootstrap_row_matches_the_hand_built_map_it_replaced() {
 
     assert_eq!(through_repo.display_name, through_map.display_name);
     assert_eq!(through_repo.name, through_map.name, "the `name` alias");
-    assert_eq!(through_repo.role, through_map.role);
     assert_eq!(through_repo.email_verified, through_map.email_verified);
     assert_eq!(
         through_repo.disabled, through_map.disabled,
@@ -252,11 +266,12 @@ async fn bootstrap_row_matches_the_hand_built_map_it_replaced() {
     assert_eq!(through_map.avatar_url.as_deref(), Some(""));
 }
 
-/// Spec 2.2.3: the initial role is the inline `users.role` column, so a
-/// bootstrapped admin holds no `user_roles` row and still resolves as admin.
-/// This is the same shape both signup paths produce.
+/// A bootstrapped admin is created holding exactly the `admin` grant, in the
+/// account's own batch, with no admin behind it. The grant is the whole of
+/// its role (auth migration 016 dropped the inline column), so it is an
+/// ordinary row another admin can remove through IAM.
 #[tokio::test]
-async fn bootstrap_writes_no_user_roles_row() {
+async fn bootstrap_writes_the_admin_grant() {
     use impresspress_core::platform_state::user_roles;
 
     let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
@@ -269,12 +284,10 @@ async fn bootstrap_writes_no_user_roles_row() {
         .await
         .expect("lookup")
         .expect("admin");
-    assert_eq!(u.role, "admin", "the inline column carries the role");
-    assert!(
-        user_roles::list_for_user(&ctx, &u.id)
-            .await
-            .expect("list grants")
-            .is_empty(),
-        "a user_roles row means a grant BEYOND the initial role"
-    );
+    let grants = user_roles::list_for_user(&ctx, &u.id)
+        .await
+        .expect("list grants");
+    assert_eq!(grants.len(), 1, "exactly one grant: {grants:?}");
+    assert_eq!(grants[0].role, "admin");
+    assert_eq!(grants[0].assigned_by, "", "no admin is behind it");
 }

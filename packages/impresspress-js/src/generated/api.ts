@@ -592,14 +592,10 @@ export interface paths {
                                 /** @description Full name, when the user supplied one. */
                                 name: string | null;
                                 /**
-                                 * @description The account's own role (`"user"` by default). A signed-in session
-                                 *     holds it alongside `roles`, which lists it only when the same role is
-                                 *     also granted.
-                                 */
-                                role: string;
-                                /**
-                                 * @description Roles granted to this user. Admins manage grants through
-                                 *     `/b/admin/api/iam/user-roles`; no sign-in grants a role.
+                                 * @description Every role this user holds — exactly the `roles` a session minted for
+                                 *     them carries. An account is created holding `user` (or `admin`, for a
+                                 *     bootstrapped admin); admins manage grants through
+                                 *     `/b/admin/api/iam/user-roles`, and no sign-in grants a role.
                                  */
                                 roles: string[];
                                 /** @description RFC 3339 timestamp of the last modification. */

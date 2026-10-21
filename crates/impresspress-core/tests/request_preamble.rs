@@ -18,7 +18,11 @@
 use std::sync::Arc;
 
 use impresspress_core::{
-    blocks::{admin::AdminBlock, auth::repo::users, userportal::UserPortalBlock},
+    blocks::{
+        admin::AdminBlock,
+        auth::repo::{users, users::InitialRole},
+        userportal::UserPortalBlock,
+    },
     test_support::{anon_msg, api_key_header, Session, TestContext},
 };
 use wafer_block::http_codec::{collect_http_response, HttpResponseParts};
@@ -35,7 +39,7 @@ async fn deployment() -> TestContext {
 }
 
 /// Seed an account with `role` and sign it in through the login route.
-async fn signed_in(ctx: &TestContext, email: &str, role: &str) -> Session {
+async fn signed_in(ctx: &TestContext, email: &str, role: InitialRole) -> Session {
     ctx.seed_account(email, PASSWORD, role).await;
     ctx.sign_in(email, PASSWORD).await
 }
@@ -119,8 +123,8 @@ async fn is_disabled(ctx: &TestContext, user_id: &str) -> bool {
 #[tokio::test]
 async fn a_cross_site_cookie_post_is_refused_before_the_admin_form_runs() {
     let ctx = deployment().await;
-    let admin = signed_in(&ctx, "admin@example.com", "admin").await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let admin = signed_in(&ctx, "admin@example.com", InitialRole::Admin).await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
 
     let mut msg = disable_click(&admin, &member.user_id);
     msg.set_meta("http.header.sec-fetch-site", "cross-site");
@@ -136,8 +140,8 @@ async fn a_cross_site_cookie_post_is_refused_before_the_admin_form_runs() {
 #[tokio::test]
 async fn a_cookie_post_with_no_origin_evidence_is_refused() {
     let ctx = deployment().await;
-    let admin = signed_in(&ctx, "admin@example.com", "admin").await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let admin = signed_in(&ctx, "admin@example.com", InitialRole::Admin).await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
 
     let (status, body) = send(&ctx, disable_click(&admin, &member.user_id), "").await;
 
@@ -152,8 +156,8 @@ async fn a_cookie_post_with_no_origin_evidence_is_refused() {
 #[tokio::test]
 async fn a_same_origin_click_disables_the_account_and_its_live_token() {
     let ctx = deployment().await;
-    let admin = signed_in(&ctx, "admin@example.com", "admin").await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let admin = signed_in(&ctx, "admin@example.com", InitialRole::Admin).await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
     assert_eq!(me(&ctx, &member).await.status, 200, "precondition");
 
     let mut msg = disable_click(&admin, &member.user_id);
@@ -200,7 +204,7 @@ async fn display_name(ctx: &TestContext, user_id: &str) -> String {
 #[tokio::test]
 async fn the_profile_form_needs_the_token_its_page_rendered() {
     let ctx = deployment().await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
     let before = display_name(&ctx, &member.user_id).await;
 
     let (status, body) = send(
@@ -228,7 +232,7 @@ async fn the_profile_form_needs_the_token_its_page_rendered() {
 #[tokio::test]
 async fn a_cross_site_profile_post_is_refused_even_with_the_token() {
     let ctx = deployment().await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
     let before = display_name(&ctx, &member.user_id).await;
     let token = rendered_form_token(&ctx, &member).await;
 
@@ -249,7 +253,7 @@ async fn a_cross_site_profile_post_is_refused_even_with_the_token() {
 #[tokio::test]
 async fn a_signed_out_access_token_is_refused() {
     let ctx = deployment().await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
     assert_eq!(me(&ctx, &member).await.status, 200, "precondition");
 
     let (status, body) = send(
@@ -268,7 +272,7 @@ async fn a_signed_out_access_token_is_refused() {
 #[tokio::test]
 async fn an_api_key_is_refused_a_route_above_its_owners_role() {
     let ctx = deployment().await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
     let key = member.create_api_key(&ctx, "member key").await;
 
     let (status, body) = send(
@@ -296,7 +300,7 @@ async fn an_api_key_is_refused_a_route_above_its_owners_role() {
 #[tokio::test]
 async fn an_admins_api_key_reaches_an_admin_route() {
     let ctx = deployment().await;
-    let admin = signed_in(&ctx, "admin@example.com", "admin").await;
+    let admin = signed_in(&ctx, "admin@example.com", InitialRole::Admin).await;
     let key = admin.create_api_key(&ctx, "admin key").await;
 
     let (status, body) = send(
@@ -372,7 +376,7 @@ async fn the_sdk_fixture_is_what_an_anonymous_me_answers() {
 #[tokio::test]
 async fn a_signed_in_member_on_an_admin_route_is_403() {
     let ctx = deployment().await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
 
     let parts = respond(
         &ctx,
@@ -390,7 +394,7 @@ async fn a_signed_in_member_on_an_admin_route_is_403() {
 #[tokio::test]
 async fn an_anonymous_page_request_is_sent_to_login() {
     let ctx = deployment().await;
-    let member = signed_in(&ctx, "member@example.com", "user").await;
+    let member = signed_in(&ctx, "member@example.com", InitialRole::User).await;
     let (status, body) = send(
         &ctx,
         member.bearer(anon_msg("create", "/b/auth/api/logout")),

@@ -689,7 +689,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        blocks::admin::test_support::routed,
+        blocks::{admin::test_support::routed, auth::repo::users::InitialRole},
         test_support::{admin_msg, audit_rows, output_is_error, output_json, TestContext},
     };
 
@@ -2235,8 +2235,9 @@ mod tests {
     /// the bootstrap admin email. Admin X is provisioned the way Init does;
     /// X grants Y `admin` through the assign route, the only source of a
     /// second admin, then removes it through the remove route. Y's next
-    /// sign-in carries no `admin` and writes no grant: no sign-in re-grants
-    /// it from the configured email.
+    /// sign-in carries no `admin` and writes no grant — Y keeps only the
+    /// `user` grant it was created with: no sign-in re-grants admin from the
+    /// configured email.
     #[tokio::test]
     async fn an_iam_removal_of_the_bootstrap_email_admin_sticks() {
         use crate::test_support::anon_msg;
@@ -2266,7 +2267,7 @@ mod tests {
         )
         .await
         .expect("provision the first admin");
-        let y_id = ctx.seed_account(Y_EMAIL, PASSWORD, "user").await;
+        let y_id = ctx.seed_account(Y_EMAIL, PASSWORD, InitialRole::User).await;
         let x = ctx.sign_in(X_EMAIL, PASSWORD).await;
 
         // X grants Y admin through the assign route.
@@ -2311,12 +2312,120 @@ mod tests {
         // Y signs in again: the configured email re-grants nothing.
         let demoted = ctx.sign_in(Y_EMAIL, PASSWORD).await;
         assert_eq!(token_roles(&ctx, &demoted).await, vec!["user".to_string()]);
-        assert!(
-            user_roles::list_for_user(&ctx.fixture(), &y_id)
-                .await
-                .expect("list Y's grants")
-                .is_empty(),
+        let roles: Vec<String> = user_roles::list_for_user(&ctx.fixture(), &y_id)
+            .await
+            .expect("list Y's grants")
+            .into_iter()
+            .map(|g| g.role)
+            .collect();
+        assert_eq!(
+            roles,
+            ["user"],
             "a sign-in must not write the removed grant back"
+        );
+    }
+
+    /// ARCH-02: a bootstrapped admin can be demoted. Admin A is provisioned
+    /// the way Init does; A makes B an admin through the assign route; B
+    /// removes A's `admin` grant through the remove route. A's next sign-in
+    /// carries no `admin`, and the router refuses A an admin route.
+    ///
+    /// Before auth migration 016 a bootstrapped admin's role was the inline
+    /// `users.role` column, which every role read unioned with the grants and
+    /// IAM could not edit: B could remove nothing, and A stayed an admin.
+    #[tokio::test]
+    async fn a_bootstrapped_admin_demoted_through_iam_is_no_longer_an_admin() {
+        use crate::test_support::anon_msg;
+
+        const A_EMAIL: &str = "bootstrapped@example.com";
+        const B_EMAIL: &str = "promoted@example.com";
+        const PASSWORD: &str = "correct-horse-battery";
+
+        let mut ctx = TestContext::with_auth()
+            .await
+            .with_admin_added()
+            .await
+            .with_sign_in_added();
+        ctx.register_block(
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            Arc::new(crate::blocks::admin::AdminBlock::new()),
+        );
+        seed_defaults(&ctx.fixture()).await;
+        crate::blocks::auth::bootstrap::bootstrap_with_email_password(
+            &ctx.fixture(),
+            A_EMAIL,
+            PASSWORD,
+        )
+        .await
+        .expect("provision the first admin");
+        let a_id = crate::blocks::auth::repo::users::find_by_email(&ctx.fixture(), A_EMAIL)
+            .await
+            .expect("read A")
+            .expect("A exists")
+            .id;
+        let b_id = ctx.seed_account(B_EMAIL, PASSWORD, InitialRole::User).await;
+
+        // A makes B an admin.
+        let a = ctx.sign_in(A_EMAIL, PASSWORD).await;
+        assert!(
+            token_roles(&ctx, &a).await.iter().any(|r| r == "admin"),
+            "precondition: the bootstrapped admin is an admin"
+        );
+        let assigned = ctx
+            .request_json(
+                a.bearer(anon_msg("create", "/b/admin/api/iam/user-roles")),
+                &serde_json::json!({ "user_id": b_id, "role": "admin" }),
+            )
+            .await;
+        let assigned = wafer_block::http_codec::collect_http_response(assigned).await;
+        assert_eq!(
+            assigned.status,
+            200,
+            "assign: {}",
+            String::from_utf8_lossy(&assigned.body)
+        );
+
+        // B removes A's admin grant: an ordinary row, like every grant.
+        let b = ctx.sign_in(B_EMAIL, PASSWORD).await;
+        let a_admin_grant = user_roles::list_for_user(&ctx.fixture(), &a_id)
+            .await
+            .expect("list A's grants")
+            .into_iter()
+            .find(|g| g.role == "admin")
+            .expect("A's admin is a grant row")
+            .id;
+        let removed = ctx
+            .request(b.bearer(anon_msg(
+                "delete",
+                &format!("/b/admin/api/iam/user-roles/{a_admin_grant}"),
+            )))
+            .await;
+        let removed = wafer_block::http_codec::collect_http_response(removed).await;
+        assert_eq!(
+            removed.status,
+            200,
+            "remove: {}",
+            String::from_utf8_lossy(&removed.body)
+        );
+
+        // A signs in again: no admin in the token, and an admin route refuses.
+        let demoted = ctx.sign_in(A_EMAIL, PASSWORD).await;
+        assert!(
+            !token_roles(&ctx, &demoted)
+                .await
+                .iter()
+                .any(|r| r == "admin"),
+            "a demoted bootstrap admin's token must not carry admin"
+        );
+        let refused = ctx
+            .request(demoted.bearer(anon_msg("retrieve", "/b/admin/api/users")))
+            .await;
+        let refused = wafer_block::http_codec::collect_http_response(refused).await;
+        assert_eq!(
+            refused.status,
+            403,
+            "an admin route must refuse the demoted admin: {}",
+            String::from_utf8_lossy(&refused.body)
         );
     }
 }

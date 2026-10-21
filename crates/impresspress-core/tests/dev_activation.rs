@@ -8,21 +8,24 @@
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{
-    blocks::dev::{
-        activation::{self, ActivationError, ActivationIntent},
-        artifacts, blobs,
-        control::{DynamicBlockSpec, DynamicRoute, GenerationAnnouncement, RouteAccessKind},
-        generation::{self, GenerationManifest, SiteManifest},
-        repo::{
-            self,
-            generations::{self, GenerationCause, GenerationStatus, NewGeneration},
-            runtime_state::{self, ActivationPhase, RuntimeState},
+    blocks::{
+        auth::repo::users::InitialRole,
+        dev::{
+            activation::{self, ActivationError, ActivationIntent},
+            artifacts, blobs,
+            control::{DynamicBlockSpec, DynamicRoute, GenerationAnnouncement, RouteAccessKind},
+            generation::{self, GenerationManifest, SiteManifest},
+            repo::{
+                self,
+                generations::{self, GenerationCause, GenerationStatus, NewGeneration},
+                runtime_state::{self, ActivationPhase, RuntimeState},
+            },
+            test_support::{
+                dev_get, dev_post, dev_status, dev_with_accounts, signed_in_as, FakeControl,
+            },
+            workspace::FileEntry,
+            WAFER_GUEST_VERSION,
         },
-        test_support::{
-            dev_get, dev_post, dev_status, dev_with_accounts, signed_in_as, FakeControl,
-        },
-        workspace::FileEntry,
-        WAFER_GUEST_VERSION,
     },
     test_support::{
         admin_msg, anon_msg, output_http_header, output_http_status, output_json, TestContext,
@@ -1535,7 +1538,7 @@ async fn the_ledger_publishes_each_generation_with_its_manifest_and_diff() {
 #[tokio::test]
 async fn the_generations_api_is_admin_only() {
     let ctx = dev_with_accounts(FakeControl::new()).await;
-    let member = signed_in_as(&ctx, "user").await;
+    let member = signed_in_as(&ctx, InitialRole::User).await;
     // No identity is told to sign in; a member is refused the admin tier.
     for (msg, status) in [
         (anon_msg("retrieve", "/b/dev/api/generations"), 401),

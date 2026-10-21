@@ -250,7 +250,6 @@ mod tests {
             "id",
             "last_login_at",
             "name",
-            "role",
             "roles",
             "updated_at",
         ];
