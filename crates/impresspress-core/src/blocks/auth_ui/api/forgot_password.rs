@@ -116,7 +116,7 @@ async fn send_reset_link(mail: &super::LaterMail, user_id: &str, email: &str) {
 mod tests {
     use super::*;
     use crate::{
-        blocks::auth::repo::users::{self, NewUser},
+        blocks::auth::repo::users,
         test_support::{output_json, TestContext},
     };
 
@@ -134,19 +134,11 @@ mod tests {
     #[tokio::test]
     async fn the_constant_body_survives_a_failed_lookup() {
         let ctx = TestContext::with_auth_and_crypto().await;
-        users::insert(
-            &ctx,
-            NewUser {
-                email: "known@example.com".into(),
-                display_name: "Known".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: true,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        crate::test_support::seed_user("known@example.com")
+            .display_name("Known")
+            .email_verified(true)
+            .insert(&ctx)
+            .await;
 
         let (limiter, msg) = crate::blocks::auth_ui::api::test_mail_request();
         let unregistered =
@@ -176,19 +168,11 @@ mod tests {
     }
 
     async fn with_known_user(ctx: &TestContext) {
-        users::insert(
-            ctx,
-            NewUser {
-                email: "known@example.com".into(),
-                display_name: "Known".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: true,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        crate::test_support::seed_user("known@example.com")
+            .display_name("Known")
+            .email_verified(true)
+            .insert(ctx)
+            .await;
     }
 
     /// Same shape one step earlier: drawing the token needs the crypto

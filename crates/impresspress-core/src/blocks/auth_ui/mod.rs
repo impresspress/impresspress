@@ -846,10 +846,7 @@ mod outbound_mail_wiring_tests {
     use wafer_run::{Block, InputStream, Message, OutputStream};
 
     use super::*;
-    use crate::{
-        blocks::auth::repo::users::{self, NewUser},
-        test_support::{anon_msg, output_json, TestContext},
-    };
+    use crate::test_support::{anon_msg, output_json, TestContext};
 
     /// Stands in for `impresspress/email` and counts the sends that reached
     /// it. Answers `{"sent": true}`, so nothing here is refused for any
@@ -883,19 +880,11 @@ mod outbound_mail_wiring_tests {
     #[tokio::test]
     async fn the_mail_budget_survives_across_requests_to_the_real_route() {
         let mut ctx = TestContext::with_auth_and_crypto().await;
-        users::insert(
-            &ctx,
-            NewUser {
-                email: "known@example.com".into(),
-                display_name: "Known".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: true,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        crate::test_support::seed_user("known@example.com")
+            .display_name("Known")
+            .email_verified(true)
+            .insert(&ctx)
+            .await;
 
         let sends = Arc::new(AtomicUsize::new(0));
         ctx.register_block(

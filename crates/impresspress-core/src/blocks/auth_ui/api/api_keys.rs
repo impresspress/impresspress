@@ -249,7 +249,7 @@ pub async fn handle_delete(ctx: &dyn Context, msg: &Message) -> OutputStream {
 mod tests {
     use super::*;
     use crate::{
-        blocks::{auth::repo::users, auth_ui::test_support::routed},
+        blocks::auth_ui::test_support::routed,
         test_support::{auth_msg, output_is_error, output_json, TestContext},
     };
 
@@ -257,20 +257,11 @@ mod tests {
 
     /// A user row with no keys; returns its id.
     async fn seed_user(ctx: &TestContext) -> String {
-        users::insert(
-            ctx,
-            users::NewUser {
-                email: "owner@example.com".into(),
-                display_name: "Owner".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed user")
-        .id
+        crate::test_support::seed_user("owner@example.com")
+            .display_name("Owner")
+            .insert(ctx)
+            .await
+            .id
     }
 
     /// `POST /b/auth/api/api-keys` with a JSON body, through the route table.

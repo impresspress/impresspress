@@ -680,19 +680,10 @@ mod outage_tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         // Created now, inside the window (`seed_auth_user` dates its row
         // 2026-01-01).
-        users::insert(
-            &ctx.fixture(),
-            users::NewUser {
-                email: "today@example.com".into(),
-                display_name: "Today".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed a user created today");
+        crate::test_support::seed_user("today@example.com")
+            .display_name("Today")
+            .insert(&ctx.fixture())
+            .await;
         request_logs::insert(
             &ctx,
             &request_logs::NewRequestLog {

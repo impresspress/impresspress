@@ -93,25 +93,13 @@ pub async fn handle_update(ctx: &dyn Context, msg: &Message, input: InputStream)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        blocks::auth::repo::users::NewUser,
-        test_support::{anon_msg, auth_msg, output_is_error, output_json, TestContext},
-    };
+    use crate::test_support::{anon_msg, auth_msg, output_is_error, output_json, TestContext};
 
     async fn seed_user(ctx: &dyn Context) -> UserRow {
-        users::insert(
-            ctx,
-            NewUser {
-                email: "ada@example.com".to_string(),
-                display_name: "Ada".to_string(),
-                avatar_url: None,
-                role: "user".to_string(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed user")
+        crate::test_support::seed_user("ada@example.com")
+            .display_name("Ada")
+            .insert(ctx)
+            .await
     }
 
     fn body(json: serde_json::Value) -> InputStream {

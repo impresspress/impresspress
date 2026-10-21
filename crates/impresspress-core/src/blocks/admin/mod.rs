@@ -2387,34 +2387,16 @@ pub(crate) mod page_link_tests {
         // account a signed-in admin is: a key the Create form mints is theirs,
         // and `api_keys.user_id` references the users table.
         ctx.seed_auth_user("admin_1").await;
-        let user = users::insert(
-            &ctx,
-            users::NewUser {
-                email: "member@example.com".into(),
-                display_name: "Member".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed user");
+        let user = crate::test_support::seed_user("member@example.com")
+            .display_name("Member")
+            .insert(&ctx)
+            .await;
         // A second, DISABLED user, so the users tab renders the Enable
         // control as well as Disable.
-        let disabled = users::insert(
-            &ctx,
-            users::NewUser {
-                email: "disabled@example.com".into(),
-                display_name: "Disabled".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed disabled user");
+        let disabled = crate::test_support::seed_user("disabled@example.com")
+            .display_name("Disabled")
+            .insert(&ctx)
+            .await;
         users::set_disabled(&ctx, &disabled.id, true)
             .await
             .expect("disable the second user");

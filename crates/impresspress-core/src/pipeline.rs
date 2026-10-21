@@ -4390,20 +4390,12 @@ mod credential_check_tests {
     /// `auth_version` in the verify-side cache — a cache hit would answer the
     /// read this suite makes fail.
     async fn seed_user(ctx: &TestContext) -> String {
-        users::insert(
-            &ctx.fixture(),
-            users::NewUser {
-                email: format!("{}@example.com", uuid::Uuid::new_v4()),
-                display_name: "Signed In".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: true,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed user")
-        .id
+        crate::test_support::seed_user(&format!("{}@example.com", uuid::Uuid::new_v4()))
+            .display_name("Signed In")
+            .email_verified(true)
+            .insert(&ctx.fixture())
+            .await
+            .id
     }
 
     /// An access token for `sub` carrying a `jti`, signed and issued the way
