@@ -26,7 +26,8 @@ use crate::{
         errors::{error_response, ErrorCode},
         rate_limit::UserRateLimiter,
     },
-    http::{err_bad_request, err_internal, ResponseBuilder},
+    csrf::SessionIssuance,
+    http::{err_internal, json_request, ResponseBuilder},
     util::{hex_encode, sha256_hex},
 };
 
@@ -56,6 +57,17 @@ pub async fn handle(
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
+    // A cross-site page must neither create an account nor sign this browser
+    // into one. Checked before anything is read or written, so a refused
+    // signup creates nothing (`crate::csrf`, layer 1b). Required even when
+    // verification is on and this signup will issue no session: the route is
+    // one of the session-issuing ones, and its rule does not depend on a
+    // setting.
+    let issuance = match SessionIssuance::verify(ctx, msg).await {
+        Ok(issuance) => issuance,
+        Err(refused) => return refused,
+    };
+
     // Enforce ALLOW_SIGNUP on the API (not just the page)
     let signup_allowed = match signup_allowed(ctx).await {
         Ok(allowed) => allowed,
@@ -65,13 +77,9 @@ pub async fn handle(
         return error_response(ErrorCode::Forbidden, "Signups are currently disabled");
     }
 
-    let raw = match input.collect_to_bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return OutputStream::error(e),
-    };
-    let body: SignupRequest = match serde_json::from_slice(&raw) {
-        Ok(b) => b,
-        Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
+    let body: SignupRequest = match json_request(msg, input).await {
+        Ok(body) => body,
+        Err(refused) => return refused,
     };
 
     let email_lower = users::normalize_email(&body.email);
@@ -240,6 +248,7 @@ pub async fn handle(
     // response reaches the browser, no separate login step needed.
     let issued = match issue_tokens_and_cookie(
         ctx,
+        issuance,
         &lifetime,
         &user.id,
         &email_lower,
@@ -464,7 +473,7 @@ mod tests {
         use crate::blocks::auth_ui::AuthUiBlock;
 
         async fn post(ctx: &TestContext, email: &str) -> (u16, serde_json::Value) {
-            let mut msg = crate::test_support::anon_msg("create", "/b/auth/api/signup");
+            let mut msg = crate::test_support::json_post_msg("/b/auth/api/signup");
             msg.set_meta(wafer_block::meta::META_REQ_CLIENT_IP, "203.0.113.7");
             let body = serde_json::json!({"email": email, "password": "correct-horse-battery"});
             let parts = wafer_block::http_codec::collect_http_response(

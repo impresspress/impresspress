@@ -485,7 +485,12 @@ pub async fn handle_request(
     // 2a. CSRF: cookie-authenticated unsafe-method requests must pass the
     // Fetch-Metadata/Origin/Referer policy before any block sees them. Bearer
     // -authenticated callers (`cookie_authenticated == false`) are exempt — see
-    // `crate::csrf` module docs. One central check for every mutation. Routed
+    // `crate::csrf` module docs. One central check for every mutation made
+    // WITH a session. The requests that hand a session out carry none, so
+    // they are not this check's: their handlers must obtain a
+    // `csrf::SessionIssuance` (same origin, no browser at all, or, for the
+    // OAuth callback, a consumed PKCE state) before the issuance tail will
+    // mint a cookie. Both origin checks read `csrf::request_origin`. Routed
     // through the same `stream` variable (rather than an early `return`) so a
     // rejection flows through the normal status-resolution + audit-log tail
     // below exactly like a dispatched response would.

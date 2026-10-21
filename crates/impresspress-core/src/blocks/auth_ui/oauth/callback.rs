@@ -120,7 +120,7 @@ pub async fn handle(
     // the provider echoed back. `take` is single-use (DELETE … RETURNING),
     // so a replayed callback or a stolen state_id can only redeem once,
     // and a state past `expires_at` is treated as missing.
-    let pkce_row = match oauth_pkce::take(ctx, state).await {
+    let pkce_state = match oauth_pkce::take(ctx, state).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return refuse(
@@ -131,13 +131,17 @@ pub async fn handle(
         }
         Err(e) => return crud::db_error_internal(e, "OAuth state lookup failed"),
     };
-    let provider = pkce_row.provider.clone();
-    let code_verifier = pkce_row.code_verifier.clone();
+    // The callback is a cross-site navigation by design, so it cannot pass
+    // the same-origin check the other sign-ins do; the consumed single-use
+    // state is its admission to session issuance (`crate::csrf`, layer 1b).
+    let issuance = crate::csrf::SessionIssuance::oauth_callback(&pkce_state);
+    let provider = pkce_state.provider();
+    let code_verifier = pkce_state.code_verifier();
     // Use the redirect_uri stored at start-time so the provider's exact-
     // match check passes even if the live config changed mid-flow.
-    let redirect_uri = pkce_row.redirect_uri.clone();
+    let redirect_uri = pkce_state.redirect_uri();
 
-    let Some(spec) = super::spec::lookup(&provider) else {
+    let Some(spec) = super::spec::lookup(provider) else {
         return err_bad_request("Unsupported OAuth provider");
     };
 
@@ -179,8 +183,8 @@ pub async fn handle(
         code,
         &client_id,
         &client_secret,
-        &redirect_uri,
-        &code_verifier,
+        redirect_uri,
+        code_verifier,
     )
     .await
     {
@@ -200,7 +204,7 @@ pub async fn handle(
     // Phase 3: resolve the local user (link / email-merge / create), enforcing
     // the signup, disabled-account and email-verification gates, and upsert
     // the provider link.
-    let account = match resolve_user(limiter, ctx, msg, &provider, &info, &clear_binding).await {
+    let account = match resolve_user(limiter, ctx, msg, provider, &info, &clear_binding).await {
         Ok(a) => a,
         Err(r) => return r,
     };
@@ -227,6 +231,7 @@ pub async fn handle(
     // that by construction.
     let issued = match issue_tokens_and_cookie(
         ctx,
+        issuance,
         &lifetime,
         &user_id,
         &email,
@@ -2267,6 +2272,30 @@ mod security_regression_tests {
     // ---------------------------------------------------------------
     // Identity resolution
     // ---------------------------------------------------------------
+
+    /// The provider sends the browser back here with a top-level navigation
+    /// from its own site, so a real callback arrives `Sec-Fetch-Site:
+    /// cross-site`. Its admission to session issuance is the consumed PKCE
+    /// state, not the same-origin check the password sign-ins take
+    /// (`crate::csrf::SessionIssuance::oauth_callback`), so it still signs in.
+    #[tokio::test]
+    async fn a_cross_site_callback_navigation_still_signs_in() {
+        let ctx = OauthFlow::google("crosssite@example.com").ctx().await;
+        let mut msg = callback_msg(&ctx).await;
+        msg.set_meta("http.header.sec-fetch-site", "cross-site");
+        msg.set_meta("http.header.host", "app.example.com");
+
+        let out = handle(&limiter(), &ctx, &msg).await;
+        let parts = wafer_block::http_codec::collect_http_response(out).await;
+        assert_eq!(parts.status, 302, "the callback signs in");
+        assert!(
+            parts.headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("set-cookie") && v.starts_with("auth_token=")
+            }),
+            "and sets the session cookie: {:?}",
+            parts.headers
+        );
+    }
 
     /// First sign-in: the callback creates the account AND the provider link,
     /// persists a session row — OAuth logins are visible on the userportal

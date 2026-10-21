@@ -87,10 +87,7 @@ async fn seed_password_user(ctx: &TestContext, email: &str, password: &str) -> S
 }
 
 fn login_msg() -> Message {
-    let mut m = Message::new("http.request");
-    m.set_meta("req.action", "create");
-    m.set_meta("req.resource", "/b/auth/api/login");
-    m
+    impresspress_core::test_support::json_post_msg("/b/auth/api/login")
 }
 
 async fn invoke_login(ctx: &TestContext, email: &str, password: &str) -> String {
@@ -153,9 +150,7 @@ async fn family_of(ctx: &TestContext, refresh_token: &str) -> String {
 async fn invoke_refresh(ctx: &TestContext, refresh_token: &str) -> String {
     let block = AuthUiBlock::default();
     let body = json!({ "refresh_token": refresh_token }).to_string();
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "create");
-    msg.set_meta("req.resource", "/b/auth/api/refresh");
+    let msg = impresspress_core::test_support::json_post_msg("/b/auth/api/refresh");
     let out = block
         .handle(ctx, msg, InputStream::from_bytes(body.into_bytes()))
         .await;

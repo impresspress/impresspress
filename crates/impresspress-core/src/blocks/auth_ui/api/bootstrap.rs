@@ -33,18 +33,28 @@ use crate::{
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+    // Redemption signs the holder in, so a cross-site page may not drive it
+    // (`crate::csrf`, layer 1b). Checked first, before the token is read or
+    // spent; the synchronizer token below is a second, independent check.
+    let issuance = match crate::csrf::SessionIssuance::verify(ctx, msg).await {
+        Ok(issuance) => issuance,
+        Err(refused) => return refused,
+    };
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
         Err(e) => return OutputStream::error(e),
     };
     let form = parse_form_body(&raw);
 
-    // CSRF defense-in-depth: this is a plain (no-JS) `<form>` POST, so the
-    // Fetch-Metadata/Origin layer (`crate::csrf::enforce_origin_policy`) is
-    // the only thing that would otherwise gate it — that layer only applies
-    // to COOKIE-authenticated requests, and this endpoint runs before any
-    // session exists. Validate the token the GET page embedded via
-    // `crate::csrf::hidden_field` instead.
+    // This is a plain (no-JS) `<form>` POST that runs before any session
+    // exists, so the cookie-authenticated layer
+    // (`crate::csrf::enforce_origin_policy`) never applies to it, and the
+    // origin check above is what keeps a cross-site page from driving it.
+    // The token the GET page embedded via `crate::csrf::hidden_field` is a
+    // second check on the browser's form post, not a secret: signed out,
+    // every visitor gets the same token, and any client can read it from
+    // `GET /b/auth/bootstrap`. A client without browser headers that holds a
+    // bootstrap token may redeem it, so that is not a gap.
     let submitted_csrf = form
         .get(crate::csrf::FIELD_NAME)
         .map(String::as_str)
@@ -142,6 +152,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     };
     let issued = match issue_tokens_and_cookie(
         ctx,
+        issuance,
         &lifetime,
         &user.id,
         &email,
@@ -298,6 +309,50 @@ mod tests {
             "a form POST with a wrong csrf_token must be rejected"
         );
         assert!(bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap());
+    }
+
+    /// Redemption signs the holder in, so a cross-site page may not drive it
+    /// even with a valid synchronizer token in the form: the origin check is
+    /// the first gate, and it spends nothing.
+    #[tokio::test]
+    async fn a_cross_site_redemption_is_refused_and_leaves_the_token_redeemable() {
+        let ctx = ctx_with_crypto().await;
+        let mut msg = bootstrap_msg();
+        msg.set_meta("http.header.sec-fetch-site", "cross-site");
+        msg.set_meta("http.header.origin", "https://evil.example");
+
+        let raw = "cross-site-token";
+        let hash = hash_token(raw);
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+            .await
+            .unwrap();
+
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
+        let out = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        match out.collect_buffered().await {
+            Err(wafer_run::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, wafer_run::ErrorCode::PermissionDenied);
+                assert_eq!(e.message, crate::csrf::ORIGIN_BLOCKED_REASON);
+            }
+            other => panic!("expected the origin refusal, got {other:?}"),
+        }
+        assert!(
+            bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap(),
+            "a refused redemption must not spend the single-use token"
+        );
+        assert!(
+            users::find_by_email(&ctx, "admin@example.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "and creates no admin"
+        );
     }
 
     #[tokio::test]

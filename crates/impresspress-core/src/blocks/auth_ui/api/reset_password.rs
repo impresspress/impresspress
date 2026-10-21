@@ -252,7 +252,12 @@ mod tests {
     async fn sign_in(ctx: &TestContext, email: &str, password: &str) -> String {
         let creds = serde_json::json!({"email": email, "password": password});
         let signed_in = output_json(
-            login::handle(ctx, InputStream::from_bytes(creds.to_string().into_bytes())).await,
+            login::handle(
+                ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                InputStream::from_bytes(creds.to_string().into_bytes()),
+            )
+            .await,
         )
         .await;
         signed_in["refresh_token"]
@@ -264,8 +269,12 @@ mod tests {
     /// Whether `token` still refreshes, through the real refresh handler.
     async fn refreshes(ctx: &TestContext, token: &str) -> bool {
         let body = serde_json::json!({ "refresh_token": token });
-        let out =
-            refresh::handle(ctx, InputStream::from_bytes(body.to_string().into_bytes())).await;
+        let out = refresh::handle(
+            ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            InputStream::from_bytes(body.to_string().into_bytes()),
+        )
+        .await;
         !output_is_error(out, "Unauthenticated").await
     }
 
@@ -324,7 +333,12 @@ mod tests {
     /// Whether `password` signs `email` in, through the real login handler.
     async fn signs_in(ctx: &TestContext, email: &str, password: &str) -> bool {
         let creds = serde_json::json!({"email": email, "password": password});
-        let out = login::handle(ctx, InputStream::from_bytes(creds.to_string().into_bytes())).await;
+        let out = login::handle(
+            ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
+            InputStream::from_bytes(creds.to_string().into_bytes()),
+        )
+        .await;
         !output_is_error(out, "Unauthenticated").await
     }
 
