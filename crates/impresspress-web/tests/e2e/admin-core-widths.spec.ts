@@ -39,7 +39,8 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   screen with its own one primary. This server's catalog is empty, so the
  *   product and group tables' narrow layouts (table.css `.product-table`,
  *   `.group-table`) are checked with seeded rows in `admin-products.spec.ts`
- *   (`e2e:writes`). My products is left out: this server has seller
+ *   (`e2e:writes`), which also covers My products and both Deleted views on
+ *   seeded rows. My products is left out here: this server has seller
  *   products off, so the page is a 403, and a refused request here would
  *   reach the dashboard capture's client-error count.
  * The widths: 800 (the filter wraps; the database cards stack; the settings
