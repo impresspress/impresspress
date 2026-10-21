@@ -27,7 +27,10 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * - Storage, portal Files and Shares, and Vector indexes, at every width from
  *   the phone to 1280: no page scrolls sideways and no table scrolls inside
  *   its frame, because the file, share and share-link tables drop columns by
- *   their own width (table.css `.object-table`, `.share-table`).
+ *   their own width (table.css `.object-table`, `.share-table`). This
+ *   server holds no share link and only short file names, so the tables'
+ *   narrow layouts are checked with seeded rows in
+ *   `files-messages-pages.spec.ts` (`e2e:writes`).
  * The widths: 800 (the filter wraps; the database cards stack; the settings
  * rail is a tab row), and 960 and 1024 (the database cards side by side, the
  * Tables column at its narrowest). Writes nothing beyond the page loads'

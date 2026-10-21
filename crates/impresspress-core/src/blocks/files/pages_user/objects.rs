@@ -93,6 +93,8 @@ fn url_encode_prefix(prefix: &str) -> String {
     parts.join("/") + "/"
 }
 
+/// Column order is part of table.css `.object-table`, which hides narrow-layout
+/// headers by position (`th:nth-child`): reorder both together.
 const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Select").select(),
     TableCol::new("Name").primary(),

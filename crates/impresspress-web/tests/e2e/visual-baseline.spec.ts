@@ -351,6 +351,8 @@ const MOBILE_ADMIN_ROUTES = [
   { path: '/b/cloudstorage/', name: 'cloudstorage' },
   { path: '/b/storage/admin/', name: 'storage-admin-overview' },
   { path: '/b/storage/admin/buckets', name: 'storage-admin-buckets' },
+  // No vector backend on this server: the callout, at phone width.
+  { path: '/b/vector/', name: 'vector-list' },
 ];
 
 // ===== Phase 5b PR-1: vector index admin pages =====

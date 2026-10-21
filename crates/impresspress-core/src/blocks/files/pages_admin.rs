@@ -351,6 +351,8 @@ impl From<&repo::shares::ShareRow> for AdminShareRow {
     }
 }
 
+/// Column order is part of table.css `.share-table--admin`, which hides narrow-layout
+/// headers by position (`th:nth-child`): reorder both together.
 const ADMIN_SHARE_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("File").primary(),
     TableCol::new("Token"),

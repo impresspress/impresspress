@@ -115,8 +115,10 @@ test('a bucket created from the modal takes an upload with labelled row controls
 /** A bucket holding `keys` (tiny text files), made through the API. */
 async function seedBucket(baseURL: string | undefined, keys: string[]): Promise<{
   bucket: string;
-  share: (key: string) => Promise<void>;
+  share: (key: string) => Promise<string>;
+  revoke: (id: string) => Promise<void>;
   remove: (key: string) => Promise<void>;
+  drop: () => Promise<void>;
 }> {
   const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
   const Authorization = await adminBearer(api);
@@ -141,11 +143,20 @@ async function seedBucket(baseURL: string | undefined, keys: string[]): Promise<
         data: { bucket, key, expires_in_hours: 24 },
       });
       expect(made.status(), await made.text()).toBe(200);
+      return (await made.json()).id as string;
+    },
+    revoke: async (id) => {
+      const gone = await api.delete(`/b/cloudstorage/shares/${encodeURIComponent(id)}`, { headers: { Authorization } });
+      expect(gone.ok(), await gone.text()).toBe(true);
     },
     remove: async (key) => {
       const gone = await api.delete(`/b/storage/api/buckets/${bucket}/objects/${encodeURIComponent(key)}`, {
         headers: { Authorization },
       });
+      expect(gone.ok(), await gone.text()).toBe(true);
+    },
+    drop: async () => {
+      const gone = await api.delete(`/b/storage/api/buckets/${bucket}`, { headers: { Authorization } });
       expect(gone.ok(), await gone.text()).toBe(true);
     },
   };
@@ -225,6 +236,49 @@ test('revoking a share link confirms in the dialog and updates the list in place
   await expect(revoke).toHaveCount(0);
   await expect(page.getByRole('heading', { level: 2, name: 'Share links', exact: true })).toBeFocused();
   expect(await page.evaluate(() => (window as unknown as { __noReload?: boolean }).__noReload)).toBe(true);
+});
+
+/**
+ * The share-link and file tables narrow by their own width (table.css
+ * `.share-table`, `.object-table`). Checked here, on the writes server,
+ * because it needs a share link with an expiry and a long file name: seeded
+ * on the baselines' server, they would show up in captures running beside
+ * it (the storage overview's counts). At every width from the phone to 1280
+ * no page or table scrolls sideways, and each row's control stays in view.
+ */
+test('the share and file tables fit their card at every width', async ({ page, baseURL }) => {
+  const long = 'quarterly-report-2026-final-version-for-the-board.pdf';
+  const seeded = await seedBucket(baseURL, [long]);
+  const id = await seeded.share(long);
+  try {
+    await loginAsAdmin(page);
+    const file = `${seeded.bucket}/${long}`;
+    const found: Record<string, unknown> = {};
+    for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [path, control] of [
+        ['/b/cloudstorage/', `Revoke the share link for ${file}`],
+        ['/b/storage/admin/shares', null],
+        [`/b/storage/${seeded.bucket}/`, `Actions for ${long}`],
+      ] as const) {
+        await page.goto(path, { waitUntil: 'networkidle' });
+        const r = await page.evaluate(() => ({
+          page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
+            .filter((t) => t.scrollWidth > t.clientWidth + 1)
+            .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
+        }));
+        const box = control ? await page.getByRole('button', { name: control }).boundingBox() : null;
+        const offscreen = box ? box.x + box.width > width + 0.5 : false;
+        if (r.page > 0 || r.tables.length || offscreen) found[`${path} at ${width}`] = { ...r, offscreen };
+      }
+    }
+    expect(found, 'a page or table scrolled sideways, or a row control left the screen').toEqual({});
+  } finally {
+    await seeded.revoke(id);
+    await seeded.remove(long);
+    await seeded.drop();
+  }
 });
 
 test.describe('on a phone', () => {
