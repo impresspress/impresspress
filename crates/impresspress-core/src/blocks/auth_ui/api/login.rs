@@ -803,4 +803,58 @@ mod tests {
         let me = fresh.bearer(anon_msg("retrieve", "/b/auth/api/me"));
         assert_eq!(output_http_status(ctx.request(me).await).await, 200);
     }
+
+    /// A sign-in writes its family's refresh row and session row as one
+    /// batch. When the session row cannot be written, the sign-in fails and
+    /// leaves no refresh row either: a family is never half there. Written
+    /// apart, the refresh row landed first and outlived the failure, a token
+    /// whose family the next refresh would refuse.
+    #[tokio::test]
+    async fn a_sign_in_whose_session_row_fails_leaves_no_refresh_row() {
+        use crate::blocks::auth::repo::{
+            sessions,
+            test_faults::{drop_trigger, fail_inserts_into},
+            tokens,
+        };
+
+        let ctx = ctx_with_crypto().await;
+        let user_id = ctx
+            .seed_account(
+                "atomic@example.com",
+                "correct-horse-battery",
+                InitialRole::User,
+            )
+            .await;
+        let trigger = fail_inserts_into(&ctx, sessions::TABLE).await;
+
+        let body = serde_json::json!({
+            "email": "atomic@example.com",
+            "password": "correct-horse-battery",
+        })
+        .to_string();
+        let out = handle(
+            &ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
+            InputStream::from_bytes(body.into_bytes()),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 500);
+
+        let refresh_rows = wafer_core::clients::database::count_by_field(
+            &ctx.fixture(),
+            tokens::TABLE,
+            "user_id",
+            serde_json::json!(user_id),
+        )
+        .await
+        .expect("count the refresh rows");
+        assert_eq!(refresh_rows, 0, "a failed sign-in leaves no refresh row");
+
+        drop_trigger(&ctx, &trigger).await;
+        let retry = login(&ctx, "atomic@example.com", "correct-horse-battery").await;
+        assert!(
+            retry["refresh_token"].is_string(),
+            "the next sign-in succeeds: {retry}"
+        );
+    }
 }

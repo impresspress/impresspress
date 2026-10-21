@@ -19,6 +19,40 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: a revoked device stays revoked, even mid-refresh
+
+**What changes.** A signed-in device is a row in `wafer_run__auth__sessions`,
+the list at **Account → Sessions**, and that row is now what keeps the device
+signed in.
+
+- **Revoking a device while it refreshes its tokens ends it.** Before, a
+  refresh that was in flight when the device was revoked could finish
+  afterwards, hand the device a working refresh token and put it back on the
+  list. Now a refresh whose device was revoked meanwhile is refused (`401`,
+  "Refresh token has been revoked"), and any token it had already minted is
+  revoked with the rest of the device's tokens. Logout follows the same rule
+  for every device at once.
+- **A device that has lost its row is signed out at its next refresh**
+  instead of being silently listed again. Rows go when a device is revoked,
+  when the user logs out, and when they expire, which all end the device
+  anyway, and when the auth migrations re-run (below).
+- **A sign-in writes its refresh token and its device row in one write.** If
+  either cannot be written, the sign-in fails with a `500` and leaves nothing
+  behind. Before, a failed device row was logged and the sign-in succeeded
+  with a device missing from the list. On Cloudflare this also takes one D1
+  round trip off every sign-in (four, from five).
+
+**Any future change to the auth migrations signs everyone out once.**
+Migration 012 recreates `wafer_run__auth__sessions`, and the auth migrations
+re-run as a set whenever any of them changes. Until now that only emptied
+the device list, which refilled as devices refreshed. From this release, the
+emptied list means every device is signed out at its next refresh, within
+one access-token lifetime (30 minutes by default). This release adds no auth
+migration, so deploying it signs nobody out.
+
+Access tokens already issued still work until they expire, as before; ending
+them at revocation is a separate change.
+
 ### Auth: only this site's own pages can sign a browser in
 
 **What changes.** The requests that hand out a session — `POST

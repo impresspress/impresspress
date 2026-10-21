@@ -1,19 +1,38 @@
 //! Row-level access over `wafer_run__auth__sessions` — one row per login
 //! family (B12).
 //!
-//! A row here is a *device*, not a credential. Its key is the refresh
-//! rotation `family` that `helpers::generate_tokens` mints, so the row created
-//! when a user signs in is the same row every subsequent token refresh
-//! touches, and it expires exactly when the refresh row it mirrors does.
-//! Nothing authenticates against this table: `AuthServiceImpl` verifies the
-//! access JWT, and the pipeline verifies it again per request. What the table
-//! feeds is `/b/userportal/sessions` — the list of devices a user can see and
+//! A row here is a *device*: one signed-in login family. Its key is the
+//! refresh rotation `family` that `helpers::generate_tokens` mints, so the row
+//! created when a user signs in is the same row every subsequent token refresh
+//! touches, and it expires exactly when the refresh row it mirrors does. It
+//! feeds `/b/userportal/sessions`, the list of devices a user can see and
 //! revoke.
+//!
+//! ## The row is the family's liveness
+//!
+//! A family is signed in exactly while its row exists. Its first refresh row
+//! and this row are written in one batch ([`create_op`] beside
+//! `tokens::create_op`), so a family never has one without the other. A
+//! rotation refreshes this row ([`touch`]) after writing its successor token,
+//! and when the touch finds no row the family was revoked while the rotation
+//! ran: the rotation revokes the family's refresh rows and refuses. Nothing
+//! re-creates a missing row. Revoking a device therefore deletes its row FIRST
+//! and revokes its refresh rows second; `userportal::pages::sessions` says why
+//! that order closes the race with a concurrent rotation.
+//!
+//! The refresh rows (`super::tokens`) answer a different question — is the
+//! presented token the family's current generation, or a replayed copy — and
+//! never this one.
 //!
 //! Before migration 012 the key was `sha256(access_token)`, which made every
 //! token issuance a new row: a browser tab wrote roughly one row per 30
 //! minutes, each lived 30 days, logout deleted none, and each showed on the
 //! device list as its own device.
+//!
+//! Migration 012 still opens with `DROP TABLE IF EXISTS` of this table, and
+//! the auth migrations re-run as a set whenever any of them changes. Because
+//! the row is the family's liveness, such a re-run signs every device out at
+//! its next token refresh (RELEASE.md says so).
 //!
 //! ## Schema convention
 //!
@@ -26,8 +45,11 @@
 
 use std::collections::HashMap;
 
-use serde_json::json;
-use wafer_block::db::{Filter, FilterOp, SortField};
+use serde_json::{json, Value};
+use wafer_block::{
+    db::{Filter, FilterOp, SortField},
+    wire::database::BatchWrite,
+};
 use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
@@ -92,14 +114,28 @@ fn user_filter(user_id: &str) -> Filter {
     }
 }
 
-/// Insert the row for a brand-new login family.
-///
-/// One row per family: [`touch`] is what a subsequent token refresh within the
-/// same family calls. Issuance falls back to this when `touch` reports it
-/// affected nothing, so a family whose row was swept or dropped re-appears on
-/// the device list at its next refresh rather than staying invisible until the
-/// user signs in again.
+/// The row for a brand-new login family, as one write of the batch that also
+/// writes the family's first refresh row (`tokens::create_op`). Issuance
+/// writes the two together so that neither lands without the other.
+pub fn create_op(new: NewSession) -> BatchWrite {
+    BatchWrite::Create {
+        collection: TABLE.to_string(),
+        data: new_row(new),
+    }
+}
+
+/// [`create_op`]'s row written on its own: test fixtures that sign an access
+/// token outside the issuance path use it to give that token's `family` the
+/// row a real sign-in would have written.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn insert(ctx: &dyn Context, new: NewSession) -> Result<(), WaferError> {
+    db::create(ctx, TABLE, new_row(new))
+        .await
+        .map_err(|e| db_failed("insert session", e))?;
+    Ok(())
+}
+
+fn new_row(new: NewSession) -> HashMap<String, Value> {
     let now = now_iso();
     let mut data = HashMap::new();
     data.insert("family".into(), json!(new.family));
@@ -108,17 +144,15 @@ pub async fn insert(ctx: &dyn Context, new: NewSession) -> Result<(), WaferError
     data.insert("created_at".into(), json!(now));
     data.insert("last_used_at".into(), json!(now));
     data.insert("expires_at".into(), json!(new.expires_at));
-    db::create(ctx, TABLE, data)
-        .await
-        .map_err(|e| db_failed("insert session", e))?;
-    Ok(())
+    data
 }
 
 /// Bump `last_used_at` to now and carry `expires_at` forward for `family`.
 ///
-/// Returns the number of rows affected — `0` when the family has no row,
-/// which is the signal issuance uses to [`insert`] one instead. `created_at`
-/// is deliberately untouched: it is when the device signed in, and rotation is
+/// Returns the number of rows affected. `0` means the family has no row: it
+/// was revoked (or expired and was swept), and the rotation that asked must
+/// refuse rather than continue it — see the module doc. `created_at` is
+/// deliberately untouched: it is when the device signed in, and rotation is
 /// not a new sign-in.
 pub async fn touch(ctx: &dyn Context, family: &str, expires_at: &str) -> Result<u64, WaferError> {
     let mut data = HashMap::new();
@@ -176,6 +210,7 @@ pub async fn list_for_user(
 }
 
 /// Delete the row for `family`. Returns the number deleted (0 if absent).
+/// This is what ends the family: see the module doc.
 ///
 /// Unscoped on purpose: its one caller, the userportal revoke, has already
 /// established whose family it is through [`find_for_user`].
@@ -191,7 +226,8 @@ pub async fn delete(ctx: &dyn Context, family: &str) -> Result<u64, WaferError> 
 ///
 /// Logout's counterpart to `tokens::revoke_all_for_user`: the two run
 /// together so the device list and the refresh tokens agree about which
-/// devices are still signed in.
+/// devices are still signed in. This one runs first, for the reason
+/// [`delete`]'s caller gives.
 pub async fn delete_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<u64, WaferError> {
     let n = db::delete_by_filters_count(ctx, TABLE, vec![user_filter(user_id)])
         .await

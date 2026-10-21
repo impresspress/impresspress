@@ -105,9 +105,11 @@ pub(crate) const API_KEY_EXPIRY_CANONICAL: &str = "015_api_key_expiry_canonical"
 ///   `ddl` must keep migration files as the stated exception; 014's `UPDATE`
 ///   already relies on it, and at runtime auth may append to the table
 ///   (`blocks/admin/mod.rs`'s grants).
-/// - **What it costs.** Adding the file re-runs the auth list, and 004 and 012
-///   drop the refresh-token and session tables: every user is signed out once
-///   (RELEASE.md). Inline admins keep admin, as grants. A dev data snapshot
+/// - **What it costs.** Adding the file re-runs the auth list, and 012 drops
+///   the session table (004 no longer drops the refresh-token table; see its
+///   header). A session row is a login family's liveness
+///   (`repo::sessions`), so every user is signed out once, at their next token
+///   refresh (RELEASE.md). Inline admins keep admin, as grants. A dev data snapshot
 ///   carrying users must be re-exported (`data_snapshot::SCHEMA_VERSION` 2).
 ///
 /// The upgrade itself, on both dialects, is tested in
@@ -925,10 +927,14 @@ mod re_run_survival_tests {
     }
 
     /// The one drop the set still carries, stated rather than discovered:
-    /// `012_sessions_family` recreates `wafer_run__auth__sessions`. Nothing
-    /// authenticates against that table — it is the device list, and
-    /// `record_login_family` re-inserts a device on its next token refresh —
-    /// so emptying it signs nobody out. RELEASE.md says so on both notes.
+    /// `012_sessions_family` recreates `wafer_run__auth__sessions`. A row
+    /// there is a login family's liveness (`repo::sessions`): a refresh whose
+    /// family has no row is refused, and nothing re-creates one. So emptying
+    /// the table signs every device out at its next token refresh; RELEASE.md
+    /// says so. (012's own header still describes the re-insert fallback that
+    /// used to refill the table. Editing that file would itself re-run the
+    /// set and sign everyone out, so its text stays until a migration change
+    /// that removes the drop.)
     #[tokio::test]
     async fn the_device_list_is_the_only_thing_a_re_run_empties() {
         let ctx = upgrading_deployment().await;

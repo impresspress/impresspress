@@ -12,7 +12,11 @@
 //!    successor: exactly one wins. The loser is refused with the same answer
 //!    step 2 gives, but its family is left alone — see [`refuse_not_live`].
 //! 4. The winner inserts a new row under the same family ID with
-//!    `generation + 1` and returns the new access + refresh pair.
+//!    `generation + 1`, then touches the family's session row. That row is
+//!    the family's liveness (`auth::repo::sessions`): when it is gone the
+//!    family was revoked while this request ran, so the family's rows are
+//!    revoked and the refresh is refused. Otherwise it returns the new
+//!    access + refresh pair.
 //!
 //! Before the claim, the token's `auth_version` claim is checked against the
 //! account's: a family issued before the account's latest security-relevant
@@ -26,7 +30,10 @@ use crate::{
     blocks::{
         auth::{
             credential_check_failed,
-            helpers::{issue_tokens_and_cookie, Rotation, SessionLifetime, TokenGrant},
+            helpers::{
+                issue_tokens_and_cookie, refresh_token_revoked, Rotation, SessionLifetime,
+                TokenGrant,
+            },
             repo::{tokens, users},
         },
         auth_ui::contracts::{RefreshRequest, RefreshResponse, TokenType},
@@ -112,7 +119,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
             // its tombstone has since been wiped, or this is a forged
             // refresh token whose family we never minted. Either way, no
             // family to revoke; just refuse.
-            return error_response(ErrorCode::InvalidToken, "Refresh token has been revoked");
+            return refresh_token_revoked();
         }
         // A read that could not run says nothing about the token. "Revoked"
         // is a statement about the credential, and making it for this
@@ -232,8 +239,11 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     // Re-issue within the *preserved* family (SEC-039): `Rotation::Within`
     // makes `generate_tokens` carry the existing family on the new refresh JWT
     // so its `family` claim agrees with the DB row that anchors reuse
-    // detection, and `row.generation + 1` advances the rotation counter. This is the same shared issuance tail every other
-    // login flow uses, so the userportal session row is written here too.
+    // detection, and `row.generation + 1` advances the rotation counter. The
+    // tail writes the successor's row and then touches the family's session
+    // row; a family revoked since the claim above has no row to touch, and the
+    // tail revokes it and answers `refresh_token_revoked` instead of tokens
+    // (`helpers::establish_family`).
     let issued = match issue_tokens_and_cookie(
         ctx,
         issuance,
@@ -285,14 +295,20 @@ async fn refuse_stale_family(ctx: &dyn Context, row: &tokens::TokenRow) -> Outpu
             "refresh: could not revoke a stale family; it stays refused by auth_version"
         );
     }
-    error_response(ErrorCode::InvalidToken, "Refresh token has been revoked")
+    refresh_token_revoked()
 }
 
 /// How a refresh token turned out not to be its family's live generation.
 ///
-/// The client is told the same thing either way — it presented a token that is
-/// no longer current, and the two are indistinguishable from outside — but
-/// what the deployment does about it differs.
+/// The client is told the same thing either way ([`refresh_token_revoked`]) —
+/// it presented a token that is no longer current, and the two are
+/// indistinguishable from outside — but what the deployment does about it
+/// differs.
+///
+/// Both are questions about the token's ROW, answered by the refresh rows
+/// (`tokens`, module doc): is this the family's current generation? Whether
+/// the family is still signed in at all is the session row's question, which
+/// the issuance tail asks after the claim, and which gets the same answer.
 enum NotLive {
     /// The row was already `revoked` when it was read: this token was rotated
     /// away at some earlier point and is being presented again.
@@ -360,7 +376,7 @@ async fn refuse_not_live(
             }
         }
     }
-    error_response(ErrorCode::InvalidToken, "Refresh token has been revoked")
+    refresh_token_revoked()
 }
 
 #[cfg(test)]
@@ -1187,7 +1203,8 @@ mod tests {
 
     /// A refresh token minted before tokens carried an `auth_version` claim:
     /// `source`'s claims with that one removed, re-signed, and stored under a
-    /// family of its own so it is a live generation-0 row like the original.
+    /// family of its own — with that family's session row, as a sign-in
+    /// writes it — so it is a live generation-0 row like the original.
     async fn claimless_copy_of(ctx: &TestContext, source: &str) -> String {
         let mut claims = crypto::verify(ctx, source)
             .await
@@ -1215,6 +1232,7 @@ mod tests {
         tokens::insert(ctx, &user_id, &token, &family, 0, &expires_at)
             .await
             .expect("store the claim-less token's row");
+        crate::test_support::seed_login_family(ctx, &user_id, &family).await;
         token
     }
 

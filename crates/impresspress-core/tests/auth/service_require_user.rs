@@ -13,7 +13,7 @@ use std::{sync::Arc, time::Duration};
 use impresspress_core::{
     blocks::auth::{
         migrations,
-        repo::{jwt_blocklist, pats, users},
+        repo::{jwt_blocklist, pats, sessions, users},
         service::{hash_token, AuthServiceImpl},
     },
     test_support::{seed_user, TestContext},
@@ -382,4 +382,47 @@ async fn require_user_rejects_a_token_signed_with_a_foreign_secret() {
         .await
         .expect_err("a foreign-secret token must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
+}
+
+/// The `family` claim of an access JWT, read off its payload.
+fn family_claim(token: &str) -> String {
+    let payload = token.split('.').nth(1).expect("a JWT has a payload");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &wafer_block_crypto::primitives::b64url_decode(payload).expect("base64url payload"),
+    )
+    .expect("JSON claims");
+    claims["family"]
+        .as_str()
+        .expect("the token names a family")
+        .to_string()
+}
+
+/// Every token `mint_access_token` signs belongs to a login family with its
+/// session row, a fresh family or the one the case names, as a real sign-in
+/// leaves it. Without the row such a token would be refused for its family
+/// once that is checked, whatever the case meant to test.
+#[tokio::test]
+async fn a_minted_access_token_has_its_familys_session_row() {
+    let (raw, ctx) = fixture().await;
+    let uid = seed_user_id(ctx.as_ref(), "family@example.com").await;
+
+    let fresh = raw
+        .mint_access_token(&uid, &[], Duration::from_secs(3600))
+        .await;
+    let chosen = raw
+        .mint_access_token(
+            &uid,
+            &[("family", serde_json::json!("fam-chosen"))],
+            Duration::from_secs(3600),
+        )
+        .await;
+    assert_eq!(family_claim(&chosen), "fam-chosen");
+
+    for token in [fresh, chosen] {
+        let family = family_claim(&token);
+        let row = sessions::find_for_user(ctx.as_ref(), &uid, &family)
+            .await
+            .expect("read the session row");
+        assert!(row.is_some(), "family {family} has its session row");
+    }
 }

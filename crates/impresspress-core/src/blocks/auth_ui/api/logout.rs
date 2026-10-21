@@ -5,7 +5,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            helpers::{build_auth_cookie, end_presented_access_token},
+            helpers::{clear_auth_cookie, end_presented_access_token},
             repo::{sessions, tokens},
         },
         auth_ui::contracts::MessageResponse,
@@ -17,34 +17,33 @@ use crate::{
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id();
     if !user_id.is_empty() {
-        // SEC-032/039: revoke (don't delete) the user's refresh-token rows
-        // so the tombstones remain available for reuse detection. A
-        // revocation failure must NOT be reported as a successful logout —
-        // the whole point of this call is invalidating refresh tokens on
-        // every device; silently discarding the failure here (the old
-        // `.ok()`) left revocable-in-name-only sessions live everywhere
-        // while telling the caller everything worked.
-        if let Err(e) = tokens::revoke_all_for_user(ctx, user_id).await {
-            tracing::error!(
-                user_id = %user_id,
-                error = %e,
-                "logout: refresh-token revocation failed"
-            );
-            return crud::db_error_internal(e, "Logout could not fully revoke the session");
-        }
-
-        // [B12] Logout is an all-devices operation — the line above revokes
-        // every refresh family the user has — so every session row goes with
-        // them. Leaving the rows behind is what made `/b/userportal/sessions`
-        // list devices as signed in for weeks after the tokens that kept them
-        // alive had been revoked. Same fail-closed treatment as the
-        // revocation itself: a list that still shows a revoked device is a
-        // security-relevant lie, not a cosmetic one.
+        // [B12] Logout is an all-devices operation, so every session row goes.
+        // The row is the family's liveness (`auth::repo::sessions`), so this
+        // is what signs the devices out: a rotation racing it finds no row to
+        // touch and refuses. It runs before the refresh rows are revoked, for
+        // the reason `userportal::pages::sessions::handle_revoke` gives for a
+        // single device. Leaving the rows behind is also what made
+        // `/b/userportal/sessions` list devices as signed in for weeks after
+        // logout. A failure is not reported as a successful logout.
         if let Err(e) = sessions::delete_all_for_user(ctx, user_id).await {
             tracing::error!(
                 user_id = %user_id,
                 error = %e,
                 "logout: session-row deletion failed"
+            );
+            return crud::db_error_internal(e, "Logout could not fully revoke the session");
+        }
+
+        // SEC-032/039: revoke (don't delete) the user's refresh-token rows
+        // so the tombstones remain available for reuse detection. A
+        // revocation failure must NOT be reported as a successful logout —
+        // silently discarding the failure here (the old `.ok()`) told the
+        // caller everything worked while the rows still read as live.
+        if let Err(e) = tokens::revoke_all_for_user(ctx, user_id).await {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "logout: refresh-token revocation failed"
             );
             return crud::db_error_internal(e, "Logout could not fully revoke the session");
         }
@@ -62,7 +61,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     }
 
-    let cookie = match build_auth_cookie("", 0, ctx).await {
+    let cookie = match clear_auth_cookie(ctx).await {
         Ok(cookie) => cookie,
         Err(e) => return crud::db_error_internal(e, "Logout could not build the cookie"),
     };

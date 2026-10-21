@@ -13,12 +13,26 @@
 //! - `revoked` — set when a token rotates (don't delete, the row is needed
 //!   for reuse detection) or when an entire family is invalidated.
 //!
+//! ## Replay, not liveness
+//!
+//! These rows answer one question: is the token being presented its family's
+//! current generation, or a copy of one that was already rotated away
+//! ([`family_has_live_row`], read by `auth_ui::api::refresh`'s replay check)?
+//! They do NOT say whether the family itself is still signed in. That is the
+//! family's row in `wafer_run__auth__sessions` (`super::sessions`): a family
+//! with no row there has been revoked, and a rotation that finds it gone
+//! refuses and revokes the rows here. Two tables, two questions, one authority
+//! for each.
+//!
 //! See `migrations/004_refresh_tokens.{sqlite,postgres}.sql` for the schema.
 
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
-use wafer_block::db::{Filter, FilterOp};
+use wafer_block::{
+    db::{Filter, FilterOp},
+    wire::database::BatchWrite,
+};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
@@ -41,6 +55,9 @@ pub fn hash(raw_token: &str) -> String {
 
 /// Insert a fresh refresh-token row at `generation` (0 for the first token
 /// in a new family, `prev_generation + 1` on rotation).
+///
+/// A brand-new family's first row is written together with its session row
+/// instead, through [`create_op`]; this is the rotation's write.
 pub async fn insert(
     ctx: &dyn Context,
     user_id: &str,
@@ -49,9 +66,40 @@ pub async fn insert(
     generation: i64,
     expires_at: &str,
 ) -> Result<(), WaferError> {
-    let id = uuid::Uuid::now_v7().to_string();
+    db::create(
+        ctx,
+        TABLE,
+        new_row(user_id, raw_token, family, generation, expires_at),
+    )
+    .await
+    .map_err(|e| db_failed("tokens insert", e))?;
+    Ok(())
+}
+
+/// [`insert`] as one write of a batch: the same row, for a caller that must
+/// land it atomically with another (a new family's session row).
+pub fn create_op(
+    user_id: &str,
+    raw_token: &str,
+    family: &str,
+    generation: i64,
+    expires_at: &str,
+) -> BatchWrite {
+    BatchWrite::Create {
+        collection: TABLE.to_string(),
+        data: new_row(user_id, raw_token, family, generation, expires_at),
+    }
+}
+
+fn new_row(
+    user_id: &str,
+    raw_token: &str,
+    family: &str,
+    generation: i64,
+    expires_at: &str,
+) -> HashMap<String, Value> {
     let mut data: HashMap<String, Value> = HashMap::new();
-    data.insert("id".into(), json!(id));
+    data.insert("id".into(), json!(uuid::Uuid::now_v7().to_string()));
     data.insert("token_hash".into(), json!(hash(raw_token)));
     data.insert("user_id".into(), json!(user_id));
     data.insert("family".into(), json!(family));
@@ -61,11 +109,7 @@ pub async fn insert(
     // keeps `created_at` consistent with every other auth repo module.
     data.insert("created_at".into(), json!(now_iso()));
     data.insert("expires_at".into(), json!(expires_at));
-
-    db::create(ctx, TABLE, data)
-        .await
-        .map_err(|e| db_failed("tokens insert", e))?;
-    Ok(())
+    data
 }
 
 /// A loaded refresh-token row.
@@ -106,6 +150,9 @@ pub async fn find_by_token(
 /// request hits a revoked row but `family_has_live_row` is true, the row
 /// being presented was already rotated and the family is under attack —
 /// revoke the whole family.
+///
+/// A replay question only. Whether the family is still signed in is its
+/// session row's to say (see the module doc).
 pub async fn family_has_live_row(ctx: &dyn Context, family: &str) -> Result<bool, WaferError> {
     let filters = vec![
         Filter {

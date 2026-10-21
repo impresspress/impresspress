@@ -352,10 +352,36 @@ mod tests {
     // `extract_auth_meta` verifies against, since the master-secret fallback
     // no longer exists.
 
-    fn sign_access_jwt(secret: &str, sub: &str, jti: Option<&str>, ttl_secs: u64) -> String {
+    //
+    // Every signer here also gives its token a login family with its session
+    // row, as a real sign-in does (`establish_family`): the token is then
+    // refused, or accepted, for the reason its test names and no other.
+
+    /// The account `sub` (seeded unless the test already did) and the session
+    /// row of `family`, which the signed token's `family` claim names.
+    async fn sign_in_family(ctx: &crate::test_support::TestContext, sub: &str, family: &str) {
+        let account = crate::blocks::auth::repo::users::find_by_id(&ctx.fixture(), sub)
+            .await
+            .expect("look the account up");
+        if account.is_none() {
+            ctx.seed_auth_user(sub).await;
+        }
+        crate::test_support::seed_login_family(ctx, sub, family).await;
+    }
+
+    async fn sign_access_jwt(
+        ctx: &crate::test_support::TestContext,
+        secret: &str,
+        sub: &str,
+        jti: Option<&str>,
+        ttl_secs: u64,
+    ) -> String {
+        let family = uuid::Uuid::now_v7().to_string();
+        sign_in_family(ctx, sub, &family).await;
         let mut claims = BTreeMap::new();
         claims.insert("sub".to_string(), serde_json::json!(sub));
         claims.insert("type".to_string(), serde_json::json!("access"));
+        claims.insert("family".to_string(), serde_json::json!(family));
         if let Some(j) = jti {
             claims.insert("jti".to_string(), serde_json::json!(j));
         }
@@ -380,7 +406,7 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(secret, "user-a", Some("jti-1"), 3600);
+        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-1"), 3600).await;
         let claims = verify_access_token(&ctx, &token, secret, "")
             .await
             .expect("the check completes")
@@ -398,17 +424,18 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt_with(secret, |claims| {
+        let token = sign_access_jwt_with(&ctx, secret, |claims| {
             claims.insert("sub".to_string(), serde_json::json!("user-a"));
             claims.insert("auth_method".to_string(), serde_json::json!("oauth.github"));
-        });
+        })
+        .await;
         let claims = verify_access_token(&ctx, &token, secret, "")
             .await
             .expect("the check completes")
             .expect("the token verifies");
         assert_eq!(claims.auth_method, "oauth.github");
 
-        let without = sign_access_jwt(secret, "user-a", None, 3600);
+        let without = sign_access_jwt(&ctx, secret, "user-a", None, 3600).await;
         let claims = verify_access_token(&ctx, &without, secret, "")
             .await
             .expect("the check completes")
@@ -443,10 +470,11 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt_with(secret, |claims| {
+        let token = sign_access_jwt_with(&ctx, secret, |claims| {
             claims.insert("sub".to_string(), serde_json::json!("user-a"));
             claims.insert("iss".to_string(), serde_json::json!("https://elsewhere"));
-        });
+        })
+        .await;
         assert!(verify_access_token(&ctx, &token, secret, "https://here")
             .await
             .expect("the check completes")
@@ -459,7 +487,7 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(secret, "user-a", Some("jti-gone"), 3600);
+        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-gone"), 3600).await;
         crate::blocks::auth::repo::jwt_blocklist::insert(
             &ctx.fixture(),
             crate::blocks::auth::repo::jwt_blocklist::NewBlocklistEntry {
@@ -492,13 +520,14 @@ mod tests {
 
         // Token minted before the bump: auth_version 0 against a stored 1.
         let uid = user.id.clone();
-        let token = sign_access_jwt_with(secret, |claims| {
+        let token = sign_access_jwt_with(&ctx, secret, |claims| {
             claims.insert("sub".to_string(), serde_json::json!(uid));
             claims.insert(
                 crate::blocks::auth::repo::users::AUTH_VERSION_FIELD.to_string(),
                 serde_json::json!(0),
             );
-        });
+        })
+        .await;
         assert!(verify_access_token(&ctx, &token, secret, "")
             .await
             .expect("the check completes")
@@ -514,10 +543,11 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt_with(secret, |claims| {
+        let token = sign_access_jwt_with(&ctx, secret, |claims| {
             claims.insert("sub".to_string(), serde_json::json!("user-a"));
             claims.insert("family".to_string(), serde_json::json!("fam-42"));
-        });
+        })
+        .await;
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await
@@ -527,6 +557,9 @@ mod tests {
 
     /// A token with no `family` claim leaves the meta empty rather than
     /// stamping a blank value that a reader could mistake for a match.
+    ///
+    /// No sign-in mints such a token, so it is signed here by hand rather
+    /// than through the signers above, which all give their token a family.
     #[tokio::test]
     async fn extract_auth_meta_leaves_the_family_empty_when_the_token_has_none() {
         use wafer_run::Message;
@@ -534,7 +567,15 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(secret, "user-a", None, 3600);
+        let derived = primitives::derive_block_key(
+            secret.as_bytes(),
+            crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
+        );
+        let mut claims = BTreeMap::new();
+        claims.insert("sub".to_string(), serde_json::json!("user-a"));
+        claims.insert("type".to_string(), serde_json::json!("access"));
+        let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
+            .expect("test jwt_sign");
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await
@@ -542,15 +583,30 @@ mod tests {
         assert_eq!(msg.get_meta(META_AUTH_FAMILY), "");
     }
 
-    /// `sign_access_jwt` with arbitrary extra claims. `type` is always
-    /// `"access"`; the caller adds `sub` and whatever else the case needs.
-    fn sign_access_jwt_with(
+    /// `sign_access_jwt` with arbitrary extra claims. `type` and a fresh
+    /// `family` are filled in; the caller adds `sub` and whatever else the
+    /// case needs, a `family` of its own included.
+    async fn sign_access_jwt_with(
+        ctx: &crate::test_support::TestContext,
         secret: &str,
         fill: impl FnOnce(&mut BTreeMap<String, serde_json::Value>),
     ) -> String {
         let mut claims = BTreeMap::new();
         claims.insert("type".to_string(), serde_json::json!("access"));
+        claims.insert(
+            "family".to_string(),
+            serde_json::json!(uuid::Uuid::now_v7().to_string()),
+        );
         fill(&mut claims);
+        let sub = claims["sub"]
+            .as_str()
+            .expect("the case sets `sub`")
+            .to_string();
+        let family = claims["family"]
+            .as_str()
+            .expect("`family` is a string")
+            .to_string();
+        sign_in_family(ctx, &sub, &family).await;
         let derived = primitives::derive_block_key(
             secret.as_bytes(),
             crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
@@ -637,7 +693,7 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(secret, "user-a", Some("jti-1"), 3600);
+        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-1"), 3600).await;
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await
@@ -667,10 +723,12 @@ mod tests {
             crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
         );
 
+        sign_in_family(&ctx, "user-prod", "fam-prod").await;
         let mut claims = BTreeMap::new();
         claims.insert("sub".to_string(), serde_json::json!("user-prod"));
         claims.insert("type".to_string(), serde_json::json!("access"));
         claims.insert("jti".to_string(), serde_json::json!("jti-prod"));
+        claims.insert("family".to_string(), serde_json::json!("fam-prod"));
         let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
             .expect("sign with derived");
 
@@ -695,7 +753,7 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(secret, "user-a", Some("jti-blocked"), 3600);
+        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-blocked"), 3600).await;
 
         // Pre-populate the blocklist with the jti.
         crate::blocks::auth::repo::jwt_blocklist::insert(
@@ -738,8 +796,8 @@ mod tests {
         .await
         .unwrap();
 
-        let blocked = sign_access_jwt(secret, "user-a", Some("session-1"), 3600);
-        let live = sign_access_jwt(secret, "user-a", Some("session-2"), 3600);
+        let blocked = sign_access_jwt(&ctx, secret, "user-a", Some("session-1"), 3600).await;
+        let live = sign_access_jwt(&ctx, secret, "user-a", Some("session-2"), 3600).await;
 
         let mut m1 = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {blocked}"), secret, "", &mut m1)
@@ -758,15 +816,19 @@ mod tests {
 
     /// Same as [`sign_access_jwt`] but with an explicit `auth_version` claim,
     /// so tests can mint a token "as of" a specific version.
-    fn sign_access_jwt_with_version(
+    async fn sign_access_jwt_with_version(
+        ctx: &crate::test_support::TestContext,
         secret: &str,
         sub: &str,
         auth_version: i64,
         ttl_secs: u64,
     ) -> String {
+        let family = uuid::Uuid::now_v7().to_string();
+        sign_in_family(ctx, sub, &family).await;
         let mut claims = BTreeMap::new();
         claims.insert("sub".to_string(), serde_json::json!(sub));
         claims.insert("type".to_string(), serde_json::json!("access"));
+        claims.insert("family".to_string(), serde_json::json!(family));
         claims.insert(
             crate::blocks::auth::repo::users::AUTH_VERSION_FIELD.to_string(),
             serde_json::json!(auth_version),
@@ -798,7 +860,7 @@ mod tests {
 
         // Minted "before" any bump — embeds the user's then-current
         // auth_version (0).
-        let token = sign_access_jwt_with_version(secret, &uid, 0, 3600);
+        let token = sign_access_jwt_with_version(&ctx, secret, &uid, 0, 3600).await;
 
         let mut before = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut before)
@@ -841,7 +903,7 @@ mod tests {
             .expect("bump auth_version");
 
         // Minted AFTER the bump, embedding the now-current version (1).
-        let token = sign_access_jwt_with_version(secret, &uid, 1, 3600);
+        let token = sign_access_jwt_with_version(&ctx, secret, &uid, 1, 3600).await;
 
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
@@ -866,7 +928,7 @@ mod tests {
         let uid = seed_user(&ctx).await;
         let secret = "test-secret";
 
-        let token = sign_access_jwt(secret, &uid, None, 3600);
+        let token = sign_access_jwt(&ctx, secret, &uid, None, 3600).await;
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await
@@ -893,7 +955,7 @@ mod tests {
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let uid = seed_user(&ctx).await;
         let secret = "test-secret";
-        let token = sign_access_jwt_with_version(secret, &uid, 0, 3600);
+        let token = sign_access_jwt_with_version(&ctx, secret, &uid, 0, 3600).await;
 
         // Same underlying in-memory DB (shallow `Clone`), but every call
         // through `wrapped` is WRAP-checked as `impresspress/router` —
