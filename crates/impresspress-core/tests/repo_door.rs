@@ -1203,6 +1203,11 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             "blocks/products/mod.rs",
             "blocks/dev/data_snapshot.rs",
             "blocks/products/tests/purchase_tests.rs",
+            // Test-fixture setup: `commerce_ctx` stages a seeded order's
+            // refunds, disputes and seller accounts with fixed dates, so the
+            // commerce pages (and the e2e fixture taken from them) render
+            // the same on every run.
+            "blocks/products/tests/page_chrome_tests.rs",
             // Test-fixture setup: `refund_reconciliation_keeps_the_provider_response_summary`
             // stages the `provider_succeeded` state an interrupted reconcile
             // leaves behind. No product path parks a row there across requests,
@@ -1223,6 +1228,11 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             "blocks/dev/data_snapshot.rs",
             "blocks/products/tests/handler_tests.rs",
             "blocks/products/tests/purchase_tests.rs",
+            // Test-fixture setup: `commerce_ctx` stages a seeded order's
+            // refunds, disputes and seller accounts with fixed dates, so the
+            // commerce pages (and the e2e fixture taken from them) render
+            // the same on every run.
+            "blocks/products/tests/page_chrome_tests.rs",
         ],
     ),
     (
@@ -1255,6 +1265,11 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             "blocks/products/tests/error_mapping_tests.rs",
             "blocks/products/tests/handler_tests.rs",
             "blocks/products/tests/page_link_tests.rs",
+            // Test-fixture setup: `commerce_ctx` stages a seeded order's
+            // refunds, disputes and seller accounts with fixed dates, so the
+            // commerce pages (and the e2e fixture taken from them) render
+            // the same on every run.
+            "blocks/products/tests/page_chrome_tests.rs",
             "blocks/products/tests/provider_tests.rs",
             "blocks/products/tests/repo_tests.rs",
             "blocks/products/tests/seller_governance_tests.rs",
