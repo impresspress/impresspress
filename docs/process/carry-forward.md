@@ -154,6 +154,9 @@ No user is signed out (nothing authenticates against the table; the `Creds`
 enum has only Jwt and Pat), and issuance re-materialises a row for each device
 on its next refresh, which is also the fallback that repopulates it. If a
 future PR wants the list to survive, rename the table instead of dropping it.
+(Superseded by `fix/family-row-is-written-atomically`: the row is now a
+family's liveness and nothing re-creates a missing one, so that DROP signs
+every device out at its next refresh. See RELEASE.md.)
 Also owed from #25: `AuthConfig.session_lifetime_days` is a dead field;
 refresh reuse-detection revokes the family but leaves the session row (not a
 correctness issue since the family is dead); Phase 4 owes the Worker

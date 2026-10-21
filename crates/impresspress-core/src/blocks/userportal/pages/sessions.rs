@@ -3,9 +3,11 @@
 //!
 //! [B12] A row is a login family, so the list has one entry per device rather
 //! than one per access token the device was ever issued, and revoking an entry
-//! actually signs that device out: the revoke burns the refresh family in
-//! `tokens` before deleting the row. Before this it removed the list entry and
-//! nothing else, so the device kept refreshing and simply re-appeared.
+//! actually signs that device out: the row is the family's liveness, and the
+//! revoke deletes it and then burns the refresh family in `tokens`
+//! ([`handle_revoke`] says why in that order). Before B12 it removed the list
+//! entry and nothing else, so the device kept refreshing and simply
+//! re-appeared.
 
 use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};

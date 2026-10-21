@@ -1332,10 +1332,9 @@ pub(crate) mod helpers {
     /// [`generate_tokens`] signs the refresh JWT with `ttl_secs`, and
     /// [`establish_family`] writes the same `expires_at` on the refresh row
     /// and the session row, so the device list cannot claim a session
-    /// outlives its token. Derived
-    /// from [`session_lifetime_days`] rather than a constant of its own: two
-    /// constants for one lifetime is what let them disagree (30 days on the
-    /// row, 7 on the token).
+    /// outlives its token. Derived from [`session_lifetime_days`] rather than
+    /// a constant of its own: two constants for one lifetime is what let them
+    /// disagree (30 days on the row, 7 on the token).
     ///
     /// Resolving it is the only step of issuance that reads configuration, and
     /// it can fail. So every handler resolves it BEFORE it consumes anything
