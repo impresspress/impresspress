@@ -352,22 +352,12 @@ mod tests {
     /// such an account by typing the constant.
     #[tokio::test]
     async fn the_timing_equalization_password_cannot_log_anyone_in() {
-        use crate::blocks::auth::repo::users;
-
         let ctx = ctx_with_crypto().await;
-        users::insert(
-            &ctx,
-            users::NewUser {
-                email: "credentialless@example.com".into(),
-                display_name: "No Credentials".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: true,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed a user with no local-credentials row");
+        crate::test_support::seed_user("credentialless@example.com")
+            .display_name("No Credentials")
+            .email_verified(true)
+            .insert(&ctx)
+            .await;
 
         let body = serde_json::json!({
             "email": "credentialless@example.com",

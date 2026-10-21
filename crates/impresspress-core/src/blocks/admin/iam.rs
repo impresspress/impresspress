@@ -1254,20 +1254,11 @@ mod tests {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let uid = users::insert(
-            &ctx,
-            users::NewUser {
-                email: "grantee@example.com".into(),
-                display_name: "Grantee".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .unwrap()
-        .id;
+        let uid = crate::test_support::seed_user("grantee@example.com")
+            .display_name("Grantee")
+            .insert(&ctx)
+            .await
+            .id;
         assert_eq!(users::auth_version(&ctx, &uid).await.unwrap(), 0);
         define_role(&ctx, "editor").await;
 
@@ -1300,20 +1291,11 @@ mod tests {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let uid = users::insert(
-            &ctx,
-            users::NewUser {
-                email: "demotee@example.com".into(),
-                display_name: "Demotee".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .unwrap()
-        .id;
+        let uid = crate::test_support::seed_user("demotee@example.com")
+            .display_name("Demotee")
+            .insert(&ctx)
+            .await
+            .id;
         define_role(&ctx, "editor").await;
 
         let msg = admin_msg("create", "/b/admin/api/iam/user-roles");

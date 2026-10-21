@@ -2813,20 +2813,7 @@ mod tests {
 
     /// Seed a user through the repo and hand back the id it minted.
     async fn seed_user(ctx: &impl Context, email: &str) -> String {
-        users::insert(
-            ctx,
-            users::NewUser {
-                email: email.to_string(),
-                display_name: email.to_string(),
-                avatar_url: None,
-                role: "user".to_string(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed user")
-        .id
+        crate::test_support::seed_user(email).insert(ctx).await.id
     }
 
     /// Self-disable and self-delete guards hold; a successful user mutation

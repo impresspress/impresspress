@@ -744,20 +744,11 @@ mod auth_version_cache_tests {
     // through the fixture.
 
     async fn seed(ctx: &TestContext) -> String {
-        repo::users::insert(
-            &ctx.fixture(),
-            repo::users::NewUser {
-                email: "cache@example.com".into(),
-                display_name: "Cache".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .unwrap()
-        .id
+        crate::test_support::seed_user("cache@example.com")
+            .display_name("Cache")
+            .insert(&ctx.fixture())
+            .await
+            .id
     }
 
     #[tokio::test]
@@ -1686,19 +1677,10 @@ pub(crate) mod helpers {
         }
 
         async fn seed_user(ctx: &TestContext) -> repo::users::UserRow {
-            repo::users::insert(
-                ctx,
-                repo::users::NewUser {
-                    email: "mint@example.com".into(),
-                    display_name: "Mint".into(),
-                    avatar_url: None,
-                    role: "user".into(),
-                    email_verified: false,
-                    verification_token_hash: None,
-                },
-            )
-            .await
-            .unwrap()
+            crate::test_support::seed_user("mint@example.com")
+                .display_name("Mint")
+                .insert(ctx)
+                .await
         }
 
         /// The grant a sign-in would resolve for `user` as read now.
@@ -2027,20 +2009,11 @@ mod api_key_lifecycle_tests {
     /// One user per key, because the tests that seed two keys would otherwise
     /// collide on the unique email.
     async fn seed_user(ctx: &TestContext, tag: &str) -> String {
-        users::insert(
-            &ctx.fixture(),
-            users::NewUser {
-                email: format!("{tag}@e.co"),
-                display_name: "Key".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .unwrap()
-        .id
+        crate::test_support::seed_user(&format!("{tag}@e.co"))
+            .display_name("Key")
+            .insert(&ctx.fixture())
+            .await
+            .id
     }
 
     /// The frame `authenticate_api_key` runs in: the pipeline's, which is

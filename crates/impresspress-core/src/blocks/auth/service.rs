@@ -722,19 +722,10 @@ mod tests {
             .expect("auth init applies user-table migrations");
 
         // A non-admin user (inline role = "user").
-        let user = users::insert(
-            &*ctx,
-            users::NewUser {
-                email: "roletable@e.co".into(),
-                display_name: "RT".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        let user = crate::test_support::seed_user("roletable@e.co")
+            .display_name("RT")
+            .insert(&*ctx)
+            .await;
 
         // Grant admin ONLY via the roles table.
         // Staged as the fixture: the auth block holds read-only on the
@@ -774,19 +765,11 @@ mod tests {
 
         // Exactly what `bootstrap::create_admin` writes for the first admin
         // (Init provisioning or token redemption).
-        let user = users::insert(
-            &*ctx,
-            users::NewUser {
-                email: "inline-admin@e.co".into(),
-                display_name: "Inline".into(),
-                avatar_url: None,
-                role: "admin".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        let user = crate::test_support::seed_user("inline-admin@e.co")
+            .display_name("Inline")
+            .role("admin")
+            .insert(&*ctx)
+            .await;
 
         assert!(
             user_roles::list_for_user(&*ctx, &user.id)
@@ -834,19 +817,10 @@ mod tests {
             .await
             .expect("auth init applies user-table migrations");
 
-        let user = users::insert(
-            &*ctx,
-            users::NewUser {
-                email: "roletable-e2e@e.co".into(),
-                display_name: "RT2".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        let user = crate::test_support::seed_user("roletable-e2e@e.co")
+            .display_name("RT2")
+            .insert(&*ctx)
+            .await;
 
         // Staged as the fixture: the auth block holds read-only on the
         // grants table, as in production, where only admin's IAM writes it.
@@ -871,19 +845,10 @@ mod tests {
 
         let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
 
-        let live = users::insert(
-            &ctx,
-            users::NewUser {
-                email: "live@e.co".into(),
-                display_name: "Live".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .unwrap();
+        let live = crate::test_support::seed_user("live@e.co")
+            .display_name("Live")
+            .insert(&ctx)
+            .await;
         // Active user → Ok.
         assert!(ensure_active(&ctx, &live.id).await.is_ok());
 
@@ -1004,19 +969,11 @@ mod tests {
             .expect("auth init applies the auth migrations");
         // A fresh user, so the verify-side `auth_version` cache holds no entry
         // for it that would answer the read this test makes fail.
-        let user = users::insert(
-            &ctx,
-            users::NewUser {
-                email: "down@e.co".into(),
-                display_name: "Down".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: true,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        let user = crate::test_support::seed_user("down@e.co")
+            .display_name("Down")
+            .email_verified(true)
+            .insert(&ctx)
+            .await;
         let ctx = refused_under_auth(ctx.refuse_database_op(
             "database.get",
             users::TABLE,
@@ -1088,19 +1045,11 @@ mod tests {
                 .init(&ctx)
                 .await
                 .expect("auth init applies the auth migrations");
-            let user = users::insert(
-                &ctx,
-                users::NewUser {
-                    email: format!("ended-{status}@e.co"),
-                    display_name: "Ended".into(),
-                    avatar_url: None,
-                    role: "user".into(),
-                    email_verified: true,
-                    verification_token_hash: None,
-                },
-            )
-            .await
-            .expect("insert user");
+            let user = crate::test_support::seed_user(&format!("ended-{status}@e.co"))
+                .display_name("Ended")
+                .email_verified(true)
+                .insert(&ctx)
+                .await;
             let ctx = refused_under_auth(ctx.refuse_database_op(
                 "database.get",
                 users::TABLE,

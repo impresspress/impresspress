@@ -3903,40 +3903,43 @@ impl TestContext {
 
 /// Seed an account through the production `repo::users::insert`.
 ///
-/// Every auth test that needs a user wants the same row: an unverified
-/// address with no verification token and no avatar, differing only in the
-/// email, the display name and the role. Spelled as a `NewUser` literal that
-/// is seventeen copies of the same six fields across `tests/auth/`, and
-/// seventeen places to edit when the struct gains a field.
+/// The one way test code creates an account: every test account outside the
+/// repo's own unit tests (`blocks/auth/repo/users.rs`) is built here, so a
+/// change to how an account is written is made once, in [`SeedUser::insert`],
+/// rather than in a `NewUser` literal per test module.
+///
+/// Most cases want the same row: an unverified address with no verification
+/// token and no avatar, differing only in the email, the display name and
+/// the role. Those are the defaults.
 ///
 /// The insert is the real one, so a test still exercises the column set and
 /// the defaults the repo writes; only the fields nobody is asserting on are
-/// hidden. Anything a case does assert on it sets:
+/// hidden. Anything a case does depend on it sets:
 ///
 /// ```ignore
 /// let user = seed_user("p@e.com").display_name("P").role("admin").insert(&ctx).await;
+/// let pending = seed_user("q@e.com").verification_token_hash(digest).insert(&ctx).await;
 /// ```
-///
-/// The two fields that are *not* here — `email_verified` and
-/// `verification_token_hash` — are `false`/`None` at every current call site.
-/// A case that needs either is asserting on verification itself and should
-/// say so with `users::insert` directly, rather than reaching for a builder
-/// default it then has to remember to override.
 pub struct SeedUser<'a> {
     email: &'a str,
     display_name: &'a str,
     avatar_url: Option<&'a str>,
     role: &'a str,
+    email_verified: bool,
+    verification_token_hash: Option<String>,
 }
 
 /// A user to seed: `email`, a display name that defaults to the email, no
-/// avatar, and the `user` role. See [`SeedUser`].
+/// avatar, the `user` role, an unverified address and no verification
+/// token. See [`SeedUser`].
 pub fn seed_user(email: &str) -> SeedUser<'_> {
     SeedUser {
         email,
         display_name: email,
         avatar_url: None,
         role: "user",
+        email_verified: false,
+        verification_token_hash: None,
     }
 }
 
@@ -3960,6 +3963,20 @@ impl<'a> SeedUser<'a> {
         self
     }
 
+    /// The `email_verified` policy flag the row is written with, when the
+    /// case depends on it (a login or mail flow on a verified address).
+    pub fn email_verified(mut self, verified: bool) -> Self {
+        self.email_verified = verified;
+        self
+    }
+
+    /// The digest stored in `verification_token`, for a case that redeems or
+    /// asserts on a pending verification.
+    pub fn verification_token_hash(mut self, hash: impl Into<String>) -> Self {
+        self.verification_token_hash = Some(hash.into());
+        self
+    }
+
     /// Insert the row, panicking on failure the way a fixture should.
     pub async fn insert(self, ctx: &dyn Context) -> crate::blocks::auth::repo::users::UserRow {
         crate::blocks::auth::repo::users::insert(
@@ -3969,8 +3986,8 @@ impl<'a> SeedUser<'a> {
                 display_name: self.display_name.to_string(),
                 avatar_url: self.avatar_url.map(str::to_string),
                 role: self.role.to_string(),
-                email_verified: false,
-                verification_token_hash: None,
+                email_verified: self.email_verified,
+                verification_token_hash: self.verification_token_hash,
             },
         )
         .await

@@ -161,19 +161,12 @@ mod tests {
     /// so the field-set assertions below are not vacuous. `insert` dual-writes
     /// `display_name` and the `name` alias, so both read "Ada".
     async fn seed_user(ctx: &dyn Context) -> String {
-        let user = users::insert(
-            ctx,
-            users::NewUser {
-                email: "admin@example.com".to_string(),
-                display_name: "Ada".to_string(),
-                avatar_url: None,
-                role: "user".to_string(),
-                email_verified: true,
-                verification_token_hash: Some("3d1f0ac0deadbeef".to_string()),
-            },
-        )
-        .await
-        .expect("seed user");
+        let user = crate::test_support::seed_user("admin@example.com")
+            .display_name("Ada")
+            .email_verified(true)
+            .verification_token_hash("3d1f0ac0deadbeef")
+            .insert(ctx)
+            .await;
         users::set_verification_token(ctx, &user.id, "3d1f0ac0deadbeef", "2026-08-01T00:00:00Z")
             .await
             .expect("seed verification bookkeeping");

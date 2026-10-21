@@ -484,19 +484,10 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let user = crate::blocks::auth::repo::users::insert(
-            &ctx.fixture(),
-            crate::blocks::auth::repo::users::NewUser {
-                email: "stale@example.com".into(),
-                display_name: "Stale".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("seed user");
+        let user = crate::test_support::seed_user("stale@example.com")
+            .display_name("Stale")
+            .insert(&ctx.fixture())
+            .await;
         crate::blocks::auth::bump_auth_version(&ctx.fixture(), &user.id)
             .await
             .expect("bump");
@@ -791,20 +782,11 @@ mod tests {
     }
 
     async fn seed_user(ctx: &crate::test_support::TestContext) -> String {
-        crate::blocks::auth::repo::users::insert(
-            &ctx.fixture(),
-            crate::blocks::auth::repo::users::NewUser {
-                email: "verify@example.com".into(),
-                display_name: "Verify".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .unwrap()
-        .id
+        crate::test_support::seed_user("verify@example.com")
+            .display_name("Verify")
+            .insert(&ctx.fixture())
+            .await
+            .id
     }
 
     #[tokio::test]

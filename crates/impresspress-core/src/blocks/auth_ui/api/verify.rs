@@ -262,25 +262,17 @@ fn html_respond(
 mod verify_tests {
     use super::*;
     use crate::{
-        blocks::auth::repo::users::{self, NewUser},
+        blocks::auth::repo::users,
         test_support::{anon_msg, output_html, output_is_error, TestContext},
     };
 
     /// A user carrying `token`'s digest in `verification_token`.
     async fn seed_unverified(ctx: &TestContext, token: &str) -> String {
-        let user = users::insert(
-            ctx,
-            NewUser {
-                email: "pending@example.com".into(),
-                display_name: "Pending".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: Some(sha256_hex(token.as_bytes())),
-            },
-        )
-        .await
-        .expect("insert user");
+        let user = crate::test_support::seed_user("pending@example.com")
+            .display_name("Pending")
+            .verification_token_hash(sha256_hex(token.as_bytes()))
+            .insert(ctx)
+            .await;
         user.id
     }
 
@@ -357,7 +349,7 @@ mod resend_tests {
 
     use super::*;
     use crate::{
-        blocks::auth::repo::users::{self, NewUser},
+        blocks::auth::repo::users,
         test_support::{output_json, TestContext},
     };
 
@@ -389,19 +381,10 @@ mod resend_tests {
     }
 
     async fn seed(ctx: &TestContext, email: &str, verified: bool) -> String {
-        let user = users::insert(
-            ctx,
-            NewUser {
-                email: email.into(),
-                display_name: "U".into(),
-                avatar_url: None,
-                role: "user".into(),
-                email_verified: false,
-                verification_token_hash: None,
-            },
-        )
-        .await
-        .expect("insert user");
+        let user = crate::test_support::seed_user(email)
+            .display_name("U")
+            .insert(ctx)
+            .await;
         users::set_email_verified(ctx, &user.id, verified)
             .await
             .expect("set email_verified");

@@ -501,19 +501,10 @@ fn write_refusals() -> [WaferError; 2] {
 }
 
 async fn seed_user(ctx: &TestContext, email: &str) {
-    users::insert(
-        ctx,
-        users::NewUser {
-            email: email.into(),
-            display_name: "U".into(),
-            avatar_url: None,
-            role: "user".into(),
-            email_verified: false,
-            verification_token_hash: None,
-        },
-    )
-    .await
-    .expect("insert user");
+    crate::test_support::seed_user(email)
+        .display_name("U")
+        .insert(ctx)
+        .await;
 }
 
 #[tokio::test]
