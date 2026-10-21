@@ -11,8 +11,9 @@
 //!
 //! - [`create_op`]: the grant an account is created with, in the same atomic
 //!   batch as the account row (`repo::users::insert_with_ops`) — `user` for
-//!   every signup, `admin` for a bootstrapped admin. The auth blocks may
-//!   append to this table for it, and do nothing else to it.
+//!   every signup, `admin` for a bootstrapped admin. The auth blocks read
+//!   this table and may append to it for this, and write nothing else to
+//!   it.
 //! - [`assign`]: every later grant, from admin's IAM assign endpoint, its
 //!   only production caller. No sign-in grants a role.
 //!
@@ -78,10 +79,13 @@ impl UserRoleRow {
         })
     }
 
-    /// Every column of the row, as the IAM endpoints echo it in their
-    /// `{id, data}` envelope; [`Self::from_record`] reads it back. Not an
-    /// insert shape — a new grant's columns are [`new_grant`]'s. `assigned_at`
-    /// is omitted when `None`, as the nullable column reads.
+    /// Every column of the row, `id` and timestamps included, as
+    /// [`Self::from_record`] reads it back: the `{id, data}` envelope the IAM
+    /// endpoints echo, and the exact row a test fixture stages under a fixed
+    /// id (admin migration 004's twin-grant tests). Not the shape a new grant
+    /// is written with — that is [`new_grant`]'s, which leaves `id` and the
+    /// timestamps to the database. `assigned_at` is omitted when `None`, as
+    /// the nullable column reads.
     pub fn to_data(&self) -> HashMap<String, Value> {
         let mut data = HashMap::new();
         data.insert("id".to_string(), json!(self.id));

@@ -5,9 +5,11 @@
 //!
 //! The database is the one an upgrade meets: admin's schema, auth's 001–015,
 //! and accounts whose role is the inline column — one of them already holding
-//! the same role as a grant. After the upgrade every account holds exactly
-//! its role as a grant and the column is gone; the next change to the auth
-//! list re-runs the whole of it, 016 included, and changes nothing.
+//! the same role as a grant, one with a role no system seeds (`editor`) and
+//! one with an empty role. After the upgrade every account holds exactly its
+//! non-empty role as a grant, under its own name, and the column is gone;
+//! the next change to the auth list re-runs the whole of it, 016 included,
+//! and changes nothing.
 //!
 //! Why each statement of 016 is shaped as it is: the 016 note on
 //! `blocks::auth::migrations::ROLES_ARE_GRANTS`.
@@ -116,6 +118,10 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
     seed_account(&db, "u1", "admin").await;
     seed_account(&db, "u2", "user").await;
     seed_account(&db, "u3", "admin").await;
+    // A role no system seeds is copied as the name it is; an empty inline
+    // role names nothing and becomes no grant.
+    seed_account(&db, "u4", "editor").await;
+    seed_account(&db, "u5", "").await;
     // u3 already holds its inline role as a grant, made by an admin.
     let mut held: HashMap<String, Value> = HashMap::new();
     held.insert("id".into(), json!("ur_held"));
@@ -138,12 +144,21 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
         pairs.sort();
         pairs
     };
-    let want: Vec<(String, String)> = [("u1", "admin"), ("u2", "user"), ("u3", "admin")]
-        .iter()
-        .map(|(u, r)| ((*u).to_string(), (*r).to_string()))
-        .collect();
-    assert_eq!(pairs(&after), want, "every inline role is a grant, once");
-    for user in ["u1", "u2"] {
+    let want: Vec<(String, String)> = [
+        ("u1", "admin"),
+        ("u2", "user"),
+        ("u3", "admin"),
+        ("u4", "editor"),
+    ]
+    .iter()
+    .map(|(u, r)| ((*u).to_string(), (*r).to_string()))
+    .collect();
+    assert_eq!(
+        pairs(&after),
+        want,
+        "every non-empty inline role is a grant, once, under its own name; u5's empty role is none"
+    );
+    for user in ["u1", "u2", "u4"] {
         let (id, by, at) = after
             .iter()
             .find(|((u, _), _)| u == user)
