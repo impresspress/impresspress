@@ -2143,6 +2143,7 @@ mod tests {
             crate::blocks::auth_ui::api::login::handle(
                 &ctx.clone()
                     .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID),
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 wafer_run::InputStream::from_bytes(body.into_bytes()),
             )
             .await,
@@ -2192,6 +2193,7 @@ mod tests {
         let status = crate::test_support::output_http_status(
             crate::blocks::auth_ui::api::login::handle(
                 &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 wafer_run::InputStream::from_bytes(body.into_bytes()),
             )
             .await,
@@ -2235,6 +2237,7 @@ mod tests {
         let login = crate::test_support::output_json(
             crate::blocks::auth_ui::api::login::handle(
                 &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 wafer_run::InputStream::from_bytes(body.into_bytes()),
             )
             .await,
@@ -2249,6 +2252,7 @@ mod tests {
             crate::test_support::output_http_status(
                 crate::blocks::auth_ui::api::refresh::handle(
                     &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
                     wafer_run::InputStream::from_bytes(body.into_bytes()),
                 )
                 .await,

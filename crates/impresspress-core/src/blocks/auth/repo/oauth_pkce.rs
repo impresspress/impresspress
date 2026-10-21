@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp};
-use wafer_core::clients::database::{self as db, RecordData};
+use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, map_opt_str, map_str, now_iso};
@@ -33,25 +33,38 @@ pub struct NewPkceState<'a> {
     pub expires_at: &'a str,
 }
 
-/// Row returned by [`take`]: everything the callback needs to complete the
-/// token exchange. `state_id` is excluded because the caller already has it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PkceStateRow {
-    pub provider: String,
-    pub code_verifier: String,
-    pub redirect_uri: String,
-    pub expires_at: String,
+/// A PKCE state [`take`] has just consumed: everything the callback needs to
+/// complete the token exchange. `state_id` is excluded because the caller
+/// already has it.
+///
+/// The fields are private and nothing outside this module can build one, so
+/// holding a value proves the single-use state was redeemed by this request.
+/// `crate::csrf::SessionIssuance::oauth_callback` relies on exactly that: it
+/// is the OAuth callback's admission to session issuance, and a struct anyone
+/// could fill in would admit anything.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ConsumedPkceState {
+    provider: String,
+    code_verifier: String,
+    redirect_uri: String,
 }
 
-fn row_from_map(m: &RecordData) -> Result<PkceStateRow, WaferError> {
-    Ok(PkceStateRow {
-        provider: map_opt_str(m, "provider").ok_or_else(|| internal_error("missing provider"))?,
-        code_verifier: map_opt_str(m, "code_verifier")
-            .ok_or_else(|| internal_error("missing code_verifier"))?,
-        redirect_uri: map_opt_str(m, "redirect_uri")
-            .ok_or_else(|| internal_error("missing redirect_uri"))?,
-        expires_at: map_str(m, "expires_at"),
-    })
+impl ConsumedPkceState {
+    /// The provider name the flow was started for.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The PKCE `code_verifier` the token exchange sends.
+    pub fn code_verifier(&self) -> &str {
+        &self.code_verifier
+    }
+
+    /// The `redirect_uri` stored when the flow started, which the provider's
+    /// exact-match check compares against.
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
 }
 
 /// Insert a new PKCE state row.
@@ -81,7 +94,10 @@ pub async fn insert(ctx: &dyn Context, new: NewPkceState<'_>) -> Result<(), Wafe
 /// timeout). Uses `db::take_by_filters` which dispatches to
 /// `DELETE … WHERE … RETURNING *` (sqlite 3.35+, postgres) so the read
 /// and delete are atomic in a single statement.
-pub async fn take(ctx: &dyn Context, state_id: &str) -> Result<Option<PkceStateRow>, WaferError> {
+pub async fn take(
+    ctx: &dyn Context,
+    state_id: &str,
+) -> Result<Option<ConsumedPkceState>, WaferError> {
     let rows = db::take_by_filters(
         ctx,
         TABLE,
@@ -96,12 +112,18 @@ pub async fn take(ctx: &dyn Context, state_id: &str) -> Result<Option<PkceStateR
     let Some(r) = rows.into_iter().next() else {
         return Ok(None);
     };
-    let row = row_from_map(&r.data)?;
-    if row.expires_at.as_str() < now_iso().as_str() {
+    let m = &r.data;
+    if map_str(m, "expires_at").as_str() < now_iso().as_str() {
         // Row was present but expired — already deleted as a side effect.
         return Ok(None);
     }
-    Ok(Some(row))
+    Ok(Some(ConsumedPkceState {
+        provider: map_opt_str(m, "provider").ok_or_else(|| internal_error("missing provider"))?,
+        code_verifier: map_opt_str(m, "code_verifier")
+            .ok_or_else(|| internal_error("missing code_verifier"))?,
+        redirect_uri: map_opt_str(m, "redirect_uri")
+            .ok_or_else(|| internal_error("missing redirect_uri"))?,
+    }))
 }
 
 /// Deletes all rows whose `expires_at < cutoff`. Returns the number deleted.
@@ -156,10 +178,10 @@ mod tests {
             .await
             .expect("take")
             .expect("row present");
-        assert_eq!(row.provider, "github");
-        assert_eq!(row.code_verifier, "verifier-abc");
+        assert_eq!(row.provider(), "github");
+        assert_eq!(row.code_verifier(), "verifier-abc");
         assert_eq!(
-            row.redirect_uri,
+            row.redirect_uri(),
             "https://example.test/b/auth/oauth/callback"
         );
 
@@ -206,7 +228,7 @@ mod tests {
              deleted: a live PKCE state that reports itself missing fails \
              every OAuth callback on a native deployment",
         );
-        assert_eq!(row.code_verifier, "verifier-on-disk");
+        assert_eq!(row.code_verifier(), "verifier-on-disk");
 
         assert!(
             take(&ctx, "state-on-disk").await.expect("take").is_none(),
@@ -287,6 +309,6 @@ mod tests {
         // Old gone, new still takeable.
         assert!(take(&ctx, "old").await.unwrap().is_none());
         let row = take(&ctx, "new").await.unwrap().expect("present");
-        assert_eq!(row.code_verifier, "v2");
+        assert_eq!(row.code_verifier(), "v2");
     }
 }

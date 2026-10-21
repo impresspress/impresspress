@@ -346,18 +346,29 @@ mod tests {
         let out = handle(&ctx, &htmx_msg(&user_id), form_body(OLD, NEW)).await;
         assert_eq!(output_status(out).await, 200, "the form post must succeed");
 
-        let signed_in =
-            output_json(login::handle(&ctx, credentials("erin@example.com", NEW)).await).await
-                ["access_token"]
-                .as_str()
-                .map(str::to_string);
+        let signed_in = output_json(
+            login::handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                credentials("erin@example.com", NEW),
+            )
+            .await,
+        )
+        .await["access_token"]
+            .as_str()
+            .map(str::to_string);
         assert!(
             signed_in.is_some_and(|t| !t.is_empty()),
             "the new password must authenticate"
         );
         assert!(
             output_is_error(
-                login::handle(&ctx, credentials("erin@example.com", OLD)).await,
+                login::handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/login"),
+                    credentials("erin@example.com", OLD)
+                )
+                .await,
                 "Unauthenticated"
             )
             .await,
@@ -473,6 +484,7 @@ mod tests {
             output_json(
                 login::handle(
                     &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/login"),
                     credentials("gina@example.com", "original-horse-battery1")
                 )
                 .await
@@ -558,6 +570,7 @@ mod tests {
             output_json(
                 login::handle(
                     &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/login"),
                     credentials("kim@example.com", "original-horse-battery1")
                 )
                 .await
@@ -604,8 +617,15 @@ mod tests {
         .await;
         assert_eq!(output_status(out).await, 200);
         assert!(
-            output_json(login::handle(&ctx, credentials("lee@example.com", NEW)).await).await
-                ["access_token"]
+            output_json(
+                login::handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/login"),
+                    credentials("lee@example.com", NEW)
+                )
+                .await
+            )
+            .await["access_token"]
                 .as_str()
                 .is_some(),
             "the new password must authenticate"
@@ -653,7 +673,15 @@ mod tests {
     /// A refresh token the account holds, from a sign-in through the real
     /// handler.
     async fn sign_in(ctx: &TestContext, email: &str, password: &str) -> String {
-        let signed_in = output_json(login::handle(ctx, credentials(email, password)).await).await;
+        let signed_in = output_json(
+            login::handle(
+                ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                credentials(email, password),
+            )
+            .await,
+        )
+        .await;
         signed_in["refresh_token"]
             .as_str()
             .unwrap_or_else(|| panic!("the sign-in succeeded: {signed_in}"))
@@ -715,7 +743,12 @@ mod tests {
         );
         assert!(
             output_is_error(
-                refresh::handle(&ctx, refresh_with(&old_session)).await,
+                refresh::handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(&old_session)
+                )
+                .await,
                 "Unauthenticated"
             )
             .await,

@@ -530,9 +530,9 @@ crate::impresspress_feature_block! {
             Route::BootstrapPage => pages::bootstrap::handle_get(ctx, &msg).await,
             Route::OauthStart => oauth::start::handle(ctx, &msg).await,
             Route::OauthCallback => oauth::callback::handle(&this.limiter, ctx, &msg).await,
-            Route::Login => api::login::handle(ctx, input).await,
+            Route::Login => api::login::handle(ctx, &msg, input).await,
             Route::Signup => api::signup::handle(&this.limiter, ctx, &msg, input).await,
-            Route::Refresh => api::refresh::handle(ctx, input).await,
+            Route::Refresh => api::refresh::handle(ctx, &msg, input).await,
             Route::Logout => api::logout::handle(ctx, &msg).await,
             Route::Me => api::me::handle_get(ctx, &msg).await,
             Route::UpdateMe => api::me::handle_update(ctx, &msg, input).await,
@@ -1016,7 +1016,7 @@ mod oauth_start_limit_tests {
             "precondition: the OAuth-start budget is spent"
         );
 
-        let mut login = anon_msg("create", "/b/auth/api/login");
+        let mut login = crate::test_support::json_post_msg("/b/auth/api/login");
         login.set_meta(wafer_block::meta::META_REQ_CLIENT_IP, "203.0.113.21");
         let body = serde_json::to_vec(&serde_json::json!({
             "email": "nobody@example.com",

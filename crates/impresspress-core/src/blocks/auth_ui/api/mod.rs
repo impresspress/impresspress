@@ -125,10 +125,15 @@ fn classify_email_error(terminal: &wafer_run::TerminalNotResponse) -> EmailNotSe
 /// create a user, and one shared limiter would make the eleventh signup in a
 /// file silently stop sending mail. A test that IS about the outbound budget
 /// builds its own limiter and holds on to it across calls.
+///
+/// The request is what an API client sends to these JSON routes: a client IP,
+/// `Content-Type: application/json` (signup decodes through
+/// `crate::http::json_request`) and no browser headers.
 #[cfg(test)]
 pub(crate) fn test_mail_request() -> (std::sync::Arc<UserRateLimiter>, Message) {
     let mut msg = Message::new("http.request");
     msg.set_meta(wafer_block::meta::META_REQ_CLIENT_IP, "203.0.113.7");
+    msg.set_meta("http.header.content-type", "application/json");
     (std::sync::Arc::new(UserRateLimiter::new()), msg)
 }
 

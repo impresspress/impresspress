@@ -1,6 +1,6 @@
 //! POST /b/auth/api/login — relocated from auth/login.rs in Task 5.
 
-use wafer_run::{context::Context, InputStream, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use crate::{
     blocks::{
@@ -20,17 +20,21 @@ use crate::{
         crud,
         errors::{error_response, ErrorCode},
     },
-    http::{err_bad_request, ResponseBuilder},
+    csrf::SessionIssuance,
+    http::{json_request, ResponseBuilder},
 };
 
-pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    let raw = match input.collect_to_bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return OutputStream::error(e),
+pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+    // Login CSRF: a cross-site page must not sign this browser in, to any
+    // account. Checked before the password is, so a refused request costs
+    // nothing and says nothing about the credentials (`crate::csrf`, layer 1b).
+    let issuance = match SessionIssuance::verify(ctx, msg).await {
+        Ok(issuance) => issuance,
+        Err(refused) => return refused,
     };
-    let body: LoginRequest = match serde_json::from_slice(&raw) {
-        Ok(b) => b,
-        Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
+    let body: LoginRequest = match json_request(msg, input).await {
+        Ok(body) => body,
+        Err(refused) => return refused,
     };
 
     let email_lower = body.email.trim().to_lowercase();
@@ -163,6 +167,7 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     };
     let issued = match issue_tokens_and_cookie(
         ctx,
+        issuance,
         &lifetime,
         &user.id,
         &email_lower,
@@ -270,7 +275,12 @@ mod tests {
 
     async fn login(ctx: &TestContext, email: &str, password: &str) -> serde_json::Value {
         let body = serde_json::json!({"email": email, "password": password}).to_string();
-        let out = handle(ctx, InputStream::from_bytes(body.into_bytes())).await;
+        let out = handle(
+            ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
+            InputStream::from_bytes(body.into_bytes()),
+        )
+        .await;
         output_json(out).await
     }
 
@@ -367,7 +377,12 @@ mod tests {
             "password": TIMING_EQUALIZATION_PASSWORD,
         })
         .to_string();
-        let out = handle(&ctx, InputStream::from_bytes(body.into_bytes())).await;
+        let out = handle(
+            &ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
+            InputStream::from_bytes(body.into_bytes()),
+        )
+        .await;
 
         match out.collect_buffered().await {
             Err(wafer_run::TerminalNotResponse::Error(err)) => assert_eq!(
@@ -432,6 +447,7 @@ mod tests {
         let captured = crate::test_support::CapturedEvents::install();
         let out = handle(
             &ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
             credentials("broken@example.com", "correct-horse-battery"),
         )
         .await;
@@ -517,6 +533,7 @@ mod tests {
 
         let out = handle(
             &ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
             credentials("slow@example.com", "correct-horse-battery"),
         )
         .await;
@@ -558,7 +575,12 @@ mod tests {
 
         for email in ["known@example.com", "unknown@example.com"] {
             let status = output_http_status(
-                handle(&down, credentials(email, "correct-horse-battery")).await,
+                handle(
+                    &down,
+                    &crate::test_support::json_post_msg("/b/auth/api/login"),
+                    credentials(email, "correct-horse-battery"),
+                )
+                .await,
             )
             .await;
             assert_eq!(
@@ -590,6 +612,7 @@ mod tests {
         let status = output_http_status(
             handle(
                 &refused,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 credentials("denied@example.com", "correct-horse-battery"),
             )
             .await,
@@ -605,7 +628,12 @@ mod tests {
         let ctx = ctx_with_crypto().await;
         signup_user(&ctx, "typo@example.com", "correct-horse-battery").await;
 
-        let out = handle(&ctx, credentials("typo@example.com", "wrong-horse-battery")).await;
+        let out = handle(
+            &ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
+            credentials("typo@example.com", "wrong-horse-battery"),
+        )
+        .await;
         assert_eq!(
             detail_code(out).await.as_deref(),
             Some("invalid_credentials")
@@ -636,6 +664,7 @@ mod tests {
         let status = output_http_status(
             handle(
                 &faulty,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 credentials("flaky@example.com", "correct-horse-battery"),
             )
             .await,
@@ -668,7 +697,12 @@ mod tests {
         let body =
             serde_json::json!({"email": "kim@example.com", "password": "correct-horse-battery"})
                 .to_string();
-        let out = handle(&ctx, InputStream::from_bytes(body.into_bytes())).await;
+        let out = handle(
+            &ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/login"),
+            InputStream::from_bytes(body.into_bytes()),
+        )
+        .await;
 
         assert_eq!(output_http_status(out).await, 503);
     }
@@ -729,8 +763,15 @@ mod tests {
         );
 
         let body = serde_json::json!({"email": EMAIL, "password": PASSWORD}).to_string();
-        let resp =
-            output_json(handle(&racing, InputStream::from_bytes(body.into_bytes())).await).await;
+        let resp = output_json(
+            handle(
+                &racing,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                InputStream::from_bytes(body.into_bytes()),
+            )
+            .await,
+        )
+        .await;
         assert!(
             racing.fired(),
             "the removal must land inside the sign-in: {resp}"

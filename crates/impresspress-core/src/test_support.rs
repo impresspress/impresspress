@@ -1362,8 +1362,14 @@ impl TestContext {
     }
 
     /// [`Self::request_with_input`] with `body` serialized as the JSON
-    /// request body.
-    pub async fn request_json<T: serde::Serialize>(&self, msg: Message, body: &T) -> OutputStream {
+    /// request body, declared as one (`Content-Type: application/json`), as
+    /// a JSON client sends it.
+    pub async fn request_json<T: serde::Serialize>(
+        &self,
+        mut msg: Message,
+        body: &T,
+    ) -> OutputStream {
+        msg.set_meta("http.header.content-type", "application/json");
         let bytes = serde_json::to_vec(body).expect("serialize test request body");
         self.request_with_input(msg, InputStream::from_bytes(bytes))
             .await
@@ -4166,6 +4172,17 @@ pub fn anon_msg(action: &str, path: &str) -> Message {
     let mut m = Message::new("http.request");
     m.set_meta("req.action", action);
     m.set_meta("req.resource", path);
+    m
+}
+
+/// An anonymous `POST` to `path` that declares a JSON body and carries no
+/// browser headers: what an API client sends. The session-issuing handlers
+/// (`auth_ui::api::{login, signup, refresh}`) accept it — no browser signal is
+/// admitted by `csrf::SessionIssuance::verify`, and `http::json_request`
+/// requires the `Content-Type`.
+pub fn json_post_msg(path: &str) -> Message {
+    let mut m = anon_msg("create", path);
+    m.set_meta("http.header.content-type", "application/json");
     m
 }
 

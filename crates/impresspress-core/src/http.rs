@@ -12,13 +12,15 @@
 //! empty `text/plain` body) used by page handlers, [`err_unavailable`],
 //! the `503` constructor `wafer_block::response` does not (yet) carry, and
 //! [`err_unauthenticated`], the `401` for a request with no identity, which
-//! carries the [`WWW_AUTHENTICATE`] challenge.
+//! carries the [`WWW_AUTHENTICATE`] challenge. [`json_request`] decodes a
+//! JSON request body only when the request says it is one, and
+//! [`err_unsupported_media_type`] is the `415` it answers otherwise.
 
 pub use wafer_block::{
     err_bad_request, err_conflict, err_forbidden, err_internal, err_internal_no_cause,
     err_not_found, err_unauthorized, ok_empty, ok_json, ResponseBuilder,
 };
-use wafer_run::{ErrorCode, MetaEntry, OutputStream, WaferError};
+use wafer_run::{ErrorCode, InputStream, Message, MetaEntry, OutputStream, WaferError};
 
 /// The `WWW-Authenticate` challenge [`err_unauthenticated`] carries
 /// (RFC 9110 §11.6.1): the two schemes the request pipeline accepts in
@@ -104,6 +106,60 @@ pub fn require_row<T>(row: Option<T>, not_found: &str) -> Result<T, OutputStream
 /// otherwise and was wrong.
 pub fn err_unavailable(message: &str) -> OutputStream {
     OutputStream::error(WaferError::new(ErrorCode::Unavailable, message.to_string()))
+}
+
+/// `415` — the request body is not in a media type this route accepts.
+///
+/// An `InvalidArgument` error whose status is overridden to 415, the way
+/// `pipeline::payload_too_large_error` overrides its 413: no `ErrorCode`
+/// maps to 415, and a bare 400 would tell the client its JSON was malformed
+/// when the problem is that it did not say it was sending JSON.
+pub fn err_unsupported_media_type(message: &str) -> OutputStream {
+    let mut error = WaferError::new(ErrorCode::InvalidArgument, message);
+    error.meta.push(MetaEntry {
+        key: wafer_run::META_RESP_STATUS.to_string(),
+        value: "415".to_string(),
+    });
+    OutputStream::error(error)
+}
+
+/// Whether `content_type` (a raw `Content-Type` header value) is
+/// `application/json`, parameters such as `; charset=utf-8` allowed.
+fn is_json_media_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+}
+
+/// Decode `input` as a JSON `T`, but only when the request declares
+/// `Content-Type: application/json`.
+///
+/// Anything else is the [`err_unsupported_media_type`] 415, before the body
+/// is read; a body that does not decode is a 400 naming the decode error.
+///
+/// The media-type check is what keeps a cross-site HTML form from posting to
+/// a JSON route at all: a `<form>` can send only `text/plain`,
+/// `application/x-www-form-urlencoded` or `multipart/form-data`, and a
+/// `text/plain` body such as `{"email":…,"password":…,"x":"="}` is still
+/// valid JSON. (A cross-site `fetch` that sets `application/json` needs a
+/// CORS preflight first.) The session-issuing
+/// routes (login, signup, refresh) decode through this as defence in depth
+/// behind `crate::csrf::SessionIssuance`.
+pub async fn json_request<T: serde::de::DeserializeOwned>(
+    msg: &Message,
+    input: InputStream,
+) -> Result<T, OutputStream> {
+    if !is_json_media_type(msg.header("content-type")) {
+        return Err(err_unsupported_media_type(
+            "Content-Type must be application/json",
+        ));
+    }
+    let raw = input
+        .collect_to_bytes()
+        .await
+        .map_err(OutputStream::error)?;
+    serde_json::from_slice(&raw).map_err(|e| err_bad_request(&format!("Invalid body: {e}")))
 }
 
 /// Build a redirect `OutputStream` with the given status (302, 303, …) and
@@ -283,6 +339,70 @@ mod tests {
             MetaGet::get(&buf.meta, "resp.header.Location"),
             Some("/login")
         );
+    }
+}
+
+#[cfg(test)]
+mod json_request_tests {
+    use super::*;
+
+    #[derive(serde::Deserialize, Debug)]
+    struct Body {
+        n: u8,
+    }
+
+    fn msg_with_content_type(content_type: &str) -> Message {
+        let mut m = Message::new("http.request");
+        if !content_type.is_empty() {
+            m.set_meta("http.header.content-type", content_type);
+        }
+        m
+    }
+
+    async fn status_of(result: Result<Body, OutputStream>) -> u16 {
+        match result.expect_err("a refusal").collect_buffered().await {
+            Err(wafer_run::TerminalNotResponse::Error(e)) => {
+                wafer_block::http_codec::resolve_error_status(&e)
+            }
+            other => panic!("expected an error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_with_or_without_parameters_decodes() {
+        for content_type in ["application/json", "Application/JSON; charset=utf-8"] {
+            let body: Body = json_request(
+                &msg_with_content_type(content_type),
+                InputStream::from_bytes(br#"{"n":7}"#.to_vec()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{content_type} decodes"));
+            assert_eq!(body.n, 7);
+        }
+    }
+
+    /// A valid JSON body is still refused when the request does not say it
+    /// is JSON: `text/plain` is what a cross-site form can send.
+    #[tokio::test]
+    async fn any_other_or_no_content_type_is_a_415() {
+        for content_type in ["text/plain", "application/x-www-form-urlencoded", ""] {
+            let result = json_request::<Body>(
+                &msg_with_content_type(content_type),
+                InputStream::from_bytes(br#"{"n":7}"#.to_vec()),
+            )
+            .await;
+            assert_eq!(status_of(result).await, 415, "{content_type:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declared_json_body_that_does_not_decode_is_a_400() {
+        let result = json_request::<Body>(
+            &msg_with_content_type("application/json"),
+            InputStream::from_bytes(b"not json".to_vec()),
+        )
+        .await;
+        assert_eq!(status_of(result).await, 400);
     }
 }
 

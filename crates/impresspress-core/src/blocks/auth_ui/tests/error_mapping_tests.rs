@@ -25,7 +25,8 @@ use crate::{
         auth_ui::AuthUiBlock,
     },
     test_support::{
-        anon_msg, auth_msg, output_http_status, output_json, FailingDbOpContext, TestContext,
+        anon_msg, auth_msg, json_post_msg, output_http_status, output_json, FailingDbOpContext,
+        TestContext,
     },
 };
 
@@ -151,7 +152,7 @@ async fn signup(ctx: &TestContext, email: &str) -> serde_json::Value {
         AuthUiBlock::default()
             .handle(
                 ctx,
-                from_client(anon_msg("create", "/b/auth/api/signup")),
+                from_client(json_post_msg("/b/auth/api/signup")),
                 InputStream::from_bytes(body),
             )
             .await,
@@ -164,7 +165,7 @@ fn login_body(email: &str) -> serde_json::Value {
 }
 
 fn login_msg() -> Message {
-    from_client(anon_msg("create", "/b/auth/api/login"))
+    from_client(json_post_msg("/b/auth/api/login"))
 }
 
 // --- api/login.rs ----------------------------------------------------------
@@ -245,7 +246,7 @@ async fn signup_account_write_denial_is_403_not_500() {
     assert_eq!(
         status(
             &ctx,
-            from_client(anon_msg("create", "/b/auth/api/signup")),
+            from_client(json_post_msg("/b/auth/api/signup")),
             login_body("new@example.com"),
         )
         .await,
@@ -267,7 +268,7 @@ async fn refresh_token_lookup_denial_is_403_not_500() {
     assert_eq!(
         status(
             &ctx,
-            from_client(anon_msg("create", "/b/auth/api/refresh")),
+            from_client(json_post_msg("/b/auth/api/refresh")),
             json!({"refresh_token": refresh_token}),
         )
         .await,

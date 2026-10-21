@@ -1,4 +1,5 @@
-//! CSRF defenses for cookie-authenticated mutations.
+//! CSRF defenses for cookie-authenticated mutations, and for the requests
+//! that mint the cookie in the first place.
 //!
 //! Cookie authentication (the `auth_token` cookie — see
 //! `blocks::router::ImpresspressRouterBlock::handle`) relies on
@@ -8,8 +9,8 @@
 //! specific subdomain — to any same-site cross-subdomain request using an
 //! unsafe method, so it is not a complete CSRF defense on its own.
 //!
-//! Two independent layers, both centralized here so no handler re-implements
-//! either:
+//! Where a request came from is decided once, by [`request_origin`], and the
+//! layers below read that one answer:
 //!
 //! 1. [`enforce_origin_policy`] — Fetch-Metadata (`Sec-Fetch-Site`) / `Origin`
 //!    / `Referer` validation for cookie-authenticated unsafe-method requests.
@@ -20,12 +21,27 @@
 //!    cross-site page has no ambient credential to attach a bearer token
 //!    with, so it cannot forge that request in the first place.
 //!
+//!    1b. [`SessionIssuance`] — session issuance. Layer 1 exempts a request
+//!    with no verified session cookie, and the requests that hand one out
+//!    (password login, signup, refresh, bootstrap redemption) carry none: a
+//!    cross-site `<form>` posting the attacker's credentials to the login
+//!    endpoint would sign the victim's browser into the attacker's account
+//!    (login CSRF). So the issuance tail,
+//!    `blocks::auth::helpers::issue_tokens_and_cookie`, takes a
+//!    [`SessionIssuance`], and the only ways to get one are
+//!    [`SessionIssuance::verify`] — the request is same-origin, or carries no
+//!    browser signal at all — and [`SessionIssuance::oauth_callback`], whose
+//!    cross-site navigation is defended by the single-use PKCE state it
+//!    consumed. The password-path handlers obtain it before any side effect;
+//!    the callback builds it from the state it has just consumed.
+//!
 //! 2. [`token`] / [`hidden_field`] / [`verify`] — a stateless synchronizer
 //!    token for the plain (non-JS, non-`htmx`) SSR `<form>` POSTs in this
 //!    app (bootstrap-admin redemption, profile update). Defense-in-depth on
 //!    top of layer 1: even an allowed-origin POST must also carry the
-//!    correct per-identity token, which nothing outside this same origin
-//!    could produce or read.
+//!    correct per-identity token. For a signed-in identity nothing outside
+//!    this origin can produce or read it; signed out it is one shared,
+//!    readable value (see [`ANONYMOUS_SUBJECT`]).
 //!
 //! `htmx`- and `fetch`-driven forms elsewhere in the app (admin variables,
 //! users, database explorer, portal buttons, chat composer, settings forms,
@@ -39,6 +55,8 @@ use maud::{html, Markup};
 use wafer_block_crypto::primitives;
 use wafer_run::{context::Context, Message, OutputStream};
 
+use crate::blocks::auth::repo::oauth_pkce::ConsumedPkceState;
+
 /// KDF context label for the CSRF signing key (see [`primitives::derive_block_key`]).
 /// Keeps the CSRF key cryptographically independent from the JWT verify key
 /// derived (elsewhere) from the same master secret, even though both trace
@@ -47,10 +65,12 @@ const CSRF_KEY_LABEL: &str = "impresspress/csrf";
 
 /// Subject used to key the token when no session is established yet (e.g.
 /// the bootstrap-admin form, rendered and submitted with no `auth_token`
-/// cookie at all). A constant subject is fine here — the anonymous case does
-/// not need per-visitor uniqueness to defeat CSRF, only unguessability, and
-/// an attacker's cross-site page can neither compute this HMAC (no master
-/// secret) nor read it off our page (Same-Origin Policy).
+/// cookie at all). The token is then the same for every signed-out visitor,
+/// and anyone can read it by fetching the form page, so it is not a secret:
+/// it only stops a cross-site page's script from reading it out of the
+/// victim's browser (Same-Origin Policy), and a signed-out route that needs
+/// a real cross-site defence has the origin check
+/// ([`SessionIssuance::verify`]).
 const ANONYMOUS_SUBJECT: &str = "anonymous";
 
 /// `<form>` field name every CSRF-protected plain-HTML form submits the
@@ -111,42 +131,69 @@ pub async fn enforce_origin_policy(
 ///   invalid/expired cookie establishes no session to protect; a protected
 ///   route still rejects it downstream (missing `user_id`), and a genuinely
 ///   public route (the Stripe webhook, OAuth callback, password-reset
-///   endpoints) is not meant to require this check at all.
+///   endpoints) is not meant to require this check at all. The public routes
+///   that MINT a session are gated separately, by [`SessionIssuance`].
 /// - the method is unsafe (`is_unsafe_method`).
+///
+/// Such a request must be [`Origin::SameOrigin`]. A cookie with no browser
+/// signal at all ([`Origin::NoBrowserSignal`]) fails closed: the cookie is
+/// an ambient credential, so its presence alone proves nothing about who
+/// sent the request.
 fn origin_policy_refuses(msg: &Message, cookie_authenticated: bool) -> bool {
     if !cookie_authenticated || msg.user_id().is_empty() || !is_unsafe_method(msg.action()) {
         return false;
     }
+    request_origin(msg) != Origin::SameOrigin
+}
 
-    // Primary signal: Fetch Metadata. Sent by every modern browser for
-    // essentially all requests (fetch/XHR, `<form>` submission, `htmx`),
-    // including same-origin ones. Only these two values indicate the request
-    // originated from our own origin (or from no web page at all — "none"
-    // covers a typed URL / bookmark / browser extension); everything else,
-    // including "same-site" and "cross-site" and any value this policy
-    // doesn't recognize, is rejected. `same-site` is deliberately NOT
-    // allowed: the `auth_token` cookie is host-only (no explicit `Domain`
-    // attribute), but `SameSite=Lax` still attaches it to a same-site
-    // cross-subdomain request, so a `same-site` classification does not
-    // imply the request came from this app — it could come from any sibling
-    // subdomain under the registrable domain. impresspress serves everything
-    // same-origin, so there is no legitimate same-site-but-cross-subdomain
-    // flow to accommodate.
+/// Where a request came from, as far as the browser says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `Sec-Fetch-Site` is `same-origin` or `none`, or — without Fetch
+    /// Metadata — `Origin` (else `Referer`) names this request's own `Host`.
+    SameOrigin,
+    /// Any other `Sec-Fetch-Site` value, or an `Origin`/`Referer` that names
+    /// another host or none (the opaque `Origin: null`).
+    CrossOrigin,
+    /// None of `Sec-Fetch-Site`, `Origin` or `Referer`: not a browser (an API
+    /// client, the CLI, `curl`), or a browser too old to send any of them.
+    NoBrowserSignal,
+}
+
+/// Classify where `msg` came from. The single source of that answer for
+/// both layer 1 ([`enforce_origin_policy`]) and session issuance
+/// ([`SessionIssuance::verify`]).
+///
+/// The primary signal is Fetch Metadata, sent by every modern browser for
+/// essentially all requests (fetch/XHR, `<form>` submission, `htmx`),
+/// including same-origin ones. Only `same-origin` and `none` (a typed URL /
+/// bookmark / browser extension — no web page at all) say the request came
+/// from this origin; everything else, including `same-site`, `cross-site`
+/// and any value this does not recognize, is cross-origin. `same-site` is
+/// deliberately NOT same-origin: the `auth_token` cookie is host-only (no
+/// explicit `Domain` attribute), but `SameSite=Lax` still attaches it to a
+/// same-site cross-subdomain request, so a `same-site` classification does
+/// not imply the request came from this app — it could come from any sibling
+/// subdomain under the registrable domain. impresspress serves everything
+/// same-origin, so there is no legitimate same-site-but-cross-subdomain flow
+/// to accommodate.
+///
+/// The fallback, for clients that send no Fetch Metadata (browsers predating
+/// Chrome 76 / Firefox 90 / Safari 16.4, or non-browser clients), compares
+/// `Origin`, then `Referer`, against this request's own `Host`; whichever is
+/// present first decides. The browser runtime's service worker, which is
+/// never sent these headers, synthesizes `sec-fetch-site` for the requests
+/// it intercepts (`impresspress-browser`'s `convert.rs`), so this sees the
+/// same signal on native, Cloudflare and the browser.
+pub fn request_origin(msg: &Message) -> Origin {
     let sec_fetch_site = msg.header("sec-fetch-site");
     if !sec_fetch_site.is_empty() {
-        let is_safe = matches!(
-            sec_fetch_site.to_ascii_lowercase().as_str(),
-            "same-origin" | "none"
-        );
-        return !is_safe;
+        return match sec_fetch_site.to_ascii_lowercase().as_str() {
+            "same-origin" | "none" => Origin::SameOrigin,
+            _ => Origin::CrossOrigin,
+        };
     }
 
-    // Fallback for clients that don't send Fetch Metadata (older browsers
-    // predating Chrome 76 / Firefox 90 / Safari 16.4, or non-browser
-    // clients presenting a cookie): validate Origin, then Referer, against
-    // this request's own Host. Whichever is present wins; if neither is
-    // present at all on an unsafe cookie-authenticated request, fail closed
-    // rather than assume same-origin.
     let self_authority = normalize_authority(msg.header("host"));
     for header in ["origin", "referer"] {
         let value = msg.header(header);
@@ -154,11 +201,70 @@ fn origin_policy_refuses(msg: &Message, cookie_authenticated: bool) -> bool {
             continue;
         }
         let authority = request_authority(value);
-        let allowed = authority.is_some() && authority == self_authority;
-        return !allowed;
+        return if authority.is_some() && authority == self_authority {
+            Origin::SameOrigin
+        } else {
+            Origin::CrossOrigin
+        };
     }
 
-    true
+    Origin::NoBrowserSignal
+}
+
+// ---------------------------------------------------------------------------
+// Layer 1b: session issuance
+// ---------------------------------------------------------------------------
+
+/// Proof that this request may be handed a session: the one argument
+/// `blocks::auth::helpers::issue_tokens_and_cookie` will not mint without.
+///
+/// It has a private field and no `Default` or `Clone`, so outside this module
+/// it exists only as what [`verify`](Self::verify) or
+/// [`oauth_callback`](Self::oauth_callback) returned, and issuance consumes
+/// it, so one proof mints one session.
+#[derive(Debug)]
+pub struct SessionIssuance {
+    _proof: (),
+}
+
+impl SessionIssuance {
+    /// Admit a password login, signup, refresh or bootstrap redemption.
+    ///
+    /// `Ok` when the request is [`Origin::SameOrigin`], or carries
+    /// [`Origin::NoBrowserSignal`]: with no browser there is no victim's
+    /// browser to forge the request from, and those callers (API clients,
+    /// the CLI, `curl`) hold the credentials they send. A
+    /// [`Origin::CrossOrigin`] request is refused with the same 403 layer 1
+    /// gives ([`ORIGIN_BLOCKED_REASON`]), and that includes an origin listed
+    /// in `WAFER_RUN_SHARED__CORS_ALLOWED_ORIGINS`: CORS lets such a page READ
+    /// responses, but no origin other than this one may obtain this site's
+    /// session cookie.
+    ///
+    /// Callers check this before any side effect, so a refused request has
+    /// created no account, spent no token and checked no password.
+    pub async fn verify(ctx: &dyn Context, msg: &Message) -> Result<Self, OutputStream> {
+        match request_origin(msg) {
+            Origin::SameOrigin | Origin::NoBrowserSignal => Ok(Self { _proof: () }),
+            Origin::CrossOrigin => Err(crate::ui::forbidden_response(
+                ctx,
+                msg,
+                ORIGIN_BLOCKED_REASON,
+                crate::ui::SignedOutAction::SignIn,
+            )
+            .await),
+        }
+    }
+
+    /// Admit the OAuth callback. The provider redirects the browser here, so
+    /// it is a cross-site top-level navigation by design and
+    /// [`verify`](Self::verify) would refuse it. Its CSRF defence is the
+    /// single-use PKCE state this flow consumed (plus the browser binding the
+    /// callback checks before consuming it): [`ConsumedPkceState`] is
+    /// produced only by `oauth_pkce::take`, so holding one proves this
+    /// request redeemed a flow this deployment started.
+    pub fn oauth_callback(_state: &ConsumedPkceState) -> Self {
+        Self { _proof: () }
+    }
 }
 
 /// Extract the `host[:port]` authority from an absolute URL string (an
@@ -391,6 +497,52 @@ mod tests {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.origin", "http://impresspress.example.com");
         assert!(!origin_policy_refuses(&msg, true));
+    }
+
+    // -- SessionIssuance::verify: the signed-out cross-origin shapes --------
+
+    /// A request with no session to protect, as login, signup and refresh
+    /// receive it, from `impresspress.example.com`'s point of view.
+    fn signed_out_post() -> Message {
+        cookie_msg("create", "/b/auth/api/login", "")
+    }
+
+    async fn issuance_is_refused(msg: &Message) -> bool {
+        let ctx = TestContext::new().await;
+        match SessionIssuance::verify(&ctx, msg).await {
+            Ok(_) => false,
+            Err(out) => crate::test_support::output_is_error(out, "PermissionDenied").await,
+        }
+    }
+
+    /// `Origin: null` is what a sandboxed iframe, a page with
+    /// `Referrer-Policy: no-referrer` and a cross-origin redirect of a POST
+    /// send. It names no host, so it is not this one, and a Referer that does
+    /// match cannot rescue it: `Origin` is present, so it decides.
+    #[tokio::test]
+    async fn an_opaque_origin_is_refused_issuance() {
+        for referer in [None, Some("https://impresspress.example.com/b/auth/login")] {
+            let mut msg = signed_out_post();
+            msg.set_meta("http.header.origin", "null");
+            if let Some(referer) = referer {
+                msg.set_meta("http.header.referer", referer);
+            }
+            assert_eq!(request_origin(&msg), Origin::CrossOrigin, "{referer:?}");
+            assert!(issuance_is_refused(&msg).await, "{referer:?}");
+        }
+    }
+
+    /// With neither Fetch Metadata nor `Origin`, a `Referer` naming another
+    /// site is cross-origin, not "no browser signal".
+    #[tokio::test]
+    async fn a_foreign_referer_alone_is_refused_issuance() {
+        let mut msg = signed_out_post();
+        msg.set_meta(
+            "http.header.referer",
+            "https://evil.example/login-csrf.html",
+        );
+        assert_eq!(request_origin(&msg), Origin::CrossOrigin);
+        assert!(issuance_is_refused(&msg).await);
     }
 
     // -- token / hidden_field / verify ---------------------------------------
