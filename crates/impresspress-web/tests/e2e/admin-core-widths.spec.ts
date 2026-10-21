@@ -67,7 +67,8 @@ import { WIDTHS as ALL_WIDTHS, isWrong, layout as blockLayout } from './fixtures
  *   conversation keeps at least 360px wherever it is shown: the chat lays
  *   itself out by its own width (`.chat-page` in layouts/page.css), the rail
  *   a toolbar above the conversation below 60rem and one pane at a time
- *   below 40rem. The legal editor's Edit / Preview tabs are the top edge of
+ *   below 40rem, and the toolbar is one row. The New context form's type
+ *   picker shows its whole option. The legal editor's Edit / Preview tabs are the top edge of
  *   the pane they switch, and at 1280 the editor fits the screen. This
  *   server has no thread, provider or context, so the seeded states (long
  *   names, ids and messages) are checked in `llm-pages.spec.ts`,
@@ -391,6 +392,33 @@ test.describe('admin core pages at in-between widths', () => {
         if (isWrong(r, primaries(width))) found[path] = r;
       }
       expect(found, 'a page scrolled sideways, a card overflowed, the chat was squeezed or the primaries differ').toEqual({});
+
+      // The chat beside its thread list below 60rem: the rail is a one-row
+      // toolbar above the conversation, not a column squeezed beside it.
+      await page.goto('/b/llm/', { waitUntil: 'networkidle' });
+      const chat = await page.evaluate(() => {
+        const rail = document.querySelector<HTMLElement>('.chat-rail')!;
+        const main = document.querySelector<HTMLElement>('.chat-main')!;
+        if (!main.checkVisibility() || !rail.checkVisibility()) return null;
+        const r = rail.getBoundingClientRect();
+        const m = main.getBoundingClientRect();
+        return { beside: r.left >= m.right - 1, above: r.bottom <= m.top + 1, height: Math.round(r.height) };
+      });
+      if (chat && !chat.beside) {
+        expect(chat.above && chat.height < 80, `the rail is a one-row toolbar: ${JSON.stringify(chat)}`).toBe(true);
+      }
+
+      // The New context form's type picker shows its whole option.
+      await page.goto('/b/messages/', { waitUntil: 'networkidle' });
+      const picker = await page.locator('#new-context-type').evaluate((select: HTMLSelectElement) => {
+        const natural = select.cloneNode(true) as HTMLSelectElement;
+        Object.assign(natural.style, { position: 'absolute', visibility: 'hidden', width: 'max-content' });
+        select.parentElement!.appendChild(natural);
+        const need = natural.getBoundingClientRect().width;
+        natural.remove();
+        return { has: select.getBoundingClientRect().width, need };
+      });
+      expect(picker.has, `the type picker cuts its option: ${JSON.stringify(picker)}`).toBeGreaterThanOrEqual(picker.need - 1);
 
       // The legal editor: the tabs are the pane's top edge, and at 1280 the
       // editor fills the screen without scrolling it.

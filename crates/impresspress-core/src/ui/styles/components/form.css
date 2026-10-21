@@ -41,11 +41,8 @@
 .form-group { margin-bottom: var(--space-5); }
 .form-group:last-child { margin-bottom: 0; }
 
-/* Two fields side by side. `minmax(0, 1fr)`: a bare `1fr` track is at least
-   its content's min-content, so a field whose hint is one long variable name
-   widened its half past the card (LLM Settings at 721-800px). */
 .form-row {
-	display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4);
+	display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4);
 }
 
 .form-label {
@@ -612,6 +609,6 @@
 
 @media (max-width: 720px) {
 	/* Forms: two-column form rows stack on narrow screens. */
-	.form-row { grid-template-columns: minmax(0, 1fr); }
+	.form-row { grid-template-columns: 1fr; }
 }
 
