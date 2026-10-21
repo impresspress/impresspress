@@ -1,5 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
-import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
+import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { WIDTHS, isWrong, layout } from './fixtures/layout';
 import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
@@ -12,6 +13,11 @@ import { PHONE, targetFloor } from './fixtures/targets';
  * - Chat: every control has a name, and at 390px the page shows one pane at
  *   a time — the thread list, or a conversation with the model picker above
  *   it — without scrolling sideways.
+ *
+ * - At every width from the phone to 1280, with the long names, endpoints,
+ *   model ids, thread titles and error text a real deployment holds: no
+ *   page scrolls sideways, no card or message overflows, the conversation
+ *   keeps its room, and each page shows its one primary or none.
  *
  * It creates, edits and deletes a provider and creates a thread, so it is
  * part of `e2e:writes`, which CI runs against its own fresh server. The
@@ -161,5 +167,93 @@ test.describe('LLM chat', () => {
     // The crumb is the way back to the list.
     await expect(page.getByRole('link', { name: 'Chat' }).first()).toBeVisible();
     expect(await overflowX(page)).toBe(0);
+  });
+});
+
+test.describe('LLM pages with long values', () => {
+  test('providers, models, a thread and settings fit their frame at every width', async ({ page, baseURL }) => {
+    test.setTimeout(240_000);
+    const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
+    const headers = { Authorization: await adminBearer(api), 'Content-Type': 'application/json' };
+    const tag = Date.now().toString(36);
+    const created: { providers: string[]; overrides: string[] } = { providers: [], overrides: [] };
+    try {
+      // What a real deployment holds: hyphenated names with no space, an
+      // Azure deployment URL, long model ids, and a disabled provider.
+      for (const [name, enabled] of [
+        [`openai-compatible-northwind-traders-production-eu-west-1-${tag}`, true],
+        [`anthropic-backup-${tag}`, false],
+      ] as const) {
+        const res = await api.post('/b/llm/api/providers', {
+          headers,
+          data: {
+            name,
+            protocol: 'open_ai_compatible',
+            endpoint: 'https://northwind-traders-production.openai.azure.com/openai/deployments/gpt-4o-2024-08-06-enterprise/v1',
+            key_var: 'IMPRESSPRESS__LLM__NORTHWIND_TRADERS_PRODUCTION_API_KEY',
+            max_tokens_field: 'max_completion_tokens',
+            models: ['gpt-4o-2024-08-06-enterprise-northwind', 'accounts/fireworks/models/llama-v3p1-405b-instruct'],
+            enabled,
+          },
+        });
+        expect(res.ok(), await res.text()).toBe(true);
+        created.providers.push(((await res.json()) as { id: string }).id);
+      }
+      // A thread with a long title and messages quoting the ids an error
+      // names, one of them unbroken.
+      const thread = await api.post('/b/messages/api/contexts', {
+        headers,
+        data: {
+          type: 'conversation',
+          title: `Renewal questions for the Northwind Traders enterprise agreement, order ord_1NvQh2KZp7a9XyTqAbCdEfGh ${tag}`,
+        },
+      });
+      expect(thread.ok(), await thread.text()).toBe(true);
+      const threadId = ((await thread.json()) as { id: string }).id;
+      for (const [role, content] of [
+        ['user', "Why did invoice in_1NvQh2KZp7a9XyTqAbCdEfGhIjKlMn fail? Stripe said: No such customer: 'cus_1NvQh2KZp7a9XyTqAbCdEfGh'"],
+        ['assistant', 'The customer was deleted before the retry. See https://dashboard.stripe.com/test/customers/cus_1NvQh2KZp7a9XyTqAbCdEfGh/payment_methods/pm_1NvQh2KZp7a9XyTqAbCdEfGh'],
+      ] as const) {
+        const entry = await api.post(`/b/messages/api/contexts/${threadId}/entries`, {
+          headers,
+          data: { kind: 'message', role, content },
+        });
+        expect(entry.ok(), await entry.text()).toBe(true);
+      }
+      const override = await api.post('/b/llm/api/config', {
+        headers,
+        data: {
+          thread_id: threadId,
+          provider_block: `impresspress/provider-llm-northwind-traders-production-${tag}`,
+          model: 'accounts/fireworks/models/llama-v3p1-405b-instruct',
+        },
+      });
+      expect(override.ok(), await override.text()).toBe(true);
+      created.overrides.push(((await override.json()) as { id: string }).id);
+
+      const pages: Record<string, (width: number) => string[]> = {
+        '/b/llm/providers': () => ['Add provider'],
+        '/b/llm/models': () => [],
+        // The thread's conversation is on screen at every width.
+        [`/b/llm/threads/${threadId}`]: () => ['Send'],
+        '/b/llm/': (width) => (width >= 960 ? ['Send'] : []),
+        '/b/llm/settings': () => [],
+      };
+      await loginAsAdmin(page);
+      const found: Record<string, unknown> = {};
+      for (const width of WIDTHS) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const [path, primaries] of Object.entries(pages)) {
+          await page.goto(path, { waitUntil: 'networkidle' });
+          const r = await layout(page);
+          if (isWrong(r, primaries(width))) found[`${path} at ${width}`] = r;
+        }
+      }
+      expect(found, 'a page scrolled sideways, a card overflowed, the chat was squeezed or the primaries differ').toEqual({});
+    } finally {
+      for (const id of created.overrides) await api.delete(`/b/llm/api/config/${id}`, { headers });
+      for (const id of created.providers) await api.delete(`/b/llm/api/providers/${id}`, { headers });
+      await api.dispose();
+    }
   });
 });

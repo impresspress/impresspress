@@ -198,6 +198,20 @@ pub fn badge(variant: BadgeVariant, label: &str) -> Markup {
     Badge::new(variant).render(html! { (label) })
 }
 
+/// A stored value as a reader names it, for a badge or a label written from
+/// it: `public_form` → `Public form`, `conversation` → `Conversation`. The
+/// underscores become spaces and the first letter a capital; nothing else
+/// changes, so an acronym keeps its case. The case is written at the source
+/// rather than by a CSS `text-transform` (design rule 4).
+pub fn humanize(value: &str) -> String {
+    let spaced = value.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// Render a colored status badge, deriving the color from the status string.
 pub fn status_badge(status: &str) -> Markup {
     // The variant is derived from the machine value; the label is humanized
@@ -210,6 +224,14 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn humanize_writes_a_stored_value_in_sentence_case() {
+        assert_eq!(humanize("public_form"), "Public form");
+        assert_eq!(humanize("conversation"), "Conversation");
+        assert_eq!(humanize("API_key"), "API key");
+        assert_eq!(humanize(""), "");
+    }
     use crate::ui::test_support::{css_rules, hand_written_class_shorthand, strip_css_comments};
 
     /// Every `.badge-…` rule in the stylesheet that paints a `background` — the

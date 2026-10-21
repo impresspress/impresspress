@@ -14,7 +14,9 @@ use super::{
     DEFAULT_PROVIDER, DEFAULT_PROVIDER_VAR,
 };
 use crate::ui::{
-    self, components, icons,
+    self,
+    components::{self, Action, ActionTarget, Card},
+    icons,
     shell::Crumb,
     templates::{self, ChatFocus, ChatPane},
 };
@@ -257,7 +259,8 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// the loaded threads and the (optional) active thread id.
 ///
 /// The button says "New thread" in words, which is its accessible name and
-/// what the empty states call it.
+/// what the empty states call it. It is a secondary: the page's one primary
+/// is the composer's Send.
 fn render_thread_list_pane(threads: &[ContextView], active_id: Option<&str>) -> Markup {
     html! {
         div .thread-pane {
@@ -265,9 +268,10 @@ fn render_thread_list_pane(threads: &[ContextView], active_id: Option<&str>) -> 
                 h2 .thread-pane__title {
                     "Threads"
                 }
-                button .btn.btn--sm.btn--primary type="button" data-action="llm-new-thread" {
-                    (icons::plus()) "New thread"
-                }
+                (Action::secondary("New thread", ActionTarget::Delegated("llm-new-thread"))
+                    .icon(icons::plus())
+                    .small()
+                    .render())
             }
             div #thread-list .thread-pane__scroll {
                 (thread_list_items(threads, active_id))
@@ -279,9 +283,8 @@ fn render_thread_list_pane(threads: &[ContextView], active_id: Option<&str>) -> 
 fn thread_list_items(threads: &[ContextView], active_id: Option<&str>) -> Markup {
     html! {
         @if threads.is_empty() {
-            p .text-muted .thread-pane__empty {
-                "No threads yet. Start one with New thread."
-            }
+            // The note llm-chat.js removes when New thread adds the first.
+            (components::empty_note("No threads yet. Start one with New thread.", None))
         } @else {
             @for thread in threads {
                 @let id = thread.id.as_str();
@@ -370,10 +373,12 @@ fn render_composer(thread_id: Option<&str>) -> Markup {
                     {}
                 }
                 div .flex .flex-col .items-center .gap-1 {
-                    button #send-btn .btn.btn--primary .h-fit type="submit" disabled[!enabled] {
-                        "Send"
-                    }
-                    span #send-status .text-muted .text-xs .nowrap {}
+                    // The page's one primary; disabled until a thread is open.
+                    (Action::primary("Send", ActionTarget::Submit { form: None })
+                        .id("send-btn")
+                        .disabled(!enabled)
+                        .render())
+                    span #send-status .text-muted .nowrap {}
                 }
             }
         }
@@ -410,9 +415,9 @@ fn render_right_rail(
             // page is byte-identical. `#model-status` beside it is owned
             // by llm-chat.js and is overwritten at runtime.
             @if models_unavailable {
-                span .text-muted .text-xs .chat-options__status { (MODELS_UNAVAILABLE) }
+                span .text-muted .chat-options__status { (MODELS_UNAVAILABLE) }
             }
-            span #model-status .text-muted .text-xs .chat-options__status {}
+            span #model-status .text-muted .chat-options__status {}
 
             div #model-progress-container .hidden .chat-options__progress {
                 div .model-progress {
@@ -428,7 +433,7 @@ fn render_right_rail(
                         // in blocks/llm/assets/llm-chat.js.
                         div #model-progress-bar .model-progress-fill {}
                     }
-                    div #model-progress-text .text-muted .text-xs .mt-1 { "" }
+                    div #model-progress-text .text-muted .mt-1 { "" }
                 }
             }
 
@@ -493,21 +498,14 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
-    let content = html! {
-        // The two defaults are block variables, kept in the variables table
-        // with every other one and edited there; this page shows what they
-        // are, not a second place to set them.
-        (components::section_header(
-            "Defaults",
-            Some(html! {
-                a .btn.btn--secondary.btn--sm href=(VARIABLES_PAGE) { "Edit in Variables" }
-            }),
-        ))
-        p .text-muted .text-sm .mb-4 {
-            "The provider and model a thread uses when it pins neither. Both are variables, set in Settings › Variables."
-        }
-        div .form-row .mb-6 {
-            div .form-group {
+    // The two defaults are block variables, kept in the variables table with
+    // every other one and edited there; this page shows what they are, not a
+    // second place to set them.
+    let defaults = Card::titled(
+        "Defaults",
+        html! {
+            div .form-row {
+                div .form-group {
                 label .form-label for="llm-default-provider" { "Default provider" }
                 input #llm-default-provider
                     .form-input .form-input--readonly
@@ -516,33 +514,50 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     readonly
                     aria-describedby="llm-default-provider-hint"
                 ;
-                p .form-hint #llm-default-provider-hint { code { (DEFAULT_PROVIDER_VAR) } }
+                p .form-hint #llm-default-provider-hint { code { (components::breakable_id(DEFAULT_PROVIDER_VAR)) } }
+                }
+                div .form-group {
+                    label .form-label for="llm-default-model" { "Default model" }
+                    input #llm-default-model
+                        .form-input .form-input--readonly
+                        type="text"
+                        value=(default_model)
+                        placeholder="(provider default)"
+                        readonly
+                        aria-describedby="llm-default-model-hint"
+                    ;
+                    p .form-hint #llm-default-model-hint { code { (components::breakable_id(DEFAULT_MODEL_VAR)) } }
+                }
             }
-            div .form-group {
-                label .form-label for="llm-default-model" { "Default model" }
-                input #llm-default-model
-                    .form-input .form-input--readonly
-                    type="text"
-                    value=(default_model)
-                    placeholder="(provider default)"
-                    readonly
-                    aria-describedby="llm-default-model-hint"
-                ;
-                p .form-hint #llm-default-model-hint { code { (DEFAULT_MODEL_VAR) } }
-            }
-        }
-
-        (components::section_header("Per-thread overrides", None))
-        @if overrides.truncated {
-            p .form-hint { "Showing the first " (overrides.rows.len()) " overrides." }
-        }
-        (render_overrides_table(&overrides.rows))
+        },
+    )
+    .subtitle(
+        "The provider and model a thread uses when it pins neither. Both are variables, set in \
+         Settings › Variables.",
+    )
+    .action(Action::secondary(
+        "Edit in variables",
+        ActionTarget::Link(VARIABLES_PAGE),
+    ))
+    .render();
+    let shown = format!("Showing the first {} overrides.", overrides.rows.len());
+    let content = html! {
+        (defaults)
+        (Card::titled("Per-thread overrides", render_overrides_table(&overrides.rows))
+            .subtitle(if overrides.truncated {
+                shown.as_str()
+            } else {
+                "Threads that pin their own provider or model."
+            })
+            .flush()
+            .render())
     };
 
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("LLM Settings", "Settings")
+        ui::Shell::admin(Section::Settings.window_title(), "Settings")
+            .trail(llm_trail("Settings"))
             .subtitle("Default provider and model, and the threads that override them"),
         ui::PageBody::from(content).with_subnav(sections(Section::Settings)),
     )
@@ -552,7 +567,9 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// Where the block's variables — the two defaults among them — are edited.
 const VARIABLES_PAGE: &str = "/b/admin/settings/variables";
 
-/// The overrides table's columns.
+/// The overrides table's columns. Narrow, the provider, model and date move
+/// to a line under the thread (table.css `.llm-table--overrides`, which
+/// hides the headers by position: a column moved here must move there).
 const OVERRIDE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Thread").primary(),
     components::TableCol::new("Provider"),
@@ -568,22 +585,30 @@ fn render_overrides_table(rows: &[repo::settings::ThreadSettingRow]) -> Markup {
         .iter()
         .map(|ov| {
             let tid = ov.thread_id.as_str();
+            let provider = if ov.provider_block.is_empty() {
+                default()
+            } else {
+                html! { code { (components::breakable_id(&ov.provider_block)) } }
+            };
+            let model = if ov.model.is_empty() {
+                default()
+            } else {
+                html! { code { (components::breakable_id(&ov.model)) } }
+            };
             components::TableRow::new(vec![
                 html! {
-                    a .font-mono .text-xs href={"/b/llm/threads/" (tid)} {
+                    a .font-mono href={"/b/llm/threads/" (tid)} {
                         (components::breakable_id(tid))
                     }
+                    // The other columns, when the table is too narrow for
+                    // them.
+                    span .llm-table__meta {
+                        (provider) " · " (model) " · "
+                        (components::timestamp(&ov.updated_at))
+                    }
                 },
-                if ov.provider_block.is_empty() {
-                    default()
-                } else {
-                    html! { code .text-xs { (ov.provider_block) } }
-                },
-                if ov.model.is_empty() {
-                    default()
-                } else {
-                    html! { code .text-xs { (ov.model) } }
-                },
+                provider,
+                model,
                 components::timestamp(&ov.updated_at),
                 html! {
                     button
@@ -602,14 +627,12 @@ fn render_overrides_table(rows: &[repo::settings::ThreadSettingRow]) -> Markup {
             ])
         })
         .collect();
-    components::DataTable::new(&OVERRIDE_COLUMNS)
+    // In its flush card: a one-line note where the rows would be.
+    let table = components::DataTable::new(&OVERRIDE_COLUMNS)
         .rows(table_rows)
-        .empty_state(
-            "No thread overrides",
-            "Every thread uses the defaults above.",
-            None,
-        )
-        .render()
+        .empty_note("No thread overrides: every thread uses the defaults above.")
+        .render();
+    html! { div .llm-table .llm-table--overrides { (table) } }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +648,20 @@ pub(super) enum Section {
     Settings,
 }
 
+impl Section {
+    /// The sub-page's window title, which keeps the block's name ("LLM
+    /// Providers"); the page's `h1` under the `LLM ›` trail is the bare
+    /// sub-page name. The page and its error page share it.
+    pub(super) fn window_title(self) -> &'static str {
+        match self {
+            Section::Chat => "Chat",
+            Section::Providers => "LLM Providers",
+            Section::Models => "LLM Models",
+            Section::Settings => "LLM Settings",
+        }
+    }
+}
+
 /// An LLM page whose read failed: drawn in the shell under the block's
 /// section links, titled `title`. The chat links back to the dashboard;
 /// every other section back to the chat.
@@ -636,24 +673,47 @@ pub(super) async fn error_page(
     error: wafer_run::WaferError,
     context: &str,
 ) -> OutputStream {
-    let back = if section == Section::Chat {
-        ui::BackLink::ADMIN_DASHBOARD
+    let (back, shell) = if section == Section::Chat {
+        (
+            ui::BackLink::ADMIN_DASHBOARD,
+            ui::Shell::admin(title, title),
+        )
     } else {
-        ui::BackLink {
-            label: "Back to the chat",
-            href: "/b/llm/",
-        }
+        (
+            ui::BackLink {
+                label: "Back to the chat",
+                href: "/b/llm/",
+            },
+            ui::Shell::admin(section.window_title(), title).trail(llm_trail(title)),
+        )
     };
     ui::shell_error_page(
         ctx,
         msg,
-        ui::Shell::admin(title, title),
+        shell,
         Some(sections(section)),
         back,
         error,
         context,
     )
     .await
+}
+
+/// The trail of an LLM sub-page: `LLM › {title}`, the chat (the block's
+/// first page) linked and the sub-page its title — the rule Storage's,
+/// Tickets' and Products' sub-pages follow. The window title keeps the
+/// block's name ("LLM Providers").
+pub(super) fn llm_trail(title: &str) -> Vec<Crumb<'_>> {
+    vec![
+        Crumb {
+            label: "LLM",
+            href: Some("/b/llm/"),
+        },
+        Crumb {
+            label: title,
+            href: None,
+        },
+    ]
 }
 
 pub(super) fn sections(active: Section) -> Markup {
@@ -1279,13 +1339,17 @@ mod tests {
         );
     }
 
+    /// The overrides sit in a flush card, so no rows is one line where the
+    /// table would be, not a framed empty state inside the card.
     #[test]
-    fn no_overrides_is_the_shared_empty_state() {
+    fn no_overrides_is_a_note_in_its_card() {
         let m = render_overrides_table(&[]).into_string();
         assert!(
-            m.contains(r#"<h2 class="empty__title">No thread overrides</h2>"#),
+            m.contains("No thread overrides: every thread uses the defaults above."),
             "{m}"
         );
+        assert!(m.contains(r#"class="empty-note"#), "{m}");
+        assert!(!m.contains(r#"class="empty""#), "{m}");
     }
 }
 
@@ -1627,6 +1691,127 @@ mod outage_tests {
         assert!(
             html.contains(r#"id="chat-input""#),
             "the chat itself still renders: {html}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod page_chrome_tests {
+    //! What each LLM page renders through the block's own dispatch: the
+    //! sub-pages' trail, one primary at most, and one level of cards.
+
+    use std::sync::Arc;
+
+    use wafer_run::{Block, InputStream};
+
+    use crate::{
+        blocks::llm::{
+            provider_admin::NoopProviderAdmin,
+            routes::test_support::{admin_msg as llm_admin_msg, routed, RecordingCtx},
+            LlmBlock,
+        },
+        test_support::{admin_msg, dom, output_html, TestContext},
+    };
+
+    async fn page(ctx: &TestContext, path: &str) -> String {
+        let mut msg = admin_msg("retrieve", path);
+        msg.set_meta("http.header.accept", "text/html");
+        output_html(
+            LlmBlock::new(Arc::new(NoopProviderAdmin))
+                .handle(ctx, msg, InputStream::empty())
+                .await,
+        )
+        .await
+    }
+
+    /// Providers, Models and Settings are titled by their own names under
+    /// the trail `LLM ›`, which leads back to the chat; the chat is the
+    /// trail's root. The window titles keep the block's name.
+    #[tokio::test]
+    async fn the_sub_pages_are_titled_under_the_llm_trail() {
+        let ctx = TestContext::with_llm().await;
+        for (path, title, h1) in [
+            ("/b/llm/providers", "LLM Providers", "Providers"),
+            ("/b/llm/models", "LLM Models", "Models"),
+            ("/b/llm/settings", "LLM Settings", "Settings"),
+        ] {
+            let html = page(&ctx, path).await;
+            assert!(
+                html.contains(&format!("<title>{title}")),
+                "{path}: the window title stays {title:?}: {html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    concat!(
+                        r#"<nav class="topbar__crumbs" aria-label="Breadcrumb"><ol>"#,
+                        r#"<li><a href="/b/llm/">LLM</a></li></ol></nav>"#,
+                        r#"<h1 class="topbar__title">{h1}</h1>"#
+                    ),
+                    h1 = h1
+                )),
+                "{path}: expected the trail LLM › {h1}: {html}"
+            );
+        }
+        let chat = page(&ctx, "/b/llm/").await;
+        assert!(
+            chat.contains(r#"<h1 class="topbar__title">Chat</h1>"#),
+            "{chat}"
+        );
+        assert!(!chat.contains("topbar__crumbs"), "{chat}");
+    }
+
+    /// The chat's one primary is Send (New thread is a secondary), the
+    /// other pages hold none on a runtime that cannot manage providers, and
+    /// no page draws a card-level surface inside a card or skips a heading
+    /// level. (The models page's empty state, whose one action is a
+    /// secondary, is `ui::tests::render_models_table_empty_shows_hint`'s.)
+    #[tokio::test]
+    async fn each_page_has_at_most_one_primary_and_one_level_of_cards() {
+        // The chat reads its threads through the messages block.
+        let chat_ctx = RecordingCtx::default().answering(
+            "/b/messages/api/contexts",
+            serde_json::json!({ "records": [], "total_count": 0 }),
+        );
+        let chat = output_html(
+            super::page(&chat_ctx, &routed(llm_admin_msg("retrieve", "/b/llm/"))).await,
+        )
+        .await;
+        let ctx = TestContext::with_llm().await;
+        for (path, primaries, html) in [
+            ("/b/llm/", vec![r#"button.btn.btn--primary "Send""#], chat),
+            (
+                "/b/llm/providers",
+                vec![],
+                page(&ctx, "/b/llm/providers").await,
+            ),
+            (
+                "/b/llm/settings",
+                vec![],
+                page(&ctx, "/b/llm/settings").await,
+            ),
+        ] {
+            assert_eq!(dom::visible_primaries(&html).0, primaries, "{path}: {html}");
+            assert_eq!(
+                dom::card_level_inside_card(&html),
+                Vec::<String>::new(),
+                "{path}"
+            );
+            let outline = dom::heading_outline(&html);
+            assert!(
+                outline.windows(2).all(|pair| pair[1].0 <= pair[0].0 + 1),
+                "{path}: a heading skips a level: {outline:?}"
+            );
+        }
+        let settings = page(&ctx, "/b/llm/settings").await;
+        for title in ["Defaults", "Per-thread overrides"] {
+            assert!(
+                settings.contains(&format!(r#"<h2 class="card__title">{title}</h2>"#)),
+                "{settings}"
+            );
+        }
+        assert!(
+            settings.contains(r#"<a class="btn btn--secondary" href="/b/admin/settings/variables">Edit in variables</a>"#),
+            "the Defaults card's head action: {settings}"
         );
     }
 }

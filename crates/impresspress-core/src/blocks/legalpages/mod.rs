@@ -1709,7 +1709,7 @@ mod tests {
             .into_string();
         assert!(s.contains(r#"role="tablist" aria-label="Content view""#));
         assert!(s.contains(
-            r#"<div class="tabs" role="tablist" aria-label="Content view"><button class="tab active" id="editor-tab-edit" type="button" role="tab" aria-selected="true" aria-controls="editor-edit-pane" data-tab="edit" data-action="legalpages-editor-tab">Edit</button>"#
+            r#"<div class="tabs legal-editor__tabs" role="tablist" aria-label="Content view"><button class="tab active" id="editor-tab-edit" type="button" role="tab" aria-selected="true" aria-controls="editor-edit-pane" data-tab="edit" data-action="legalpages-editor-tab">Edit</button>"#
         ));
         assert!(s.contains(
             r#"<button class="tab" id="editor-tab-preview" type="button" role="tab" aria-selected="false" aria-controls="editor-preview-pane" tabindex="-1" data-tab="preview" data-action="legalpages-editor-tab">Preview</button></div>"#

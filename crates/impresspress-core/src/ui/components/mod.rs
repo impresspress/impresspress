@@ -22,7 +22,7 @@ mod time;
 pub use action::{Action, ActionTarget, HeaderAction};
 pub use auth::{alert, alert_message, auth_panel, oauth_button, AlertVariant};
 pub use avatar::{avatar, user_identity, AvatarSize};
-pub use badge::{badge, status_badge, Badge, BadgeVariant, HeaderStatus};
+pub use badge::{badge, humanize, status_badge, Badge, BadgeVariant, HeaderStatus};
 pub use button::{filter_links, filter_toggle, subnav, tab_navigation, FilterLinks, Tab};
 pub use callout::{callout, CalloutTone};
 pub use card::Card;

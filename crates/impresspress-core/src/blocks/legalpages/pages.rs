@@ -20,9 +20,11 @@ use crate::{
     ui::{
         self,
         components::{
-            self, ActionTarget, BadgeVariant, DataTable, HeaderAction, TableCol, TableRow,
+            self, Action, ActionTarget, BadgeVariant, Card, DataTable, HeaderAction, TableCol,
+            TableRow,
         },
         icons, settings_form,
+        shell::Crumb,
     },
     util::wire_str,
 };
@@ -50,20 +52,47 @@ fn section_links(active: &str) -> Markup {
     )
 }
 
+/// The block's first page, the Privacy policy editor: where the sidebar's
+/// "Legal" leads, and the root of the sub-pages' trail.
+const LEGAL_ROOT: &str = "/b/legalpages/admin/privacy";
+
+/// The trail of a legal sub-page: `Legal › {h1}`, the block's first page
+/// linked and the sub-page titled by its own name — the rule Storage's,
+/// Tickets', Products' and LLM's sub-pages follow. The window title keeps
+/// the block's name ("Legal settings").
+fn legal_trail(h1: &str) -> Vec<Crumb<'_>> {
+    vec![
+        Crumb {
+            label: "Legal",
+            href: Some(LEGAL_ROOT),
+        },
+        Crumb {
+            label: h1,
+            href: None,
+        },
+    ]
+}
+
 /// A legal admin page whose read failed: drawn in the shell under the
-/// block's section links, with a link back to the dashboard.
+/// block's section links, with a link back to the dashboard. `h1` is the
+/// page's heading under the trail, when it is a sub-page.
 async fn error_page(
     ctx: &dyn Context,
     msg: &Message,
     title: &str,
+    h1: Option<&str>,
     section: &str,
     error: WaferError,
     context: &str,
 ) -> OutputStream {
+    let shell = match h1 {
+        Some(h1) => ui::Shell::admin(title, h1).trail(legal_trail(h1)),
+        None => ui::Shell::admin(title, title),
+    };
     ui::shell_error_page(
         ctx,
         msg,
-        ui::Shell::admin(title, title),
+        shell,
         Some(section_links(section)),
         ui::BackLink::ADMIN_DASHBOARD,
         error,
@@ -123,6 +152,7 @@ pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentTyp
                 ctx,
                 msg,
                 doc_type.title(),
+                None,
                 wire_str(&doc_type).as_str(),
                 e,
                 "legal editor page: document read failed",
@@ -205,6 +235,11 @@ pub(super) fn editor_view<'a>(
             .data("legal-editor-action", "")
             .hidden(!started);
 
+    // Not started, the empty state's "Write …" is the page's one visible
+    // primary: the header's Publish waits hidden, and editor.js removes this
+    // empty state as it reveals Save draft and Publish, so the two primaries
+    // are never on screen together.
+    let write = format!("Write the {lower}");
     let body = html! {
         @if !started {
             div #legal-editor-empty {
@@ -213,11 +248,7 @@ pub(super) fn editor_view<'a>(
                     &format!("No {lower} yet"),
                     "Nothing has been saved or published yet, so the public page shows a \
                      placeholder until you publish.",
-                    Some(html! {
-                        button .btn .btn--primary type="button" data-action="legalpages-start" {
-                            "Write the " (lower)
-                        }
-                    }),
+                    Some(Action::primary(&write, ActionTarget::Delegated("legalpages-start")).render()),
                 ))
             }
         }
@@ -259,7 +290,9 @@ pub(super) fn editor_view<'a>(
             // of one field, switched in place by `editor.js` (no request),
             // so they are a WAI-ARIA tablist rather than `tab_navigation`'s
             // htmx links.
-            div .tabs role="tablist" aria-label="Content view" {
+            // `.legal-editor__tabs`: the strip is the top edge of the pane it
+            // switches, not a row of its own above it (form.css).
+            div .tabs .legal-editor__tabs role="tablist" aria-label="Content view" {
                 button #editor-tab-edit .tab .active type="button"
                     role="tab" aria-selected="true" aria-controls="editor-edit-pane"
                     data-tab="edit" data-action="legalpages-editor-tab"
@@ -311,6 +344,7 @@ pub async fn endpoints_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ctx,
         msg,
         ui::Shell::admin("Endpoints", "Endpoints")
+            .trail(legal_trail("Endpoints"))
             .subtitle("Every HTTP endpoint the legal pages block serves"),
         ui::PageBody::from(endpoints_view()).with_subnav(section_links("endpoints")),
     )
@@ -324,9 +358,9 @@ const FIELD_COLUMNS: [TableCol<'static>; 3] = [
 ];
 
 /// The endpoints reference: what the block declares from `ROUTES` — the
-/// table `handle()` dispatches on — grouped by who may call it, each group in
-/// the shared [`components::endpoint_table`]. It cannot drift from what the
-/// block serves.
+/// table `handle()` dispatches on — grouped by who may call it, each group a
+/// flush card holding the shared [`components::endpoint_table`], then the
+/// document fields in one more. It cannot drift from what the block serves.
 pub(super) fn endpoints_view() -> Markup {
     let declared = endpoint_match::declare(super::ROUTES);
     let groups = [
@@ -364,21 +398,19 @@ pub(super) fn endpoints_view() -> Markup {
                 .cloned()
                 .collect();
             @if !endpoints.is_empty() {
-                section .legal-endpoints__group {
-                    (components::section_header(title, None))
-                    p .text-muted .text-sm .mb-3 { (description) }
-                    (components::endpoint_table(&format!("{title} endpoints"), &endpoints))
-                }
+                (Card::titled(
+                    title,
+                    components::endpoint_table(&format!("{title} endpoints"), &endpoints),
+                )
+                .subtitle(description)
+                .flush()
+                .render())
             }
         }
-        section .legal-endpoints__group {
-            (components::section_header("Document fields", None))
-            p .text-muted .text-sm .mb-3 {
-                "Each record the JSON API returns carries these fields in its "
-                code { "data" } "."
-            }
-            (DataTable::new(&FIELD_COLUMNS).rows(fields).render())
-        }
+        (Card::titled("Document fields", DataTable::new(&FIELD_COLUMNS).rows(fields).render())
+            .subtitle("The fields of each record's data object in the JSON API.")
+            .flush()
+            .render())
     }
 }
 
@@ -547,6 +579,7 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     ctx,
                     msg,
                     "Legal settings",
+                    Some("Settings"),
                     "settings",
                     e,
                     "legalpages settings: current values read failed",
@@ -558,7 +591,8 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("Legal settings", "Legal settings")
+        ui::Shell::admin("Legal settings", "Settings")
+            .trail(legal_trail("Settings"))
             .subtitle("Customize the public legal pages appearance"),
         ui::PageBody::from(content).with_subnav(section_links("settings")),
     )
@@ -601,4 +635,139 @@ pub async fn handle_render_preview(_ctx: &dyn Context, input: InputStream) -> Ou
     };
     let fragment = render_preview_fragment(&body.content);
     ResponseBuilder::new().body(fragment.into_bytes(), "text/html; charset=utf-8")
+}
+
+#[cfg(test)]
+mod page_chrome_tests {
+    //! What the legal admin pages render through the block's own dispatch:
+    //! the sub-pages' trail, one primary at most, one level of cards.
+
+    use wafer_run::{Block, InputStream, LifecycleEvent, LifecycleType};
+
+    use super::*;
+    use crate::{
+        blocks::legalpages::LegalPagesBlock,
+        test_support::{admin_msg, dom, output_html, TestContext},
+    };
+
+    /// The block with its two default documents, as a fresh deployment has.
+    async fn seeded() -> TestContext {
+        let ctx = crate::blocks::legalpages::test_ctx().await;
+        LegalPagesBlock::new()
+            .lifecycle(
+                &ctx,
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: Vec::new(),
+                },
+            )
+            .await
+            .expect("init seeds the defaults");
+        ctx
+    }
+
+    async fn page(ctx: &TestContext, path: &str) -> String {
+        let mut msg = admin_msg("retrieve", path);
+        msg.set_meta("http.header.accept", "text/html");
+        output_html(
+            LegalPagesBlock::new()
+                .handle(ctx, msg, InputStream::empty())
+                .await,
+        )
+        .await
+    }
+
+    /// Settings and Endpoints are titled by their own names under the trail
+    /// `Legal ›`, which leads to the block's first page; the document
+    /// editors are the block's own pages, with no trail. The window titles
+    /// stay as they were.
+    #[tokio::test]
+    async fn the_sub_pages_are_titled_under_the_legal_trail() {
+        let ctx = seeded().await;
+        for (path, title, h1) in [
+            ("/b/legalpages/admin/settings", "Legal settings", "Settings"),
+            ("/b/legalpages/admin/endpoints", "Endpoints", "Endpoints"),
+        ] {
+            let html = page(&ctx, path).await;
+            assert!(
+                html.contains(&format!("<title>{title}")),
+                "{path}: the window title stays {title:?}: {html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    concat!(
+                        r#"<nav class="topbar__crumbs" aria-label="Breadcrumb"><ol>"#,
+                        r#"<li><a href="{root}">Legal</a></li></ol></nav>"#,
+                        r#"<h1 class="topbar__title">{h1}</h1>"#
+                    ),
+                    root = LEGAL_ROOT,
+                    h1 = h1
+                )),
+                "{path}: expected the trail Legal › {h1}: {html}"
+            );
+        }
+        let privacy = page(&ctx, LEGAL_ROOT).await;
+        assert!(!privacy.contains("topbar__crumbs"), "{privacy}");
+    }
+
+    /// The editor's one primary is the header's Publish; Settings' is Save
+    /// settings; Endpoints has none. Every endpoint group and the fields are
+    /// flush cards, and no page draws a card-level surface inside a card or
+    /// skips a heading level.
+    #[tokio::test]
+    async fn each_page_has_one_primary_at_most_and_one_level_of_cards() {
+        let ctx = seeded().await;
+        for (path, primaries) in [
+            (LEGAL_ROOT, vec![r#"button.btn.btn--primary "Publish""#]),
+            (
+                "/b/legalpages/admin/settings",
+                vec![r#"button.btn.btn--primary "Save settings""#],
+            ),
+            ("/b/legalpages/admin/endpoints", vec![]),
+        ] {
+            let html = page(&ctx, path).await;
+            assert_eq!(dom::visible_primaries(&html).0, primaries, "{path}: {html}");
+            assert_eq!(
+                dom::card_level_inside_card(&html),
+                Vec::<String>::new(),
+                "{path}"
+            );
+            let outline = dom::heading_outline(&html);
+            assert!(
+                outline.windows(2).all(|pair| pair[1].0 <= pair[0].0 + 1),
+                "{path}: a heading skips a level: {outline:?}"
+            );
+        }
+        let endpoints = endpoints_view().into_string();
+        let groups = endpoints
+            .matches(r#"<section class="card card--flush">"#)
+            .count();
+        assert!(
+            groups >= 3,
+            "each endpoint group and the fields is a flush card: {endpoints}"
+        );
+        assert!(!endpoints.contains("legal-endpoints__group"), "{endpoints}");
+    }
+
+    /// Not started, the empty state's "Write the privacy policy" is the
+    /// page's one visible primary: Publish and Save draft wait hidden.
+    #[test]
+    fn a_document_not_started_offers_one_visible_primary_in_its_empty_state() {
+        let state = EditorState {
+            current: None,
+            live_version: None,
+            next_version: 1,
+        };
+        let view = editor_view(DocumentType::Privacy, &state, "/b/legalpages/privacy");
+        let body = view.body.into_string();
+        assert_eq!(
+            dom::visible_primaries(&body).0,
+            vec![r#"button.btn.btn--primary "Write the privacy policy""#],
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"data-action="legalpages-start""#),
+            "the empty state's action is the start verb editor.js handles: {body}"
+        );
+    }
 }

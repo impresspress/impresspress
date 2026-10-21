@@ -1,5 +1,6 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { WIDTHS, isWrong, layout } from './fixtures/layout';
 import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
@@ -163,6 +164,96 @@ test.describe('tickets admin', () => {
       });
     });
   }
+
+  // The pages with the long values a real deployment holds — a type title
+  // in parentheses, a subject, an assignee id and a page path with no space,
+  // an analysis quoting ids — at every width from the phone to 1280: no page
+  // scrolls sideways, no record table scrolls inside its frame, no card
+  // overflows, and each page shows its one primary or none.
+  test('the tickets pages fit their frame at every width with long values', async ({ page, baseURL }) => {
+    test.setTimeout(180_000);
+    const { api, headers } = await seeder(baseURL);
+    const type = await api.post('/b/tickets/api/admin/types', {
+      headers,
+      data: {
+        key: `business-info-${UNIQUE}`.slice(0, 48),
+        title: `Incorrect business information (hours, address, phone) ${UNIQUE}`,
+        escalation_kind: 'privacy',
+        sort_order: 2,
+      },
+    });
+    expect(type.ok(), await type.text()).toBe(true);
+    const typeId = ((await type.json()) as { id: string }).id;
+    const ticket = await api.post('/b/tickets/api/admin/tickets', {
+      headers,
+      data: {
+        source: 'api',
+        type_id: typeId,
+        subject: 'Northwind Traders listing shows the wrong opening hours for the Wellington CBD store',
+        description:
+          "The listing says Monday opening is 8am, but the store opens at 9am. Stripe event evt_1NvQh2KZp7a9XyTqLongEventIdentifier names the account 'acct_1NvQh2KZp7a9XyTqLongAccountIdentifier'.",
+        source_path: '/activities/northwind-traders-wellington-cbd-store-lambton-quay/opening-hours',
+        subject_type: 'listing',
+        subject_id: 'listing_01HZX9Q2KZp7a9XyTqAbCdEfGhIjKlMnOpQrSt',
+        evidence_url: 'https://northwind-traders-production.example.com/stores/wellington-cbd/opening-hours?utm_source=report',
+        priority: 'urgent',
+      },
+    });
+    expect(ticket.ok(), await ticket.text()).toBe(true);
+    const ticketId = ((await ticket.json()) as { id: string }).id;
+    const assigned = await api.patch(`/b/tickets/api/admin/tickets/${ticketId}`, {
+      headers,
+      data: { assignee_id: 'user_01HZX9Q2KZp7a9XyTqAbCdEfGh-ana.lucia.fernandez-gonzalez', reason: '' },
+    });
+    expect(assigned.ok(), await assigned.text()).toBe(true);
+    const analysis = await api.post(`/b/tickets/api/admin/tickets/${ticketId}/analyses`, {
+      headers,
+      data: {
+        source: 'triage-agent-northwind-traders-production',
+        model: 'accounts/fireworks/models/llama-v3p1-405b-instruct',
+        summary: "The report quotes evt_1NvQh2KZp7a9XyTqLongEventIdentifier and 'acct_1NvQh2KZp7a9XyTqLongAccountIdentifier'.",
+        confidence: 0.82,
+        suggested_actions: [{ action: 'update_listing_hours', listing_id: 'listing_01HZX9Q2KZp7a9XyTqAbCdEfGhIjKlMnOpQrSt' }],
+      },
+    });
+    expect(analysis.ok(), await analysis.text()).toBe(true);
+    await api.dispose();
+
+    const pages: Record<string, string[]> = {
+      '/b/tickets/admin/tickets': ['New ticket'],
+      [`/b/tickets/admin/tickets/${ticketId}`]: ['Save changes'],
+      '/b/tickets/admin/types': ['New type'],
+      '/b/tickets/admin/settings': [],
+      '/b/tickets/admin/endpoints': [],
+    };
+    const found: Record<string, unknown> = {};
+    for (const width of WIDTHS) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [path, primaries] of Object.entries(pages)) {
+        await page.goto(path, { waitUntil: 'networkidle' });
+        const r = await layout(page);
+        if (isWrong(r, primaries)) found[`${path} at ${width}`] = r;
+      }
+    }
+    expect(found, 'a page scrolled sideways, a card overflowed or the primaries differ').toEqual({});
+  });
+
+  test.describe('the filters disclosure on a phone', () => {
+    test.use(PHONE);
+    // A button lookalike takes the buttons' 8px corners (`--radius-md`), not
+    // a pill's.
+    test('its summary has the buttons\' corners', async ({ page }) => {
+      await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
+      const summary = page.locator('.ticket-filters-disclosure__summary');
+      await expect(summary).toBeVisible();
+      const [summaryRadius, buttonRadius] = await page.evaluate(() => [
+        getComputedStyle(document.querySelector('.ticket-filters-disclosure__summary')!).borderTopLeftRadius,
+        getComputedStyle(document.querySelector('.topbar__actions .btn')!).borderTopLeftRadius,
+      ]);
+      expect(summaryRadius).toBe('8px');
+      expect(summaryRadius).toBe(buttonRadius);
+    });
+  });
 
   test('create a ticket type from its modal', async ({ page }) => {
     const title = `Billing ${UNIQUE}`;

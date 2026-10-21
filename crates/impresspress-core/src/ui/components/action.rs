@@ -84,6 +84,7 @@ pub struct Action<'a> {
     small: bool,
     id: Option<&'a str>,
     hidden: bool,
+    disabled: bool,
     title: Option<&'a str>,
     keyshortcuts: Option<&'a str>,
     data: Vec<(&'static str, &'a str)>,
@@ -99,6 +100,7 @@ impl<'a> Action<'a> {
             small: false,
             id: None,
             hidden: false,
+            disabled: false,
             title: None,
             keyshortcuts: None,
             data: Vec::new(),
@@ -156,6 +158,18 @@ impl<'a> Action<'a> {
         self
     }
 
+    /// Render the button `disabled`, for an action a script enables once it
+    /// can do something (the chat's Send, before a thread is open). A link
+    /// has no disabled state, so only a button target takes one.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        assert!(
+            !matches!(self.target, ActionTarget::Link(_) | ActionTarget::NewTab(_)),
+            "a link cannot be disabled; Action::disabled needs a button target"
+        );
+        self.disabled = disabled;
+        self
+    }
+
     /// The `title` tooltip (`"Save draft (Ctrl+S)"`). It is a hint only:
     /// the label stays the accessible name.
     pub fn title(mut self, title: &'a str) -> Self {
@@ -207,6 +221,7 @@ impl<'a> Action<'a> {
             @if new_tab { span .sr-only { " (opens in a new tab)" } }
         };
         let (id, hidden, title, keys) = (self.id, self.hidden, self.title, self.keyshortcuts);
+        let disabled = self.disabled;
         let element = match self.target {
             ActionTarget::Link(href) => html! {
                 a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
@@ -220,22 +235,22 @@ impl<'a> Action<'a> {
             },
             ActionTarget::Modal(modal) => html! {
                 button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
-                    type="button" data-action="modal-open" data-modal-target=(modal)
+                    type="button" data-action="modal-open" data-modal-target=(modal) disabled[disabled]
                 { (content) }
             },
             ActionTarget::Delegated(verb) => html! {
                 button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
-                    type="button" data-action=(verb)
+                    type="button" data-action=(verb) disabled[disabled]
                 { (content) }
             },
             ActionTarget::Submit { form } => html! {
                 button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
-                    type="submit" form=[form]
+                    type="submit" form=[form] disabled[disabled]
                 { (content) }
             },
             ActionTarget::HxGet { url, target } => html! {
                 button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
-                    type="button" hx-get=(url) hx-target=(target)
+                    type="button" hx-get=(url) hx-target=(target) disabled[disabled]
                 { (content) }
             },
         };
@@ -406,6 +421,26 @@ mod tests {
         );
         assert!(s.ends_with("</svg>Remove</button>"), "{s}");
         assert!(!render(Action::secondary("x", ActionTarget::Link("/"))).contains("hidden"));
+    }
+
+    #[test]
+    fn a_button_can_start_disabled_and_a_link_cannot() {
+        assert_eq!(
+            render(
+                Action::primary("Send", ActionTarget::Submit { form: None })
+                    .id("send-btn")
+                    .disabled(true)
+            ),
+            r#"<button class="btn btn--primary" id="send-btn" type="submit" disabled>Send</button>"#
+        );
+        assert!(!render(
+            Action::primary("Send", ActionTarget::Submit { form: None }).disabled(false)
+        )
+        .contains("disabled"));
+        let link = std::panic::catch_unwind(|| {
+            Action::secondary("Go", ActionTarget::Link("/")).disabled(true)
+        });
+        assert!(link.is_err(), "a link has no disabled state");
     }
 
     #[test]

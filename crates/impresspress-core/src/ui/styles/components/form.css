@@ -41,8 +41,11 @@
 .form-group { margin-bottom: var(--space-5); }
 .form-group:last-child { margin-bottom: 0; }
 
+/* Two fields side by side. `minmax(0, 1fr)`: a bare `1fr` track is at least
+   its content's min-content, so a field whose hint is one long variable name
+   widened its half past the card (LLM Settings at 721-800px). */
 .form-row {
-	display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4);
+	display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4);
 }
 
 .form-label {
@@ -354,20 +357,28 @@
  * tabs (`.tabs`, nav.css) and the pane they switch. */
 .legal-editor__status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-5); }
 .legal-editor__meta { font-size: var(--text-sm); color: var(--text-muted); }
+/* The Edit / Preview strip is the pane's top edge: the shared `.tabs`
+ * bottom margin (24px) left the pane hanging below its own tabs, and the
+ * strip's rule stands in for the pane's top border. Two classes, so it
+ * outranks `.tabs` (nav.css, later in the bundle). */
+.tabs.legal-editor__tabs { margin-bottom: 0; }
 /* The textarea fills the viewport below the editor's header rows (at least
- * 20rem) at every width -- it is a field of its own, not a `.form-input`,
- * whose target-floor minimum would otherwise win the cascade over this
- * height. It keeps the shared focus outline (base.css), drawn inside the
- * pane's border. */
-.editor-pane { background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-md); }
-.editor-textarea { display: block; width: 100%; min-height: max(20rem, calc(100dvh - 24rem)); padding: var(--space-4); border: none; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1rem; line-height: 1.6; background: transparent; color: var(--text-primary); }
+ * 20rem) -- it is a field of its own, not a `.form-input`, whose
+ * target-floor minimum would otherwise win the cascade over this height. It
+ * keeps the shared focus outline (base.css), drawn inside the pane's border.
+ * The 27rem taken off the screen's height (here and in `.preview-content`)
+ * is what the screen holds besides the pane on a desktop: the page header,
+ * the section links, the status, Title and Content rows, the tabs and the
+ * hint under the pane (about 26.4rem at 1280px since the page frame lost
+ * its card). Where the header wraps (narrower screens, phones) the page
+ * scrolls a little instead. */
+.editor-pane { background: var(--surface-1); border: 1px solid var(--border-color); border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); }
+.editor-textarea { display: block; width: 100%; min-height: max(20rem, calc(100dvh - 27rem)); padding: var(--space-4); border: none; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1rem; line-height: 1.6; background: transparent; color: var(--text-primary); }
 .editor-textarea:focus-visible { outline-offset: -2px; }
-.preview-content { padding: var(--space-6); min-height: max(20rem, calc(100dvh - 24rem)); font-family: Georgia, 'Times New Roman', serif; line-height: 1.8; }
+.preview-content { padding: var(--space-6); min-height: max(20rem, calc(100dvh - 27rem)); font-family: Georgia, 'Times New Roman', serif; line-height: 1.8; }
 @media (max-width: 720px) {
 	.preview-content { padding: var(--space-4); }
 }
-/* The endpoints reference: one section per caller tier, then the fields. */
-.legal-endpoints__group + .legal-endpoints__group { margin-top: var(--space-8); }
 
 /* ===== Utility ===== */
 .text-center { text-align: center; }
@@ -601,6 +612,6 @@
 
 @media (max-width: 720px) {
 	/* Forms: two-column form rows stack on narrow screens. */
-	.form-row { grid-template-columns: 1fr; }
+	.form-row { grid-template-columns: minmax(0, 1fr); }
 }
 

@@ -19,8 +19,8 @@ use crate::{
     ui::{
         self,
         components::{
-            self, ActionTarget, BadgeVariant, CalloutTone, DataTable, HeaderAction, Modal,
-            TableCol, TableRow,
+            self, humanize, Action, ActionTarget, BadgeVariant, CalloutTone, Card, DataTable,
+            HeaderAction, Modal, TableCol, TableRow,
         },
         icons,
         shell::Crumb,
@@ -36,6 +36,14 @@ pub(super) const TYPES: &str = "/b/tickets/admin/types";
 const CREATE_TICKET_MODAL: &str = "create-ticket";
 /// The "New ticket type" modal on the types page.
 pub(super) const CREATE_TYPE_MODAL: &str = "create-type";
+/// The inbox's New ticket trigger: the header's primary and the empty
+/// inbox's secondary copy are drawn from this one label and target.
+const NEW_TICKET: (&str, ActionTarget<'static>) =
+    ("New ticket", ActionTarget::Modal(CREATE_TICKET_MODAL));
+/// The types page's New type trigger, likewise for the header and the empty
+/// list.
+const NEW_TYPE: (&str, ActionTarget<'static>) =
+    ("New type", ActionTarget::Modal(CREATE_TYPE_MODAL));
 /// The element a ticket's workflow and note forms swap with the re-rendered
 /// ticket.
 pub(super) const DETAIL_REGION: &str = "ticket-detail";
@@ -97,15 +105,13 @@ pub async fn inbox(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ))
         (create_ticket_modal(&types))
     };
+    let (new_ticket, new_ticket_target) = NEW_TICKET;
     shell(
         ctx,
         msg,
         ui::Shell::admin("Tickets", "Tickets")
             .subtitle("Public reports and internal work items")
-            .primary_action(
-                HeaderAction::new("New ticket", ActionTarget::Modal(CREATE_TICKET_MODAL))
-                    .icon(icons::plus()),
-            ),
+            .primary_action(HeaderAction::new(new_ticket, new_ticket_target).icon(icons::plus())),
         Section::Inbox,
         content,
     )
@@ -155,21 +161,19 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 (type_fields("type-new", None))
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Create type" }
+                    (Action::primary("Create type", ActionTarget::Submit { form: None }).render())
                 }))
             }
         }))
     };
+    let (new_type, new_type_target) = NEW_TYPE;
     shell(
         ctx,
         msg,
         ui::Shell::admin("Ticket types", "Types")
             .trail(tickets_trail("Types"))
             .subtitle("The categories every ticket is filed under")
-            .primary_action(
-                HeaderAction::new("New type", ActionTarget::Modal(CREATE_TYPE_MODAL))
-                    .icon(icons::plus()),
-            ),
+            .primary_action(HeaderAction::new(new_type, new_type_target).icon(icons::plus())),
         Section::Types,
         content,
     )
@@ -226,42 +230,36 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
         })
         .collect();
     let content = html! {
-        div .ticket-page {
-            @if readiness.ready {
-                (components::callout(
-                    CalloutTone::Info,
-                    "Public reporting is on",
-                    html! { p { "The public form accepts reports. Every check below passes." } },
-                    Some(public_form),
-                ))
-            } @else {
-                (components::callout(
-                    CalloutTone::Warning,
-                    "Public reporting is off",
-                    html! {
-                        p { "The public form accepts reports only once all of these are fixed:" }
-                        ul .ticket-reasons { @for reason in &readiness.reasons { li { (humanize(reason)) } } }
-                    },
-                    Some(public_form),
-                ))
-            }
-            section {
-                (components::section_header(
-                    "Configuration",
-                    Some(html! {
-                        a .btn .btn--secondary href="/b/admin/settings/variables" {
-                            "Edit in Variables"
-                        }
-                    }),
-                ))
-                p .ticket-section__intro {
-                    "These settings are changed on the Variables page. Secrets are never shown "
-                    "here, only whether they are set. Open tickets and tickets under legal hold "
-                    "are never deleted, whatever the retention settings say."
-                }
-                (DataTable::new(&SETTING_COLUMNS).rows(rows).render())
-            }
+        @if readiness.ready {
+            (components::callout(
+                CalloutTone::Info,
+                "Public reporting is on",
+                html! { p { "The public form accepts reports. Every check below passes." } },
+                Some(public_form),
+            ))
+        } @else {
+            (components::callout(
+                CalloutTone::Warning,
+                "Public reporting is off",
+                html! {
+                    p { "The public form accepts reports only once all of these are fixed:" }
+                    ul .ticket-reasons { @for reason in &readiness.reasons { li { (humanize(reason)) } } }
+                },
+                Some(public_form),
+            ))
         }
+        (Card::titled("Configuration", DataTable::new(&SETTING_COLUMNS).rows(rows).render())
+            .subtitle(
+                "These settings are changed on the Variables page. Secrets are never shown \
+                 here, only whether they are set. Open tickets and tickets under legal hold \
+                 are never deleted, whatever the retention settings say.",
+            )
+            .action(Action::secondary(
+                "Edit in variables",
+                ActionTarget::Link("/b/admin/settings/variables"),
+            ))
+            .flush()
+            .render())
     };
     shell(
         ctx,
@@ -282,23 +280,20 @@ pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .into_iter()
         .partition(|endpoint| endpoint.output_schema.is_some());
     let content = html! {
-        div .ticket-page {
-            section {
-                (components::section_header("JSON API", None))
-                p .ticket-section__intro {
-                    "For scripts and agents. Admin routes need an administrator's session or "
-                    "API key."
-                }
-                (components::endpoint_table("JSON API endpoints", &api))
-            }
-            section {
-                (components::section_header("Pages and form actions", None))
-                p .ticket-section__intro {
-                    "The public report form, and what these admin pages load and submit."
-                }
-                (components::endpoint_table("Page and form action endpoints", &pages))
-            }
-        }
+        (Card::titled("JSON API", components::endpoint_table("JSON API endpoints", &api))
+            .subtitle(
+                "For scripts and agents. Admin routes need an administrator's session or \
+                 API key.",
+            )
+            .flush()
+            .render())
+        (Card::titled(
+            "Pages and form actions",
+            components::endpoint_table("Page and form action endpoints", &pages),
+        )
+        .subtitle("The public report form, and what these admin pages load and submit.")
+        .flush()
+        .render())
     };
     shell(
         ctx,
@@ -316,6 +311,9 @@ pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
 // Inbox
 // ---------------------------------------------------------------------------
 
+/// The inbox's columns. Narrow, the type, source and date move to a line
+/// under the subject (table.css `.ticket-table--inbox`, which hides the
+/// headers by position: a column moved here must move there).
 const TICKET_COLUMNS: [TableCol<'static>; 6] = [
     TableCol::new("Ticket").primary(),
     TableCol::new("Status"),
@@ -325,13 +323,13 @@ const TICKET_COLUMNS: [TableCol<'static>; 6] = [
     TableCol::new("Created"),
 ];
 
+/// The empty inbox's New ticket: the header's trigger again, as a secondary
+/// — the header holds the page's one primary.
 fn new_ticket_button() -> Markup {
-    html! {
-        button .btn .btn--primary type="button" data-action="modal-open"
-            data-modal-target=(CREATE_TICKET_MODAL) {
-            (icons::plus()) "New ticket"
-        }
-    }
+    let (label, target) = NEW_TICKET;
+    Action::secondary(label, target)
+        .icon(icons::plus())
+        .render()
 }
 
 /// The inbox filters: one labelled control per filter, every option drawn
@@ -381,8 +379,8 @@ fn filter_form(msg: &Message, types: &[db::Record], filtered: bool) -> Markup {
                     value=(msg.query("assignee_id")) maxlength="160" autocomplete="off";
             }
             div .ticket-filters__actions {
-                button .btn .btn--secondary type="submit" { "Apply filters" }
-                @if filtered { a .btn .btn--ghost href=(INBOX) { "Clear" } }
+                (Action::secondary("Apply filters", ActionTarget::Submit { form: None }).render())
+                @if filtered { (Action::quiet("Clear", ActionTarget::Link(INBOX)).render()) }
             }
         }
         }
@@ -419,6 +417,13 @@ fn ticket_table(tickets: &[db::Record], filtered: bool) -> Markup {
                 html! {
                     span .data-table__title { (service::str_field(ticket, "subject")) }
                     span .ticket-ref { (service::str_field(ticket, "reference")) }
+                    // The type, source and date columns, when the table is
+                    // too narrow for them.
+                    span .ticket-table__meta {
+                        (service::str_field(ticket, "type_title_snapshot")) " · "
+                        (source_label(service::str_field(ticket, "source"))) " · "
+                        (components::timestamp(service::str_field(ticket, "created_at")))
+                    }
                 },
                 status_badge(service::str_field(ticket, "status")),
                 priority_badge(service::str_field(ticket, "priority")),
@@ -446,7 +451,7 @@ fn ticket_table(tickets: &[db::Record], filtered: bool) -> Markup {
             Some(new_ticket_button()),
         )
     };
-    table.render()
+    html! { div .ticket-table .ticket-table--inbox { (table.render()) } }
 }
 
 fn create_ticket_modal(types: &[db::Record]) -> Markup {
@@ -504,7 +509,7 @@ fn create_ticket_modal(types: &[db::Record]) -> Markup {
                     }
                     (components::modal_footer(html! {
                         (components::modal_cancel())
-                        button .btn .btn--primary type="submit" { "Create ticket" }
+                        (Action::primary("Create ticket", ActionTarget::Submit { form: None }).render())
                     }))
                 }
             }
@@ -563,30 +568,29 @@ pub(super) fn detail_region(view: &TicketPage) -> Markup {
         badges.push(components::badge(BadgeVariant::Warning, "Legal hold"));
     }
 
+    // One card per section beside the meta rail, the escalation notice
+    // above them; the workflow's Save changes is the page's one primary.
     let mut sections = Vec::new();
     if let Some(kind) = escalated {
-        sections.push(html! {
-            div .ticket-section {
-                (components::callout(
-                    CalloutTone::Warning,
-                    &format!("{} review required", humanize(kind)),
-                    html! {
-                        p {
-                            "A person must review this ticket. Do not contact the reporter or "
-                            "change content automatically."
-                        }
-                    },
-                    None,
-                ))
-            }
-        });
+        sections.push(components::callout(
+            CalloutTone::Warning,
+            &format!("{} review required", humanize(kind)),
+            html! {
+                p {
+                    "A person must review this ticket. Do not contact the reporter or "
+                    "change content automatically."
+                }
+            },
+            None,
+        ));
     }
-    sections.push(html! {
-        section .ticket-section {
-            (components::section_header("Original report", None))
-            p .ticket-report .pre-wrap { (&report.description) }
-        }
-    });
+    sections.push(
+        Card::titled(
+            "Original report",
+            html! { p .ticket-report .pre-wrap { (&report.description) } },
+        )
+        .render(),
+    );
     sections.push(workflow_section(id, ticket));
     sections.push(activity_section(id, &view.detail));
     sections.push(analyses_section(&view.detail));
@@ -702,9 +706,7 @@ fn workflow_section(id: &str, ticket: &db::Record) -> Markup {
         .collect();
     let priority = service::str_field(ticket, "priority");
     let duplicate_of = service::nullable_str_field(ticket, "duplicate_of").unwrap_or("");
-    html! {
-        section .ticket-section {
-            (components::section_header("Workflow", None))
+    let form = html! {
             form hx-patch={ (INBOX) "/" (id) } hx-target={ "#" (DETAIL_REGION) }
                 hx-swap="outerHTML" hx-disabled-elt=(DISABLE_WHILE_SENDING) {
                 div .ticket-workflow__grid {
@@ -769,17 +771,15 @@ fn workflow_section(id: &str, ticket: &db::Record) -> Markup {
                     "Legal hold: keep this ticket past its retention period"
                 }
                 div .ticket-form-actions {
-                    button .btn .btn--primary type="submit" { "Save changes" }
+                    (Action::primary("Save changes", ActionTarget::Submit { form: None }).render())
                 }
             }
-        }
-    }
+    };
+    Card::titled("Workflow", form).render()
 }
 
 fn activity_section(id: &str, detail: &service::TicketDetail) -> Markup {
-    html! {
-        section .ticket-section {
-            (components::section_header("Activity", None))
+    let body = html! {
             form hx-post={ (INBOX) "/" (id) "/notes" } hx-target={ "#" (DETAIL_REGION) }
                 hx-swap="outerHTML" hx-disabled-elt=(DISABLE_WHILE_SENDING) {
                 div .form-group {
@@ -789,7 +789,7 @@ fn activity_section(id: &str, detail: &service::TicketDetail) -> Markup {
                     p #ticket-note-hint .form-hint { "Seen by administrators only." }
                 }
                 div .ticket-form-actions {
-                    button .btn .btn--secondary type="submit" { "Add note" }
+                    (Action::secondary("Add note", ActionTarget::Submit { form: None }).render())
                 }
             }
             @if detail.events_truncated {
@@ -810,22 +810,23 @@ fn activity_section(id: &str, detail: &service::TicketDetail) -> Markup {
                     }
                 }
             }
-        }
-    }
+    };
+    Card::titled("Activity", body).render()
 }
 
 fn analyses_section(detail: &service::TicketDetail) -> Markup {
-    html! {
-        section .ticket-section {
-            (components::section_header("Analyses", None))
+    let body = html! {
             @if detail.analyses_truncated {
                 p .ticket-section__intro { "Only the 100 most recent analyses are shown." }
             }
             @if detail.analyses.is_empty() {
-                p .ticket-section__intro {
-                    "No analysis is attached. An analysis is advisory: it never changes the ticket."
-                }
+                (components::empty_note(
+                    "No analysis is attached. An analysis is advisory: it never changes the ticket.",
+                    None,
+                ))
             }
+            // Each analysis a divided section of the card, not a framed box
+            // inside it.
             @for analysis in &detail.analyses {
                 @let field = |name: &str| service::str_field(analysis, name).to_string();
                 article .ticket-analysis {
@@ -853,8 +854,8 @@ fn analyses_section(detail: &service::TicketDetail) -> Markup {
                     }
                 }
             }
-        }
-    }
+    };
+    Card::titled("Analyses", body).render()
 }
 
 /// A timeline entry's heading: a status the ticket moved to, a note, or the
@@ -871,6 +872,10 @@ fn event_label(event_type: &str) -> String {
 // Ticket types
 // ---------------------------------------------------------------------------
 
+/// The types page's columns. Narrow, the public form, default priority,
+/// escalation and order move to a line under the type (table.css
+/// `.ticket-table--types`, which hides the headers by position: a column
+/// moved here must move there).
 const TYPE_COLUMNS: [TableCol<'static>; 7] = [
     TableCol::new("Type").primary(),
     TableCol::new("State"),
@@ -881,13 +886,13 @@ const TYPE_COLUMNS: [TableCol<'static>; 7] = [
     TableCol::new("Actions").actions(),
 ];
 
+/// The empty type list's New type: the header's trigger again, as a
+/// secondary.
 fn new_type_button() -> Markup {
-    html! {
-        button .btn .btn--primary type="button" data-action="modal-open"
-            data-modal-target=(CREATE_TYPE_MODAL) {
-            (icons::plus()) "New type"
-        }
-    }
+    let (label, target) = NEW_TYPE;
+    Action::secondary(label, target)
+        .icon(icons::plus())
+        .render()
 }
 
 /// The edit modal of the type `id`.
@@ -902,17 +907,34 @@ pub(super) fn types_region(types: &[db::Record]) -> Markup {
         .map(|kind| {
             let title = service::str_field(kind, "title");
             let escalation = service::str_field(kind, "escalation_kind");
+            let public = if service::bool_field(kind, "public_visible") {
+                "Offered"
+            } else {
+                "Internal only"
+            };
+            let escalation_text = if escalation == EscalationKind::None.as_str() {
+                "No review".to_string()
+            } else {
+                format!("{} review", humanize(escalation))
+            };
             TableRow::new(vec![
                 html! {
                     span .data-table__title { (title) }
                     code .ticket-setting-key { (service::str_field(kind, "key")) }
+                    // The other columns, when the table is too narrow for
+                    // them.
+                    span .ticket-table__meta {
+                        (public) " · " (humanize(service::str_field(kind, "default_priority")))
+                        " priority · " (escalation_text) " · Order "
+                        (number_field(kind, "sort_order"))
+                    }
                 },
                 if service::bool_field(kind, "active") {
                     components::badge(BadgeVariant::Success, "Active")
                 } else {
                     components::badge(BadgeVariant::Secondary, "Inactive")
                 },
-                html! { @if service::bool_field(kind, "public_visible") { "Offered" } @else { "Internal only" } },
+                html! { (public) },
                 priority_badge(service::str_field(kind, "default_priority")),
                 html! {
                     @if escalation == EscalationKind::None.as_str() { "None" }
@@ -932,14 +954,16 @@ pub(super) fn types_region(types: &[db::Record]) -> Markup {
         .collect();
     html! {
         div id=(TYPES_REGION) {
-            (DataTable::new(&TYPE_COLUMNS)
-                .rows(rows)
-                .empty_state(
-                    "No ticket types yet",
-                    "Every ticket is filed under a type. Create one to start taking reports.",
-                    Some(new_type_button()),
-                )
-                .render())
+            div .ticket-table .ticket-table--types {
+                (DataTable::new(&TYPE_COLUMNS)
+                    .rows(rows)
+                    .empty_state(
+                        "No ticket types yet",
+                        "Every ticket is filed under a type. Create one to start taking reports.",
+                        Some(new_type_button()),
+                    )
+                    .render())
+            }
             @for kind in types {
                 @let modal_id = edit_type_modal_id(&kind.id);
                 (Modal::new(&modal_id, service::str_field(kind, "title")).render(html! {
@@ -948,7 +972,7 @@ pub(super) fn types_region(types: &[db::Record]) -> Markup {
                         (type_fields(&format!("type-{}", kind.id), Some(kind)))
                         (components::modal_footer(html! {
                             (components::modal_cancel())
-                            button .btn .btn--primary type="submit" { "Save type" }
+                            (Action::primary("Save type", ActionTarget::Submit { form: None }).render())
                         }))
                     }
                 }))
@@ -1127,17 +1151,6 @@ fn source_label(source: &str) -> &str {
         Ok(TicketSource::Api) => "API",
         Ok(TicketSource::Ai) => "AI",
         Err(_) => source,
-    }
-}
-
-/// A stored value as a reader sees it: `public_form` → `Public form`, and a
-/// sentence starts with a capital.
-fn humanize(value: &str) -> String {
-    let spaced = value.replace('_', " ");
-    let mut chars = spaced.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
     }
 }
 
@@ -1740,6 +1753,117 @@ pub(super) mod render_tests {
         let inbox = page(&ctx, INBOX).await;
         assert!(inbox.contains(r#"<h1 class="topbar__title">Tickets</h1>"#));
         assert!(!inbox.contains("topbar__crumbs"), "{inbox}");
+    }
+
+    /// Card titles in document order.
+    fn card_titles(html: &str) -> Vec<String> {
+        html.split(r#"<h2 class="card__title">"#)
+            .skip(1)
+            .map(|rest| rest[..rest.find("</h2>").expect("closed")].to_string())
+            .collect()
+    }
+
+    /// Every heading level follows from the one above it.
+    fn assert_no_heading_jump(path: &str, html: &str) {
+        let outline = crate::test_support::dom::heading_outline(html);
+        assert!(
+            outline.windows(2).all(|pair| pair[1].0 <= pair[0].0 + 1),
+            "{path}: a heading skips a level: {outline:?}"
+        );
+    }
+
+    /// The ticket page: each section a card beside the meta rail, the
+    /// escalation notice above them, an analysis-free ticket saying so in a
+    /// line, and the workflow's Save changes the one primary (Add note is a
+    /// secondary).
+    #[tokio::test]
+    async fn the_ticket_page_is_cards_beside_the_rail_under_one_primary() {
+        use crate::test_support::dom;
+
+        let (ctx, _, ticket) = seeded().await;
+        let path = format!("{INBOX}/{ticket}");
+        let html = page(&ctx, &path).await;
+        assert_eq!(
+            card_titles(&html),
+            ["Original report", "Workflow", "Activity", "Analyses"],
+            "{html}"
+        );
+        assert_eq!(
+            dom::visible_primaries(&html).0,
+            [r#"button.btn.btn--primary "Save changes""#],
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<button class="btn btn--secondary" type="submit">Add note</button>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<p class="empty-note">No analysis is attached."#),
+            "{html}"
+        );
+        assert_eq!(
+            dom::card_level_inside_card(&html),
+            Vec::<String>::new(),
+            "{html}"
+        );
+        assert!(!html.contains("ticket-section\""), "{html}");
+        assert_no_heading_jump(&path, &html);
+    }
+
+    /// The list pages hold the header's one primary, whose empty-state copy
+    /// is a secondary; Settings and Endpoints hold none, their tables in
+    /// flush cards. No page draws a card-level surface inside a card.
+    #[tokio::test]
+    async fn the_list_pages_have_one_primary_and_one_level_of_cards() {
+        use crate::test_support::dom;
+
+        let empty = TestContext::with_tickets().await;
+        for (path, primary, copy) in [
+            (INBOX, "New ticket", CREATE_TICKET_MODAL),
+            (TYPES, "New type", CREATE_TYPE_MODAL),
+        ] {
+            let html = page(&empty, path).await;
+            assert_eq!(
+                dom::visible_primaries(&html).0,
+                [format!(r#"button.btn.btn--primary "{primary}""#)],
+                "{path}: {html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    r#"<button class="btn btn--secondary" type="button" data-action="modal-open" data-modal-target="{copy}">"#
+                )),
+                "{path}: the empty state offers the header's trigger as a secondary: {html}"
+            );
+            assert_no_heading_jump(path, &html);
+        }
+        let (ctx, _, _) = seeded().await;
+        for (path, cards) in [
+            ("/b/tickets/admin/settings", vec!["Configuration"]),
+            (
+                "/b/tickets/admin/endpoints",
+                vec!["JSON API", "Pages and form actions"],
+            ),
+        ] {
+            let html = page(&ctx, path).await;
+            assert_eq!(
+                dom::visible_primaries(&html).0,
+                Vec::<String>::new(),
+                "{path}"
+            );
+            assert_eq!(card_titles(&html), cards, "{path}: {html}");
+            assert_eq!(
+                html.matches(r#"<section class="card card--flush">"#)
+                    .count(),
+                cards.len(),
+                "{path}: {html}"
+            );
+            assert_eq!(
+                dom::card_level_inside_card(&html),
+                Vec::<String>::new(),
+                "{path}"
+            );
+            assert_no_heading_jump(path, &html);
+        }
     }
 
     /// The endpoint reference is generated from the route table: every row
