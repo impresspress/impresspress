@@ -286,6 +286,7 @@ mod tests {
         let signed_in = crate::test_support::output_json(
             crate::blocks::auth_ui::api::login::handle(
                 &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 wafer_run::InputStream::from_bytes(serde_json::to_vec(&login).expect("body")),
             )
             .await,

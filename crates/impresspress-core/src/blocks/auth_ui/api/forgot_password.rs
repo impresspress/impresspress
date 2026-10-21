@@ -330,6 +330,7 @@ mod tests {
         let signed_in = output_json(
             super::super::login::handle(
                 &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 InputStream::from_bytes(serde_json::to_vec(&login).expect("body")),
             )
             .await,

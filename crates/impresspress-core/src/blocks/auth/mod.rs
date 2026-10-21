@@ -1532,8 +1532,21 @@ pub(crate) mod helpers {
     /// costs a row on a UX surface and is logged rather than raised. The
     /// REFRESH-token row is a credential — [`store_refresh_token`] explains
     /// why its failure returns an error and no tokens are handed out.
+    ///
+    /// The [`crate::csrf::SessionIssuance`] is the caller's proof that this
+    /// request may be given a session at all (`crate::csrf`, layer 1b): its
+    /// only constructors check the request's origin or consume an OAuth
+    /// state, so no flow reaches the cookie without one. It carries no data;
+    /// being passed is its whole job. It is taken by value, so one proof
+    /// mints one session.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the admission proof plus one argument per distinct input of the \
+                  issued session; none is derivable here from another"
+    )]
     pub(crate) async fn issue_tokens_and_cookie(
         ctx: &dyn wafer_run::context::Context,
+        _issuance: crate::csrf::SessionIssuance,
         lifetime: &SessionLifetime,
         user_id: &str,
         email: &str,

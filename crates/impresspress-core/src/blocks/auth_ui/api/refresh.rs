@@ -20,7 +20,7 @@
 //! [`handle`].
 
 use wafer_core::clients::crypto;
-use wafer_run::{context::Context, InputStream, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use crate::{
     blocks::{
@@ -33,17 +33,22 @@ use crate::{
         crud,
         errors::{error_response, ErrorCode},
     },
-    http::{err_bad_request, ResponseBuilder},
+    csrf::SessionIssuance,
+    http::{json_request, ResponseBuilder},
 };
 
-pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    let raw = match input.collect_to_bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return OutputStream::error(e),
+pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+    // A refresh sets the session cookie too, so a cross-site page may not
+    // drive one (`crate::csrf`, layer 1b). Checked before the token is
+    // looked at: a refused refresh neither rotates the presented token nor
+    // treats it as a replay, so it stays exactly as live as it was.
+    let issuance = match SessionIssuance::verify(ctx, msg).await {
+        Ok(issuance) => issuance,
+        Err(refused) => return refused,
     };
-    let body: RefreshRequest = match serde_json::from_slice(&raw) {
-        Ok(b) => b,
-        Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
+    let body: RefreshRequest = match json_request(msg, input).await {
+        Ok(body) => body,
+        Err(refused) => return refused,
     };
 
     // Verify the JWT signature/expiry. A valid signature alone is not enough
@@ -231,6 +236,7 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     // login flow uses, so the userportal session row is written here too.
     let issued = match issue_tokens_and_cookie(
         ctx,
+        issuance,
         &lifetime,
         &user_id,
         &email,
@@ -395,7 +401,15 @@ mod tests {
         let (limiter, msg) = crate::blocks::auth_ui::api::test_mail_request();
         collect_or_panic(signup::handle(&limiter, ctx, &msg, json_input(creds.clone())).await)
             .await;
-        let resp = output_json(login::handle(ctx, json_input(creds)).await).await;
+        let resp = output_json(
+            login::handle(
+                ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                json_input(creds),
+            )
+            .await,
+        )
+        .await;
         resp["refresh_token"]
             .as_str()
             .unwrap_or_else(|| panic!("login must return a refresh token: {resp}"))
@@ -416,7 +430,15 @@ mod tests {
         );
         let token = fresh_refresh_token(&ctx).await;
 
-        let rotated = output_json(handle(&ctx, refresh_with(&token)).await).await;
+        let rotated = output_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&token),
+            )
+            .await,
+        )
+        .await;
 
         let access = rotated["access_token"]
             .as_str()
@@ -446,7 +468,15 @@ mod tests {
     /// live successor — the SEC-039 replay setup.
     async fn rotated_pair(ctx: &TestContext) -> (String, String) {
         let first = fresh_refresh_token(ctx).await;
-        let resp = output_json(handle(ctx, refresh_with(&first)).await).await;
+        let resp = output_json(
+            handle(
+                ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&first),
+            )
+            .await,
+        )
+        .await;
         let second = resp["refresh_token"]
             .as_str()
             .unwrap_or_else(|| panic!("rotation must return a new refresh token: {resp}"))
@@ -465,7 +495,16 @@ mod tests {
             .family;
 
         assert!(
-            output_is_error(handle(&ctx, refresh_with(&first)).await, "Unauthenticated").await,
+            output_is_error(
+                handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(&first)
+                )
+                .await,
+                "Unauthenticated"
+            )
+            .await,
             "a rotated-away token must be refused"
         );
 
@@ -476,7 +515,16 @@ mod tests {
             "reuse must revoke every row in the family"
         );
         assert!(
-            output_is_error(handle(&ctx, refresh_with(&second)).await, "Unauthenticated").await,
+            output_is_error(
+                handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(&second)
+                )
+                .await,
+                "Unauthenticated"
+            )
+            .await,
             "the live successor must be unusable once reuse was detected"
         );
     }
@@ -490,7 +538,12 @@ mod tests {
         let failing =
             FailingDbOpContext::new(ctx, vec![("database.list", tokens::TABLE)]).after_passing(1);
 
-        let out = handle(&failing, refresh_with(&first)).await;
+        let out = handle(
+            &failing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&first),
+        )
+        .await;
 
         assert!(
             output_is_error(out, "Internal").await,
@@ -505,7 +558,12 @@ mod tests {
         let (first, _second) = rotated_pair(&ctx).await;
         let failing = FailingDbOpContext::new(ctx, vec![("database.update_where", tokens::TABLE)]);
 
-        let out = handle(&failing, refresh_with(&first)).await;
+        let out = handle(
+            &failing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&first),
+        )
+        .await;
 
         assert!(
             output_is_error(out, "Internal").await,
@@ -536,7 +594,15 @@ mod tests {
         let ctx = TestContext::with_auth_and_pinned_mint_crypto().await;
         let first = fresh_refresh_token(&ctx).await;
 
-        let rotated = output_http_json(handle(&ctx, refresh_with(&first)).await).await;
+        let rotated = output_http_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&first),
+            )
+            .await,
+        )
+        .await;
         let second = rotated["refresh_token"].as_str().unwrap_or_else(|| {
             panic!("rotating inside the mint's own second must issue a successor, got {rotated}")
         });
@@ -547,7 +613,15 @@ mod tests {
 
         // And the successor is usable: a token that merely looked new would
         // read back the revoked predecessor's row and be refused as a replay.
-        let again = output_http_json(handle(&ctx, refresh_with(second)).await).await;
+        let again = output_http_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(second),
+            )
+            .await,
+        )
+        .await;
         assert!(
             again["refresh_token"].is_string(),
             "the successor must refresh in its turn, got {again}"
@@ -570,7 +644,12 @@ mod tests {
         // alone; only the account-state read of the users table fails.
         let failing = FailingDbOpContext::new(ctx, vec![("database.get", users::TABLE)]);
 
-        let out = handle(&failing, refresh_with(&token)).await;
+        let out = handle(
+            &failing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&token),
+        )
+        .await;
 
         assert!(
             output_is_error(out, "Internal").await,
@@ -588,7 +667,12 @@ mod tests {
         // `find_by_token`, so no `after_passing` is needed here.
         let failing = FailingDbOpContext::new(ctx, vec![("database.list", tokens::TABLE)]);
 
-        let out = handle(&failing, refresh_with(&token)).await;
+        let out = handle(
+            &failing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&token),
+        )
+        .await;
 
         assert!(
             output_is_error(out, "Internal").await,
@@ -606,7 +690,12 @@ mod tests {
         let failing =
             FailingDbOpContext::new(ctx, vec![("database.update_where_count", tokens::TABLE)]);
 
-        let out = handle(&failing, refresh_with(&token)).await;
+        let out = handle(
+            &failing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&token),
+        )
+        .await;
 
         assert!(
             output_is_error(out, "Internal").await,
@@ -627,7 +716,15 @@ mod tests {
         // left on the tokens table is the rotation's own insert.
         let failing = FailingDbOpContext::new(ctx, vec![("database.create", tokens::TABLE)]);
 
-        let body = output_http_json(handle(&failing, refresh_with(&token)).await).await;
+        let body = output_http_json(
+            handle(
+                &failing,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&token),
+            )
+            .await,
+        )
+        .await;
 
         assert_eq!(
             body["error"], "Internal",
@@ -668,7 +765,15 @@ mod tests {
                 let gated = gated.clone();
                 let token = token.clone();
                 tokio::spawn(async move {
-                    output_http_json(handle(&gated, refresh_with(&token)).await).await
+                    output_http_json(
+                        handle(
+                            &gated,
+                            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                            refresh_with(&token),
+                        )
+                        .await,
+                    )
+                    .await
                 })
             })
             .collect();
@@ -729,7 +834,15 @@ mod tests {
             .find(|b| b["refresh_token"].is_string())
             .expect("one request must win the claim");
         let winner_token = winner["refresh_token"].as_str().expect("a string token");
-        let again = output_http_json(handle(&ctx, refresh_with(winner_token)).await).await;
+        let again = output_http_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(winner_token),
+            )
+            .await,
+        )
+        .await;
         assert!(
             again["refresh_token"].is_string(),
             "the winner's session must survive the loser's refusal: {again}"
@@ -820,7 +933,15 @@ mod tests {
             if on_tokens && !self.already_ran.swap(true, Ordering::SeqCst) {
                 // The competing request runs on the INNER context, so its own
                 // claim does not re-enter this branch.
-                let resp = output_json(handle(&self.inner, refresh_with(&self.token)).await).await;
+                let resp = output_json(
+                    handle(
+                        &self.inner,
+                        &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                        refresh_with(&self.token),
+                    )
+                    .await,
+                )
+                .await;
                 let minted = resp["refresh_token"]
                     .as_str()
                     .unwrap_or_else(|| panic!("the competing rotation must succeed: {resp}"))
@@ -867,7 +988,15 @@ mod tests {
         let token = fresh_refresh_token(&ctx).await;
         let racer = RotateBeforeTheClaim::new(ctx.clone(), token.clone());
 
-        let loser = output_http_json(handle(&racer, refresh_with(&token)).await).await;
+        let loser = output_http_json(
+            handle(
+                &racer,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&token),
+            )
+            .await,
+        )
+        .await;
 
         assert!(
             !loser["refresh_token"].is_string(),
@@ -880,7 +1009,15 @@ mod tests {
         );
 
         let winner_token = racer.winner_token();
-        let again = output_http_json(handle(&ctx, refresh_with(&winner_token)).await).await;
+        let again = output_http_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&winner_token),
+            )
+            .await,
+        )
+        .await;
         assert!(
             again["refresh_token"].is_string(),
             "the rotation that WON must still refresh; burning the family on a \
@@ -909,7 +1046,12 @@ mod tests {
                 wafer_run::WaferError::new(code, "simulated crypto fault"),
             );
 
-            let out = handle(&failing, refresh_with(&token)).await;
+            let out = handle(
+                &failing,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&token),
+            )
+            .await;
             assert_eq!(output_http_status(out).await, status, "{code:?}");
         }
     }
@@ -942,7 +1084,15 @@ mod tests {
             .clone()
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let creds = serde_json::json!({"email": EMAIL, "password": PASSWORD});
-        let signed_in = output_json(login::handle(&auth_ui, json_input(creds)).await).await;
+        let signed_in = output_json(
+            login::handle(
+                &auth_ui,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                json_input(creds),
+            )
+            .await,
+        )
+        .await;
         let refresh_token = signed_in["refresh_token"]
             .as_str()
             .unwrap_or_else(|| panic!("the sign-in succeeded: {signed_in}"))
@@ -972,7 +1122,15 @@ mod tests {
             },
         );
 
-        let rotated = output_json(handle(&racing, refresh_with(&refresh_token)).await).await;
+        let rotated = output_json(
+            handle(
+                &racing,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&refresh_token),
+            )
+            .await,
+        )
+        .await;
         assert!(
             racing.fired(),
             "the removal must land inside the rotation: {rotated}"
@@ -1008,7 +1166,12 @@ mod tests {
             .expect("the rotation handed out a successor");
         assert!(
             output_is_error(
-                handle(&auth_ui, refresh_with(next_refresh)).await,
+                handle(
+                    &auth_ui,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(next_refresh)
+                )
+                .await,
                 "Unauthenticated"
             )
             .await,
@@ -1080,7 +1243,15 @@ mod tests {
             "precondition: the token carries no auth_version claim"
         );
 
-        let rotated = output_http_json(handle(&ctx, refresh_with(&before)).await).await;
+        let rotated = output_http_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&before),
+            )
+            .await,
+        )
+        .await;
         assert!(
             rotated["refresh_token"].is_string(),
             "a claim-less token refreshes against an account still at version 0: {rotated}"
@@ -1090,7 +1261,16 @@ mod tests {
             .await
             .expect("bump auth_version");
         assert!(
-            output_is_error(handle(&ctx, refresh_with(&after)).await, "Unauthenticated").await,
+            output_is_error(
+                handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(&after)
+                )
+                .await,
+                "Unauthenticated"
+            )
+            .await,
             "a claim-less token must not outlive the account's first auth_version bump"
         );
     }
@@ -1164,7 +1344,15 @@ mod tests {
             local_credentials::TABLE,
             change_password_now(ctx.clone(), uid, OLD_PASSWORD, NEW_PASSWORD),
         );
-        let signed_in = output_json(login::handle(&racing, credentials(OLD_PASSWORD)).await).await;
+        let signed_in = output_json(
+            login::handle(
+                &racing,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                credentials(OLD_PASSWORD),
+            )
+            .await,
+        )
+        .await;
         assert!(
             racing.fired(),
             "the change must land inside the sign-in: {signed_in}"
@@ -1185,7 +1373,16 @@ mod tests {
         );
 
         assert!(
-            output_is_error(handle(&ctx, refresh_with(token)).await, "Unauthenticated").await,
+            output_is_error(
+                handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(token)
+                )
+                .await,
+                "Unauthenticated"
+            )
+            .await,
             "a refresh token from a sign-in that checked the old password must not \
              outlive the password change"
         );
@@ -1198,11 +1395,27 @@ mod tests {
 
         // The control: a sign-in with the new password refreshes, so the
         // refusal above is the stale version and nothing else.
-        let fresh = output_json(login::handle(&ctx, credentials(NEW_PASSWORD)).await).await;
+        let fresh = output_json(
+            login::handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                credentials(NEW_PASSWORD),
+            )
+            .await,
+        )
+        .await;
         let fresh = fresh["refresh_token"]
             .as_str()
             .unwrap_or_else(|| panic!("the new password signs in: {fresh}"));
-        let again = output_http_json(handle(&ctx, refresh_with(fresh)).await).await;
+        let again = output_http_json(
+            handle(
+                &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(fresh),
+            )
+            .await,
+        )
+        .await;
         assert!(
             again["refresh_token"].is_string(),
             "a family issued after the change refreshes: {again}"
@@ -1241,7 +1454,15 @@ mod tests {
                 }
             },
         );
-        let signed_in = output_json(login::handle(&racing, credentials(OLD_PASSWORD)).await).await;
+        let signed_in = output_json(
+            login::handle(
+                &racing,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                credentials(OLD_PASSWORD),
+            )
+            .await,
+        )
+        .await;
         assert!(
             racing.fired(),
             "the disable must land inside the sign-in: {signed_in}"
@@ -1251,7 +1472,16 @@ mod tests {
             .unwrap_or_else(|| panic!("the sign-in read the account while active: {signed_in}"));
 
         assert!(
-            output_is_error(handle(&ctx, refresh_with(token)).await, "Unauthenticated").await,
+            output_is_error(
+                handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(token)
+                )
+                .await,
+                "Unauthenticated"
+            )
+            .await,
             "a refresh token from a sign-in that straddled a disable must not \
              refresh once the account is enabled again"
         );
@@ -1274,7 +1504,15 @@ mod tests {
             tokens::TABLE,
             change_password_now(ctx.clone(), uid, OLD_PASSWORD, NEW_PASSWORD),
         );
-        let rotated = output_json(handle(&racing, refresh_with(&token)).await).await;
+        let rotated = output_json(
+            handle(
+                &racing,
+                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                refresh_with(&token),
+            )
+            .await,
+        )
+        .await;
         assert!(
             racing.fired(),
             "the change must land inside the rotation: {rotated}"
@@ -1285,7 +1523,12 @@ mod tests {
 
         assert!(
             output_is_error(
-                handle(&ctx, refresh_with(successor)).await,
+                handle(
+                    &ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                    refresh_with(successor)
+                )
+                .await,
                 "Unauthenticated"
             )
             .await,

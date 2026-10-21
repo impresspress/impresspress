@@ -538,6 +538,7 @@ mod tests {
         let signed_in = output_json(
             login::handle(
                 &ctx,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
                 InputStream::from_bytes(
                     serde_json::json!({ "email": EMAIL, "password": NEW })
                         .to_string()

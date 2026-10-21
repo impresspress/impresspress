@@ -1430,8 +1430,15 @@ mod tests {
         let roles_in_a_fresh_token = |ctx: TestContext| {
             let creds = creds.clone();
             async move {
-                let token = output_json(login::handle(&ctx, body_input(creds)).await).await
-                    ["access_token"]
+                let token = output_json(
+                    login::handle(
+                        &ctx,
+                        &crate::test_support::json_post_msg("/b/auth/api/login"),
+                        body_input(creds),
+                    )
+                    .await,
+                )
+                .await["access_token"]
                     .as_str()
                     .expect("login mints an access token")
                     .to_string();

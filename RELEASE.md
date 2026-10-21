@@ -19,6 +19,40 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: only this site's own pages can sign a browser in
+
+**What changes.** The requests that hand out a session — `POST
+/b/auth/api/login`, `/b/auth/api/signup`, `/b/auth/api/refresh` and
+bootstrap-token redemption (`/b/auth/api/bootstrap`) — refuse a request a
+browser reports as coming from another origin, with the same `403` ("This
+request couldn't be verified as coming from this site…") a cross-site
+mutation already gets. Before this, a page on any other site could post the
+attacker's own credentials to the login route from a hidden `<form>` and
+sign the visitor's browser into the attacker's account: the cookie check that
+guards signed-in requests does not apply to a request that carries no
+session yet.
+
+- **"Another origin" includes origins listed in
+  `WAFER_RUN_SHARED__CORS_ALLOWED_ORIGINS`.** CORS still lets such a page
+  read this site's API responses, but it can no longer obtain this site's
+  session cookie. A separate front end that signed users in cross-origin
+  must now sign them in on this site's own origin. No client in this
+  repository did; the storefront widget only reads products.
+- **A request with no browser headers at all is unaffected** (no
+  `Sec-Fetch-Site`, `Origin` or `Referer`): API clients, `impresspress-js`
+  outside a browser, the CLI, `curl`. There is no visitor's browser to forge
+  such a request from.
+- **The OAuth callback is unaffected.** The provider sends the browser back
+  with a cross-site navigation by design; the single-use OAuth state is what
+  protects it, as before.
+- **Login, signup and refresh now require `Content-Type:
+  application/json`**, and answer `415` otherwise. Every in-repo client
+  (the sign-in pages, `impresspress-js`, the dev sandbox's entry page)
+  already sends it. A script that posted JSON without the header needs to
+  add it.
+- A refused refresh does not spend the refresh token it presented, and a
+  refused signup creates no account.
+
 ### Auth: a role is a grant row; the upgrade ends every session
 
 **What changes.** An account's role lived in two places: the inline
