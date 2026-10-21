@@ -2423,17 +2423,20 @@ async fn overview_shows_disabled_notice_when_user_products_off() {
     let html = output_to_html(super::super::pages::overview(&ctx, &msg).await).await;
 
     assert!(
-        html.contains("Customer accounts cannot create their own listings yet"),
+        html.contains("customer accounts cannot create their own listings yet"),
         "disabled notice should clearly explain the customer-facing effect: {html}"
     );
+    // Informational, so a one-line note with its link rather than a framed
+    // empty state with a button.
     assert!(
-        html.contains("Settings"),
-        "disabled notice should point at how to enable it: {html}"
+        html.contains(r#"<p class="empty-note">User products are turned off:"#),
+        "the notice is a note: {html}"
     );
     assert!(
-        html.contains(r#"href="/b/products/admin/settings""#),
-        "disabled notice's action should link to the Settings page: {html}"
+        html.contains(r#"<a href="/b/products/admin/settings">Go to settings</a></p>"#),
+        "disabled notice's link should lead to the Settings page: {html}"
     );
+    assert!(!html.contains("Go to Settings"), "{html}");
     assert!(
         !html.contains("Add your first product"),
         "disabled overview should not show the enabled+empty CTA copy: {html}"
@@ -2454,9 +2457,15 @@ async fn overview_shows_add_product_cta_when_enabled_and_empty() {
         "enabled+empty overview should show the add-product CTA: {html}"
     );
     assert!(
-        html.contains(r#"<div class="empty__action"><a class="btn btn--sm btn--secondary" href="/b/products/admin/new">"#),
+        html.contains(r#"<div class="empty__action"><a class="btn btn--secondary" href="/b/products/admin/new"><svg"#),
         "CTA should link to the real create path (the wizard), as a secondary action: {html}"
     );
+    // The same trigger, under the same name, as the topbar's primary.
+    assert!(
+        html.contains(r#"<div class="topbar__actions"><a class="btn btn--primary" href="/b/products/admin/new"><svg"#),
+        "{html}"
+    );
+    assert_eq!(html.matches("New product</a>").count(), 2, "{html}");
     assert!(
         !html.contains("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS"),
         "enabled overview should not show the disabled-state notice: {html}"
@@ -2549,23 +2558,28 @@ async fn admin_product_wizard_exposes_simple_and_advanced_templates() {
     assert!(html.contains("Inline rates work in hosted and embedded Checkout"));
     assert!(html.contains("Create a Stripe Customer for one-time payments"));
 
-    // The advanced rows, the price-model options and the money maths are the
-    // bundle's, not the page's. `loaded_bundle` asserts the page loads it.
+    // The advanced rows are the page's, rendered once as `<template>`s the
+    // bundle clones; the money maths are the bundle's. `loaded_bundle`
+    // asserts the page loads it.
+    assert!(
+        html.contains(r#"<template id="wizard-component-row">"#),
+        "{html}"
+    );
+    assert!(html.contains(">Condition</label>"), "{html}");
+    assert!(html.contains(r#"value="graduated""#));
+    assert!(html.contains(r#"value="volume""#));
+    assert!(html.contains(r#"value="package""#));
+    assert!(html.contains("upper bound | unit amount | flat amount"));
     #[cfg(feature = "embed-assets")]
     {
         let js = loaded_bundle(&html, "products-wizard.js");
-        assert!(js.contains("Condition"));
         assert!(js.contains("BigInt"), "money conversion must be exact");
         assert!(js.contains("wizardCurrencyExponent"));
         assert!(js.contains("unit_amount_minor"));
-        assert!(js.contains(r#"value="graduated""#));
-        assert!(js.contains(r#"value="volume""#));
-        assert!(js.contains(r#"value="package""#));
         assert!(js.contains("wizardParseTiers"));
         assert!(js.contains("wizardParseLookup"));
         assert!(js.contains("wizardParseShippingCountries"));
         assert!(js.contains("wizardParseShippingOptions"));
-        assert!(js.contains("upper bound | unit amount | flat amount"));
     }
 }
 

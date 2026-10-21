@@ -488,3 +488,41 @@ a.pagination__link:hover { background: var(--bg-hover); }
 .db-tables__summary > :first-child { flex: 1; }
 /* The card's heading, at a card title's size (card.css `.card__title`). */
 .db-tables__summary > .section-header__title { font-size: var(--text-base); }
+
+/* The products lists (`blocks/products/pages.rs`) narrow by their own width
+   too. Administration's product list (`.product-table--live`) keeps the
+   name and its availability below 40rem, and the owner, the currency and the
+   updated date become one line under the name (`.product-table__meta`); the
+   Deleted views (administration's `--deleted`, a seller's `--own-deleted`)
+   move the owner, the currency and the deletion date there, so the two ways
+   out stay in view; a seller's own list (`--own`) moves the currency and
+   the created date. The groups list (`.group-table`) drops the
+   description and moves the created date under the name below 34rem, so the
+   row's edit and delete controls stay in view. Without these the tables
+   scrolled sideways from 721 to about 900px.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `PRODUCT_COLUMNS`, `DELETED_PRODUCT_COLUMNS`, `OWN_PRODUCT_COLUMNS`,
+   `OWN_DELETED_PRODUCT_COLUMNS` or `GROUP_COLUMNS` must move here too. */
+.product-table { container: product-table / inline-size; }
+.group-table { container: group-table / inline-size; }
+.product-table__meta, .group-table__meta {
+	display: none; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+@container product-table (max-width: 40rem) {
+	.product-table--live td:is([data-label="Owner"], [data-label="Currency"], [data-label="Updated"]),
+	.product-table--live > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5)),
+	.product-table--deleted td:is([data-label="Owner"], [data-label="Currency"], [data-label="Deleted"]),
+	.product-table--deleted > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)),
+	.product-table--own td:is([data-label="Currency"], [data-label="Created"]),
+	.product-table--own > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4)),
+	.product-table--own-deleted td:is([data-label="Currency"], [data-label="Deleted"]),
+	.product-table--own-deleted > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.product-table .product-table__meta { display: block; }
+}
+@container group-table (max-width: 34rem) {
+	.group-table td:is([data-label="Description"], [data-label="Created"]),
+	.group-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(4)) { display: none; }
+	.group-table .group-table__meta { display: block; }
+}

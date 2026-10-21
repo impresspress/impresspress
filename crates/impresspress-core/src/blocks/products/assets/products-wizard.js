@@ -74,26 +74,18 @@ function productWizardValidateStep(step){
 function productWizardNext(){if(productWizardValidateStep(productWizardStep))productWizardShowStep(productWizardStep+1)}
 function productWizardPrevious(){productWizardShowStep(productWizardStep-1)}
 
+// One row of the offer editor, cloned from the `<template>` the page renders
+// once (`offer_row_templates` in pages.rs), so the row's markup has one
+// writer. Each `id` and `label[for]` in the template is a stem; the clone's
+// get `-{index}` so every row's labels name its own fields.
+function wizardCloneRow(templateId,index){
+  var row=wizardById(templateId).content.firstElementChild.cloneNode(true);
+  row.querySelectorAll('[id]').forEach(function(el){el.id=el.id+'-'+index});
+  row.querySelectorAll('label[for]').forEach(function(label){label.htmlFor=label.htmlFor+'-'+index});
+  return row;
+}
 function addWizardVariable(seed){
-  seed=seed||{};var index=productWizardVariableIndex++;
-  var row=document.createElement('section');row.className='card mt-3';row.dataset.variableRow='';
-  row.innerHTML=`<div class="card__body">
-    <div class="flex justify-between gap-3 items-center"><strong>Customer input</strong><button class="btn btn--secondary btn--sm" type="button" data-remove-row>Remove</button></div>
-    <div class="grid grid-auto-150 gap-3 mt-3">
-      <div class="form-group"><label class="form-label required" for="wizard-variable-key-${index}">Key</label><input class="form-input" id="wizard-variable-key-${index}" data-variable-key required placeholder="quantity"></div>
-      <div class="form-group"><label class="form-label required" for="wizard-variable-label-${index}">Label</label><input class="form-input" id="wizard-variable-label-${index}" data-variable-label required placeholder="Quantity"></div>
-      <div class="form-group"><label class="form-label" for="wizard-variable-kind-${index}">Type</label><select class="form-select" id="wizard-variable-kind-${index}" data-variable-kind><option value="integer">Whole number</option><option value="number">Decimal number</option><option value="date">Date</option><option value="date_time">Date and time</option><option value="boolean">Yes / no</option><option value="select">Choice</option><option value="multi_select">Multiple choices</option><option value="text">Text</option></select></div>
-      <div class="form-group" data-variable-min-wrap><label class="form-label" for="wizard-variable-min-${index}">Minimum</label><input class="form-input" id="wizard-variable-min-${index}" data-variable-min inputmode="decimal"></div>
-      <div class="form-group" data-variable-max-wrap><label class="form-label" for="wizard-variable-max-${index}">Maximum</label><input class="form-input" id="wizard-variable-max-${index}" data-variable-max inputmode="decimal"></div>
-      <div class="form-group" data-variable-step-wrap><label class="form-label" for="wizard-variable-step-${index}">Step</label><input class="form-input" id="wizard-variable-step-${index}" data-variable-step inputmode="decimal"></div>
-      <div class="form-group" data-variable-options-wrap><label class="form-label" for="wizard-variable-options-${index}">Choices</label><input class="form-input" id="wizard-variable-options-${index}" data-variable-options placeholder="small, medium, large"></div>
-      <div class="form-group"><label class="form-label" for="wizard-variable-visibility-${index}">Visibility</label><select class="form-select" id="wizard-variable-visibility-${index}" data-variable-visibility><option value="public">Customer</option><option value="hidden">Hidden</option><option value="admin_only">Admin only</option></select></div>
-      <div class="form-group"><label class="form-label" for="wizard-variable-default-${index}">Default value</label><input class="form-input" id="wizard-variable-default-${index}" data-variable-default placeholder="Optional"></div>
-      <div class="form-group" data-variable-length-wrap><label class="form-label" for="wizard-variable-length-${index}">Maximum text length</label><input class="form-input" id="wizard-variable-length-${index}" data-variable-length type="number" min="1" max="10000"></div>
-    </div><label class="flex gap-2"><input type="checkbox" data-variable-required> Required</label>
-    <div class="form-group"><label class="form-label" for="wizard-variable-help-${index}">Help text</label><input class="form-input" id="wizard-variable-help-${index}" data-variable-help maxlength="500" placeholder="Shown beside this input"></div>
-  </div>`;
-  row.querySelector('[data-remove-row]').onclick=function(){row.remove()};
+  seed=seed||{};var row=wizardCloneRow('wizard-variable-row',productWizardVariableIndex++);
   row.querySelector('[data-variable-key]').value=seed.key||'';
   row.querySelector('[data-variable-label]').value=seed.label||'';
   row.querySelector('[data-variable-kind]').value=seed.kind||'integer';
@@ -106,7 +98,6 @@ function addWizardVariable(seed){
   row.querySelector('[data-variable-length]').value=seed.maximum_length||'';
   row.querySelector('[data-variable-help]').value=seed.help_text||'';
   row.querySelector('[data-variable-required]').checked=seed.required!==false;
-  row.querySelector('[data-variable-kind]').onchange=function(){wizardVariableKindChanged(row)};
   wizardVariableKindChanged(row);
   wizardById('wizard-variables').appendChild(row);
 }
@@ -120,32 +111,7 @@ function wizardVariableKindChanged(row){
 }
 
 function addWizardComponent(seed){
-  seed=seed||{};var index=productWizardComponentIndex++;
-  var row=document.createElement('section');row.className='card mt-3';row.dataset.componentRow='';
-  row.innerHTML=`<div class="card__body">
-    <div class="flex justify-between gap-3 items-center"><strong>Price row</strong><button class="btn btn--secondary btn--sm" type="button" data-remove-row>Remove</button></div>
-    <div class="grid grid-auto-150 gap-3 mt-3">
-      <div class="form-group"><label class="form-label required" for="wizard-component-key-${index}">Key</label><input class="form-input" id="wizard-component-key-${index}" data-component-key required placeholder="base"></div>
-      <div class="form-group"><label class="form-label required" for="wizard-component-label-${index}">Label</label><input class="form-input" id="wizard-component-label-${index}" data-component-label required placeholder="Base price"></div>
-      <div class="form-group"><label class="form-label" for="wizard-component-description-${index}">Description</label><input class="form-input" id="wizard-component-description-${index}" data-component-description maxlength="500"></div>
-      <div class="form-group"><label class="form-label" for="wizard-component-type-${index}">Calculation</label><select class="form-select" id="wizard-component-type-${index}" data-component-type><option value="fixed">Fixed amount</option><option value="per_unit">Amount × input</option><option value="flat_plus_per_unit">Base + amount × input</option><option value="lookup">Price selected by input</option><option value="graduated">Graduated tiers</option><option value="volume">Volume tiers</option><option value="package">Packages / blocks</option></select></div>
-      <div class="form-group"><label class="form-label required" for="wizard-component-amount-${index}">Amount / unit rate</label><input class="form-input" id="wizard-component-amount-${index}" data-component-amount inputmode="decimal" value="0.00" required></div>
-      <div class="form-group"><label class="form-label" for="wizard-component-input-${index}">Pricing input key</label><input class="form-input" id="wizard-component-input-${index}" data-component-input placeholder="quantity"></div>
-      <div class="form-group"><label class="form-label" for="wizard-condition-${index}">Condition</label><select class="form-select" id="wizard-condition-${index}" data-component-condition><option value="always">Always include</option><option value="equals">Input equals value</option><option value="not_equals">Input does not equal value</option><option value="greater_than">Input is greater than value</option><option value="greater_than_or_equal">Input is at least value</option><option value="less_than">Input is less than value</option><option value="less_than_or_equal">Input is at most value</option><option value="contains">Input contains value</option><option value="in">Input is one of these values</option><option value="present">Input is present</option><option value="advanced_preserved" hidden>Advanced condition (preserved)</option></select></div>
-      <div class="form-group"><label class="form-label" for="wizard-condition-input-${index}">Condition input</label><input class="form-input" id="wizard-condition-input-${index}" data-condition-input></div>
-      <div class="form-group"><label class="form-label" for="wizard-condition-value-${index}">Condition value</label><input class="form-input" id="wizard-condition-value-${index}" data-condition-value></div>
-    </div>
-    <details class="my-3"><summary>Advanced calculation details</summary>
-      <div class="grid grid-auto-180 gap-3 mt-3">
-        <div class="form-group"><label class="form-label" for="wizard-component-base-${index}">Base amount</label><input class="form-input" id="wizard-component-base-${index}" data-component-base inputmode="decimal" value="0.00"><p class="text-muted text-sm">Used by base + per-unit pricing.</p></div>
-        <div class="form-group"><label class="form-label" for="wizard-component-package-size-${index}">Units per package</label><input class="form-input" id="wizard-component-package-size-${index}" data-component-package-size type="number" min="1" value="1"><p class="text-muted text-sm">Used by package pricing.</p></div>
-        <div class="form-group"><label class="form-label" for="wizard-component-rounding-${index}">Partial packages</label><select class="form-select" id="wizard-component-rounding-${index}" data-component-rounding><option value="up">Round up and charge a package</option><option value="exact">Require an exact multiple</option></select></div>
-      </div>
-      <div class="form-group"><label class="form-label" for="wizard-component-details-${index}">Lookup prices or tiers</label><textarea class="form-textarea" id="wizard-component-details-${index}" data-component-details rows="4" placeholder="Lookup: small = 10.00&#10;Tier: 10 | 1.00 | 0.00&#10;Final tier: * | 0.80 | 0.00"></textarea><p class="text-muted text-sm">Lookup rows use <code>choice = amount</code>. Tier rows use <code>upper bound | unit amount | flat amount</code>; use <code>*</code> for the final open tier.</p></div>
-    </details>
-    <label class="flex gap-2"><input type="checkbox" data-component-required> Required row</label>
-  </div>`;
-  row.querySelector('[data-remove-row]').onclick=function(){row.remove()};
+  seed=seed||{};var row=wizardCloneRow('wizard-component-row',productWizardComponentIndex++);
   row.querySelector('[data-component-key]').value=seed.key||'';
   row.querySelector('[data-component-label]').value=seed.label||'';
   row.querySelector('[data-component-description]').value=seed.description||'';
@@ -416,8 +382,8 @@ function initProductWizard(){productWizardTemplateChanged();productWizardShippin
 // attributes; see the rule in ui/assets/chrome.js. The verbs are `pw-`
 // prefixed because `data-action` is one namespace shared by every script on
 // the page -- the product manager loads this file too, for the visual editor's
-// "+ Add input"/"+ Add row" buttons, which is why those two verbs work on both
-// pages from this one listener.
+// "Add input" and "Add row" buttons and their rows' controls, which is why
+// those verbs work on both pages from this one listener.
 //
 // Guarded for the reason spelled out at the top of products-seller-admin.js: an htmx swap
 // re-executes this script against the same `document`, so an unguarded
@@ -435,6 +401,7 @@ function initProductWizard(){productWizardTemplateChanged();productWizardShippin
     var action=el.getAttribute('data-action');
     if(action==='pw-add-variable')addWizardVariable();
     else if(action==='pw-add-component')addWizardComponent();
+    else if(action==='pw-remove-row')el.closest('.offer-row').remove();
     else if(action==='pw-previous')productWizardPrevious();
     else if(action==='pw-next')productWizardNext();
     else if(action==='pw-submit')submitProductWizard(el.getAttribute('data-wizard-intent'));
@@ -444,6 +411,7 @@ function initProductWizard(){productWizardTemplateChanged();productWizardShippin
     if(!(el instanceof Element))return;
     var action=el.getAttribute('data-action');
     if(action==='pw-template-changed')productWizardTemplateChanged();
+    else if(action==='pw-variable-kind-changed')wizardVariableKindChanged(el.closest('.offer-row'));
     else if(action==='pw-shipping-changed')productWizardShippingChanged();
   });
 })();

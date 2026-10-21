@@ -275,6 +275,19 @@
 .products-payment-link-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
 .products-payment-link-url { word-break: break-all; }
 .products-code-block { display: block; width: 100%; padding: var(--space-3) var(--space-3); border: 1px solid var(--border-color); border-radius: 10px; background: var(--surface-2); overflow-wrap: anywhere; }
+/* An offer card's first row (pages.rs `render_managed_offer`, and the
+   deleted-product close manager): its state badges, then its controls at
+   the end. The controls wrap under the badges when they do not fit. */
+.offer-card__toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
+/* The offer editor (pages.rs `offer_rows_editor`): "Customer fields" and
+   "Itemized price rows", each a heading with its add button, then its rows.
+   A row (`offer_row_templates`, cloned by products-wizard.js) is a divided
+   part of the step or editor it sits in, never a card inside it. */
+.offer-rows { margin-block: var(--space-5); }
+.offer-rows__head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); }
+.offer-row { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--border-color); }
+.offer-row__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.offer-row__check { display: flex; align-items: center; gap: var(--space-2); margin-block: var(--space-3); }
 .product-wizard-progress { margin: 0 0 var(--space-5); }
 .product-wizard-progress ol { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); list-style: none; padding: 0; margin: 0; }
 /* Each step is a `.badge`; its name is running text, so it takes 14px, not
@@ -476,7 +489,10 @@
 .grid-auto-320 { grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 /* Two fixed, unequally-weighted columns — the shipping origin/destination
  * row is the only user of this shape. */
-.grid-shipping { grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr); }
+/* The wizard's shipping countries and options: side by side where both fit
+   their 18rem, stacked in a narrower card (a phone, or the 721-900px band
+   beside the sidebar), where fixed 180px + 280px tracks overflowed it. */
+.grid-shipping { grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr)); }
 
 /* ===== Disclosure (details/summary) =====
  * `summary { cursor: pointer }` lives in base.css as a global element

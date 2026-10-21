@@ -808,16 +808,19 @@
  * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
  * `<style>` block (task 12e). Products cards are the shared `.card`: the
  * products-only radius and shadow went with the products tab strip. */
-/* Onboarding guide. The three tiles are cards and look like cards: the
-   same surface, border, 12px radius and 20px padding as `.card`. */
-.products-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
-.products-guide__item { position: relative; padding: var(--space-5); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-1); }
+/* Onboarding guide: three `Card::plain` tiles in a row (one column on a
+   phone). The grid owns the space between and under them, so the cards'
+   own bottom margin goes; the note or empty state after the guide then
+   sits a gap below it rather than touching it. */
+.products-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }
+.products-guide > .card { margin-bottom: 0; }
 /* At the original 14% mix, --primary-button on this background only reaches
    4.12:1 (computed) -- below the 4.5:1 AA floor for the "1"/"2"/"3" digit
    this renders (products/pages.rs). A 6% mix keeps the same pale-pink chip
    look and gets --primary-button to 4.60:1 (computed). */
 .products-guide__number { display: grid; place-items: center; width: 2rem; height: 2rem; margin-bottom: var(--space-3); border-radius: 999px; background: color-mix(in srgb, var(--primary-color) 6%, var(--surface-1)); color: var(--primary-button); font-weight: 750; }
-.products-guide__item h3 { font-size: 1rem; margin: 0 0 var(--space-1); }
+.products-guide__title { font-size: var(--text-base); margin: 0 0 var(--space-1); }
+.products-guide__text { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.55; }
 /* These three were bare `<a class="text-sm">`. The bundle sets no rules on
    `a` at all -- every other link in the admin carries an explicit class --
    so they fell through to the user-agent default and rendered as underlined
@@ -827,12 +830,12 @@
 .products-guide__link {
 	display: inline-flex; align-items: center; gap: var(--space-1);
 	margin-top: var(--space-3);
+	font-size: var(--text-sm);
 	color: var(--primary-button); text-decoration: none; font-weight: 500;
 }
 .products-guide__link:hover { text-decoration: underline; }
 /* Match the 14px label rather than the icon set's 18px default. */
 .products-guide__link svg { width: 14px; height: 14px; }
-.products-guide__item p { margin: 0; line-height: 1.55; }
 .product-template-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .product-template-card { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); align-items: start; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: 14px; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
 .product-template-card:hover { border-color: var(--primary-color); box-shadow: 0 8px 22px rgba(15, 23, 42, .08); transform: translateY(-1px); }
