@@ -424,6 +424,12 @@ a.pagination__link:hover { background: var(--bg-hover); }
    (the line names both). Without this the owner's table scrolled sideways
    from 721 to about 900px with the revoke control out of view.
 
+   The thresholds are the tables' six- and five-column minimum widths in
+   CI's font (DejaVu Sans, wider than most): the owner's is about 43.5rem
+   with an expiry and a created date that do not wrap (695px in a 670px
+   container at 960 with a 40rem threshold), so it goes compact below
+   45rem.
+
    The headers are hidden by position, the cells by their label: a column
    moved in `SHARE_COLUMNS` / `ADMIN_SHARE_COLUMNS` must move here too. */
 .share-table { container: share-table / inline-size; }
@@ -431,7 +437,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	display: none; margin-top: var(--space-1);
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
-@container share-table (max-width: 40rem) {
+@container share-table (max-width: 45rem) {
 	.share-table--owner td:is([data-label="Token"], [data-label="Created"]),
 	.share-table--owner > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
 	.share-table--owner .share-table__meta { display: block; }
