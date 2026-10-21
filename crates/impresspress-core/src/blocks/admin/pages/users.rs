@@ -787,6 +787,40 @@ mod tests {
         assert!(!own.contains("(you)") && !own.contains("hx-post"), "{own}");
     }
 
+    /// A bootstrapped admin reads Admin on the Users page. The page lists
+    /// each account's `user_roles` grants (`ops::fetch_roles`), and before
+    /// auth migration 016 a bootstrapped admin's role was an inline column
+    /// that page never read, so its row showed no role at all.
+    #[tokio::test]
+    async fn a_bootstrapped_admin_reads_admin_on_the_users_page() {
+        let ctx = TestContext::with_auth_and_crypto()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::auth::bootstrap::bootstrap_with_email_password(
+            &ctx.fixture(),
+            "first-admin@example.com",
+            "correct-horse-battery",
+        )
+        .await
+        .expect("provision the first admin");
+        let id = users::find_by_email(&ctx, "first-admin@example.com")
+            .await
+            .expect("read the admin")
+            .expect("the admin exists")
+            .id;
+        let html = users_page_html(&ctx, None).await;
+
+        let start = html
+            .find(&format!(r#"<tr id="user-row-{id}""#))
+            .unwrap_or_else(|| panic!("no row for the admin: {html}"));
+        let row = &html[start..start + html[start..].find("</tr>").expect("a closed row")];
+        assert!(row.contains(">admin</span>"), "the admin badge: {row}");
+        assert!(
+            !row.contains(components::NO_VALUE),
+            "the row must not say the admin holds no role: {row}"
+        );
+    }
+
     /// A disabled account's badge says so, in sentence case.
     #[tokio::test]
     async fn a_disabled_user_reads_disabled() {

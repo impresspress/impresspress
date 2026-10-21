@@ -186,7 +186,6 @@ async fn seed_product_and_order(ctx: &TestContext) -> String {
         json!({
             "email": "owner@example.com",
             "display_name": "Owner",
-            "role": "user",
             "email_verified": true,
         }),
     )
@@ -553,6 +552,11 @@ async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
         "replace semantics: the fresh bootstrap admin's role assignment is gone too"
     );
     assert_eq!(role_rows[0].data["user_id"], json!(admin_id));
+    assert_eq!(
+        role_rows[0].data["role"],
+        json!("admin"),
+        "the owner's admin grant travels: since auth migration 016 it is the whole of their role"
+    );
 
     let products = db::list_all(&dst, PRODUCTS_TABLE, Vec::new())
         .await
@@ -635,6 +639,25 @@ async fn import_refuses_a_table_outside_this_builds_allowlist() {
         "impresspress__products__stripe_events".to_string(),
         vec![json_map(json!({ "id": "evt_1" })).into_iter().collect()],
     );
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
+}
+
+/// A v1 snapshot is refused. v1 carried users rows with the inline `role`
+/// column auth migration 016 dropped, and accounts whose role was that column
+/// alone; replayed into a v2 build its users rows name a column that is gone
+/// and its accounts arrive with no grant. Version 2 is the first whose role
+/// is its `user_roles` rows.
+#[tokio::test]
+async fn import_refuses_a_v1_snapshot() {
+    assert_eq!(data_snapshot::SCHEMA_VERSION, 2);
+    let ctx = TestContext::with_products().await.fixture();
+    let snap = DataSnapshot {
+        schema_version: 1,
+        tables: std::collections::BTreeMap::new(),
+    };
     let err = data_snapshot::import(&as_dev(&ctx), &snap)
         .await
         .unwrap_err();

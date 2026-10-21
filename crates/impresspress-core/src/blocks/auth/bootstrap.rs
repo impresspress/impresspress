@@ -4,8 +4,9 @@
 //! one of these paths based on which bootstrap vars are set:
 //!
 //! 1. `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD` — hash the password
-//!    via `wafer-run/crypto` and create the admin account, its
-//!    `local_credentials` row and its address proof ([`create_admin`]).
+//!    via `wafer-run/crypto` and create the admin account, its `admin`
+//!    grant, its `local_credentials` row and its address proof
+//!    ([`create_admin`]).
 //! 2. `BOOTSTRAP_ADMIN_TOKEN` — store sha256(token) in `bootstrap_tokens`
 //!    with a 24h expiry. The holder later redeems it at
 //!    `POST /b/auth/api/bootstrap` (`auth_ui::api::bootstrap`), which creates
@@ -122,10 +123,12 @@ pub(crate) async fn create_admin(
     // the normalized address up) and one signup does not see as taken.
     let email = users::normalize_email(email);
 
-    // The account, its password and its proof in one atomic write. As
-    // separate writes, a failure between them left an admin with no password
-    // — and since `run` only bootstraps an EMPTY users table, no later boot
-    // would repair it.
+    // The account, its `admin` grant, its password and its proof in one
+    // atomic write. As separate writes, a failure between them left an admin
+    // with no password, or an account that is not an admin — and since `run`
+    // only bootstraps an EMPTY users table, no later boot would repair it.
+    // The grant is an ordinary `user_roles` row, so another admin can remove
+    // it through IAM like any other.
     //
     // A bootstrapped admin is inherently trusted: the operator chose this
     // address in config, or the holder of the operator's single-use token
@@ -141,10 +144,10 @@ pub(crate) async fn create_admin(
             email,
             display_name: "Admin".to_string(),
             avatar_url: None,
-            role: "admin".to_string(),
             email_verified: true,
             verification_token_hash: None,
         },
+        users::InitialRole::Admin,
         |id| {
             vec![
                 local_credentials::create_op(id, password_hash, false),

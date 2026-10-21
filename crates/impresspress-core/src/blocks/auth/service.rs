@@ -485,11 +485,11 @@ impl AuthService for AuthServiceImpl {
         }
 
         let uid = self.require_user(ctx, msg).await?;
-        // Admin is determined by the SAME merged role resolution the HTTP
-        // `is_admin` path uses — `get_user_roles` merges the inline `users.role`
-        // with `user_roles::TABLE` rows. So a user granted admin via the roles
-        // table (the admin IAM UI) is admin to trait consumers too, not only to
-        // `/b/admin` routes. [F19]
+        // Admin is determined by the account's `user_roles` grants, the one
+        // representation of a role, read through the same `get_user_roles`
+        // the HTTP `is_admin` path's tokens are minted from. So a user granted
+        // admin through the IAM UI is admin to trait consumers too, not only
+        // to `/b/admin` routes. [F19]
         let has = match role {
             Role::Admin => crate::blocks::auth::helpers::get_user_roles(ctx, &uid.0)
                 .await
@@ -514,10 +514,15 @@ impl AuthService for AuthServiceImpl {
             .await
             .map_err(|e| backend_error(e, "auth: profile lookup"))?
             .ok_or(AuthError::NotFound)?;
-        let role = match row.role.as_str() {
-            "admin" => Role::Admin,
-            _ => Role::User,
-        };
+        // The account's grants decide it, exactly as they decide
+        // `require_role(Admin)`: the profile of an account an admin demoted
+        // must not still say admin.
+        let is_admin = crate::blocks::auth::helpers::get_user_roles(ctx, &row.id)
+            .await
+            .map_err(|e| backend_error(e, "auth: profile role lookup"))?
+            .iter()
+            .any(|r| r == "admin");
+        let role = if is_admin { Role::Admin } else { Role::User };
         Ok(UserProfile {
             id: UserId(row.id),
             email: row.email,
@@ -704,10 +709,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_user_roles_reflects_admin_granted_only_via_roles_table() {
-        // The scenario F19 fixes: a user whose inline `users.role` is NOT
-        // "admin" but who has an admin row in user_roles::TABLE must resolve
-        // to admin via the merged resolver that `require_role` now uses.
+    async fn get_user_roles_reads_every_grant() {
+        // F19: a user granted admin through IAM resolves to admin through the
+        // resolver `require_role` uses, alongside the `user` grant the account
+        // was created with.
         use crate::platform_state::user_roles;
 
         let ctx = Arc::new(
@@ -721,40 +726,39 @@ mod tests {
             .await
             .expect("auth init applies user-table migrations");
 
-        // A non-admin user (inline role = "user").
         let user = crate::test_support::seed_user("roletable@e.co")
             .display_name("RT")
             .insert(&*ctx)
             .await;
 
-        // Grant admin ONLY via the roles table.
-        // Staged as the fixture: the auth block holds read-only on the
-        // grants table, as in production, where only admin's IAM writes it.
+        // Staged as the fixture: the auth block may append an account's own
+        // grant and read grants, as in production, where every later grant
+        // is admin's IAM's to write.
         user_roles::assign(&ctx.fixture(), &user.id, "admin", "")
             .await
             .expect("assign admin via roles table");
 
-        let roles = crate::blocks::auth::helpers::get_user_roles(&*ctx, &user.id)
+        let mut roles = crate::blocks::auth::helpers::get_user_roles(&*ctx, &user.id)
             .await
-            .expect(
-                "get_user_roles must succeed (TestContext::with_admin has no WRAP enforcement)",
-            );
-        assert!(
-            roles.iter().any(|r| r == "admin"),
-            "merged resolver must see the roles-table admin grant: {roles:?}"
+            .expect("get_user_roles reads the grants");
+        roles.sort_unstable();
+        assert_eq!(
+            roles,
+            ["admin", "user"],
+            "the account's own grant and the IAM one"
         );
     }
 
-    /// The other direction, and the evidence spec 2.2.3 rests on: a user
-    /// whose ONLY admin claim is the inline `users.role` column — no
-    /// `user_roles` row at all — still resolves as admin everywhere
-    /// authorization is decided. Bootstrap provisioning writes exactly this
-    /// shape (`NewUser.role` is `"admin"`; no `user_roles` row), as both
-    /// signup paths do for `"user"`. If this test ever fails, a bootstrapped
-    /// admin has stopped being an admin.
+    /// A grant row is the whole of an account's role: an account created with
+    /// the `admin` grant — the role `bootstrap::create_admin` gives the first
+    /// admin, through the same `insert_with_ops` — satisfies
+    /// `require_role(Admin)` with a token that claims no roles, and stops
+    /// satisfying it the moment the grant is removed. Before auth migration
+    /// 016 a bootstrapped admin's role was an inline column IAM could not
+    /// touch, so the second half failed.
     #[tokio::test]
-    async fn inline_admin_role_alone_satisfies_require_role() {
-        use crate::platform_state::user_roles;
+    async fn a_grant_alone_decides_require_role() {
+        use crate::{blocks::auth::repo::users::InitialRole, platform_state::user_roles};
 
         let ctx = Arc::new(with_admin_and_jwt_secret().await);
         let service = AuthServiceImpl;
@@ -763,51 +767,45 @@ mod tests {
             .await
             .expect("auth init applies user-table migrations");
 
-        // Exactly what `bootstrap::create_admin` writes for the first admin
-        // (Init provisioning or token redemption).
-        let user = crate::test_support::seed_user("inline-admin@e.co")
-            .display_name("Inline")
-            .role("admin")
+        let user = crate::test_support::seed_user("granted-admin@e.co")
+            .display_name("Granted")
+            .role(InitialRole::Admin)
             .insert(&*ctx)
             .await;
-
-        assert!(
-            user_roles::list_for_user(&*ctx, &user.id)
-                .await
-                .expect("list grants")
-                .is_empty(),
-            "bootstrap provisioning writes no user_roles row — the initial role is the \
-             inline column"
-        );
-
-        let roles = crate::blocks::auth::helpers::get_user_roles(&*ctx, &user.id)
+        let grants = user_roles::list_for_user(&*ctx, &user.id)
             .await
-            .expect("merged resolver must succeed");
+            .expect("list grants");
         assert_eq!(
-            roles,
-            vec!["admin".to_string()],
-            "the inline role is the first thing the merged resolver reads"
+            grants.iter().map(|g| g.role.as_str()).collect::<Vec<_>>(),
+            ["admin"],
+            "the account is created with exactly its admin grant"
         );
 
-        // The token claims no roles at all; the inline column is what has to
-        // carry the grant.
+        // The token claims no roles at all; the grant is what decides.
+        let msg = bearer_msg(&access_token_for(&user.id, &[]));
         let got = service
-            .require_role(
-                &*ctx,
-                &bearer_msg(&access_token_for(&user.id, &[])),
-                Role::Admin,
-            )
+            .require_role(&*ctx, &msg, Role::Admin)
             .await
-            .expect("an inline-role admin must satisfy Role::Admin with no user_roles row");
+            .expect("a granted admin satisfies Role::Admin");
         assert_eq!(got.0, user.id);
+
+        user_roles::remove(&ctx.fixture(), &grants[0].id)
+            .await
+            .expect("revoke the admin grant");
+        assert!(
+            matches!(
+                service.require_role(&*ctx, &msg, Role::Admin).await,
+                Err(AuthError::Forbidden)
+            ),
+            "with its grant removed the account is no admin"
+        );
     }
 
     #[tokio::test]
     async fn require_role_admin_grants_via_roles_table_only() {
         // End-to-end version of the resolver test above: a real access-JWT
-        // Message for a user whose inline `users.role` is "user" but who has
-        // an admin row in user_roles::TABLE must satisfy
-        // `require_role(Role::Admin)`.
+        // Message for an account created as a `user` and later granted admin
+        // in user_roles::TABLE must satisfy `require_role(Role::Admin)`.
         use crate::platform_state::user_roles;
 
         let ctx = Arc::new(with_admin_and_jwt_secret().await);
@@ -822,8 +820,8 @@ mod tests {
             .insert(&*ctx)
             .await;
 
-        // Staged as the fixture: the auth block holds read-only on the
-        // grants table, as in production, where only admin's IAM writes it.
+        // Staged as the fixture: every grant after the account's own is
+        // admin's IAM's to write.
         user_roles::assign(&ctx.fixture(), &user.id, "admin", "")
             .await
             .expect("assign admin via roles table");

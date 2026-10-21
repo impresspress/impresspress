@@ -871,47 +871,33 @@ pub(crate) mod helpers {
         config_vars::{ALLOW_SIGNUP_KEY, ENVIRONMENT_KEY},
     };
 
-    /// Resolve `user_id`'s merged role set: the inline `users.role` (the
-    /// bootstrap path) plus any rows in the legacy `user_roles::TABLE`
-    /// (multi-role history / admin-IAM grants), deduped since both can
-    /// produce `"admin"` for the bootstrapped admin.
+    /// `user_id`'s roles: the names of its `user_roles` grants, the one
+    /// representation of a role (auth migration 016).
     ///
-    /// Both reads propagate `Err` instead of swallowing it (SB-3): a WRAP
-    /// denial or transient DB error on `user_roles::TABLE` must not look
+    /// Propagates the read's own `Err` instead of swallowing it (SB-3): a
+    /// WRAP denial or transient DB error on `user_roles::TABLE` must not look
     /// identical to "user has no roles" — that would silently 403 every
     /// admin (`AuthServiceImpl::require_role`) and stamp empty roles on
-    /// API keys (`authenticate_api_key`). `NotFound` on the inline-role read
-    /// is the one case that is genuinely "no role from this source", not a
-    /// failure, and stays non-fatal.
-    ///
-    /// The two reads do not depend on each other, so they are sent together:
-    /// on Cloudflare each is a D1 round trip. When both fail, the inline-role
-    /// read's error is the one returned.
+    /// API keys (`authenticate_api_key`).
     ///
     /// Not for a token's `roles` claim: a mint resolves its roles through
-    /// [`TokenGrant::resolve`], which orders its reads after the version the
+    /// [`TokenGrant::resolve`], which orders its read after the version the
     /// token carries.
     pub(crate) async fn get_user_roles(
         ctx: &dyn wafer_run::context::Context,
         user_id: &str,
     ) -> Result<Vec<String>, WaferError> {
-        let (user, grants) = futures::join!(
-            repo::users::find_by_id(ctx, user_id),
-            user_roles::list_for_user(ctx, user_id),
-        );
-        let inline = user?.map(|user| user.role);
-        let grants =
-            grants.map_err(|e| repo::db_failed("get_user_roles: roles table lookup", e))?;
-        Ok(merge_roles(inline, grants))
+        let grants = user_roles::list_for_user(ctx, user_id)
+            .await
+            .map_err(|e| repo::db_failed("get_user_roles: roles table lookup", e))?;
+        Ok(role_names(grants))
     }
 
-    /// The inline role (when there is one) followed by every granted role it
-    /// does not already name.
-    fn merge_roles(inline: Option<String>, grants: Vec<user_roles::UserRoleRow>) -> Vec<String> {
+    /// The role each grant names, once each. The `(user_id, role)` unique
+    /// index makes repeats impossible wherever admin's 004 has run; a browser
+    /// install created before it can still hold one.
+    fn role_names(grants: Vec<user_roles::UserRoleRow>) -> Vec<String> {
         let mut roles: Vec<String> = Vec::new();
-        if let Some(role) = inline.filter(|role| !role.is_empty()) {
-            roles.push(role);
-        }
         for grant in grants {
             if !roles.contains(&grant.role) {
                 roles.push(grant.role);
@@ -939,9 +925,8 @@ pub(crate) mod helpers {
 
     impl TokenGrant {
         /// The grant for `user`, a row this request read in full from the
-        /// database (or the one it just inserted). Its `auth_version` and
-        /// inline role are the row's own; the role grants are read now,
-        /// after it.
+        /// database (or the one it just inserted). Its `auth_version` is the
+        /// row's own; the role grants are read now, after it.
         ///
         /// Propagates the read's own [`WaferError`] (SB-3): a WRAP denial or
         /// DB error must not be mistaken for "user has no roles".
@@ -958,7 +943,7 @@ pub(crate) mod helpers {
                 .map_err(|e| repo::db_failed("token roles: roles table lookup", e))?;
             Ok(Self {
                 auth_version: user.auth_version,
-                roles: merge_roles(Some(user.role.clone()), grants),
+                roles: role_names(grants),
             })
         }
 
@@ -2145,7 +2130,7 @@ mod api_key_lifecycle_tests {
     }
 }
 
-// SB-3: `get_user_roles` used to swallow both DB reads with `if let
+// SB-3: `get_user_roles` used to swallow its DB reads with `if let
 // Ok(...)`, so a WRAP-grant regression or transient DB error yielded an
 // empty/partial roles list indistinguishable from "user genuinely has no
 // roles" — silently 403ing every admin (`require_role`), minting tokens
@@ -2175,8 +2160,8 @@ mod get_user_roles_error_surfacing_tests {
 
     #[tokio::test]
     async fn token_grant_propagates_denied_roles_read_instead_of_dropping_grants() {
-        // A mint whose grants read fails must not issue a token with only the
-        // inline role: that would silently strip every granted role.
+        // A mint whose grants read fails must not issue a token without
+        // roles: that would silently strip every granted role.
         let ctx = TestContext::with_auth().await;
         let user = seed_user("someone@example.com")
             .insert(&ctx.fixture())

@@ -18,7 +18,6 @@ async fn insert_then_find_by_email_and_id() {
         .insert(&ctx)
         .await;
     assert_eq!(inserted.email, "a@example.com");
-    assert_eq!(inserted.role, "user");
     assert!(inserted.avatar_url.is_none());
 
     let by_email = users::find_by_email(&ctx, "a@example.com")
@@ -54,7 +53,7 @@ async fn insert_with_avatar_roundtrips() {
     let inserted = seed_user("b@example.com")
         .display_name("B")
         .avatar_url("https://example.com/a.png")
-        .role("admin")
+        .role(users::InitialRole::Admin)
         .insert(&ctx)
         .await;
 
@@ -66,5 +65,12 @@ async fn insert_with_avatar_roundtrips() {
         fetched.avatar_url.as_deref(),
         Some("https://example.com/a.png")
     );
-    assert_eq!(fetched.role, "admin");
+    let roles: Vec<String> =
+        impresspress_core::platform_state::user_roles::list_for_user(&ctx, &inserted.id)
+            .await
+            .expect("list grants")
+            .into_iter()
+            .map(|grant| grant.role)
+            .collect();
+    assert_eq!(roles, ["admin"], "the account is created holding its grant");
 }

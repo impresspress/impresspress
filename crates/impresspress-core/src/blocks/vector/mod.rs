@@ -319,6 +319,7 @@ mod access_tests {
 
     use super::*;
     use crate::{
+        blocks::auth::repo::users::InitialRole,
         endpoint_match::action_for_method,
         test_support::{anon_msg, output_http_status, Session, TestContext},
     };
@@ -331,8 +332,8 @@ mod access_tests {
         ctx
     }
 
-    async fn signed_in(ctx: &TestContext, role: &str) -> Session {
-        let email = format!("{role}@example.com");
+    async fn signed_in(ctx: &TestContext, role: InitialRole) -> Session {
+        let email = format!("{}@example.com", role.as_str());
         ctx.seed_account(&email, "correct-horse-battery-staple", role)
             .await;
         ctx.sign_in(&email, "correct-horse-battery-staple").await
@@ -383,7 +384,7 @@ mod access_tests {
     #[tokio::test]
     async fn every_route_refuses_a_non_admin_session() {
         let ctx = ctx().await;
-        let member = signed_in(&ctx, "user").await;
+        let member = signed_in(&ctx, InitialRole::User).await;
         for row in ROUTES {
             let path = concrete_path(row.template);
             let action = action_for_method(row.method);
@@ -402,7 +403,7 @@ mod access_tests {
     #[tokio::test]
     async fn an_admin_still_reaches_the_api() {
         let ctx = ctx().await;
-        let admin = signed_in(&ctx, "admin").await;
+        let admin = signed_in(&ctx, InitialRole::Admin).await;
         for path in ["/b/vector/api/indexes", "/b/vector/api/stats"] {
             assert_eq!(
                 output_http_status(ctx.request(admin.bearer(anon_msg("retrieve", path))).await)

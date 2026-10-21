@@ -19,6 +19,50 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: a role is a grant row, and the upgrade signs everyone out once
+
+**What changes.** An account's role lived in two places: the inline
+`wafer_run__auth__users.role` column, written once when the account was
+created, and the `impresspress__admin__user_roles` grant rows admin's IAM
+manages. Every role check read both, but IAM could change only the rows, so
+the first admin — whose `admin` was the inline column — could not be demoted,
+and the Users page showed them with no role at all.
+
+Now a role is a `user_roles` row and nothing else:
+
+- Auth migration 016 copies every account's inline role into a grant (unless
+  the account already holds it) and drops the column. Every existing admin
+  keeps admin, as a grant.
+- An account is created holding its first grant, in the same write as the
+  account: `user` at signup (password or OAuth), `admin` for the admin
+  created at first boot or by redeeming the bootstrap token. A later change
+  to anyone's roles, the first admin's included, is an IAM assign or removal.
+  The last admin still cannot lose it: an admin cannot remove their own
+  `admin`, and the `admin` role cannot be deleted.
+- The Users page and the admin users API now list every role an account
+  holds, `user` included.
+- An access token without a `roles` claim carries no role. Nothing in this
+  codebase mints the older single `role` claim, and it is no longer read.
+
+**Upgrading signs every user out, once.** Adding 016 changes the auth
+migration list, so the deploy or boot that applies it re-runs the whole list,
+and its earlier migrations drop the refresh-token and session tables. Every
+signed-in user has to sign in again; an access token already issued stays
+valid until it expires (30 minutes by default,
+`WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS`). Nothing else is lost.
+
+**API change.** `GET /b/admin/api/users` no longer returns `role` on each
+user. Read `roles`, which lists every role the account holds — the same list
+its session carries. The `@impresspress/sdk` types are regenerated without it.
+
+**Dev data snapshots are version 2.** A `seed/data.json` exported before this
+release (version 1) is refused on import: its users rows carry the dropped
+column. Export the sandbox again from a build that has applied 016.
+
+**Database support.** 016 needs `ALTER TABLE … DROP COLUMN`: SQLite 3.35 or
+later, which the native server, the browser build and Cloudflare D1 all are,
+or any supported PostgreSQL.
+
 ### Auth: the bootstrap admin email grants nothing at sign-in
 
 **What changes.** `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` no longer

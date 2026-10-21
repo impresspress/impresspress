@@ -1,21 +1,32 @@
-//! `impresspress__admin__user_roles`: role grants beyond a user's initial
-//! role — one row per `(user_id, role)`, which a unique index over the pair
-//! enforces wherever admin migration 004 has run (every native and Cloudflare
-//! deployment and every new browser install; not a browser install created
-//! before it — see the note beside that migration) — read by the framework auth block on
-//! every login (`get_user_roles` merges them with the inline `users.role`)
-//! and managed by admin's IAM surface.
+//! `impresspress__admin__user_roles`: an account's roles — one row per
+//! `(user_id, role)`, which a unique index over the pair enforces wherever
+//! admin migration 004 has run (every native and Cloudflare deployment and
+//! every new browser install; not a browser install created before it — see
+//! the note beside that migration). The one representation of a role: the
+//! framework auth block reads these rows on every token mint, role check and
+//! API-key authentication, and admin's IAM surface manages them.
 //!
 //! Runtime flavour only (spec 2.1.2): nothing reads these rows before WRAP.
-//! [`assign`] is the single writer, and admin's IAM assign endpoint is its
-//! only production caller: no sign-in grants a role. Signup and bootstrap
-//! provisioning write no row: the initial role is the inline `users.role`,
-//! and a row here means "granted beyond it" (spec 2.2.3).
+//! Two writers:
+//!
+//! - [`create_op`]: the grant an account is created with, in the same atomic
+//!   batch as the account row (`repo::users::insert_with_ops`) — `user` for
+//!   every signup, `admin` for a bootstrapped admin. The auth blocks may
+//!   append to this table for it, and do nothing else to it.
+//! - [`assign`]: every later grant, from admin's IAM assign endpoint, its
+//!   only production caller. No sign-in grants a role.
+//!
+//! Before auth migration 016 an account's first role was an inline
+//! `users.role` column and a row here meant "granted beyond it"; 016 copied
+//! every inline role into a row and dropped the column.
 
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
-use wafer_block::db::{Filter, FilterOp};
+use wafer_block::{
+    db::{Filter, FilterOp},
+    wire::database::BatchWrite,
+};
 use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
@@ -35,8 +46,9 @@ pub struct UserRoleRow {
     pub role: String,
     /// When the grant was made; nullable in the schema.
     pub assigned_at: Option<String>,
-    /// The admin who granted it; empty when no admin is behind the grant
-    /// (see [`assign`]).
+    /// The admin who granted it; empty when no admin is behind the grant:
+    /// one an account was created with ([`create_op`]), one auth migration
+    /// 016 carried over from the inline column, and test fixtures'.
     pub assigned_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -66,8 +78,10 @@ impl UserRoleRow {
         })
     }
 
-    /// The column map this row inserts as. `assigned_at` is omitted when
-    /// `None` so the nullable column stays NULL.
+    /// Every column of the row, as the IAM endpoints echo it in their
+    /// `{id, data}` envelope; [`Self::from_record`] reads it back. Not an
+    /// insert shape — a new grant's columns are [`new_grant`]'s. `assigned_at`
+    /// is omitted when `None`, as the nullable column reads.
     pub fn to_data(&self) -> HashMap<String, Value> {
         let mut data = HashMap::new();
         data.insert("id".to_string(), json!(self.id));
@@ -80,6 +94,37 @@ impl UserRoleRow {
         data.insert("created_at".to_string(), json!(self.created_at));
         data.insert("updated_at".to_string(), json!(self.updated_at));
         data
+    }
+}
+
+/// The columns a new grant is written with: every column of its row except
+/// `id`, `created_at` and `updated_at`, which the database stamps. The one
+/// shape both writers insert, so a grant made with an account and one made
+/// by an admin are the same row. Leaving the stamped columns to the database
+/// is also what an append-only grant requires: the auth blocks write
+/// [`create_op`]'s row through one.
+fn new_grant(user_id: &str, role: &str, assigned_by: &str) -> HashMap<String, Value> {
+    let mut data = HashMap::new();
+    data.insert("user_id".to_string(), json!(user_id));
+    data.insert("role".to_string(), json!(role));
+    data.insert("assigned_at".to_string(), json!(crate::util::now_rfc3339()));
+    data.insert("assigned_by".to_string(), json!(assigned_by));
+    data
+}
+
+/// The batch write that grants `role` to the account `user_id` as it is
+/// created. `repo::users::insert_with_ops` appends it to the account's own
+/// batch, so no account exists without its grant. No admin is behind it, so
+/// `assigned_by` is empty.
+///
+/// Not checked against the role definitions: signup must not depend on
+/// admin's `Init` having seeded them, and a grant is a name — a token carries
+/// it whether or not a role row describes it. Which roles an admin may assign
+/// is IAM's rule (`admin::iam::handle_assign_role`).
+pub fn create_op(user_id: &str, role: &str) -> BatchWrite {
+    BatchWrite::Create {
+        collection: TABLE.to_string(),
+        data: new_grant(user_id, role, ""),
     }
 }
 
@@ -105,7 +150,7 @@ fn eq(field: &str, value: &str) -> Filter {
 }
 
 /// Decode grant rows, warning about and skipping a row that does not decode
-/// — the policy the auth block's role merge and admin's bulk role fetch have
+/// — the policy the auth block's role reads and admin's bulk role fetch have
 /// always applied to a malformed row.
 fn decode_rows(records: Vec<db::Record>) -> Vec<UserRoleRow> {
     records
@@ -123,7 +168,7 @@ fn decode_rows(records: Vec<db::Record>) -> Vec<UserRoleRow> {
 /// List the grants `filters` selects, for a filter that pins the read to one
 /// principal or one page of them.
 ///
-/// One row per extra role a user holds, so the matching set is as small as
+/// One row per role a user holds, so the matching set is as small as
 /// the number of roles the deployment defines. The unfiltered and
 /// filtered-by-role reads are a different shape and have their own functions
 /// ([`list_all`], [`list_by_role`]) — this table's row count grows with the
@@ -146,7 +191,7 @@ pub async fn list_for_user(
     list_for_principals(
         ctx,
         vec![eq("user_id", user_id)],
-        Bound::OnePer("extra role one user holds"),
+        Bound::OnePer("role one user holds"),
     )
     .await
 }
@@ -171,7 +216,7 @@ pub async fn list_for_users(
             operator: FilterOp::In,
             value: Value::Array(values),
         }],
-        Bound::OnePer("extra role held by one of the user ids on one admin list page"),
+        Bound::OnePer("role held by one of the user ids on one admin list page"),
     )
     .await
 }
@@ -179,7 +224,7 @@ pub async fn list_for_users(
 /// Grants across the whole deployment, for the IAM listing, and whether
 /// there are more than the listing returned.
 ///
-/// The table holds one row per extra role per user, so it grows with the user
+/// The table holds one row per role per user, so it grows with the user
 /// base: this read is capped and says so, rather than presenting a prefix as
 /// the complete grant list.
 pub async fn list_all(ctx: &dyn Context) -> Result<CappedList<UserRoleRow>, WaferError> {
@@ -234,9 +279,9 @@ async fn holds(ctx: &dyn Context, user_id: &str, role: &str) -> Result<bool, Waf
 }
 
 /// Grant `role` to `user_id` unless they already hold it. `assigned_by` is
-/// the granting admin's id, or empty when no admin is behind the grant (the
-/// rows the retired sign-in grant of `admin` wrote, and test fixtures). The
-/// single writer for this table.
+/// the granting admin's id. Admin's IAM assign endpoint is the one
+/// production caller and always passes one; test fixtures stage grants with
+/// it empty. The account-creation grant is [`create_op`], not this.
 ///
 /// The unique index over `(user_id, role)` (admin migration 004, where it
 /// has run) is what makes this safe to run concurrently — two admins
@@ -253,17 +298,7 @@ pub async fn assign(
     if holds(ctx, user_id, role).await? {
         return Ok(Assigned::AlreadyAssigned);
     }
-    let now = crate::util::now_rfc3339();
-    let row = UserRoleRow {
-        id: format!("ur_{}", uuid::Uuid::new_v4()),
-        user_id: user_id.to_string(),
-        role: role.to_string(),
-        assigned_at: Some(now.clone()),
-        assigned_by: assigned_by.to_string(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    let rec = match db::create(ctx, TABLE, row.to_data()).await {
+    let rec = match db::create(ctx, TABLE, new_grant(user_id, role, assigned_by)).await {
         Ok(rec) => rec,
         // The unique index over `(user_id, role)` refused it: the grant is
         // held. `AlreadyExists` is how every backend reports that.
@@ -327,7 +362,7 @@ mod tests {
             Assigned::Created(row) => row,
             Assigned::AlreadyAssigned => panic!("first grant must create the row"),
         };
-        assert!(created.id.starts_with("ur_"), "{}", created.id);
+        assert!(!created.id.is_empty(), "the database mints the grant's id");
         assert_eq!(created.user_id, "u-1");
         assert_eq!(created.role, "editor");
         assert!(created

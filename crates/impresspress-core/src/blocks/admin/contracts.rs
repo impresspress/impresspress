@@ -72,17 +72,14 @@ pub struct AdminUserView {
     pub name: Option<String>,
     /// Avatar image URL, when set.
     pub avatar_url: Option<String>,
-    // The single-role column on the users row, written by the signup path and
-    // not admin-writable. `auth::merge_roles` puts it first in a token's
-    // `roles` claim, ahead of the grants below.
-    /// The account's own role (`"user"` by default). A signed-in session
-    /// holds it alongside `roles`, which lists it only when the same role is
-    /// also granted.
-    pub role: String,
-    // Read from `impresspress__admin__user_roles`. Writers: the IAM
-    // endpoints (`iam.rs`, including a role rename) only.
-    /// Roles granted to this user. Admins manage grants through
-    /// `/b/admin/api/iam/user-roles`; no sign-in grants a role.
+    // Read from `impresspress__admin__user_roles`, the one representation of
+    // a role. Writers: account creation (`repo::users::insert_with_ops`, the
+    // account's first grant) and the IAM endpoints (`iam.rs`, including a
+    // role rename).
+    /// Every role this user holds — exactly the `roles` a session minted for
+    /// them carries. An account is created holding `user` (or `admin`, for a
+    /// bootstrapped admin); admins manage grants through
+    /// `/b/admin/api/iam/user-roles`, and no sign-in grants a role.
     pub roles: Vec<String>,
     /// Whether the email address has been verified.
     pub email_verified: bool,
@@ -111,7 +108,6 @@ impl AdminUserView {
             display_name: row.display_name.clone(),
             name: row.name.clone(),
             avatar_url: row.avatar_url.clone(),
-            role: row.role.clone(),
             roles,
             email_verified: row.email_verified,
             disabled: row.disabled,

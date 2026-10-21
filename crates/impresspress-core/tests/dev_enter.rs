@@ -11,7 +11,10 @@
 
 use impresspress_core::{
     blocks::{
-        auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
+        auth::{
+            config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
+            repo::users::InitialRole,
+        },
         dev::{
             self,
             test_support::{dev_with_accounts, FakeControl},
@@ -42,7 +45,7 @@ async fn sandbox() -> TestContext {
     let mut ctx = dev_with_accounts(FakeControl::new()).await;
     ctx.set_config(BOOTSTRAP_ADMIN_EMAIL_KEY, EMAIL);
     ctx.set_config(BOOTSTRAP_ADMIN_PASSWORD_KEY, PASSWORD);
-    ctx.seed_account(EMAIL, PASSWORD, "admin").await;
+    ctx.seed_account(EMAIL, PASSWORD, InitialRole::Admin).await;
     ctx
 }
 
@@ -169,7 +172,7 @@ async fn a_changed_password_is_refused_by_the_login_route() {
     ctx.set_config(BOOTSTRAP_ADMIN_EMAIL_KEY, EMAIL);
     ctx.set_config(BOOTSTRAP_ADMIN_PASSWORD_KEY, PASSWORD);
     // The account exists under a password that is no longer the seeded one.
-    ctx.seed_account(EMAIL, "a-password-the-owner-chose", "admin")
+    ctx.seed_account(EMAIL, "a-password-the-owner-chose", InitialRole::Admin)
         .await;
 
     let html = output_html(

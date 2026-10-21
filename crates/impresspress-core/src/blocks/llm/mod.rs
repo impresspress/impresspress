@@ -1314,7 +1314,10 @@ mod access_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::test_support::{anon_msg, output_http_status, output_json, Session, TestContext};
+    use crate::{
+        blocks::auth::repo::users::InitialRole,
+        test_support::{anon_msg, output_http_status, output_json, Session, TestContext},
+    };
 
     /// A context that routes `/b/llm/*` to the real block and can sign people
     /// in, so each request below presents a real token.
@@ -1331,8 +1334,8 @@ mod access_tests {
         ctx
     }
 
-    async fn signed_in(ctx: &TestContext, role: &str) -> Session {
-        let email = format!("{role}@example.com");
+    async fn signed_in(ctx: &TestContext, role: InitialRole) -> Session {
+        let email = format!("{}@example.com", role.as_str());
         ctx.seed_account(&email, "correct-horse-battery-staple", role)
             .await;
         ctx.sign_in(&email, "correct-horse-battery-staple").await
@@ -1359,7 +1362,7 @@ mod access_tests {
     #[tokio::test]
     async fn a_non_admin_cannot_pin_a_thread_to_a_backend() {
         let ctx = ctx().await;
-        let member = signed_in(&ctx, "user").await;
+        let member = signed_in(&ctx, InitialRole::User).await;
 
         assert_eq!(
             output_http_status(
@@ -1387,8 +1390,8 @@ mod access_tests {
     #[tokio::test]
     async fn a_non_admin_cannot_delete_an_override() {
         let ctx = ctx().await;
-        let admin = signed_in(&ctx, "admin").await;
-        let member = signed_in(&ctx, "user").await;
+        let admin = signed_in(&ctx, InitialRole::Admin).await;
+        let member = signed_in(&ctx, InitialRole::User).await;
 
         let created = output_json(
             ctx.request_with_input(
@@ -1425,7 +1428,7 @@ mod access_tests {
     #[tokio::test]
     async fn the_config_read_is_still_open_to_any_logged_in_caller() {
         let ctx = ctx().await;
-        let member = signed_in(&ctx, "user").await;
+        let member = signed_in(&ctx, InitialRole::User).await;
         assert_eq!(
             output_http_status(
                 ctx.request(member.bearer(anon_msg("retrieve", "/b/llm/api/config")))

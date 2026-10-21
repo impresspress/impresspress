@@ -52,15 +52,72 @@ const SQL_014_POSTGRES: &str = include_str!("014_clear_provider_access_tokens.po
 const SQL_015_SQLITE: &str = include_str!("015_api_key_expiry_canonical.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_015_POSTGRES: &str = include_str!("015_api_key_expiry_canonical.postgres.sql");
+const SQL_016_SQLITE: &str = include_str!("016_roles_are_grants.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_016_POSTGRES: &str = include_str!("016_roles_are_grants.postgres.sql");
 
 /// Basename of the API-key expiry repair, named once so the migration list
 /// and the test that drives it cannot drift apart.
 pub(crate) const API_KEY_EXPIRY_CANONICAL: &str = "015_api_key_expiry_canonical";
 
+/// Basename of the migration that makes a role a grant row only.
+///
+/// # The 016 note
+///
+/// An account's role used to live in two places: the inline
+/// `wafer_run__auth__users.role` column, written once at account creation,
+/// and `impresspress__admin__user_roles` rows, written by admin's IAM. Every
+/// reader unioned them, while IAM could edit only the rows, so an inline
+/// `admin` — every bootstrapped admin — could not be demoted. 016 copies each
+/// inline role into a grant and drops the column; from then on an account's
+/// roles are its grant rows, which account creation writes in the account's
+/// own batch (`repo::users::insert_with_ops`).
+///
+/// - **Re-runnable.** Every change to this list re-runs it in full, so the
+///   file opens with an `ADD COLUMN` that recreates the column empty before
+///   the copy and the `DROP` (SQLite has no `DROP COLUMN IF EXISTS`). On a
+///   database that still has 001's column the `ADD` is a duplicate, which
+///   the runner tolerates for an `ADD COLUMN` alone; on a re-run the copy
+///   finds nothing to copy. PostgreSQL says `IF [NOT] EXISTS` on both.
+/// - **The `NOT EXISTS`** skips an account that already holds the grant, and
+///   so also covers a browser install created before admin's 004 built the
+///   `(user_id, role)` unique index.
+/// - **`DROP COLUMN` support.** Nothing but 001's `CREATE TABLE` names the
+///   column: no index, view or trigger. SQLite added `DROP COLUMN` in 3.35;
+///   native runs the SQLite rusqlite bundles, the browser sql.js 3.45, and D1
+///   current SQLite.
+/// - **Admin's schema must already exist.** The `INSERT` names admin's
+///   `user_roles`, so the auth list fails with `no such table` on a database
+///   admin's 001 has not built. What guarantees it is the boot order: every
+///   target initialises admin before the other blocks
+///   (`builder::boot`'s `init_block(admin)`), and the test fixtures apply
+///   admin's list first (`TestContext::with_auth`). It is not that auth's
+///   migration state lives in admin's `block_settings`: a missing
+///   `block_settings` table is tolerated. `the_auth_list_needs_admins_schema`
+///   pins this, so a boot reorder fails a test.
+/// - **Ids.** 016 mints `ur_<32 hex>` ids; a grant written at runtime takes
+///   the id the database mints (a UUIDv7). Nothing parses a grant id:
+///   `UserRoleRow::from_record` requires only a non-empty `user_id` and
+///   `role`.
+/// - **`assigned_by` is empty**, as on every grant no admin made.
+/// - **An auth migration writing admin's table.** It runs through `db::ddl`,
+///   which is not table-scoped today. A future wafer-run change that scopes
+///   `ddl` must keep migration files as the stated exception; 014's `UPDATE`
+///   already relies on it, and at runtime auth may append to the table
+///   (`blocks/admin/mod.rs`'s grants).
+/// - **What it costs.** Adding the file re-runs the auth list, and 004 and 012
+///   drop the refresh-token and session tables: every user is signed out once
+///   (RELEASE.md). Inline admins keep admin, as grants. A dev data snapshot
+///   carrying users must be re-exported (`data_snapshot::SCHEMA_VERSION` 2).
+///
+/// The upgrade itself, on both dialects, is tested in
+/// `crates/impresspress-native/tests/auth_roles_are_grants.rs`.
+pub const ROLES_ARE_GRANTS: &str = "016_roles_are_grants";
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle(Init)` apply path (auth's `init`).
 /// Order here is the apply order.
-pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+pub const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("001_auth_schema", SQL_001_SQLITE),
     ("002_reserved_orgs", SQL_002_SQLITE),
     ("003_oauth_pkce_states", SQL_003_SQLITE),
@@ -76,6 +133,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("013_email_proof", SQL_013_SQLITE),
     ("014_clear_provider_access_tokens", SQL_014_SQLITE),
     (API_KEY_EXPIRY_CANONICAL, SQL_015_SQLITE),
+    (ROLES_ARE_GRANTS, SQL_016_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
@@ -83,7 +141,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 /// `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     ("001_auth_schema", SQL_001_POSTGRES),
     ("002_reserved_orgs", SQL_002_POSTGRES),
     ("003_oauth_pkce_states", SQL_003_POSTGRES),
@@ -99,9 +157,10 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     ("013_email_proof", SQL_013_POSTGRES),
     ("014_clear_provider_access_tokens", SQL_014_POSTGRES),
     (API_KEY_EXPIRY_CANONICAL, SQL_015_POSTGRES),
+    (ROLES_ARE_GRANTS, SQL_016_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
+pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 /// Apply the auth schema through the shared migration-state gate.
 ///
@@ -342,6 +401,11 @@ mod provider_token_clearing_tests {
             "014_clear_provider_access_tokens",
             "precondition: 014 is in the list, and `before` stops right at it"
         );
+        // Admin's schema first, as every boot applies it: 016 copies roles
+        // into admin's `user_roles` (the 016 note on `ROLES_ARE_GRANTS`).
+        apply_ddl_via_service(&db, &crate::blocks::admin::migrations::ddl_files("sqlite"))
+            .await
+            .expect("apply admin's schema");
         apply_ddl_via_service(&db, &before)
             .await
             .expect("apply the pre-014 schema");
@@ -385,6 +449,55 @@ mod provider_token_clearing_tests {
             .await
             .expect("a second re-run succeeds");
         assert_eq!(stored_tokens(&db).await, vec!["", ""]);
+    }
+}
+
+#[cfg(test)]
+mod roles_are_grants_tests {
+    //! The ordering 016 relies on (the 016 note on [`super::ROLES_ARE_GRANTS`]).
+    //! The upgrade itself is tested on both dialects in
+    //! `crates/impresspress-native/tests/auth_roles_are_grants.rs`.
+
+    use std::sync::Arc;
+
+    use wafer_block_sqlite::service::SQLiteDatabaseService;
+    use wafer_core::interfaces::database::service::DatabaseService;
+
+    use super::SQLITE_MIGRATIONS;
+    use crate::migration_helper::apply_ddl_via_service;
+
+    fn auth_list() -> Vec<&'static str> {
+        SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect()
+    }
+
+    /// 016 writes admin's `user_roles`, so the auth list applies only where
+    /// admin's schema already exists — which every boot guarantees by
+    /// initialising admin first. Pinned so a boot reorder fails here, not in
+    /// a deployment whose auth migrations stop at 016.
+    #[tokio::test]
+    async fn the_auth_list_needs_admins_schema() {
+        let bare: Arc<dyn DatabaseService> =
+            Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
+        let err = apply_ddl_via_service(&bare, &auth_list())
+            .await
+            .expect_err("the auth list cannot apply before admin's");
+        assert!(
+            err.contains("INSERT INTO impresspress__admin__user_roles")
+                && err.contains("no such table: impresspress__admin__user_roles"),
+            "it is 016's copy that needs admin's table: {err}"
+        );
+
+        let ordered: Arc<dyn DatabaseService> =
+            Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
+        apply_ddl_via_service(
+            &ordered,
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+        )
+        .await
+        .expect("admin's list applies first");
+        apply_ddl_via_service(&ordered, &auth_list())
+            .await
+            .expect("after admin's, the auth list applies");
     }
 }
 

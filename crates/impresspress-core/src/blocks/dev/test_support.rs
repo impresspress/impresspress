@@ -34,7 +34,10 @@ use super::{
     seed::{SeedFetch, SeedFile},
 };
 #[cfg(feature = "block-dev")]
-use crate::test_support::{admin_msg, output_json, Session, TestContext};
+use crate::{
+    blocks::auth::repo::users::InitialRole,
+    test_support::{admin_msg, output_json, Session, TestContext},
+};
 
 // ---------------------------------------------------------------------------
 // Reaching the block
@@ -66,8 +69,8 @@ const ACCOUNT_PASSWORD: &str = "correct-horse-battery-staple";
 /// the local credentials, so a page assertion on it must not be satisfied by
 /// the signed-in operator's own email.
 #[cfg(feature = "block-dev")]
-pub async fn signed_in_as(ctx: &TestContext, role: &str) -> Session {
-    let email = format!("{role}-account@example.com");
+pub async fn signed_in_as(ctx: &TestContext, role: InitialRole) -> Session {
+    let email = format!("{}-account@example.com", role.as_str());
     ctx.seed_account(&email, ACCOUNT_PASSWORD, role).await;
     ctx.sign_in(&email, ACCOUNT_PASSWORD).await
 }

@@ -854,6 +854,7 @@ fn root_redirect(user_id_empty: bool) -> OutputStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::auth::repo::users::InitialRole;
 
     /// Test that the routing table covers expected prefixes and block assignments.
     #[test]
@@ -1447,8 +1448,12 @@ mod tests {
         use crate::test_support::{anon_msg, output_is_error, TestContext};
 
         let ctx = TestContext::with_auth().await.with_sign_in_added();
-        ctx.seed_account("member@example.com", "correct-horse-battery-staple", "user")
-            .await;
+        ctx.seed_account(
+            "member@example.com",
+            "correct-horse-battery-staple",
+            InitialRole::User,
+        )
+        .await;
         let member = ctx
             .sign_in("member@example.com", "correct-horse-battery-staple")
             .await;

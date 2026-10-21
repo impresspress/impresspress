@@ -2852,6 +2852,7 @@ mod csrf_wiring_tests {
 
     use super::*;
     use crate::{
+        blocks::auth::repo::users::InitialRole,
         routing::{ExtraRoute, RouteAccess},
         test_support::{anon_msg, Session, TestContext},
     };
@@ -2898,8 +2899,12 @@ mod csrf_wiring_tests {
             "test/csrf-probe",
             RouteAccess::Public,
         ));
-        ctx.seed_account("user-1@example.com", "correct-horse-battery", "user")
-            .await;
+        ctx.seed_account(
+            "user-1@example.com",
+            "correct-horse-battery",
+            InitialRole::User,
+        )
+        .await;
         let session = ctx
             .sign_in("user-1@example.com", "correct-horse-battery")
             .await;
