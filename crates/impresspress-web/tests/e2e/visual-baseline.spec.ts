@@ -212,9 +212,13 @@ function volatileMasks(page: Page) {
   return [
     page
       .locator(
-        'td:has(time, [data-relative-time], .relative-time), :is([data-relative-time], .relative-time, time):not(td *)',
+        'td:has(time, [data-relative-time], .relative-time):not(:has(.object-table__meta, .share-table__meta)), :is([data-relative-time], .relative-time, time):not(td *)',
       )
       .filter({ visible: true }),
+    // A narrowing table's meta line (table.css `.object-table`,
+    // `.share-table`) carries the row's date under its name: mask the date,
+    // not the name's whole cell. Hidden where the table is wide.
+    page.locator(':is(.object-table__meta, .share-table__meta) time').filter({ visible: true }),
     page.locator('.chart__range'),
     page.locator('td:has([data-volatile-id])'),
     page.locator('td:has([data-volatile-metric]), .stat:has-text("Avg response") .stat__value'),
