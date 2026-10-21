@@ -55,6 +55,12 @@ fn analytics_headline(currency: &CommerceAnalytics, seller_view: bool) -> Markup
     ])
 }
 
+/// A page's sales analytics, one group per currency (money in two
+/// currencies is never added up). Each group sits on the page background:
+/// its heading and record count, the four headline figures as a stat row,
+/// then one card holding the rest as a key/value list, and the top products
+/// as a table in a flush card of their own. A stat row is a card-level
+/// surface, so it never goes inside the card (layout rule 2).
 fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: bool) -> Markup {
     html! {
         section .products-section {
@@ -67,50 +73,60 @@ fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: 
                 (components::empty_state(icons::bar_chart(), "No sales data yet", "Completed orders and subscription activity will appear here.", None))
             } @else {
                 @for currency in analytics {
-                    article .card .mt-4 {
-                        header .card__head {
-                            div {
-                                h2 .card__title { (currency.currency) }
-                                p .text-muted .text-sm .text-subtitle { (currency.paid_order_count) " paid of " (currency.order_count) " checkout records" }
-                            }
-                            (components::status_badge(&currency.currency))
-                        }
-                        div .card__body {
-                            (analytics_headline(currency, seller_view))
-                            dl .products-status-list {
-                                @if seller_view {
-                                    div { dt { "Before Stripe fees" } dd { (display_money(currency.net_volume_minor.saturating_sub(currency.platform_fees_minor), &currency.currency)) } }
-                                }
-                                div { dt { "Failed orders" } dd { (currency.failed_order_count) } }
-                                div { dt { "Past due" } dd { (currency.past_due_subscription_count) } }
-                                div { dt { "Open disputes" } dd { (currency.open_dispute_count) " · " (display_money(currency.open_disputed_volume_minor, &currency.currency)) } }
-                                div { dt { "Lost disputes" } dd { (currency.lost_dispute_count) " · " (display_money(currency.lost_disputed_volume_minor, &currency.currency)) } }
-                            }
-                            p .text-muted .text-sm {
-                                "Subscriptions: " (currency.active_subscription_count) " active, "
-                                (currency.trialing_subscription_count) " trialing, "
-                                (currency.past_due_subscription_count) " past due, "
-                                (currency.canceled_subscription_count) " canceled. Refunded orders: "
-                                (currency.refunded_order_count) "."
-                                @if currency.open_dispute_count > 0 { " Open disputes require attention in Stripe." }
-                            }
-                            @if !currency.top_products.is_empty() {
-                                h3 .products-subheading { "Top products by gross sales" }
-                                @let cols = [
-                                    components::TableCol::new("Product"),
-                                    components::TableCol::new("Quantity"),
-                                    components::TableCol::new("Gross"),
-                                ];
-                                @let rows: Vec<Vec<Markup>> = currency.top_products.iter().map(|product| vec![
-                                    html! { span .font-medium { (product.name) } },
-                                    html! { (product.quantity) },
-                                    html! { (display_money(product.revenue_minor, &currency.currency)) },
-                                ]).collect();
-                                (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
-                            }
-                        }
-                    }
+                    (analytics_currency(currency, seller_view))
                 }
+            }
+        }
+    }
+}
+
+/// One currency's analytics group ([`analytics_section`]).
+fn analytics_currency(currency: &CommerceAnalytics, seller_view: bool) -> Markup {
+    let figures = html! {
+        dl .products-status-list .mt-0 {
+            @if seller_view {
+                div { dt { "Before Stripe fees" } dd { (display_money(currency.net_volume_minor.saturating_sub(currency.platform_fees_minor), &currency.currency)) } }
+            }
+            div { dt { "Failed orders" } dd { (currency.failed_order_count) } }
+            div { dt { "Past due" } dd { (currency.past_due_subscription_count) } }
+            div { dt { "Open disputes" } dd { (currency.open_dispute_count) " · " (display_money(currency.open_disputed_volume_minor, &currency.currency)) } }
+            div { dt { "Lost disputes" } dd { (currency.lost_dispute_count) " · " (display_money(currency.lost_disputed_volume_minor, &currency.currency)) } }
+        }
+        p .text-muted .text-sm {
+            "Subscriptions: " (currency.active_subscription_count) " active, "
+            (currency.trialing_subscription_count) " trialing, "
+            (currency.past_due_subscription_count) " past due, "
+            (currency.canceled_subscription_count) " canceled. Refunded orders: "
+            (currency.refunded_order_count) "."
+            @if currency.open_dispute_count > 0 { " Open disputes require attention in Stripe." }
+        }
+    };
+    html! {
+        div .products-currency {
+            (components::section_header(&currency.currency, None))
+            p .section-desc { (currency.paid_order_count) " paid of " (currency.order_count) " checkout records" }
+            (analytics_headline(currency, seller_view))
+            (components::Card::plain(figures).render())
+            @if !currency.top_products.is_empty() {
+                // Named for its currency: each currency's group repeats the
+                // card, and a heading list should tell them apart.
+                @let top_title = format!("Top {} products by gross sales", currency.currency);
+                @let cols = [
+                    components::TableCol::new("Product"),
+                    components::TableCol::new("Quantity"),
+                    components::TableCol::new("Gross"),
+                ];
+                @let rows: Vec<Vec<Markup>> = currency.top_products.iter().map(|product| vec![
+                    html! { span .font-medium { (product.name) } },
+                    html! { (product.quantity) },
+                    html! { (display_money(product.revenue_minor, &currency.currency)) },
+                ]).collect();
+                (components::Card::titled(
+                    &top_title,
+                    components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}),
+                )
+                .flush()
+                .render())
             }
         }
     }
@@ -125,23 +141,36 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
                 (components::empty_state(icons::info(), "No recent failures", "No failed seller orders need attention.", None))
             } @else {
                 @let row_hrefs: Vec<String> = failures.iter().map(|failure| format!("/b/products/selling/orders/{}", failure.order_id)).collect();
-                @let cols = [
-                    components::TableCol::new("Order").primary(),
-                    components::TableCol::new("Amount"),
-                    components::TableCol::new("Last result"),
-                    components::TableCol::new("Date"),
-                ];
                 @let rows: Vec<Vec<Markup>> = failures.iter().map(|failure| vec![
-                    html! { code { (&failure.order_id) } },
+                    html! {
+                        code .cell-wrap { (&failure.order_id) }
+                        span .commerce-table__meta { (components::timestamp(&failure.created_at)) }
+                    },
                     html! { (display_money(failure.total_minor, &failure.currency)) },
-                    html! { span .text-sm { (if failure.error.is_empty() { "Payment did not complete" } else { &failure.error }) } },
+                    // Stripe's errors quote ids (`No such customer: 'cus_…'`), one
+                    // unbroken word each: it may break anywhere.
+                    html! { span .text-sm .cell-wrap { (if failure.error.is_empty() { "Payment did not complete" } else { &failure.error }) } },
                     components::timestamp(&failure.created_at),
                 ]).collect();
-                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
+                div .commerce-table .commerce-table--failures {
+                    (components::data_table(&FAILURE_COLUMNS, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
+                }
             }
         }
     }
 }
+
+/// A seller's recent failed orders. Narrow (table.css
+/// `.commerce-table--failures`), the date becomes the line under the order.
+/// Column order is part of that rule (headers hidden by position): reorder
+/// both together.
+const FAILURE_COLUMNS: [components::TableCol<'static>; 4] = [
+    components::TableCol::new("Order").primary(),
+    components::TableCol::new("Amount"),
+    components::TableCol::new("Last result"),
+    components::TableCol::new("Date"),
+];
+
 use crate::{
     config_vars,
     ui::{
@@ -1090,6 +1119,30 @@ pub async fn deleted_product_close(
 // Admin: seller governance and moderation
 // ---------------------------------------------------------------------------
 
+/// The seller accounts list. Narrow (table.css `.commerce-table--sellers`),
+/// the payment and payout states and the listing count become the line under
+/// the seller. Column order is part of that rule (headers hidden by
+/// position): reorder both together.
+const SELLER_COLUMNS: [components::TableCol<'static>; 6] = [
+    components::TableCol::new("Seller").primary(),
+    components::TableCol::new("Selling"),
+    components::TableCol::new("Payments"),
+    components::TableCol::new("Payouts"),
+    components::TableCol::new("Listings"),
+    components::TableCol::new("Needs action"),
+];
+
+/// A seller's own products, on the seller's admin page. Narrow (table.css
+/// `.commerce-table--owned`), the update date becomes the line under the
+/// product. Column order is part of that rule (headers hidden by position):
+/// reorder both together.
+const OWNED_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
+    components::TableCol::new("Product").primary(),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Approval"),
+    components::TableCol::new("Updated"),
+];
+
 pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let sellers = match repo::seller_accounts::list_rows(ctx).await {
         Ok(sellers) => sellers,
@@ -1234,23 +1287,27 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 (components::empty_state(icons::link(), "No sellers yet", "Seller accounts appear here after a user starts Stripe onboarding.", None))
             } @else {
                 @let row_hrefs: Vec<String> = sellers.rows.iter().map(|seller| format!("/b/products/admin/sellers/{}", seller.id)).collect();
-                @let cols = [
-                    components::TableCol::new("Seller").primary(),
-                    components::TableCol::new("Selling"),
-                    components::TableCol::new("Payments"),
-                    components::TableCol::new("Payouts"),
-                    components::TableCol::new("Listings"),
-                    components::TableCol::new("Needs action"),
-                ];
-                @let rows: Vec<Vec<Markup>> = sellers.rows.iter().map(|seller| vec![
-                    html! { (&seller.user_id) },
-                    components::status_badge(&commerce_wire(&seller.status)),
-                    components::status_badge(if seller.capabilities.charges_enabled { "enabled" } else { "disabled" }),
-                    components::status_badge(if seller.capabilities.payouts_enabled { "enabled" } else { "disabled" }),
-                    html! { (product_counts.get(&seller.user_id).copied().unwrap_or_default()) },
-                    html! { @if seller.capabilities.requirements_due.is_empty() { span .text-muted { "None" } } @else { strong { (seller.capabilities.requirements_due.len()) } } },
-                ]).collect();
-                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
+                @let rows: Vec<Vec<Markup>> = sellers.rows.iter().map(|seller| {
+                    let listings = product_counts.get(&seller.user_id).copied().unwrap_or_default();
+                    vec![
+                        html! {
+                            (components::breakable_id(&seller.user_id))
+                            span .commerce-table__meta {
+                                "Payments " (if seller.capabilities.charges_enabled { "enabled" } else { "disabled" })
+                                " · payouts " (if seller.capabilities.payouts_enabled { "enabled" } else { "disabled" })
+                                " · " (count_noun(listings, "listing"))
+                            }
+                        },
+                        components::status_badge(&commerce_wire(&seller.status)),
+                        components::status_badge(if seller.capabilities.charges_enabled { "enabled" } else { "disabled" }),
+                        components::status_badge(if seller.capabilities.payouts_enabled { "enabled" } else { "disabled" }),
+                        html! { (listings) },
+                        html! { @if seller.capabilities.requirements_due.is_empty() { span .text-muted { "None" } } @else { strong { (seller.capabilities.requirements_due.len()) } } },
+                    ]
+                }).collect();
+                div .commerce-table .commerce-table--sellers {
+                    (components::data_table(&SELLER_COLUMNS, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
+                }
             }
         }
     };
@@ -1258,6 +1315,7 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ctx,
         msg,
         ui::Shell::admin("Sellers", "Sellers")
+            .trail(admin_trail("Sellers"))
             .subtitle("Approve listings and help sellers get ready to take payments"),
         Sections::Admin(AdminSection::Sellers),
         content,
@@ -1312,52 +1370,46 @@ pub async fn admin_seller_detail(
     } else {
         "Suspend seller"
     };
-    let action_class = if suspended {
-        "btn--primary"
-    } else {
-        "btn--secondary"
-    };
     let config = ui::script_json(&serde_json::json!({
         "action_url": format!("/b/products/api/admin/sellers/{seller_id}/{action}"),
         "action": action,
     }));
-    let content = html! {
-        p #seller-admin-error .login-error role="alert" aria-live="assertive" hidden {}
-        section .card {
-            header .card__head {
-                div {
-                    h2 .card__title { "Seller account" }
-                    p .text-muted .text-sm .text-subtitle { "Stripe verification and selling access" }
-                }
-                div .flex .gap-2 .items-center .flex-wrap {
-                    (components::status_badge(&commerce_wire(&seller.status)))
-                    button .btn .(action_class) .btn--sm type="button" data-seller-action=(action) data-action="psa-set-state" { (action_label) }
-                }
-            }
-            div .card__body {
-                (components::stat_row(vec![
-                    components::Stat::new("Payments", if seller.capabilities.charges_enabled { "Enabled" } else { "Disabled" }),
-                    components::Stat::new("Payouts", if seller.capabilities.payouts_enabled { "Enabled" } else { "Disabled" }),
-                    components::Stat::new("Verification", if seller.capabilities.details_submitted { "Complete" } else { "Incomplete" }),
-                    components::Stat::new("Platform fee", &fee.map_or_else(|()| "Not configured".to_string(), |fee| fee_percent(fee.into()))),
-                ]))
-                details .products-plain-details {
-                    summary { "Technical account details" }
-                    div .text-sm {
-                        p { strong { "Local account ID: " } code { (&seller.id) } }
-                        p { strong { "Stripe account: " } @if seller.stripe_account_id.is_empty() { "Not connected" } @else { code { (&seller.stripe_account_id) } } }
-                        @if !seller.disabled_reason.is_empty() { p { strong { "Disabled reason: " } (friendly_requirement(&seller.disabled_reason)) } }
-                    }
-                }
-                @if !seller.sync_error.is_empty() { p .login-error { "Stripe connection: " (&seller.sync_error) } }
-                h3 .products-subheading { "What this seller still needs to do" }
-                @if seller.capabilities.requirements_due.is_empty() {
-                    p .text-muted .text-sm { "Nothing — Stripe has no outstanding requirements." }
-                } @else {
-                    ul { @for requirement in &seller.capabilities.requirements_due { li { (friendly_requirement(requirement)) } } }
-                }
+    let fee_label = fee.map_or_else(
+        |()| "Not configured".to_string(),
+        |fee| fee_percent(fee.into()),
+    );
+    let account = html! {
+        details .products-plain-details .mt-0 {
+            summary { "Technical account details" }
+            div .text-sm {
+                p { strong { "Local account ID: " } code { (&seller.id) } }
+                p { strong { "Stripe account: " } @if seller.stripe_account_id.is_empty() { "Not connected" } @else { code { (&seller.stripe_account_id) } } }
+                @if !seller.disabled_reason.is_empty() { p { strong { "Disabled reason: " } (friendly_requirement(&seller.disabled_reason)) } }
             }
         }
+        @if !seller.sync_error.is_empty() { p .login-error .products-provider-note { "Stripe connection: " (&seller.sync_error) } }
+        h3 .products-subheading { "What this seller still needs to do" }
+        @if seller.capabilities.requirements_due.is_empty() {
+            p .text-muted .text-sm { "Nothing — Stripe has no outstanding requirements." }
+        } @else {
+            ul { @for requirement in &seller.capabilities.requirements_due { li { (friendly_requirement(requirement)) } } }
+        }
+    };
+    // The page is about this seller's account, so its state is the header's
+    // status and its one control the header's action: reactivating a
+    // suspended seller is the page's primary, suspending one a secondary
+    // (its script confirms first).
+    let content = html! {
+        p #seller-admin-error .login-error role="alert" aria-live="assertive" hidden {}
+        (components::stat_row(vec![
+            components::Stat::new("Payments", if seller.capabilities.charges_enabled { "Enabled" } else { "Disabled" }),
+            components::Stat::new("Payouts", if seller.capabilities.payouts_enabled { "Enabled" } else { "Disabled" }),
+            components::Stat::new("Verification", if seller.capabilities.details_submitted { "Complete" } else { "Incomplete" }),
+            components::Stat::new("Platform fee", &fee_label),
+        ]))
+        (components::Card::titled("Seller account", account)
+            .subtitle("Stripe verification and selling access")
+            .render())
         section .products-section {
             (components::section_header("Owned products", None))
             @if products.truncated {
@@ -1367,28 +1419,37 @@ pub async fn admin_seller_detail(
                 (components::empty_state(icons::package(), "No products", "This seller has not created any products.", None))
             } @else {
                 @let row_hrefs: Vec<String> = products.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
-                @let cols = [
-                    components::TableCol::new("Product").primary(),
-                    components::TableCol::new("Status"),
-                    components::TableCol::new("Approval"),
-                    components::TableCol::new("Updated"),
-                ];
                 @let rows: Vec<Vec<Markup>> = products.rows.iter().map(|product| vec![
-                    html! { (product.str_field("name")) },
+                    html! {
+                        (product.str_field("name"))
+                        span .commerce-table__meta { "Updated " (components::timestamp(product.str_field("updated_at"))) }
+                    },
                     components::status_badge(product.str_field("status")),
                     components::status_badge(product.str_field("approval_status")),
                     components::timestamp(product.str_field("updated_at")),
                 ]).collect();
-                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
+                div .commerce-table .commerce-table--owned {
+                    (components::data_table(&OWNED_PRODUCT_COLUMNS, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
+                }
             }
         }
         script { (maud::PreEscaped(format!("window.__sellerAdminConfig={config};"))) }
         script src=(assets::seller_admin_js_url()) {}
     };
+    let status = commerce_wire(&seller.status);
+    let set_state = HeaderAction::new(action_label, ActionTarget::Delegated("psa-set-state"))
+        .data("seller-action", action);
+    let shell =
+        ui::Shell::admin(&seller.user_id, &seller.user_id).status(HeaderStatus::status(&status));
+    let shell = if suspended {
+        shell.primary_action(set_state)
+    } else {
+        shell.secondary_action(set_state)
+    };
     products_page(
         ctx,
         msg,
-        ui::Shell::admin(&seller.user_id, &seller.user_id)
+        shell
             .trail(vec![
                 ui::shell::Crumb {
                     label: "Sellers",
@@ -2875,25 +2936,27 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
             (order_status_chips("/b/products/admin/purchases", &status_filter))
         }
         @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/purchases/{}", crate::util::url_path_encode(&record.id))).collect();
-        @let cols = [
-            components::TableCol::new("Order").primary(),
-            components::TableCol::new("Customer"),
-            components::TableCol::new("Status"),
-            components::TableCol::new("Total"),
-            components::TableCol::new("Placed"),
-        ];
         @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
             let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
             let buyer = if !r.str_field("buyer_email").is_empty() { r.str_field("buyer_email") } else if !r.str_field("buyer_user_id").is_empty() { r.str_field("buyer_user_id") } else { r.str_field("user_id") };
+            let customer = html! { @if buyer.is_empty() { "Guest" } @else { (components::breakable_id(buyer)) } };
             vec![
-                html! { code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) } },
-                html! { span .text-sm { @if buyer.is_empty() { "Guest" } @else { (components::breakable_id(buyer)) } } },
+                html! {
+                    code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) }
+                    span .commerce-table__meta {
+                        (components::status_badge(r.str_field("status"))) " "
+                        (customer) " · " (components::timestamp(r.str_field("created_at")))
+                    }
+                },
+                html! { span .text-sm { (customer) } },
                 components::status_badge(r.str_field("status")),
                 html! { span .font-medium { (amount) } },
                 components::timestamp(r.str_field("created_at")),
             ]
         }).collect();
-        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), order_list_empty(&status_filter, "Customer orders will appear here after checkout starts.")))
+        div .commerce-table .commerce-table--orders {
+            (components::data_table(&ORDER_COLUMNS, rows, Some(move |index| row_hrefs.get(index).cloned()), order_list_empty(&status_filter, "Customer orders will appear here after checkout starts.")))
+        }
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &base_href)) }
     };
 
@@ -2901,12 +2964,52 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ctx,
         msg,
         ui::Shell::admin("Orders", "Orders")
+            .trail(admin_trail("Orders"))
             .subtitle("Track payments, refunds, and customer orders"),
         Sections::Admin(AdminSection::Orders),
         content,
     )
     .await
 }
+
+/// Administration's order list. It narrows by its own width (table.css
+/// `.commerce-table--orders`): where five columns do not fit, the status,
+/// the customer and the date leave their columns for one line under the
+/// order (`.commerce-table__meta`), so the total keeps its room.
+///
+/// Column order is part of that rule, which hides the narrow layout's
+/// headers by position (`th:nth-child`): reorder both together.
+const ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Order").primary(),
+    components::TableCol::new("Customer"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Total"),
+    components::TableCol::new("Placed"),
+];
+
+/// A seller's order list. Narrow (table.css `.commerce-table--seller-orders`),
+/// the subscription and the date become the line under the buyer. Column
+/// order is part of that rule (headers hidden by position): reorder both
+/// together.
+const SELLER_ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Buyer").primary(),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Total"),
+    components::TableCol::new("Subscription"),
+    components::TableCol::new("Date"),
+];
+
+/// A buyer's purchases. Each row is titled by its order number, as the
+/// order's own page is; narrow (table.css `.commerce-table--purchases`), the
+/// provider and the date become the line under it. Column order is part of
+/// that rule (headers hidden by position): reorder both together.
+const PURCHASE_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Order").primary(),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Total"),
+    components::TableCol::new("Provider"),
+    components::TableCol::new("Date"),
+];
 
 /// The order statuses an order list can be narrowed to, with their labels.
 const ORDER_STATUSES: [(&str, &str); 6] = [
@@ -3019,44 +3122,71 @@ fn stripe_connection_card(status: &StripeConnectionStatus) -> Markup {
             "The configured Stripe credentials could not be validated.",
         ),
     };
-    html! {
-        section .card {
-            header .card__head {
-                div {
-                    h2 .card__title { "Connection" }
-                    p .text-muted .text-sm .text-subtitle { (summary) }
-                }
-                span #stripe-state .badge .(badge_class) { (state_label) }
+    let body = html! {
+        @if !status.error.is_empty() {
+            p #stripe-error .text-sm .text-danger .mt-0 {
+                (status.error)
             }
-            div .card__body {
-                @if !status.error.is_empty() {
-                    p #stripe-error .text-sm .text-danger .mt-0 {
-                        (status.error)
-                    }
-                } @else {
-                    p #stripe-error .text-sm .text-muted .mt-0 {}
-                }
-                dl .products-status-list {
-                    div { dt { "Payments" } dd { (capability_badge(status.charges_enabled)) } }
-                    div { dt { "Payouts" } dd { (capability_badge(status.payouts_enabled)) } }
-                    div { dt { "Default currency" } dd { (if status.default_currency.is_empty() { components::NO_VALUE } else { &status.default_currency }) } }
-                }
-                details .products-plain-details {
-                    summary { "Technical connection details" }
-                    div .text-sm {
-                        p { strong { "Stripe account: " } @if status.account_id.is_empty() { "Not connected" } @else { code { (&status.account_id) } } }
-                        p { strong { "Country: " } (if status.country.is_empty() { "—" } else { &status.country }) }
-                        p { strong { "API version: " } code { (&status.api_version) } }
-                    }
-                }
-                div .products-form-actions {
-                    button #stripe-test-button .btn .btn--secondary .btn--sm type="button" data-action="ps-test-connection" {
-                        "Test connection"
-                    }
-                }
+        } @else {
+            p #stripe-error .text-sm .text-muted .mt-0 {}
+        }
+        dl .products-status-list {
+            // The connection's state, which "Test connection" rewrites in
+            // place (products-stripe-setup.js): a row of the list rather
+            // than a badge in the card head, which holds only its action.
+            div { dt { "Status" } dd { span #stripe-state .badge .(badge_class) { (state_label) } } }
+            div { dt { "Payments" } dd { (capability_badge(status.charges_enabled)) } }
+            div { dt { "Payouts" } dd { (capability_badge(status.payouts_enabled)) } }
+            div { dt { "Default currency" } dd { (if status.default_currency.is_empty() { components::NO_VALUE } else { &status.default_currency }) } }
+        }
+        details .products-plain-details {
+            summary { "Technical connection details" }
+            div .text-sm {
+                p { strong { "Stripe account: " } @if status.account_id.is_empty() { "Not connected" } @else { code { (&status.account_id) } } }
+                p { strong { "Country: " } (if status.country.is_empty() { "—" } else { &status.country }) }
+                p { strong { "API version: " } code { (&status.api_version) } }
             }
         }
-    }
+    };
+    components::Card::titled("Connection", body)
+        .subtitle(summary)
+        .action(
+            Action::secondary(
+                "Test connection",
+                ActionTarget::Delegated("ps-test-connection"),
+            )
+            .id("stripe-test-button"),
+        )
+        .render()
+}
+
+/// One of the Stripe page's recovery tools: a flush card whose head is the
+/// tool's title and what it is for, then a toolbar (a status filter, its
+/// Refresh, and any action the tool takes), the live summary and error
+/// lines, and the list `products-stripe-setup.js` fills. The list is a
+/// `table.data-table` once it has rows, edge to edge in the flush card,
+/// whose frame it absorbs (layout rule 2); until then its text takes the
+/// card's inset (`card.css` `.products-ops__list`).
+fn stripe_ops_card(
+    id: &'static str,
+    title: &'static str,
+    subtitle: &'static str,
+    toolbar: Markup,
+    status_lines: Markup,
+    list: Markup,
+) -> Markup {
+    components::Card::titled(
+        title,
+        html! {
+            div .products-ops__bar { (toolbar) }
+            div .products-ops__status { (status_lines) }
+            (list)
+        },
+    )
+    .subtitle(subtitle)
+    .id(id)
+    .flush()
+    .render()
 }
 
 pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -3088,57 +3218,51 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
             ))
         }
         (stripe_connection_card(&status))
-        div .grid .grid-auto-320 .gap-4 .mt-4 {
-            section .card {
-                header .card__head { h2 .card__title { "Go-live checklist" } }
-                div .card__body {
-                    ul .products-checklist {
-                        (setup_check("Secret key", status.configured, "Stored server-side and never rendered back into this page."))
-                        (setup_check("Publishable key", status.publishable_key_configured, "Required by embedded Checkout and browser storefronts."))
-                        (setup_check("Webhook signing secret", status.webhook_secret_configured, "Required to verify Stripe event signatures and reject forged events."))
-                        (setup_check("Stripe account verification", connected && status.details_submitted, "Stripe must confirm the account details before live processing."))
-                        (setup_check("Charges enabled", connected && status.charges_enabled, "The platform account must be allowed to accept payments."))
-                    }
+        div .grid .grid-auto-320 .gap-4 .card-grid {
+            (components::Card::titled("Go-live checklist", html! {
+                ul .products-checklist {
+                    (setup_check("Secret key", status.configured, "Stored server-side and never rendered back into this page."))
+                    (setup_check("Publishable key", status.publishable_key_configured, "Required by embedded Checkout and browser storefronts."))
+                    (setup_check("Webhook signing secret", status.webhook_secret_configured, "Required to verify Stripe event signatures and reject forged events."))
+                    (setup_check("Stripe account verification", connected && status.details_submitted, "Stripe must confirm the account details before live processing."))
+                    (setup_check("Charges enabled", connected && status.charges_enabled, "The platform account must be allowed to accept payments."))
                 }
-            }
-            section .card {
-                header .card__head { h2 .card__title { "Webhook destination" } }
-                div .card__body {
-                    p .text-muted .text-sm { "Register this HTTPS route as a Stripe webhook destination:" }
-                    code .products-code-block { "/b/products/webhooks" }
-                    details .products-plain-details {
-                        summary { "Show required Stripe event types" }
-                        // The set `handle_webhook` dispatches on, not a
-                        // second copy of it: a type the block starts
-                        // handling is advertised here without anyone
-                        // remembering to add it, and one it stops handling
-                        // stops being advertised.
-                        ul .text-sm {
-                            @for event_type in StripeEventType::ALL {
-                                li { code { (util::wire_str(event_type)) } }
-                            }
+            }).render())
+            (components::Card::titled("Webhook destination", html! {
+                p .text-muted .text-sm .mt-0 { "Register this HTTPS route as a Stripe webhook destination:" }
+                code .products-code-block { "/b/products/webhooks" }
+                details .products-plain-details {
+                    summary { "Show required Stripe event types" }
+                    // The set `handle_webhook` dispatches on, not a
+                    // second copy of it: a type the block starts
+                    // handling is advertised here without anyone
+                    // remembering to add it, and one it stops handling
+                    // stops being advertised.
+                    ul .text-sm {
+                        @for event_type in StripeEventType::ALL {
+                            li { code { (util::wire_str(event_type)) } }
                         }
                     }
-                    p .text-muted .text-sm {
-                        "Use the signing secret Stripe assigns to this destination in Products Settings. Keep test and live destinations separate."
-                    }
                 }
-            }
+                p .text-muted .text-sm {
+                    "Use the signing secret Stripe assigns to this destination in Products Settings. Keep test and live destinations separate."
+                }
+            }).render())
         }
-        details .products-advanced {
-            summary { "Advanced: webhook delivery history" }
-            section #stripe-webhook-operations .card {
-            header .card__head {
-                div {
-                    h2 .card__title { "Webhook delivery health" }
-                    p .text-muted .text-sm .text-subtitle {
-                        "Review failed Stripe notifications and replay one after the underlying problem is fixed."
-                    }
-                }
-                div .flex .gap-2 .items-end .flex-wrap {
-                    label .text-sm for="stripe-webhook-filter" {
-                        "Status"
-                        select #stripe-webhook-filter data-action="ps-load-webhooks" .d-block .mt-1 {
+        // The recovery tools are for when something went wrong, so they are
+        // folded away; the fold is a plain disclosure on the page
+        // background, not a frame, so the cards it opens onto are not cards
+        // inside a card.
+        details .products-tools {
+            summary .products-tools__summary { "Advanced: webhook delivery history and Stripe recovery tools" }
+            (stripe_ops_card(
+                "stripe-webhook-operations",
+                "Webhook delivery health",
+                "Review failed Stripe notifications and replay one after the underlying problem is fixed.",
+                html! {
+                    div .form-group {
+                        label .form-label for="stripe-webhook-filter" { "Status" }
+                        select #stripe-webhook-filter .form-select data-action="ps-load-webhooks" {
                             option value="dead_letter" selected { "Needs manual review" }
                             option value="failed" { "Waiting to retry" }
                             option value="processing" { "Processing" }
@@ -3146,31 +3270,25 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             option value="" { "All events" }
                         }
                     }
-                    button .btn .btn--secondary .btn--sm type="button" data-action="ps-load-webhooks" { "Refresh" }
-                }
-            }
-            div .card__body {
-                p #stripe-webhook-summary .text-muted .text-sm aria-live="polite" .mt-0 {}
-                p #stripe-webhook-error .login-error role="alert" aria-live="assertive" hidden {}
-                div #stripe-webhook-events aria-live="polite" { "Loading webhook events…" }
-                noscript { p .text-muted .text-sm { "JavaScript is required to inspect and replay webhook deliveries." } }
-            }
-        }
-        }
-        details .products-advanced {
-            summary { "Advanced: Stripe recovery tools" }
-            section #stripe-provider-operations .card {
-            header .card__head {
-                div {
-                    h2 .card__title { "Provider reconciliation" }
-                    p .text-muted .text-sm .text-subtitle {
-                        "Retry incomplete Stripe updates and review any operation that could not recover automatically."
-                    }
-                }
-                div .flex .gap-2 .items-end .flex-wrap {
-                    label .text-sm for="stripe-provider-filter" {
-                        "Status"
-                        select #stripe-provider-filter data-action="ps-load-provider-ops" .d-block .mt-1 {
+                    (Action::secondary("Refresh", ActionTarget::Delegated("ps-load-webhooks")).render())
+                },
+                html! {
+                    p #stripe-webhook-summary .text-muted .text-sm aria-live="polite" {}
+                    p #stripe-webhook-error .login-error role="alert" aria-live="assertive" hidden {}
+                    noscript { p .text-muted .text-sm { "JavaScript is required to inspect and replay webhook deliveries." } }
+                },
+                html! {
+                    div #stripe-webhook-events .products-ops__list aria-live="polite" { "Loading webhook events…" }
+                },
+            ))
+            (stripe_ops_card(
+                "stripe-provider-operations",
+                "Provider reconciliation",
+                "Retry incomplete Stripe updates and review any operation that could not recover automatically.",
+                html! {
+                    div .form-group {
+                        label .form-label for="stripe-provider-filter" { "Status" }
+                        select #stripe-provider-filter .form-select data-action="ps-load-provider-ops" {
                             option value="dead_letter" selected { "Needs manual review" }
                             option value="failed" { "Waiting to retry" }
                             option value="pending" { "Pending" }
@@ -3179,18 +3297,21 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             option value="" { "All operations" }
                         }
                     }
-                    button #stripe-provider-reconcile .btn .btn--primary .btn--sm type="button" data-action="ps-reconcile" { "Reconcile due operations" }
-                    button .btn .btn--secondary .btn--sm type="button" data-action="ps-load-provider-ops" { "Refresh" }
-                }
-            }
-            div .card__body {
-                p #stripe-provider-summary .text-muted .text-sm aria-live="polite" .mt-0 {}
-                p #stripe-provider-reconcile-result .text-sm role="status" aria-live="polite" {}
-                p #stripe-provider-error .login-error role="alert" aria-live="assertive" hidden {}
-                div #stripe-provider-operations-list aria-live="polite" { "Loading provider operations…" }
-                noscript { p .text-muted .text-sm { "JavaScript is required to inspect and reconcile provider operations." } }
-            }
-        }
+                    (Action::secondary("Refresh", ActionTarget::Delegated("ps-load-provider-ops")).render())
+                    (Action::secondary("Reconcile due operations", ActionTarget::Delegated("ps-reconcile"))
+                        .id("stripe-provider-reconcile")
+                        .render())
+                },
+                html! {
+                    p #stripe-provider-summary .text-muted .text-sm aria-live="polite" {}
+                    p #stripe-provider-reconcile-result .text-sm role="status" aria-live="polite" {}
+                    p #stripe-provider-error .login-error role="alert" aria-live="assertive" hidden {}
+                    noscript { p .text-muted .text-sm { "JavaScript is required to inspect and reconcile provider operations." } }
+                },
+                html! {
+                    div #stripe-provider-operations-list .products-ops__list aria-live="polite" { "Loading provider operations…" }
+                },
+            ))
         }
         script src=(assets::stripe_setup_js_url()) {}
     };
@@ -3200,9 +3321,11 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Configure Stripe",
         ActionTarget::Link("/b/products/admin/settings"),
     );
-    let shell = ui::Shell::admin("Stripe setup", "Stripe setup").subtitle(
-        "Connect Stripe, confirm payment readiness, and review anything that needs attention",
-    );
+    let shell = ui::Shell::admin("Stripe setup", "Stripe setup")
+        .trail(admin_trail("Stripe setup"))
+        .subtitle(
+            "Connect Stripe, confirm payment readiness, and review anything that needs attention",
+        );
     let shell = if status.state == StripeConnectionState::NotConfigured {
         shell.primary_action(configure)
     } else {
@@ -3249,7 +3372,19 @@ fn friendly_requirement(requirement: &str) -> String {
         .join(" ")
 }
 
-fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u16) -> Markup {
+/// The seller's Stripe account as a card: its state, what it can do, what
+/// Stripe still needs, and the ways on (finish onboarding, open the Stripe
+/// dashboard, manage products).
+///
+/// `onboarding_primary` says whether finishing onboarding is the page's one
+/// primary action. It is on the seller dashboard, which is about selling;
+/// on Commerce the page's primary is "View purchases", so there it is a
+/// secondary.
+fn seller_status_card(
+    account: Option<&SellerAccount>,
+    fee_basis_points: u16,
+    onboarding_primary: bool,
+) -> Markup {
     let ready = account.is_some_and(|account| {
         account.capabilities.details_submitted
             && account.capabilities.charges_enabled
@@ -3258,15 +3393,20 @@ fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u16) ->
     });
     let suspended = account.is_some_and(|account| account.status == SellerStatus::Suspended);
     let has_account = account.is_some_and(|account| !account.stripe_account_id.is_empty());
-    html! {
-        section .card {
-            header .card__head {
-                div {
-                    h2 .card__title { "Stripe seller account" }
-                    p .text-muted .text-sm .text-subtitle {
-                        "Stripe hosts identity verification, payouts, and the Express dashboard."
-                    }
-                }
+    let onboarding_label = if has_account {
+        "Continue Stripe setup"
+    } else {
+        "Connect Stripe to sell"
+    };
+    let onboarding_target = ActionTarget::Delegated("pp-seller-onboarding");
+    let onboarding = if onboarding_primary {
+        Action::primary(onboarding_label, onboarding_target)
+    } else {
+        Action::secondary(onboarding_label, onboarding_target)
+    };
+    let body = html! {
+        dl .products-status-list .mt-0 {
+            div { dt { "Status" } dd {
                 @if suspended {
                     (components::badge(components::BadgeVariant::Danger, "Suspended"))
                 } @else if ready {
@@ -3276,48 +3416,43 @@ fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u16) ->
                 } @else {
                     (components::badge(components::BadgeVariant::Warning, "Not connected"))
                 }
+            } }
+            div { dt { "Charges" } dd { (capability_badge(account.is_some_and(|a| a.capabilities.charges_enabled))) } }
+            div { dt { "Payouts" } dd { (capability_badge(account.is_some_and(|a| a.capabilities.payouts_enabled))) } }
+            div { dt { "Platform fee" } dd { (fee_percent(fee_basis_points.into())) } }
+            div { dt { "Mode" } dd { @if account.is_some_and(|a| a.livemode) { "Live" } @else { "Test" } } }
+        }
+        @if let Some(account) = account {
+            @if !account.capabilities.requirements_due.is_empty() {
+                div .mt-4 {
+                    strong { "Information Stripe still needs" }
+                    ul .text-sm {
+                        @for requirement in &account.capabilities.requirements_due {
+                            li { (friendly_requirement(requirement)) }
+                        }
+                    }
+                }
             }
-            div .card__body {
-                dl .products-status-list {
-                    div { dt { "Charges" } dd { (capability_badge(account.is_some_and(|a| a.capabilities.charges_enabled))) } }
-                    div { dt { "Payouts" } dd { (capability_badge(account.is_some_and(|a| a.capabilities.payouts_enabled))) } }
-                    div { dt { "Platform fee" } dd { (fee_percent(fee_basis_points.into())) } }
-                    div { dt { "Mode" } dd { @if account.is_some_and(|a| a.livemode) { "Live" } @else { "Test" } } }
-                }
-                @if let Some(account) = account {
-                    @if !account.capabilities.requirements_due.is_empty() {
-                        div .mt-4 {
-                            strong { "Information Stripe still needs" }
-                            ul .text-sm {
-                                @for requirement in &account.capabilities.requirements_due {
-                                    li { (friendly_requirement(requirement)) }
-                                }
-                            }
-                        }
-                    }
-                    @if !account.disabled_reason.is_empty() {
-                        p .text-sm .text-danger { "Stripe restriction: " (friendly_requirement(&account.disabled_reason)) }
-                    }
-                    @if !account.sync_error.is_empty() {
-                        p .text-muted .text-sm { "Last refresh: " (account.sync_error) }
-                    }
-                }
-                div .flex .gap-3 .flex-wrap .mt-5 {
-                    @if !suspended && !ready {
-                        button .btn .btn--primary .btn--md type="button" data-action="pp-seller-onboarding" {
-                            @if has_account { "Continue Stripe setup" } @else { "Connect Stripe to sell" }
-                        }
-                    }
-                    @if !suspended && has_account {
-                        button .btn .btn--secondary .btn--md type="button" data-action="pp-seller-dashboard" {
-                            "Open Stripe dashboard"
-                        }
-                    }
-                    a .btn .btn--secondary .btn--md href="/b/products/my-products" { "Manage products" }
-                }
+            @if !account.disabled_reason.is_empty() {
+                p .text-sm .text-danger .products-provider-note { "Stripe restriction: " (friendly_requirement(&account.disabled_reason)) }
+            }
+            @if !account.sync_error.is_empty() {
+                p .text-muted .text-sm .products-provider-note { "Last refresh: " (account.sync_error) }
             }
         }
-    }
+        div .products-form-actions {
+            @if !suspended && !ready {
+                (onboarding.render())
+            }
+            @if !suspended && has_account {
+                (Action::secondary("Open Stripe dashboard", ActionTarget::Delegated("pp-seller-dashboard")).render())
+            }
+            (Action::secondary("Manage products", ActionTarget::Link("/b/products/my-products")).render())
+        }
+    };
+    components::Card::titled("Stripe seller account", body)
+        .subtitle("Stripe hosts identity verification, payouts, and the Express dashboard.")
+        .render()
 }
 
 pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -3415,31 +3550,26 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
     }
     let content = html! {
         div #commerce-portal-error .text-sm hidden .text-danger .mb-4 {}
+        // The callout explains the split; its own "View order history"
+        // link went, since "View purchases" below is the same destination
+        // and the page's one primary.
         (components::callout(
             components::CalloutTone::Info,
             "One commerce workspace",
             html! { p { "Purchases stay separate from products you sell, so it is always clear whether you are buying or managing a storefront." } },
-            Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/my-purchases" { "View order history" } }),
+            None,
         ))
         (components::stat_row(commerce_stats))
-        section .card .mt-4 {
-            header .card__head {
-                div {
-                    h2 .card__title { "Purchases and subscriptions" }
-                    p .text-muted .text-sm .text-subtitle {
-                        "Review orders here. Stripe's secure Billing Portal handles saved payment methods, invoices, and subscription changes."
-                    }
-                }
+        (components::Card::titled("Purchases and subscriptions", html! {
+            div .products-actions {
+                (Action::primary("View purchases", ActionTarget::Link("/b/products/my-purchases")).render())
+                (Action::secondary("Manage billing", ActionTarget::Delegated("pp-buyer-billing")).render())
             }
-            div .card__body .flex .gap-3 .flex-wrap {
-                a .btn .btn--primary .btn--md href="/b/products/my-purchases" { "View purchases" }
-                button .btn .btn--secondary .btn--md type="button" data-action="pp-buyer-billing" { "Manage billing" }
-            }
-        }
+        })
+        .subtitle("Review orders here. Stripe's secure Billing Portal handles saved payment methods, invoices, and subscription changes.")
+        .render())
         @if seller_enabled {
-            div .mt-4 {
-                (seller_status_card(seller_account.as_ref(), fee_basis_points))
-            }
+            (seller_status_card(seller_account.as_ref(), fee_basis_points, false))
         }
         script src=(assets::commerce_portal_js_url()) {}
     };
@@ -3534,7 +3664,7 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
     };
     let content = html! {
         div #commerce-portal-error .text-sm hidden .text-danger .mb-4 {}
-        (seller_status_card(account.as_ref(), fee_basis_points))
+        (seller_status_card(account.as_ref(), fee_basis_points, true))
         (analytics_section(&analytics, "Your sales by currency", true))
         (seller_failures_section(&failures))
         script src=(assets::commerce_portal_js_url()) {}
@@ -3569,7 +3699,7 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Ok(Some(account)) => account,
         Ok(None) => {
             let content = html! {
-                (components::empty_state(icons::link(), "Connect Stripe first", "Complete seller setup before accepting and reviewing seller orders.", Some(html! { a .btn .btn--primary .btn--md href="/b/products/selling" { "Open seller setup" } })))
+                (components::empty_state(icons::link(), "Connect Stripe first", "Complete seller setup before accepting and reviewing seller orders.", Some(Action::primary("Open seller setup", ActionTarget::Link("/b/products/selling")).render())))
             };
             return products_page(
                 ctx,
@@ -3628,21 +3758,25 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
             (order_status_chips("/b/products/selling/orders", &status_filter))
         }
         @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/selling/orders/{}", crate::util::url_path_encode(&record.id))).collect();
-        @let cols = [
-            components::TableCol::new("Buyer").primary(),
-            components::TableCol::new("Status"),
-            components::TableCol::new("Total"),
-            components::TableCol::new("Subscription"),
-            components::TableCol::new("Date"),
-        ];
-        @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| vec![
-            html! { (components::breakable_id(if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") })) },
-            components::status_badge(order.str_field("status")),
-            html! { span .font-medium { (display_money(order.i64_field("total_cents"), order.str_field("currency"))) } },
-            html! { @if order.str_field("stripe_subscription_id").is_empty() { span .text-muted { (components::NO_VALUE) } } @else { (components::status_badge(order.str_field("subscription_status"))) } },
-            components::timestamp(order.str_field("created_at")),
-        ]).collect();
-        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), order_list_empty(&status_filter, "Orders for your products will appear here after a customer checks out.")))
+        @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| {
+            let subscribed = !order.str_field("stripe_subscription_id").is_empty();
+            vec![
+                html! {
+                    (components::breakable_id(if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") }))
+                    span .commerce-table__meta {
+                        (components::timestamp(order.str_field("created_at")))
+                        @if subscribed { " · Subscription " (order.str_field("subscription_status").replace('_', " ")) }
+                    }
+                },
+                components::status_badge(order.str_field("status")),
+                html! { span .font-medium { (display_money(order.i64_field("total_cents"), order.str_field("currency"))) } },
+                html! { @if subscribed { (components::status_badge(order.str_field("subscription_status"))) } @else { span .text-muted { (components::NO_VALUE) } } },
+                components::timestamp(order.str_field("created_at")),
+            ]
+        }).collect();
+        div .commerce-table .commerce-table--seller-orders {
+            (components::data_table(&SELLER_ORDER_COLUMNS, rows, Some(move |index| row_hrefs.get(index).cloned()), order_list_empty(&status_filter, "Orders for your products will appear here after a customer checks out.")))
+        }
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &base_href)) }
     };
     products_page(
@@ -3655,6 +3789,56 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
     )
     .await
 }
+
+/// An order's line items. Narrow (table.css `.commerce-table--items`), the
+/// quantity and unit price become the line under the item. Column order is
+/// part of that rule (headers hidden by position): reorder both together.
+const ITEM_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Item").primary(),
+    components::TableCol::new("Quantity"),
+    components::TableCol::new("Unit"),
+    components::TableCol::new("Total"),
+    components::TableCol::new("Configuration"),
+];
+
+/// An order's refunds, each titled by its amount. Narrow (table.css
+/// `.commerce-table--refunds`), the date and Stripe's refund id become the
+/// line under it. Column order is part of that rule (headers hidden by
+/// position): reorder both together.
+const REFUND_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Amount").primary(),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Note"),
+    components::TableCol::new("Date"),
+    components::TableCol::new("Provider refund"),
+];
+
+/// A dispute's reason as a label: Stripe sends a snake_case code
+/// (`product_not_received`), shown as a sentence-case phrase ("Product not
+/// received") so it reads, and wraps, like the rest of the row.
+fn dispute_reason(code: &str) -> String {
+    if code.is_empty() {
+        return "Not supplied".to_string();
+    }
+    let words = code.replace('_', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => words,
+    }
+}
+
+/// An order's disputes, each titled by its amount. Narrow (table.css
+/// `.commerce-table--disputes`), the evidence deadline and Stripe's dispute
+/// id become the line under it. Column order is part of that rule (headers
+/// hidden by position): reorder both together.
+const DISPUTE_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Amount").primary(),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Reason"),
+    components::TableCol::new("Evidence due"),
+    components::TableCol::new("Provider dispute"),
+];
 
 #[derive(Clone, Copy)]
 enum OrderPageAccess {
@@ -3861,7 +4045,7 @@ async fn order_detail(
     };
     let title = format!("Order #{}", purchase.id.get(..8).unwrap_or(&purchase.id));
     let content = html! {
-        p .text-muted .mt-0 { "Placed " (components::timestamp(purchase.str_field("created_at"))) }
+        p .text-muted .mt-0 .mb-4 { "Placed " (components::timestamp(purchase.str_field("created_at"))) }
         div #order-detail-error .login-error hidden {}
         (components::stat_row(vec![
             components::Stat::new("Total", &display_money(purchase.i64_field("total_cents"), currency)),
@@ -3869,78 +4053,79 @@ async fn order_detail(
             components::Stat::new("Customer", if buyer.is_empty() { "Guest" } else { buyer }),
             components::Stat::new("Items", &line_items.len().to_string()),
         ]))
-        details .products-plain-details {
-            summary { "View order total breakdown" }
-            div .products-form-grid .products-form-grid--compact .text-sm {
-                p { strong { "Subtotal: " } (display_money(purchase.i64_field("subtotal_cents"), currency)) }
-                p { strong { "Discount: " } (display_money(purchase.i64_field("discount_cents"), currency)) }
-                p { strong { "Tax: " } (display_money(purchase.i64_field("tax_cents"), currency)) }
-                p { strong { "Shipping: " } (display_money(purchase.i64_field("shipping_cents"), currency)) }
-                p { strong { "Platform fee: " } (display_money(purchase.i64_field("platform_fee_cents"), currency)) }
-            }
-        }
-        details .products-advanced {
-            summary { "Order timeline" }
-            div .products-advanced__body .products-form-grid {
-                @for (label, value) in [
-                    ("Order created", purchase.str_field("created_at")),
-                    ("Payment recorded", purchase.str_field("payment_at")),
-                    ("Approved", purchase.str_field("approved_at")),
-                    ("Refund updated", purchase.str_field("refunded_at")),
-                    ("Subscription synced", purchase.str_field("subscription_last_synced_at")),
-                    ("Subscription canceled", purchase.str_field("subscription_canceled_at")),
-                ] {
-                    @if !value.is_empty() {
-                        div { p .text-muted .text-sm .m-0 { (label) } strong .text-sm { (components::timestamp(value)) } }
+        div .grid .grid-auto-280 .gap-4 .card-grid {
+            (components::Card::titled("Totals", html! {
+                dl .products-status-list .mt-0 {
+                    @for (label, amount) in [
+                        ("Subtotal", "subtotal_cents"),
+                        ("Discount", "discount_cents"),
+                        ("Tax", "tax_cents"),
+                        ("Shipping", "shipping_cents"),
+                        ("Platform fee", "platform_fee_cents"),
+                    ] {
+                        div { dt { (label) } dd { (display_money(purchase.i64_field(amount), currency)) } }
                     }
                 }
-            }
-        }
-        section .card .mt-4 {
-            header .card__head { h2 .card__title { "Items" } }
-            div .card__body {
-                @if line_items.is_empty() {
-                    p .text-muted { "No line-item snapshot is available for this order." }
-                } @else {
-                    @let cols = [
-                        components::TableCol::new("Item"),
-                        components::TableCol::new("Quantity"),
-                        components::TableCol::new("Unit"),
-                        components::TableCol::new("Total"),
-                        components::TableCol::new("Configuration"),
-                    ];
-                    @let rows: Vec<Vec<Markup>> = line_items.iter().map(|item| {
-                        // `input_snapshot` is a JSON object encoded into a
-                        // `TEXT` column, so it arrives as the encoded string
-                        // on every backend. `json_text_field` renders that,
-                        // and a decoded value too.
-                        let snapshot = item.json_text_field("input_snapshot");
-                        vec![
-                            html! { strong { (item.str_field("product_name")) } },
-                            html! { (item.i64_field("quantity")) },
-                            html! { (display_money(item.i64_field("unit_amount_minor"), currency)) },
-                            html! { strong { (display_money(item.i64_field("total_minor"), currency)) } },
-                            html! { @if snapshot.is_empty() || snapshot == "{}" { span .text-muted { "—" } } @else { details { summary { "View" } code .text-sm { (snapshot) } } } },
-                        ]
-                    }).collect();
-                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
+            }).render())
+            (components::Card::titled("Timeline", html! {
+                dl .products-status-list .mt-0 {
+                    @for (label, value) in [
+                        ("Order created", purchase.str_field("created_at")),
+                        ("Payment recorded", purchase.str_field("payment_at")),
+                        ("Approved", purchase.str_field("approved_at")),
+                        ("Refund updated", purchase.str_field("refunded_at")),
+                        ("Subscription synced", purchase.str_field("subscription_last_synced_at")),
+                        ("Subscription canceled", purchase.str_field("subscription_canceled_at")),
+                    ] {
+                        @if !value.is_empty() {
+                            div { dt { (label) } dd { (components::timestamp(value)) } }
+                        }
+                    }
                 }
-            }
+            }).render())
         }
-        div .grid .grid-auto-280 .gap-4 .mt-4 {
-            section .card {
-                header .card__head { h2 .card__title { "Buyer and checkout" } }
-                div .card__body .text-sm {
-                    p { strong { "Buyer: " } (if buyer.is_empty() { "Guest" } else { buyer }) }
-                    p { strong { "Presentation: " } (purchase.str_field("checkout_mode")) }
-                    p { strong { "Provider: " } (purchase.str_field("provider")) }
-                    p { strong { "Seller account: " } (if purchase.str_field("seller_account_id").is_empty() { "Platform" } else { purchase.str_field("seller_account_id") }) }
+        @let item_rows: Vec<components::TableRow> = line_items.iter().map(|item| {
+            // `input_snapshot` is a JSON object encoded into a
+            // `TEXT` column, so it arrives as the encoded string
+            // on every backend. `json_text_field` renders that,
+            // and a decoded value too.
+            let snapshot = item.json_text_field("input_snapshot");
+            let unit = display_money(item.i64_field("unit_amount_minor"), currency);
+            components::TableRow::new(vec![
+                html! {
+                    strong { (item.str_field("product_name")) }
+                    span .commerce-table__meta { (item.i64_field("quantity")) " × " (unit) }
+                },
+                html! { (item.i64_field("quantity")) },
+                html! { (unit) },
+                html! { strong { (display_money(item.i64_field("total_minor"), currency)) } },
+                html! { @if snapshot.is_empty() || snapshot == "{}" { span .text-muted { "—" } } @else { details { summary { "View" } code .text-sm .cell-wrap { (snapshot) } } } },
+            ])
+        }).collect();
+        (components::Card::titled(
+            "Items",
+            html! {
+                div .commerce-table .commerce-table--items {
+                    (components::DataTable::new(&ITEM_COLUMNS)
+                        .rows(item_rows)
+                        .empty_note("No line-item snapshot is available for this order.")
+                        .render())
                 }
+            },
+        )
+        .flush()
+        .render())
+        (components::Card::titled("Buyer and checkout", html! {
+            div .text-sm {
+                p .mt-0 { strong { "Buyer: " } (if buyer.is_empty() { "Guest" } else { buyer }) }
+                p { strong { "Presentation: " } (purchase.str_field("checkout_mode")) }
+                p { strong { "Provider: " } (purchase.str_field("provider")) }
+                p { strong { "Seller account: " } (if purchase.str_field("seller_account_id").is_empty() { "Platform" } else { purchase.str_field("seller_account_id") }) }
             }
-            details .products-advanced .mt-0 {
+            details .products-plain-details {
                 summary { "Technical payment details" }
-                div .products-advanced__body .text-sm {
-                    h2 .details-heading { "Provider reconciliation" }
+                div .text-sm {
+                    h3 .products-subheading { "Provider reconciliation" }
                     p { strong { "State: " } (components::status_badge(purchase.str_field("reconciliation_status"))) }
                     @if !purchase.str_field("provider_payment_status").is_empty() {
                         p { strong { "Payment state: " } (components::status_badge(purchase.str_field("provider_payment_status"))) }
@@ -3965,98 +4150,99 @@ async fn order_detail(
                     }
                 }
             }
-        }
+        }).render())
         @if !purchase.str_field("stripe_subscription_id").is_empty() {
-            section .card .mt-4 {
-                header .card__head {
-                    div {
-                        h2 .card__title { "Subscription" }
-                        p .text-muted .text-sm .text-subtitle { code { (purchase.str_field("stripe_subscription_id")) } }
-                    }
-                    (components::status_badge(purchase.str_field("subscription_status")))
+            (components::Card::titled("Subscription", html! {
+                dl .products-status-list .mt-0 {
+                    div { dt { "Status" } dd { (components::status_badge(purchase.str_field("subscription_status"))) } }
+                    div { dt { "Subscription" } dd { code { (purchase.str_field("stripe_subscription_id")) } } }
+                    div { dt { "Current period ends" } dd { @if purchase.str_field("subscription_current_period_end").is_empty() { "Not reported yet" } @else { (components::timestamp(purchase.str_field("subscription_current_period_end"))) } } }
+                    div { dt { "Cancels at period end" } dd { (if purchase.bool_field("subscription_cancel_at_period_end") { "Yes" } else { "No" }) } }
+                    @if !purchase.str_field("subscription_canceled_at").is_empty() { div { dt { "Canceled" } dd { (components::timestamp(purchase.str_field("subscription_canceled_at"))) } } }
                 }
-                div .card__body {
-                    p .text-sm { strong { "Current period ends: " } @if purchase.str_field("subscription_current_period_end").is_empty() { "Not reported yet" } @else { (components::timestamp(purchase.str_field("subscription_current_period_end"))) } }
-                    p .text-sm { strong { "Cancels at period end: " } (if purchase.bool_field("subscription_cancel_at_period_end") { "Yes" } else { "No" }) }
-                    @if !purchase.str_field("subscription_canceled_at").is_empty() { p .text-sm { strong { "Canceled: " } (components::timestamp(purchase.str_field("subscription_canceled_at"))) } }
-                    @if matches!(access, OrderPageAccess::Buyer) && !purchase.str_field("stripe_customer_id").is_empty() {
-                        button .btn .btn--primary .btn--md type="button" data-action="pp-order-billing" { "Manage subscription and billing" }
+                // The buyer's page has no other primary: managing their
+                // subscription is what they come back to an order for.
+                @if matches!(access, OrderPageAccess::Buyer) && !purchase.str_field("stripe_customer_id").is_empty() {
+                    div .products-form-actions {
+                        (Action::primary("Manage subscription and billing", ActionTarget::Delegated("pp-order-billing")).render())
                     }
                 }
-            }
+            }).render())
         }
         @if !refunds.is_empty() {
-            section .card .mt-4 {
-                header .card__head { h2 .card__title { "Refund history" } }
-                div .card__body {
-                    @let cols = [
-                        components::TableCol::new("Status"),
-                        components::TableCol::new("Amount"),
-                        components::TableCol::new("Provider refund"),
-                        components::TableCol::new("Note"),
-                        components::TableCol::new("Date"),
-                    ];
-                    @let rows: Vec<Vec<Markup>> = refunds.iter().map(|refund| vec![
-                        components::status_badge(refund.str_field("status")),
-                        html! { (display_money(refund.i64_field("amount_minor"), currency)) },
-                        html! { code .text-sm { (refund.str_field("provider_refund_id")) } },
-                        html! { span .text-sm { (refund.str_field("note")) } },
-                        components::timestamp(refund.str_field("created_at")),
-                    ]).collect();
-                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
-                }
-            }
+            @let rows: Vec<Vec<Markup>> = refunds.iter().map(|refund| vec![
+                html! {
+                    strong { (display_money(refund.i64_field("amount_minor"), currency)) }
+                    span .commerce-table__meta { (components::timestamp(refund.str_field("created_at"))) " · " code .cell-wrap { (refund.str_field("provider_refund_id")) } }
+                },
+                components::status_badge(refund.str_field("status")),
+                html! { span .text-sm { (refund.str_field("note")) } },
+                components::timestamp(refund.str_field("created_at")),
+                html! { code .text-sm .cell-wrap { (refund.str_field("provider_refund_id")) } },
+            ]).collect();
+            (components::Card::titled(
+                "Refund history",
+                html! {
+                    div .commerce-table .commerce-table--refunds {
+                        (components::data_table(&REFUND_COLUMNS, rows, None::<fn(usize) -> Option<String>>, html! {}))
+                    }
+                },
+            )
+            .flush()
+            .render())
         }
         @if !disputes.is_empty() {
-            section .card .mt-4 {
-                header .card__head {
-                    div {
-                        h2 .card__title { "Payment disputes" }
-                        @if matches!(access, OrderPageAccess::Admin | OrderPageAccess::Seller) {
-                            p .text-muted .text-sm .text-subtitle { "Evidence, balance impact, and payout actions are managed in Stripe. This ledger mirrors signed provider events." }
+            @let rows: Vec<Vec<Markup>> = disputes.iter().map(|dispute| {
+                let due_by = dispute.str_field("evidence_due_by");
+                let due = html! { @if due_by.is_empty() { (components::NO_VALUE) } @else { (components::timestamp(due_by)) } };
+                vec![
+                    html! {
+                        strong { (display_money(dispute.i64_field("amount_minor"), dispute.str_field("currency"))) }
+                        span .commerce-table__meta {
+                            @if !due_by.is_empty() { "Evidence due " (components::timestamp(due_by)) " · " }
+                            code .cell-wrap { (dispute.str_field("provider_dispute_id")) }
                         }
+                    },
+                    components::status_badge(dispute.str_field("status")),
+                    html! { span .text-sm { (dispute_reason(dispute.str_field("reason"))) } },
+                    due,
+                    html! { code .text-sm .cell-wrap { (dispute.str_field("provider_dispute_id")) } },
+                ]
+            }).collect();
+            @let disputes_card = components::Card::titled(
+                "Payment disputes",
+                html! {
+                    div .commerce-table .commerce-table--disputes {
+                        (components::data_table(&DISPUTE_COLUMNS, rows, None::<fn(usize) -> Option<String>>, html! {}))
                     }
-                }
-                div .card__body {
-                    @let cols = [
-                        components::TableCol::new("Status"),
-                        components::TableCol::new("Amount"),
-                        components::TableCol::new("Reason"),
-                        components::TableCol::new("Evidence due"),
-                        components::TableCol::new("Provider dispute"),
-                    ];
-                    @let rows: Vec<Vec<Markup>> = disputes.iter().map(|dispute| vec![
-                        components::status_badge(dispute.str_field("status")),
-                        html! { strong { (display_money(dispute.i64_field("amount_minor"), dispute.str_field("currency"))) } },
-                        html! { span .text-sm { (if dispute.str_field("reason").is_empty() { "Not supplied" } else { dispute.str_field("reason") }) } },
-                        html! { @if dispute.str_field("evidence_due_by").is_empty() { (components::NO_VALUE) } @else { (components::timestamp(dispute.str_field("evidence_due_by"))) } },
-                        html! { code .text-sm { (dispute.str_field("provider_dispute_id")) } },
-                    ]).collect();
-                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
-                }
-            }
+                },
+            )
+            .flush();
+            @let disputes_card = if matches!(access, OrderPageAccess::Admin | OrderPageAccess::Seller) {
+                disputes_card.subtitle("Evidence, balance impact, and payout actions are managed in Stripe. This ledger mirrors signed provider events.")
+            } else {
+                disputes_card
+            };
+            (disputes_card.render())
         }
         @if refund_url.is_some() && refundable {
-            section .card .mt-4 {
-                header .card__head { h2 .card__title { "Create refund" } }
-                div .card__body {
-                    p .text-muted .text-sm { "Leave the amount blank to refund the complete remaining balance. Stripe refunds and proportional Connect fee/transfer reversals are requested before local success is recorded." }
-                    div .grid .grid-auto-240 .gap-4 {
-                        div .form-group { label .form-label for="order-refund-amount" { "Amount (" (currency) ")" } input #order-refund-amount .form-input type="text" inputmode="decimal" placeholder="Full remaining amount" {} }
-                        div .form-group { label .form-label for="order-refund-note" { "Private note" } textarea #order-refund-note .form-textarea maxlength="500" {} }
-                    }
-                    button .btn .btn--danger .btn--md type="button" data-action="po-submit-refund" { "Create refund" }
+            (components::Card::titled("Create refund", html! {
+                p .text-muted .text-sm .mt-0 { "Leave the amount blank to refund the complete remaining balance. Stripe refunds and proportional Connect fee/transfer reversals are requested before local success is recorded." }
+                div .grid .grid-auto-240 .gap-4 {
+                    div .form-group { label .form-label for="order-refund-amount" { "Amount (" (currency) ")" } input #order-refund-amount .form-input type="text" inputmode="decimal" placeholder="Full remaining amount" {} }
+                    div .form-group { label .form-label for="order-refund-note" { "Private note" } textarea #order-refund-note .form-textarea maxlength="500" {} }
                 }
-            }
+                (Action::danger("Create refund", ActionTarget::Delegated("po-submit-refund")).render())
+            }).render())
         }
         script { (maud::PreEscaped(format!("window.__orderDetailConfig={page_config};"))) }
         script src=(assets::commerce_portal_js_url()) {}
         script src=(assets::order_detail_js_url()) {}
     };
     let livemode = if purchase.bool_field("livemode") {
-        "live"
+        "Live mode"
     } else {
-        "test"
+        "Test mode"
     };
     let shell = sections
         .shell(&title)
@@ -4071,7 +4257,10 @@ async fn order_detail(
             },
         ])
         .status(HeaderStatus::status(purchase.str_field("status")))
-        .status(HeaderStatus::status(livemode));
+        .status(HeaderStatus::badge(
+            components::Badge::new(components::BadgeVariant::Secondary),
+            livemode,
+        ));
     products_page(ctx, msg, shell, sections, content).await
 }
 
@@ -4272,22 +4461,22 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let content = html! {
         @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-purchases/{}", crate::util::url_path_encode(&record.id))).collect();
-        @let cols = [
-            components::TableCol::new("Status"),
-            components::TableCol::new("Total"),
-            components::TableCol::new("Provider"),
-            components::TableCol::new("Date"),
-        ];
         @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
             let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
             vec![
+                html! {
+                    code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) }
+                    span .commerce-table__meta { (components::timestamp(r.str_field("created_at"))) " · " (r.str_field("provider")) }
+                },
                 components::status_badge(r.str_field("status")),
                 html! { span .font-medium { (amount) } },
                 html! { span .text-muted .text-sm { (r.str_field("provider")) } },
                 components::timestamp(r.str_field("created_at")),
             ]
         }).collect();
-        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), components::empty_state(icons::shopping_cart(), "No purchases yet", "Orders you place will appear here with their receipts.", None)))
+        div .commerce-table .commerce-table--purchases {
+            (components::data_table(&PURCHASE_COLUMNS, rows, Some(move |index| row_hrefs.get(index).cloned()), components::empty_state(icons::shopping_cart(), "No purchases yet", "Orders you place will appear here with their receipts.", None)))
+        }
         @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/my-purchases")) }
     };
 
@@ -4458,6 +4647,7 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ctx,
         msg,
         ui::Shell::admin("Products settings", "Settings")
+            .trail(admin_trail("Settings"))
             .subtitle("Set up payments and choose sensible defaults for new products"),
         Sections::Admin(AdminSection::Settings),
         content,

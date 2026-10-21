@@ -259,6 +259,14 @@
 .products-advanced__body { padding: var(--space-4); }
 .products-plain-details { margin-top: var(--space-3); }
 .products-plain-details > summary { cursor: pointer; color: var(--text-muted); font-size: var(--text-sm); font-weight: 600; }
+/* What a disclosure unfolds is mostly provider ids and event names: each
+   one unbroken word, so it breaks anywhere rather than run past a narrow
+   card. */
+.products-plain-details code { overflow-wrap: anywhere; }
+/* A line quoting what Stripe said about an account (a sync error, a
+   restriction): Stripe's messages name ids (`No such account: 'acct_…'`),
+   unbroken words that break anywhere rather than run past the card. */
+.products-provider-note { overflow-wrap: anywhere; }
 .products-checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); }
 .products-checklist__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); }
 .products-checklist__item p { margin: var(--space-1) 0 0; }
@@ -269,6 +277,10 @@
 .products-status-list > div:last-child { border-bottom: 0; }
 .products-status-list dt { color: var(--text-secondary); font-size: var(--text-sm); }
 .products-status-list dd { margin: 0; font-weight: 500; }
+/* A value may be an id (a subscription's): it breaks anywhere rather than
+   run past the card on a phone. A date keeps its line, and the label wraps
+   beside it instead. */
+.products-status-list dd code { overflow-wrap: anywhere; }
 /* Deleted-product "close manager" (blocks/products/pages.rs) -- ported from
    origin/main's inline `style="..."` attributes during the main merge,
    2026-09-02 (the guard `pages_carry_no_static_inline_styles` caught them). */
@@ -502,9 +514,6 @@
 .details-block--spaced { margin: var(--space-2) 0 var(--space-4); }
 .details-block--divider { border-top: 1px solid var(--border-color); margin-top: var(--space-5); padding-top: var(--space-5); }
 .summary-strong { font-weight: 600; }
-/* A compact heading inside a details body — smaller than the page's h2
- * default and flush with the content above it. */
-.details-heading { font-size: 1rem; margin-top: 0; }
 
 /* ===== Settings form (ui/settings_form.rs) =====
  * One card per section, then the Save row, on the page background; each

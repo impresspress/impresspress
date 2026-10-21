@@ -81,6 +81,16 @@
    no head, it is padded on every side like a framed card's content. */
 .card--flush .empty-note { padding: 0 var(--card-pad) var(--card-pad); }
 .card--flush > .card__body:first-child .empty-note { padding-top: var(--card-pad); }
+/* Cards side by side (`.card-grid`, with the `.grid` utilities): the grid's
+   gap spaces them, so their own bottom margin goes and the grid takes it
+   instead. */
+.card-grid { margin-bottom: var(--space-4); }
+.card-grid > .card { margin-bottom: 0; }
+/* A page with no `.page` gap (the products commerce pages) lays its blocks
+   out in flow, and a stat row sets no outer margin: a card or a card grid
+   after one sits the gap below it that a card leaves under the card above
+   it. */
+.stat-row + :is(.card, .card-grid) { margin-top: var(--space-4); }
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 
@@ -843,6 +853,35 @@
 .product-template-card input { margin-top: var(--space-1); }
 .product-template-card strong, .product-template-card span { grid-column: 2; }
 .product-template-card strong { margin: 0 !important; }
+/* The commerce pages (orders, sellers, Stripe, the seller dashboard) lay
+   their sections out in flow on the page background. A currency's
+   analytics (`analytics_currency`) are its heading, the stat row, the card
+   of other figures and the top products' card; the next currency sits a
+   section's gap below. */
+.products-currency + .products-currency { margin-top: var(--space-8); }
+/* The Stripe page's recovery tools: a disclosure on the page background
+   (not a frame, so the cards it opens onto are not inside one), its summary
+   a muted line with the cards a gap under it. */
+.products-tools > .products-tools__summary {
+	cursor: pointer; padding: var(--space-2) 0;
+	font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary);
+}
+.products-tools[open] > .products-tools__summary { margin-bottom: var(--space-3); }
+/* One recovery tool (`stripe_ops_card`), a flush card: its toolbar (the
+   status filter, Refresh, any action) and its live lines take the card's
+   inset, and so does the list until it holds a table, which then runs edge
+   to edge as the card's own (layout rule 2). */
+.products-ops__bar {
+	display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3);
+	padding: 0 var(--card-pad);
+}
+.products-ops__bar > .form-group { margin: 0; min-width: min(100%, 14rem); }
+.products-ops__status { padding: 0 var(--card-pad); }
+.products-ops__status > p { margin: var(--space-3) 0 0; }
+.products-ops__status > p:empty, .products-ops__status > p[hidden] { display: none; }
+.products-ops__list { margin-top: var(--space-4); padding: 0 var(--card-pad) var(--card-pad); font-size: var(--text-sm); color: var(--text-secondary); }
+.products-ops__list:has(> table) { padding: 0; }
+.products-ops__list > p { margin: 0; }
 @media (max-width: 760px) {
 	.products-guide { grid-template-columns: 1fr; }
 	.product-template-grid { grid-template-columns: 1fr; }

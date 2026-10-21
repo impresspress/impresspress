@@ -476,6 +476,10 @@ async fn the_sub_pages_are_titled_under_the_products_trail() {
         ("/b/products/admin/manage", "All products"),
         ("/b/products/admin/manage?view=deleted", "All products"),
         ("/b/products/admin/groups", "Groups"),
+        ("/b/products/admin/purchases", "Orders"),
+        ("/b/products/admin/sellers", "Sellers"),
+        ("/b/products/admin/stripe", "Stripe setup"),
+        ("/b/products/admin/settings", "Settings"),
     ] {
         let html = admin_page(&ctx, path).await;
         assert!(
@@ -690,5 +694,493 @@ fn the_offer_row_templates_fixture_is_what_the_page_renders() {
             super::super::pages::offer_row_templates().into_string()
         ),
         "{path} is out of date; write the expected text to it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The commerce pages: orders, sellers, Stripe, the seller dashboard
+// ---------------------------------------------------------------------------
+
+/// A page as `user` (or the admin, for `None`) asks for it in a browser.
+async fn page_as(ctx: &crate::test_support::TestContext, path: &str, user: Option<&str>) -> String {
+    match user {
+        None => admin_page(ctx, path).await,
+        Some(user) => {
+            let (resource, query) = path.split_once('?').unwrap_or((path, ""));
+            let (mut msg, input) = get_msg(resource, user);
+            for (k, v) in query.split('&').filter_map(|pair| pair.split_once('=')) {
+                msg.set_meta(format!("req.query.{k}"), v);
+            }
+            msg.set_meta("http.header.accept", "text/html");
+            output_to_html(dispatch(ctx, msg, input).await).await
+        }
+    }
+}
+
+fn record(
+    pairs: &[(&str, serde_json::Value)],
+) -> std::collections::HashMap<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
+/// The seller `seller_1` (account `seller_account_1`, onboarding) and a
+/// suspended `seller_3`, a pending listing, and six orders with line items:
+/// one with a subscription, a refund and a dispute, one failed seller order,
+/// and the long values the narrow table layouts exist for (an unbroken
+/// email, a long listing name, provider ids). Every date is fixed, so the
+/// pages render the same on every run.
+async fn commerce_ctx() -> crate::test_support::TestContext {
+    use serde_json::json;
+    let ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS", "250"),
+    ])
+    .await;
+    let when = json!("2026-10-01T10:00:00Z");
+    for (id, user, status, ready, reason) in [
+        ("seller_account_1", "seller_1", "onboarding", false, ""),
+        (
+            "seller_account_3",
+            "seller_3",
+            "suspended",
+            true,
+            "requirements.past_due",
+        ),
+    ] {
+        seed(&ctx, super::super::repo::seller_accounts::TABLE, id, record(&[
+            ("user_id", json!(user)), ("status", json!(status)),
+            ("stripe_account_id", json!(format!("acct_{id}"))),
+            ("details_submitted", json!(ready)), ("charges_enabled", json!(ready)), ("payouts_enabled", json!(false)),
+            ("requirements_json", json!(r#"{"currently_due":["individual.verification.document","external_account"]}"#)),
+            ("fee_basis_points", json!(250)), ("dashboard_type", json!("express")),
+            ("disabled_reason", json!(reason)),
+            (
+                "sync_error",
+                json!("No such account: 'acct_1NvQh2KZp7a9XyTqLongAccountIdentifier'"),
+            ),
+            ("created_at", when.clone()), ("updated_at", when.clone()),
+        ])).await;
+    }
+    // Through the repo (the table is the repo's to name), with the dates
+    // given, so they stay fixed.
+    super::super::repo::products::create(
+        &ctx,
+        record(&[
+            ("id", json!("prod_pending")),
+            (
+                "name",
+                json!("Microcrystalline-glazed ceramic mug with a very long listing title"),
+            ),
+            ("owner_id", json!("seller_1")),
+            ("created_by", json!("seller_1")),
+            ("owner_type", json!("user")),
+            ("status", json!("draft")),
+            ("approval_status", json!("pending")),
+            ("submitted_at", when.clone()),
+            ("currency", json!("NZD")),
+            ("slug", json!("prod-pending")),
+            ("created_at", when.clone()),
+            ("updated_at", when.clone()),
+        ]),
+    )
+    .await
+    .expect("seed the pending listing");
+    for (i, status) in [
+        "completed",
+        "partially_refunded",
+        "refunded",
+        "failed",
+        "pending",
+        "completed",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = format!("ord_{i}_8f2a6c1e9b7d4e0f");
+        super::super::repo::purchases::create(
+            &ctx,
+            record(&[
+                ("id", json!(&id)),
+                ("user_id", json!("buyer_1")),
+                ("buyer_user_id", json!("buyer_1")),
+                (
+                    "buyer_email",
+                    json!(if i == 1 {
+                        "someone.with.a.really.long.address@acme.co.nz"
+                    } else {
+                        "ana@example.com"
+                    }),
+                ),
+                ("status", json!(status)),
+                ("currency", json!(if i == 5 { "JPY" } else { "NZD" })),
+                // Large totals, the failed seller order's largest, so the order
+                // and failure tables need their narrow layouts at 721px in
+                // any font.
+                (
+                    "total_cents",
+                    json!(match i {
+                        3 => 12_345_678_901_i64,
+                        // JPY has no minor unit: the same figure.
+                        5 => 1_234_567,
+                        _ => 123_456_789,
+                    }),
+                ),
+                ("subtotal_cents", json!(1_200_000)),
+                ("tax_cents", json!(34_567)),
+                (
+                    "refunded_total_cents",
+                    json!(match i {
+                        1 => 200_000,
+                        2 => 123_456_789,
+                        _ => 0,
+                    }),
+                ),
+                ("platform_fee_cents", json!(3000)),
+                (
+                    "seller_account_id",
+                    json!(if i % 2 == 0 || i == 3 {
+                        "seller_account_1"
+                    } else {
+                        ""
+                    }),
+                ),
+                ("provider", json!("stripe")),
+                ("checkout_mode", json!("hosted")),
+                (
+                    "stripe_subscription_id",
+                    json!(if i == 0 {
+                        "sub_1NvQh2KZp7a9XyTqAbCdEfGh"
+                    } else {
+                        ""
+                    }),
+                ),
+                (
+                    "subscription_status",
+                    json!(if i == 0 { "active" } else { "" }),
+                ),
+                ("stripe_customer_id", json!("cus_1NvQh2KZp7a9XyTq")),
+                ("reconciliation_status", json!("reconciled")),
+                // The failed order's error quotes an id, as Stripe's do.
+                (
+                    "reconciliation_error",
+                    json!(if i == 3 {
+                        "No such customer: 'cus_1NvQh2KZp7a9XyTqAbCdEfGh'"
+                    } else {
+                        ""
+                    }),
+                ),
+                ("provider_payment_status", json!("succeeded")),
+                (
+                    "stripe_payment_intent_id",
+                    json!("pi_3NvQh2KZp7a9XyTq1abcdef"),
+                ),
+                (
+                    "provider_session_id",
+                    json!("cs_test_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"),
+                ),
+                ("created_at", when.clone()),
+                ("updated_at", when.clone()),
+                ("payment_at", when.clone()),
+            ]),
+        )
+        .await
+        .expect("seed an order");
+        super::super::repo::purchases::add_line_item(
+            &ctx,
+            record(&[
+                ("id", json!(format!("li_{i}"))),
+                ("purchase_id", json!(id)),
+                ("product_id", json!("prod_x")),
+                (
+                    "product_name",
+                    json!("Annual team plan with priority support"),
+                ),
+                ("quantity", json!(3)),
+                ("unit_amount_minor", json!(411_522)),
+                ("total_minor", json!(1_234_567)),
+                (
+                    "input_snapshot",
+                    json!(r#"{"seats":12,"region":"ap-southeast-2"}"#),
+                ),
+                ("created_at", when.clone()),
+                ("updated_at", when.clone()),
+            ]),
+        )
+        .await
+        .expect("seed a line item");
+    }
+    seed(
+        &ctx,
+        super::super::repo::refunds::TABLE,
+        "ref_1",
+        record(&[
+            ("purchase_id", json!(COMMERCE_ORDER)),
+            ("status", json!("succeeded")),
+            ("amount_minor", json!(200_000)),
+            ("provider_refund_id", json!("re_3NvQh2KZp7a9XyTq0abcdef")),
+            (
+                "note",
+                json!("Customer asked to downgrade two seats after the first invoice"),
+            ),
+            ("payment_intent_id", json!("pi_3NvQh2KZp7a9XyTq1abcdef")),
+            ("idempotency_key", json!("ui_0_200000")),
+            ("target_refunded_total_minor", json!(200_000)),
+            ("currency", json!("NZD")),
+            ("created_at", when.clone()),
+            ("updated_at", when.clone()),
+        ]),
+    )
+    .await;
+    seed(
+        &ctx,
+        super::super::repo::disputes::TABLE,
+        "dp_1",
+        record(&[
+            ("purchase_id", json!(COMMERCE_ORDER)),
+            ("seller_account_id", json!("seller_account_1")),
+            ("stripe_account_id", json!("acct_seller_account_1")),
+            ("provider_dispute_id", json!("dp_1NvQh2KZp7a9XyTq")),
+            ("payment_intent_id", json!("pi_3NvQh2KZp7a9XyTq1abcdef")),
+            ("status", json!("needs_response")),
+            ("amount_minor", json!(50_000)),
+            ("currency", json!("NZD")),
+            ("reason", json!("product_not_received")),
+            ("evidence_due_by", json!("2026-11-18T03:33:20+00:00")),
+            ("created_at", when.clone()),
+            ("updated_at", when.clone()),
+        ]),
+    )
+    .await;
+    // A second dispute with no evidence deadline, a large amount and a
+    // long dispute id.
+    seed(
+        &ctx,
+        super::super::repo::disputes::TABLE,
+        "dp_2",
+        record(&[
+            ("purchase_id", json!(COMMERCE_ORDER)),
+            ("seller_account_id", json!("seller_account_1")),
+            ("stripe_account_id", json!("acct_seller_account_1")),
+            (
+                "provider_dispute_id",
+                json!("du_1NvQh2KZp7a9XyTqAbCdEfGhIjKl"),
+            ),
+            ("payment_intent_id", json!("pi_3NvQh2KZp7a9XyTq1abcdef")),
+            ("status", json!("warning_needs_response")),
+            ("amount_minor", json!(123_456_789)),
+            ("currency", json!("NZD")),
+            ("reason", json!("incorrect_account_details")),
+            ("created_at", when.clone()),
+            ("updated_at", when.clone()),
+        ]),
+    )
+    .await;
+    ctx
+}
+
+/// The order [`commerce_ctx`] gives a subscription, a refund and a dispute.
+const COMMERCE_ORDER: &str = "ord_0_8f2a6c1e9b7d4e0f";
+
+/// Each commerce page, and who views it (`None` is the admin).
+const COMMERCE_PAGES: &[(&str, &str, Option<&str>)] = &[
+    ("overview", "/b/products/admin/", None),
+    ("orders", "/b/products/admin/purchases", None),
+    ("sellers", "/b/products/admin/sellers", None),
+    ("seller", "/b/products/admin/sellers/seller_account_1", None),
+    (
+        "order",
+        "/b/products/admin/purchases/ord_0_8f2a6c1e9b7d4e0f",
+        None,
+    ),
+    ("commerce", "/b/products/", Some("seller_1")),
+    ("purchases", "/b/products/my-purchases", Some("buyer_1")),
+    (
+        "purchase",
+        "/b/products/my-purchases/ord_0_8f2a6c1e9b7d4e0f",
+        Some("buyer_1"),
+    ),
+    ("selling", "/b/products/selling", Some("seller_1")),
+    (
+        "seller-orders",
+        "/b/products/selling/orders",
+        Some("seller_1"),
+    ),
+];
+
+/// Every commerce page shows at most one visible primary, holds no
+/// card-level surface inside a card (the analytics stat rows and the seller
+/// account's stats sit on the page background), and its headings descend
+/// from the one h1 without a jump.
+#[tokio::test]
+async fn the_commerce_pages_have_one_primary_and_no_card_inside_a_card() {
+    use crate::test_support::dom;
+
+    let ctx = commerce_ctx().await;
+    let mut pages: Vec<(&str, String)> = Vec::new();
+    for (name, path, user) in COMMERCE_PAGES {
+        pages.push((name, page_as(&ctx, path, *user).await));
+    }
+    pages.push(("stripe", admin_page(&ctx, "/b/products/admin/stripe").await));
+    pages.push((
+        "suspended",
+        admin_page(&ctx, "/b/products/admin/sellers/seller_account_3").await,
+    ));
+    pages.push((
+        "seller-order",
+        page_as(
+            &ctx,
+            &format!("/b/products/selling/orders/{COMMERCE_ORDER}"),
+            Some("seller_1"),
+        )
+        .await,
+    ));
+    pages.push((
+        "no-account",
+        page_as(&ctx, "/b/products/selling/orders", Some("buyer_1")).await,
+    ));
+    for (name, html) in &pages {
+        let primaries = dom::visible_primaries(html).0;
+        let expected: &[&str] = match *name {
+            "commerce" => &[r#"a.btn.btn--primary "View purchases""#],
+            "selling" => &[r#"button.btn.btn--primary "Continue Stripe setup""#],
+            "purchase" => &[r#"button.btn.btn--primary "Manage subscription and billing""#],
+            "suspended" => &[r#"button.btn.btn--primary "Reactivate seller""#],
+            "stripe" => &[r#"a.btn.btn--primary "Configure Stripe""#],
+            "no-account" => &[r#"a.btn.btn--primary "Open seller setup""#],
+            "overview" => &[r#"a.btn.btn--primary "New product""#],
+            _ => &[],
+        };
+        assert_eq!(primaries, expected, "{name}: {html}");
+        assert!(
+            dom::card_level_inside_card(html).is_empty(),
+            "{name}: {:?}",
+            dom::card_level_inside_card(html)
+        );
+        let outline = dom::heading_outline(html);
+        assert_eq!(
+            outline.iter().filter(|(level, _)| *level == 1).count(),
+            1,
+            "{name}: {outline:?}"
+        );
+        assert!(
+            outline.windows(2).all(|pair| pair[1].0 <= pair[0].0 + 1),
+            "{name}: {outline:?}"
+        );
+    }
+}
+
+/// The seller's admin page: the account's state is the header's status and
+/// its one control the header's action, a secondary "Suspend seller" for an
+/// active seller and the page's primary "Reactivate seller" for a suspended
+/// one; the four stats sit on the page background, above the account card.
+#[tokio::test]
+async fn the_seller_page_puts_its_state_and_control_in_the_header() {
+    let ctx = commerce_ctx().await;
+    let active = admin_page(&ctx, "/b/products/admin/sellers/seller_account_1").await;
+    assert!(
+        topbar_actions(&active).contains(r#"<span class="badge badge-info">onboarding</span>"#),
+        "{active}"
+    );
+    assert!(
+        topbar_actions(&active).contains(r#"<button data-seller-action="suspend" class="btn btn--secondary" type="button" data-action="psa-set-state">Suspend seller</button>"#),
+        "{active}"
+    );
+    let body = body(&active);
+    let stats = body.find(r#"<div class="stat-row">"#).expect("stat row");
+    let card = body
+        .find(r#"<h2 class="card__title">Seller account</h2>"#)
+        .expect("account card");
+    assert!(stats < card, "{body}");
+    let suspended = admin_page(&ctx, "/b/products/admin/sellers/seller_account_3").await;
+    assert!(
+        topbar_actions(&suspended).contains(r#"<button data-seller-action="reactivate" class="btn btn--primary" type="button" data-action="psa-set-state">Reactivate seller</button>"#),
+        "{suspended}"
+    );
+}
+
+/// The body of each commerce page as `admin-core-widths.spec.ts` mounts it
+/// in a real page to lay its tables out at nine widths: `main#content`'s
+/// contents, scripts removed (their URLs carry a content hash, and a mounted
+/// script would not run anyway), one `<!-- page: name -->` line before each.
+pub(super) async fn commerce_fixture() -> String {
+    let ctx = commerce_ctx().await;
+    let mut out = String::new();
+    for (name, path, user) in COMMERCE_PAGES {
+        let html = page_as(&ctx, path, *user).await;
+        let main = html
+            .split_once(r#"<main class="shell__body" id="content" tabindex="0">"#)
+            .and_then(|(_, rest)| rest.split_once("</main>"))
+            .map(|(main, _)| main)
+            .unwrap_or_else(|| panic!("{name}: no main#content\n{html}"));
+        let mut body = String::new();
+        let mut rest = main;
+        while let Some(start) = rest.find("<script") {
+            body.push_str(&rest[..start]);
+            let end =
+                rest[start..].find("</script>").expect("closed script") + start + "</script>".len();
+            rest = &rest[end..];
+        }
+        body.push_str(rest);
+        out.push_str(&format!("<!-- page: {name} -->\n{body}\n"));
+    }
+    out
+}
+
+/// `admin-core-widths.spec.ts` reads the commerce pages from a fixture file
+/// (the visual server has no orders, sellers or disputes, and writes nothing);
+/// this keeps that file what the pages render. To refresh it after a
+/// deliberate markup change, write `commerce_fixture()` to the path below.
+#[tokio::test]
+async fn the_commerce_fixture_is_what_the_pages_render() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../impresspress-web/tests/e2e/fixtures/commerce-pages.html"
+    );
+    let expected = commerce_fixture().await;
+    let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+    assert_eq!(
+        on_disk, expected,
+        "{path} is out of date; write the expected text to it"
+    );
+}
+
+/// An order page's header marks the payment mode as a neutral badge in
+/// words ("Test mode"), not the raw `test` as a status badge; a dispute's
+/// reason reads as a phrase; and Commerce's callout no longer repeats the
+/// page's one way to the purchases.
+#[tokio::test]
+async fn the_order_header_names_the_mode_and_a_dispute_reason_reads_as_words() {
+    let ctx = commerce_ctx().await;
+    let order = admin_page(
+        &ctx,
+        &format!("/b/products/admin/purchases/{COMMERCE_ORDER}"),
+    )
+    .await;
+    assert!(
+        topbar_actions(&order).contains(r#"<span class="badge badge-secondary">Test mode</span>"#),
+        "{order}"
+    );
+    let body = body(&order);
+    assert!(
+        body.contains(r#"<span class="text-sm">Product not received</span>"#),
+        "{body}"
+    );
+    assert!(!body.contains("product_not_received"), "{body}");
+    // No deadline: the line under the amount is the dispute id alone.
+    assert!(
+        body.contains(r#"<span class="commerce-table__meta"><code class="cell-wrap">du_1NvQh2KZp7a9XyTqAbCdEfGhIjKl</code></span>"#),
+        "{body}"
+    );
+    let commerce = page_as(&ctx, "/b/products/", Some("seller_1")).await;
+    assert!(!commerce.contains("View order history"), "{commerce}");
+    assert_eq!(
+        commerce
+            .matches(r#"href="/b/products/my-purchases""#)
+            .count(),
+        2,
+        "the Purchases section link and the one primary: {commerce}"
     );
 }
