@@ -30,7 +30,7 @@ async fn require_role_user_admin_and_bootstrap_token() {
 
     let admin = seed_user("admin@e.com")
         .display_name("A")
-        .role("admin")
+        .role(impresspress_core::blocks::auth::repo::users::InitialRole::Admin)
         .insert(ctx.as_ref())
         .await;
     let plain = seed_user("user@e.com")
@@ -48,9 +48,9 @@ async fn require_role_user_admin_and_bootstrap_token() {
 
     let svc = AuthServiceImpl;
 
-    // Admin's token meets Role::Admin. The role comes from the merged role
-    // resolution (`users.role` plus the roles table), not from the token's
-    // own `roles` claim, so a stale claim cannot grant admin.
+    // Admin's token meets Role::Admin. The role comes from the account's
+    // grants in the roles table, not from the token's own `roles` claim, so
+    // a stale claim cannot grant admin.
     let got = svc
         .require_role(&*ctx, &bearer(&admin_jwt), Role::Admin)
         .await

@@ -2897,8 +2897,8 @@ mod tests {
     }
 
     /// A body naming a column outside [`AdminUserPatch`]'s three fields
-    /// changes nothing: the whitelist is the type, so `role` and `email` are
-    /// not reachable from a `PATCH` at all.
+    /// changes nothing: the whitelist is the type, so a `role` key grants
+    /// nothing and `email` is not reachable from a `PATCH` at all.
     #[tokio::test]
     async fn admin_patch_ignores_columns_outside_the_whitelist() {
         let ctx = admin_ctx().await;
@@ -2916,7 +2916,13 @@ mod tests {
         let row = expect_ok(update_user_fields(&ctx, &msg, &id, &body).await);
 
         assert_eq!(row.name.as_deref(), Some("Renamed"), "name is writable");
-        assert_eq!(row.role, "user", "role is not an admin-writable field");
+        let roles: Vec<String> = user_roles::list_for_user(&ctx, &id)
+            .await
+            .expect("read the grants")
+            .into_iter()
+            .map(|g| g.role)
+            .collect();
+        assert_eq!(roles, ["user"], "a `role` key in a PATCH grants nothing");
         assert_eq!(
             row.email, "whitelist@example.com",
             "email is not an admin-writable field"

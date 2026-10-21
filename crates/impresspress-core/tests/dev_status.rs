@@ -9,19 +9,23 @@
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{
-    blocks::dev::{
-        contracts::StatusResponse,
-        control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
-        repo::{
-            self,
-            generations::{self, GenerationCause, GenerationStatus, NewGeneration},
-            runtime_state::{self, ActivationPhase, RuntimeState},
-            seed_info::{self, SeedInfo},
+    blocks::{
+        auth::repo::users::InitialRole,
+        dev::{
+            contracts::StatusResponse,
+            control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
+            repo::{
+                self,
+                generations::{self, GenerationCause, GenerationStatus, NewGeneration},
+                runtime_state::{self, ActivationPhase, RuntimeState},
+                seed_info::{self, SeedInfo},
+            },
+            test_support::{
+                dev_status, dev_with_accounts, fake_bypass_rules, signed_in_as, FakeControl,
+                FakeShell,
+            },
+            DevBlock, DevShared, RuntimeControl, ROUTES, WAFER_GUEST_VERSION,
         },
-        test_support::{
-            dev_status, dev_with_accounts, fake_bypass_rules, signed_in_as, FakeControl, FakeShell,
-        },
-        DevBlock, DevShared, RuntimeControl, ROUTES, WAFER_GUEST_VERSION,
     },
     test_support::{
         admin_msg, anon_msg, output_http_header, output_http_status, output_status, TestContext,
@@ -229,7 +233,7 @@ async fn status_follows_the_runtime_generation_as_it_is_bumped() {
 #[tokio::test]
 async fn status_is_admin_only() {
     let ctx = dev_with_accounts(FakeControl::new()).await;
-    let member = signed_in_as(&ctx, "user").await;
+    let member = signed_in_as(&ctx, InitialRole::User).await;
     assert_eq!(
         output_http_status(ctx.request(anon_msg("retrieve", "/b/dev/api/status")).await).await,
         401

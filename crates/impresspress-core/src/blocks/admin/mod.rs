@@ -656,20 +656,32 @@ crate::impresspress_feature_block! {
                 CollectionSchema::new(wrap_grants::TABLE),
             ])
             .grants(vec![
-                // Read-only, for both auth blocks: they read an account's
-                // role grants (`require_role`, a token mint) and write none.
-                // No sign-in grants a role; admin's IAM endpoints, running
-                // as this block, are the only writer.
+                // Read and append, for both auth blocks, and nothing else.
+                //
+                // Read: they read an account's role grants (`require_role`, a
+                // token mint). auth-ui's signup/login/refresh/OAuth-callback
+                // handlers call the shared `TokenGrant::resolve` helper
+                // directly (not via the framework `wafer-run/auth` service),
+                // so WRAP authorizes on their own node_id
+                // ("impresspress/auth-ui"); without the read every sign-in in
+                // the native server hits PermissionDenied on user_roles
+                // (surfaced as a real error by SB-3).
+                //
+                // Append: an account is created holding its first grant, in
+                // the account's own batch (`repo::users::insert_with_ops`) —
+                // `user` at signup (auth-ui, password and OAuth), `admin` for
+                // a bootstrapped admin (auth's `Init`, auth-ui's token
+                // redemption). An append-only insert cannot pick the row's
+                // id or timestamps, and they may not update, delete or
+                // re-point a grant: every change to an existing account's
+                // roles is admin's IAM endpoints', running as this block.
                 wafer_run::ResourceGrant::read(super::auth::AUTH_BLOCK_ID, user_roles::TABLE),
-                // auth-ui's signup/login/refresh/OAuth-callback handlers call
-                // the shared `TokenGrant::resolve` helper directly (not via
-                // the framework `wafer-run/auth` service), so WRAP authorizes
-                // on their own node_id ("impresspress/auth-ui"). Without this
-                // grant every sign-in in the native server hits
-                // PermissionDenied reading user_roles (surfaced as a real
-                // error by SB-3; previously swallowed into an empty roles
-                // list).
+                wafer_run::ResourceGrant::append(super::auth::AUTH_BLOCK_ID, user_roles::TABLE),
                 wafer_run::ResourceGrant::read(super::auth_ui::AUTH_UI_BLOCK_ID, user_roles::TABLE),
+                wafer_run::ResourceGrant::append(
+                    super::auth_ui::AUTH_UI_BLOCK_ID,
+                    user_roles::TABLE,
+                ),
                 // The pipeline router authenticates an API key by reading its
                 // user's roles (`blocks::auth::authenticate_api_key`), in the
                 // router's own context, on every request that carries one.
@@ -1594,7 +1606,7 @@ mod grant_tests {
     }
 
     #[test]
-    fn admin_block_grants_the_auth_blocks_read_only_on_user_roles() {
+    fn admin_block_grants_the_auth_blocks_read_and_append_on_user_roles() {
         // auth-ui's sign-in handlers call the shared `TokenGrant::resolve`
         // helper directly, so WRAP authorizes on their own node_id
         // ("impresspress/auth-ui"), not the framework `wafer-run/auth`
@@ -1603,9 +1615,10 @@ mod grant_tests {
         // `get_user_roles` swallowed the read error into an empty roles list;
         // SB-3 made it a real error (500 on login).
         //
-        // Read, and only read, for both auth blocks: no sign-in grants a
-        // role, so neither writes the table. A write grant here would let
-        // auth code mint role grants that only admin's IAM endpoints may.
+        // Both auth blocks create accounts, each with its first grant in the
+        // account's own batch, so each may append. Never a full write grant:
+        // that would let auth code update, delete or re-point existing
+        // grants, which only admin's IAM endpoints may.
         use super::super::{auth::AUTH_BLOCK_ID, auth_ui::AUTH_UI_BLOCK_ID};
         use crate::platform_state::user_roles;
 
@@ -1614,14 +1627,19 @@ mod grant_tests {
         let table = user_roles::TABLE;
 
         for grantee in [AUTH_BLOCK_ID, AUTH_UI_BLOCK_ID] {
-            let found: Vec<_> = grants
+            let mut found: Vec<_> = grants
                 .iter()
                 .filter(|g| g.grantee == grantee && g.resource == table)
+                .map(|g| g.write)
                 .collect();
-            assert!(
-                found.len() == 1 && found[0].write == wafer_block::GrantWrite::None,
-                "admin block must grant {grantee} exactly one read-only grant on \
-                 {table} — found: {found:?}"
+            found.sort_by_key(|w| format!("{w:?}"));
+            assert_eq!(
+                found,
+                [
+                    wafer_block::GrantWrite::Append,
+                    wafer_block::GrantWrite::None
+                ],
+                "admin block must grant {grantee} exactly read and append on {table}"
             );
         }
     }

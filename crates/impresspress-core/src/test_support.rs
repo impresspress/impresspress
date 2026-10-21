@@ -566,17 +566,19 @@ impl TestContext {
 
     /// Seed one `wafer_run__auth__users` row under a caller-chosen id.
     ///
-    /// The ONE raw-SQL users fixture in this crate (CLAUDE.md's test-fixture
-    /// exception). Ten test modules hand-wrote this same `INSERT` because
+    /// The one raw-SQL fixture for a CURRENT-schema users row (CLAUDE.md's
+    /// test-fixture exception); the migration upgrade tests also write users
+    /// rows by raw SQL, against the historical schemas they upgrade. Ten test
+    /// modules hand-wrote this same `INSERT` because
     /// `repo::users::insert` mints a UUID, while each of them needs the id
     /// its own authenticated `Message` — or a foreign key on another auth
     /// table — already names. Consolidating them keeps the users table's
     /// wire name and NOT NULL column set spelled in one place, which is what
     /// `tests/repo_door.rs` checks.
     ///
-    /// `email` is `{user_id}@example.com` and `display_name` is `user_id`;
-    /// the role is `"user"`, so a test that needs an admin sets it through
-    /// the repo afterwards.
+    /// `email` is `{user_id}@example.com` and `display_name` is `user_id`.
+    /// The account holds no role grant: a test that needs one stages it
+    /// through `platform_state::user_roles::assign`.
     pub async fn seed_auth_user(&self, user_id: &str) {
         self.seed_auth_user_verified(user_id, false).await;
     }
@@ -587,13 +589,12 @@ impl TestContext {
         wafer_core::clients::database::exec_raw(
             &self.fixture(),
             "INSERT INTO wafer_run__auth__users \
-             (id, email, display_name, role, email_verified, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (id, email, display_name, email_verified, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
             &[
                 serde_json::json!(user_id),
                 serde_json::json!(format!("{user_id}@example.com")),
                 serde_json::json!(user_id),
-                serde_json::json!("user"),
                 serde_json::json!(i64::from(email_verified)),
                 serde_json::json!("2026-01-01T00:00:00Z"),
                 serde_json::json!("2026-01-01T00:00:00Z"),
@@ -1393,13 +1394,18 @@ impl TestContext {
         self
     }
 
-    /// Seed an account that can sign in with `password`: a user row whose
-    /// inline role is `role`, and a password credential hashed by the
+    /// Seed an account that can sign in with `password`: a user row created
+    /// with the `role` grant, and a password credential hashed by the
     /// registered crypto block. Returns the user id.
     ///
     /// Staged as fixture data; the credential it yields is minted by
     /// [`Self::sign_in`], through the login route.
-    pub async fn seed_account(&self, email: &str, password: &str, role: &str) -> String {
+    pub async fn seed_account(
+        &self,
+        email: &str,
+        password: &str,
+        role: crate::blocks::auth::repo::users::InitialRole,
+    ) -> String {
         let fixture = self.fixture();
         let user = seed_user(email).role(role).insert(&fixture).await;
         let hash = wafer_core::clients::crypto::hash(&fixture, password)
@@ -3924,36 +3930,37 @@ impl TestContext {
 ///   `tests/auth/migrations_012_sessions_family.rs`: raw inserts against
 ///   historical schemas, before the later migrations run.
 ///
-/// Most cases want the same row: an unverified address with no verification
-/// token and no avatar, differing only in the email, the display name and
-/// the role. Those are the defaults.
+/// Most cases want the same account: an unverified address with no
+/// verification token and no avatar, created with the `user` grant,
+/// differing only in the email, the display name and the role. Those are the
+/// defaults.
 ///
 /// The insert is the real one, so a test still exercises the column set and
 /// the defaults the repo writes; only the fields nobody is asserting on are
 /// hidden. Anything a case does depend on it sets:
 ///
 /// ```ignore
-/// let user = seed_user("p@e.com").display_name("P").role("admin").insert(&ctx).await;
+/// let user = seed_user("p@e.com").display_name("P").role(InitialRole::Admin).insert(&ctx).await;
 /// let pending = seed_user("q@e.com").verification_token_hash(digest).insert(&ctx).await;
 /// ```
 pub struct SeedUser<'a> {
     email: &'a str,
     display_name: &'a str,
     avatar_url: Option<&'a str>,
-    role: &'a str,
+    role: crate::blocks::auth::repo::users::InitialRole,
     email_verified: bool,
     verification_token_hash: Option<String>,
 }
 
 /// A user to seed: `email`, a display name that defaults to the email, no
-/// avatar, the `user` role, an unverified address and no verification
+/// avatar, the `user` grant, an unverified address and no verification
 /// token. See [`SeedUser`].
 pub fn seed_user(email: &str) -> SeedUser<'_> {
     SeedUser {
         email,
         display_name: email,
         avatar_url: None,
-        role: "user",
+        role: crate::blocks::auth::repo::users::InitialRole::User,
         email_verified: false,
         verification_token_hash: None,
     }
@@ -3972,9 +3979,13 @@ impl<'a> SeedUser<'a> {
         self
     }
 
-    /// The inline `users.role` column — `"admin"` is what makes an account an
-    /// admin, not a `user_roles` row (see `repo::users::NewUser::role`).
-    pub fn role(mut self, role: &'a str) -> Self {
+    /// The grant the account is created with, written in its own batch as
+    /// production writes it (`repo::users::insert_with_ops`). A grant is the
+    /// whole of a role: [`InitialRole::Admin`] makes an admin, and removing
+    /// that grant later unmakes one.
+    ///
+    /// [`InitialRole::Admin`]: crate::blocks::auth::repo::users::InitialRole::Admin
+    pub fn role(mut self, role: crate::blocks::auth::repo::users::InitialRole) -> Self {
         self.role = role;
         self
     }
@@ -4001,10 +4012,10 @@ impl<'a> SeedUser<'a> {
                 email: self.email.to_string(),
                 display_name: self.display_name.to_string(),
                 avatar_url: self.avatar_url.map(str::to_string),
-                role: self.role.to_string(),
                 email_verified: self.email_verified,
                 verification_token_hash: self.verification_token_hash,
             },
+            self.role,
         )
         .await
         .unwrap_or_else(|e| panic!("seed user {}: {e:?}", self.email))

@@ -634,10 +634,6 @@ async fn resolve_user(
                     } else {
                         Some(info.avatar.clone())
                     },
-                    // Every new account is a `user`, as password signup
-                    // writes it: no sign-in grants a role, whatever address
-                    // the provider asserts.
-                    role: "user".to_string(),
                     // The policy flag, written exactly as `api::signup`
                     // writes it: the provider's assertion satisfies the
                     // policy, and so does a deployment that asks for no
@@ -648,34 +644,32 @@ async fn resolve_user(
                     email_verified: info.email_verified || !require_verification,
                     verification_token_hash: None,
                 };
-                // The initial role is the inline `users.role` that
-                // `get_user_roles` reads first; a `user_roles` row means a
-                // grant beyond it, so none is written at signup — the same
-                // rows password signup produces.
-                //
-                // The account, the link that is its only way in, and — when
-                // the provider asserted the address — the proof of it, in
-                // one atomic write. Written apart, a failure after the
-                // account left one with no link and no password; the next
-                // sign-in then met it down the email path above, and a
-                // provider that asserts nothing is refused adoption there
-                // for good.
+                // The account, its `user` grant, the link that is its only
+                // way in, and — when the provider asserted the address — the
+                // proof of it, in one atomic write. Every new account is a
+                // `user`, as password signup writes it: no sign-in grants a
+                // role, whatever address the provider asserts. Written
+                // apart, a failure after the account left one with no link
+                // and no password; the next sign-in then met it down the
+                // email path above, and a provider that asserts nothing is
+                // refused adoption there for good.
                 let proof = info.email_verified.then(|| users::proof::oauth(provider));
-                let inserted = users::insert_with_ops(ctx, new_user, |id| {
-                    let mut ops = vec![provider_links::create_op(provider_links::NewLink {
-                        provider,
-                        provider_ref: &info.provider_ref,
-                        user_id: id,
-                        provider_login: &info.provider_login,
-                    })];
-                    ops.extend(
-                        proof
-                            .as_deref()
-                            .map(|proof| users::record_email_proof_op(id, proof)),
-                    );
-                    ops
-                })
-                .await;
+                let inserted =
+                    users::insert_with_ops(ctx, new_user, users::InitialRole::User, |id| {
+                        let mut ops = vec![provider_links::create_op(provider_links::NewLink {
+                            provider,
+                            provider_ref: &info.provider_ref,
+                            user_id: id,
+                            provider_login: &info.provider_login,
+                        })];
+                        ops.extend(
+                            proof
+                                .as_deref()
+                                .map(|proof| users::record_email_proof_op(id, proof)),
+                        );
+                        ops
+                    })
+                    .await;
                 match inserted {
                     Ok(u) => (u.id, true),
                     Err(e) => return Err(crud::db_error_internal(e, "Failed to create user")),
@@ -1841,7 +1835,7 @@ mod security_regression_tests {
     // Role grants
     // ---------------------------------------------------------------
 
-    /// Whether `user_id` holds `admin`, on the row or as a grant.
+    /// Whether `user_id` holds an `admin` grant.
     async fn holds_admin(ctx: &TestContext, user_id: &str) -> bool {
         crate::blocks::auth::helpers::get_user_roles(ctx, user_id)
             .await
@@ -1852,8 +1846,8 @@ mod security_regression_tests {
 
     /// No OAuth sign-in grants admin, even for the configured bootstrap
     /// admin address with a provider asserting it: the first admin comes from
-    /// Init or a bootstrap token, never from a sign-in. A new account is a
-    /// `user`, on the row and with no grant.
+    /// Init or a bootstrap token, never from a sign-in. A new account is
+    /// created holding the `user` grant and nothing else.
     #[tokio::test]
     async fn an_asserted_bootstrap_admin_address_creates_a_plain_user() {
         let admin_email = "admin@example.com";
@@ -1881,10 +1875,12 @@ mod security_regression_tests {
             created.email_is_proven(),
             "precondition: Google asserted the address, so the account is proven"
         );
-        assert_eq!(created.role, "user");
-        assert!(
-            !holds_admin(&ctx, &created.id).await,
-            "an OAuth signup must not be granted admin"
+        assert_eq!(
+            crate::blocks::auth::helpers::get_user_roles(&ctx, &created.id)
+                .await
+                .expect("roles read ok"),
+            ["user"],
+            "an OAuth signup is created holding `user`, and is not granted admin"
         );
     }
 

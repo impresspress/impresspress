@@ -490,6 +490,15 @@ jobs:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
         run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test admin_blessed_hash -- --ignored --nocapture
 
+      # Auth migration 016 copies every inline `users.role` into a
+      # `user_roles` grant and drops the column, and the auth list re-runs
+      # cleanly over it. The SQLite half runs in the step above; this is the
+      # PostgreSQL half. It creates a database of its own per scenario.
+      - name: Auth migration 016 makes every role a grant on PostgreSQL
+        env:
+          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
+        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test auth_roles_are_grants -- --ignored --nocapture
+
   cloudflare:
     name: Cloudflare wasm32 check
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`

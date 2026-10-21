@@ -838,12 +838,8 @@
                               "null"
                             ]
                           },
-                          "role": {
-                            "description": "The account's own role (`\"user\"` by default). A signed-in session\nholds it alongside `roles`, which lists it only when the same role is\nalso granted.",
-                            "type": "string"
-                          },
                           "roles": {
-                            "description": "Roles granted to this user. Admins manage grants through\n`/b/admin/api/iam/user-roles`; no sign-in grants a role.",
+                            "description": "Every role this user holds — exactly the `roles` a session minted for\nthem carries. An account is created holding `user` (or `admin`, for a\nbootstrapped admin); admins manage grants through\n`/b/admin/api/iam/user-roles`, and no sign-in grants a role.",
                             "items": {
                               "type": "string"
                             },
@@ -860,7 +856,6 @@
                           "display_name",
                           "name",
                           "avatar_url",
-                          "role",
                           "roles",
                           "email_verified",
                           "disabled",

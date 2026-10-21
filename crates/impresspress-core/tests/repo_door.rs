@@ -365,7 +365,17 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
         &["platform_state/wrap_grants.rs", "cache_key.rs"],
     ),
     ("request_logs", &["platform_state/request_logs.rs"]),
-    ("user_roles", &["platform_state/user_roles.rs"]),
+    (
+        "user_roles",
+        &[
+            "platform_state/user_roles.rs",
+            // auth migration 016 copies roles into this table, and its
+            // ordering test asserts the error the `.sql` file's statement
+            // raises without admin's schema; reading the name back from the
+            // constant would make it tautological
+            "blocks/auth/migrations/mod.rs",
+        ],
+    ),
     // The files doors. Each is its own `repo/<module>.rs` and nothing else,
     // with one exception on the objects table: the WRAP-grant loader's
     // fixture seeds a grant whose target IS a table name on the wire, and
@@ -415,8 +425,8 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
             // files define; reading the name back from the constant they are
             // testing would make them tautological
             "blocks/auth/migrations/mod.rs",
-            // `seed_auth_user` — the ONE raw-SQL users fixture in the crate
-            // (a test needs a user under a caller-chosen id that its own
+            // `seed_auth_user` — the one raw-SQL fixture for a current-schema
+            // users row (a test needs a user under a caller-chosen id that its own
             // authenticated `Message` names; `users::insert` mints a UUID) —
             // plus the WRAP tests whose grant target IS the wire name
             "test_support.rs",
@@ -823,6 +833,10 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             "blocks/auth_ui/api/login.rs",
             "blocks/auth_ui/api/refresh.rs",
             "blocks/auth_ui/tests/error_mapping_tests.rs",
+            // A fault injector: the signup atomicity test fails the insert of
+            // the account's grant, the last write of its batch, so the
+            // account row must not survive it.
+            "blocks/auth_ui/api/signup.rs",
         ],
     ),
     (
