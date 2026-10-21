@@ -898,6 +898,32 @@ mod tests {
             );
         }
 
+        /// The whole revoke lands after the refresh claimed its token and
+        /// before it wrote the successor's row, so the revoke's refresh-row
+        /// revocation cannot reach the successor. The touch then finds no
+        /// row, and the refresh revokes the family itself, the successor
+        /// included, before it refuses. Left live, that row would read as the
+        /// family's current generation to the replay check, which would
+        /// report a replay of the old token as theft.
+        #[tokio::test]
+        async fn a_revoke_between_the_claim_and_the_successor_insert_revokes_the_successor() {
+            let d = two_devices().await;
+            let racing = AfterDbOpContext::new(
+                d.ctx.clone(),
+                "database.update_where_count",
+                tokens::TABLE,
+                revoke_b(&d),
+            );
+
+            let out = refresh_with(&racing, &d.b_refresh).await;
+            assert!(racing.fired(), "the revoke must land inside the refresh");
+            assert!(
+                output_is_error(out, "Unauthenticated").await,
+                "a refresh of a device revoked mid-rotation is refused"
+            );
+            b_is_gone(&d).await;
+        }
+
         /// The revoke lands after the refresh wrote its successor's row and
         /// before it touched the session row. The touch finds no row, so the
         /// refresh revokes the family and is refused. It used to re-insert the
