@@ -32,14 +32,16 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   narrow layouts are checked with seeded rows in
  *   `files-messages-pages.spec.ts` (`e2e:writes`).
  * - Products' catalog pages (overview, All products and its Deleted view,
- *   Groups, the wizard, My products), at every width from the phone to
+ *   Groups, the wizard), at every width from the phone to
  *   1280: no page scrolls sideways, no table scrolls inside its frame, and
  *   one primary is visible; the wizard's configurable pricing step and its
  *   shipping step fit their card, and the group editor's dialog fits the
  *   screen with its own one primary. This server's catalog is empty, so the
  *   product and group tables' narrow layouts (table.css `.product-table`,
  *   `.group-table`) are checked with seeded rows in `admin-products.spec.ts`
- *   (`e2e:writes`).
+ *   (`e2e:writes`). My products is left out: this server has seller
+ *   products off, so the page is a 403, and a refused request here would
+ *   reach the dashboard capture's client-error count.
  * The widths: 800 (the filter wraps; the database cards stack; the settings
  * rail is a tab row), and 960 and 1024 (the database cards side by side, the
  * Tables column at its narrowest). Writes nothing beyond the page loads'
@@ -271,7 +273,6 @@ test.describe('admin core pages at in-between widths', () => {
     '/b/products/admin/manage?view=deleted',
     '/b/products/admin/groups',
     '/b/products/admin/new',
-    '/b/products/my-products',
   ];
   /** What overflows, and the primaries a reader sees outside any dialog. */
   const layout = (page: Page) =>
