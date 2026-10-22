@@ -1285,7 +1285,7 @@ mod tests {
     /// every role change bumps the version, so a key that did would die
     /// whenever an admin edited its owner's roles. A key is revoked when its
     /// owner's password changes or is reset
-    /// (`auth::end_sessions_after_password_change`), not on a role change.
+    /// (`auth::end_credentials_after_password_change`), not on a role change.
     /// Driven through the production request path, so the key is checked the
     /// way a deployment checks it.
     #[tokio::test]

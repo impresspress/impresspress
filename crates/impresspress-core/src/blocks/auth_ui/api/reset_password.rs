@@ -5,7 +5,7 @@ use wafer_run::{context::Context, InputStream, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            end_sessions_after_password_change, hash_new_password,
+            end_credentials_after_password_change, hash_new_password,
             repo::{local_credentials, users},
         },
         auth_ui::contracts::MessageResponse,
@@ -109,7 +109,7 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     // session or key that survives is the attacker's. A reset whose sessions did not end must not
     // be answered as success, and it gives the link back: the retry writes
     // the same password again and ends the sessions this attempt could not.
-    if let Err(e) = end_sessions_after_password_change(ctx, &user.id).await {
+    if let Err(e) = end_credentials_after_password_change(ctx, &user.id).await {
         restore_token(ctx, &user.id, &token_hash, &user.reset_token_expires).await;
         return crud::db_error_internal(e, "Password reset but session invalidation failed");
     }

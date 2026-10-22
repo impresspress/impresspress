@@ -344,11 +344,16 @@ async fn api_key_revoke_denial_is_403_not_500() {
         .as_str()
         .expect("user id")
         .to_string();
+    // Signed in, as the pipeline leaves the request: the create checks the
+    // session again after it mints the key.
+    crate::test_support::seed_login_family(&ctx, &user_id, "keys-session").await;
+    let mut create = auth_msg("create", "/b/auth/api/api-keys", &user_id);
+    create.set_meta(crate::crypto::META_AUTH_FAMILY, "keys-session");
     let created = output_json(
         AuthUiBlock::default()
             .handle(
                 &ctx,
-                auth_msg("create", "/b/auth/api/api-keys", &user_id),
+                create,
                 InputStream::from_bytes(
                     serde_json::to_vec(&json!({"name": "ci"})).expect("serialize"),
                 ),

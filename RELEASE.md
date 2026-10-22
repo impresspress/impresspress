@@ -37,8 +37,11 @@ what it did happens on every native boot.
   owner's status, not the account's devices or sign-in version, so a key
   minted by whoever held the old password survived a password reset. A key
   revoked this way keeps its row, marked revoked (`revoked_at`) exactly as a
-  key revoked by hand is; create new keys after the change. An admin
-  changing a user's roles still leaves that user's keys alone.
+  key revoked by hand is; create new keys after the change. A key-creation
+  request that was already under way when the password changed is refused,
+  and the key it wrote is revoked: creating a key checks the session or key
+  that asked for it again once the key exists. An admin changing a user's
+  roles still leaves that user's keys alone.
 - **A change or reset that could not sign the devices out or revoke the keys
   answers an error,** not success. A reset gives the link back, so retrying it
   finishes the job. A change is retried by signing in with the new password

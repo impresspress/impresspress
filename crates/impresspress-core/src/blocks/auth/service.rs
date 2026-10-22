@@ -11,8 +11,10 @@
 //! `require_role(Admin)` additionally honours an unexpired bootstrap token
 //! presented as a Bearer, which is how the first admin is created.
 //!
-//! The session table is not a credential store: a row there is a login family
-//! for the userportal device list (B12), never something a request presents.
+//! The session table holds no credential a request presents. A row there is a
+//! login family (B12): a device on the userportal list, and the liveness every
+//! access token is checked against — a token whose family has no live row is
+//! refused ([`crate::crypto::verify_access_token`], SEC-02).
 //!
 //! No document states the cross-block contract; code does.
 //! [`crate::blocks::register_auth`] installs this impl behind wafer-core's
@@ -139,8 +141,8 @@ fn is_expired(expires_at: &str) -> bool {
 /// Internal credential classification used by all three require_* methods.
 enum Creds {
     /// A verified access JWT; the payload is its `sub`, already checked
-    /// against the signature, `type`, issuer, blocklist and `auth_version`
-    /// rules by [`crate::crypto::verify_access_token`].
+    /// against the signature, `type`, issuer, blocklist, login-family and
+    /// `auth_version` rules by [`crate::crypto::verify_access_token`].
     Jwt(String),
     /// A presented token that is not an access JWT, as the sha256 of the raw
     /// token — the lookup key in `wafer_run__auth__personal_access_tokens`.

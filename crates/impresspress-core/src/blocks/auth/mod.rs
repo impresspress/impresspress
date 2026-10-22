@@ -669,7 +669,7 @@ fn invalidate_auth_version_cache(user_id: &str) {
 /// the cache (or vice versa).
 ///
 /// The single call site for every security-relevant mutation: password
-/// change and reset ([`end_sessions_after_password_change`]), disable/soft-delete
+/// change and reset ([`end_credentials_after_password_change`]), disable/soft-delete
 /// (`admin::ops::{set_user_disabled,delete_user,update_user_fields}`), and
 /// role change (`admin::iam::{handle_assign_role,handle_remove_role,
 /// cascade_role_rename}` and `admin::ops::delete_role`).
@@ -733,7 +733,7 @@ pub(crate) async fn bump_auth_version(
 ///
 /// A reset gives the link back on an error, and the retry repeats every step;
 /// a change is retried by changing the password again.
-pub(crate) async fn end_sessions_after_password_change(
+pub(crate) async fn end_credentials_after_password_change(
     ctx: &dyn wafer_run::context::Context,
     user_id: &str,
 ) -> Result<(), WaferError> {
@@ -1993,6 +1993,54 @@ pub(crate) mod helpers {
     }
 }
 
+/// Meta key holding the id of the API key that authenticated the request.
+/// Set by [`authenticate_api_key`] and nowhere else — like the other `auth.*`
+/// meta it is written by the pipeline's credential step, never taken from the
+/// request — and read by [`presented_credential_is_live`].
+pub const META_AUTH_API_KEY_ID: &str = "auth.api_key_id";
+
+/// Whether the credential that authenticated `msg` is still live, read now.
+///
+/// The pipeline checks the credential when the request starts; a write that
+/// mints a new credential from it must check again after that write, or a
+/// revocation landing between the two misses the new credential. The order
+/// closes the race without a transaction, as `helpers::end_family` does for a
+/// rotation: every revocation ends the presenting credential first and the
+/// account's API keys after (a password change: session rows, then keys,
+/// [`end_credentials_after_password_change`]). So a re-check that runs after
+/// the revocation reached the presenting credential sees it dead, and one that
+/// runs before it means the new credential was written before the keys were
+/// revoked, so their revocation covered it.
+///
+/// - An access token (`auth.family`, set by `crate::crypto::extract_auth_meta`):
+///   its login family's session row ([`repo::sessions::is_live`]).
+/// - An API key ([`META_AUTH_API_KEY_ID`], set by [`authenticate_api_key`]):
+///   the key's own row — present, the caller's, not revoked, not expired.
+/// - Neither: `false`. Every request the pipeline authenticated carries one,
+///   so a caller with neither presented nothing that can be checked again.
+pub(crate) async fn presented_credential_is_live(
+    ctx: &dyn wafer_run::context::Context,
+    msg: &wafer_run::Message,
+) -> Result<bool, WaferError> {
+    let user_id = msg.user_id();
+    if user_id.is_empty() {
+        return Ok(false);
+    }
+    let family = msg.get_meta(crate::crypto::META_AUTH_FAMILY);
+    if !family.is_empty() {
+        return repo::sessions::is_live(ctx, user_id, family).await;
+    }
+    let key_id = msg.get_meta(META_AUTH_API_KEY_ID);
+    if !key_id.is_empty() {
+        return Ok(repo::api_keys::find_by_id(ctx, key_id)
+            .await?
+            .is_some_and(|key| {
+                key.user_id == user_id && !key.is_revoked() && !key.is_expired(chrono::Utc::now())
+            }));
+    }
+    Ok(false)
+}
+
 /// Authenticate a request using an API key.
 ///
 /// Hashes the key with SHA-256, looks it up in the database by key_hash,
@@ -2059,6 +2107,7 @@ pub async fn authenticate_api_key(
     msg.set_meta(META_AUTH_USER_ID, &key_row.user_id);
     msg.set_meta(META_AUTH_USER_EMAIL, &user.email);
     msg.set_meta(META_AUTH_USER_ROLES, &roles_str);
+    msg.set_meta(META_AUTH_API_KEY_ID, &key_row.id);
     Ok(())
 }
 

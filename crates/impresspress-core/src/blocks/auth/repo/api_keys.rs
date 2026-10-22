@@ -194,7 +194,7 @@ pub async fn revoke(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
 /// revoked.
 ///
 /// Called when the account's password changes or is reset
-/// (`auth::end_sessions_after_password_change`). A key is a credential of its
+/// (`auth::end_credentials_after_password_change`). A key is a credential of its
 /// own: [`crate::blocks::auth::authenticate_api_key`] checks the key's revocation,
 /// expiry and the account's status, not `auth_version`, so the version bump
 /// that retires the account's access tokens does not reach it. It is not made

@@ -6,7 +6,7 @@ use wafer_run::{context::Context, InputStream, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            check_password, end_sessions_after_password_change, hash_new_password,
+            check_password, end_credentials_after_password_change, hash_new_password,
             repo::{local_credentials, users},
             PasswordCheck,
         },
@@ -46,7 +46,7 @@ const MISMATCH: &str = "New passwords do not match.";
 /// The htmx answer replaces the whole form ([`FORM_ID`], `HX-Retarget` +
 /// `HX-Reswap: outerHTML`) rather than landing in the result slot. The change
 /// ends every device and API key and bumps the user's `auth_version`
-/// ([`end_sessions_after_password_change`]), which retires the access token
+/// ([`end_credentials_after_password_change`]), which retires the access token
 /// the page itself is holding (see [`crate::crypto::verify_access_token`]) — so the
 /// form, still filled in with the old and new password, has nothing left to
 /// submit. What replaces it says so and offers the way back in, landing on
@@ -252,7 +252,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     // The credential has changed, so every session and API key the old
     // password opened must end, and a failure to end them must not be
     // answered as success.
-    if let Err(e) = end_sessions_after_password_change(ctx, user_id).await {
+    if let Err(e) = end_credentials_after_password_change(ctx, user_id).await {
         return crud::db_error_internal(e, "Password changed but session invalidation failed");
     }
     changed_response(msg)
@@ -1005,6 +1005,115 @@ mod tests {
                     .await,
             )
             .await
+        }
+
+        /// `POST /b/auth/api/api-keys` as the pipeline's credential step leaves
+        /// it for `authorization`: the step itself runs here, in the router's
+        /// frame, and writes the `auth.*` meta the handler reads.
+        async fn verified_create(ctx: &TestContext, authorization: &str) -> wafer_run::Message {
+            let router = ctx
+                .clone()
+                .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+            let mut msg = anon_msg("create", "/b/auth/api/api-keys");
+            if let Some(token) = authorization.strip_prefix("ApiKey ") {
+                crate::blocks::auth::authenticate_api_key(&router, token, &mut msg)
+                    .await
+                    .expect("the key check completes");
+            } else {
+                let secret = wafer_run::context::Context::config_get(
+                    &router,
+                    crate::blocks::auth::JWT_SECRET_KEY,
+                )
+                .unwrap_or("")
+                .to_string();
+                let iss = crate::crypto::expected_issuer(&router)
+                    .await
+                    .expect("read the issuer");
+                crate::crypto::extract_auth_meta(&router, authorization, &secret, &iss, &mut msg)
+                    .await
+                    .expect("the token check completes");
+            }
+            assert!(!msg.user_id().is_empty(), "the credential verified");
+            msg
+        }
+
+        /// A key-creation request authenticated before a password change,
+        /// whose insert lands after the change revoked the account's keys,
+        /// must not leave a working key behind. `handle_create` checks the
+        /// presenting credential again after its insert: the change ended it,
+        /// so the new key is revoked and the request refused. Driven for both
+        /// credentials that can create a key: an access token (its login
+        /// family) and an API key (its own row).
+        #[tokio::test]
+        async fn a_key_minted_across_the_change_does_not_survive_it() {
+            use crate::blocks::auth::repo::api_keys;
+
+            let ctx = TestContext::with_auth().await.with_sign_in_added();
+            let user_id = ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
+            let here = ctx.sign_in(EMAIL, PASSWORD).await;
+            let attacker = ctx.sign_in(EMAIL, PASSWORD).await;
+            let attacker_key = attacker.create_api_key(&ctx, "attacker").await;
+
+            // R1: two in-flight creates pass the pipeline's credential step,
+            // one on the attacker's session and one on the attacker's key.
+            let on_session =
+                verified_create(&ctx, &format!("Bearer {}", attacker.access_token)).await;
+            let on_key = verified_create(&ctx, &format!("ApiKey {attacker_key}")).await;
+
+            // C: the owner changes the password: rows, tokens, keys, bump.
+            let changed = ctx
+                .request_json(
+                    here.bearer(anon_msg("create", "/b/auth/api/change-password")),
+                    &serde_json::json!({
+                        "current_password": PASSWORD,
+                        "new_password": NEW_PASSWORD,
+                    }),
+                )
+                .await;
+            assert_eq!(status(changed).await, 200);
+
+            // R2: each in-flight create reaches its insert.
+            let auth_ui = ctx
+                .clone()
+                .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+            for (credential, msg) in [("session", &on_session), ("API key", &on_key)] {
+                let out = crate::blocks::auth_ui::api::api_keys::handle_create(
+                    &auth_ui,
+                    msg,
+                    wafer_run::InputStream::from_bytes(br#"{"name":"late"}"#.to_vec()),
+                )
+                .await;
+                assert_eq!(
+                    status(out).await,
+                    401,
+                    "a create on the attacker's {credential} is refused once the change ended it"
+                );
+            }
+            let keys = api_keys::list_for_user(&ctx.fixture(), &user_id)
+                .await
+                .unwrap();
+            assert_eq!(keys.len(), 3, "the attacker's key and the two late ones");
+            assert!(
+                keys.iter().all(|key| key.is_revoked()),
+                "no key of the account survives the change: {keys:?}"
+            );
+        }
+
+        /// The re-check does not change who may create a key: a live session
+        /// and a live API key both still can.
+        #[tokio::test]
+        async fn a_live_session_or_api_key_still_creates_keys() {
+            let ctx = TestContext::with_auth().await.with_sign_in_added();
+            ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
+            let session = ctx.sign_in(EMAIL, PASSWORD).await;
+            let key = session.create_api_key(&ctx, "first").await;
+            let created = ctx
+                .request_json(
+                    api_key_header(anon_msg("create", "/b/auth/api/api-keys"), &key),
+                    &serde_json::json!({ "name": "second" }),
+                )
+                .await;
+            assert_eq!(status(created).await, 200, "an API key creates a key");
         }
 
         /// Decision 2: a password change revokes the account's API keys, and
