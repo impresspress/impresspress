@@ -175,6 +175,9 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
 /// - any other `<dialog>` holding a `.btn--danger`, the class a destructive
 ///   confirm's button is drawn in: that is a block's own confirm dialog, a
 ///   second mechanism beside the shared one;
+/// - an inline `<script>` that reaches the browser's own `confirm`
+///   ([`browser_confirm_references`]): a script embedded in a page is held
+///   to the rule the shipped script files are;
 /// - an element with `hx-confirm` that does not name its action
 ///   (`data-confirm-label`, not empty) and its tone (`data-confirm-tone`,
 ///   `danger` or `primary`), without which chrome.js refuses to ask.
@@ -219,6 +222,15 @@ pub fn confirm_problems(html: &str) -> Vec<String> {
             ));
         }
     }
+    for script in doc.select(&selector("script:not([src])")) {
+        let text: String = script.text().collect();
+        for at in browser_confirm_references(&text) {
+            problems.push(format!(
+                "an inline <script> refers to the browser's confirm, at its line {at} \
+                 (ask in the shared dialog: window.impresspressConfirm)"
+            ));
+        }
+    }
     for asker in doc.select(&selector("[hx-confirm]")) {
         let label = asker.value().attr("data-confirm-label").unwrap_or_default();
         let tone = asker.value().attr("data-confirm-tone").unwrap_or_default();
@@ -232,6 +244,36 @@ pub fn confirm_problems(html: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// Every place script `src` reaches the browser's own `confirm`, as
+/// `line: text`. Not only a call: any reference to a global's `confirm` —
+/// `window`, `self`, `globalThis`, `top` or `parent`, then `.confirm` (or
+/// `?.confirm`) or `["confirm"]` with any quote — whether it is called there,
+/// aliased (`var ask = window.confirm`) or called through `.call`. And a bare
+/// `confirm(`, which is the same global. Words that only contain the name —
+/// `impresspressConfirm(`, `htmx:confirm`, `data-confirm-tone`,
+/// `confirm-accept` — are not references to it.
+///
+/// Prose in a script comment is held to it too: a comment that names the
+/// browser's confirm writes it as "the browser's confirm dialog".
+pub fn browser_confirm_references(src: &str) -> Vec<String> {
+    static GLOBAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?x)
+            (?:^|[^\w$.])(?:window|self|globalThis|top|parent)\s*
+            (?: (?:\?\.|\.)\s*confirm(?:[^\w$]|$)
+              | (?:\?\.)?\s*\[\s*["'`]confirm["'`]\s*\] )
+            | (?:^|[^\w$])confirm\s*\(
+            "#,
+        )
+        .expect("a valid pattern")
+    });
+    src.lines()
+        .enumerate()
+        .filter(|(_, line)| GLOBAL.is_match(line))
+        .map(|(n, line)| format!("{}: {}", n + 1, line.trim()))
+        .collect()
 }
 
 /// How a guard names an element: `button.btn.btn--primary "Save"`.
@@ -660,6 +702,75 @@ mod tests {
                 r#"<button hx-delete="/x" hx-confirm="X?" data-confirm-label="Delete x" data-confirm-tone="danger">X</button>"#
             )),
             vec!["the document carries 0 dialog#confirm-dialog, not one"]
+        );
+    }
+
+    // ── browser_confirm_references ────────────────────────────────────
+
+    #[test]
+    fn every_spelling_of_the_browser_confirm_is_a_reference() {
+        for spelling in [
+            "if (!window.confirm('x')) return;",
+            "window.confirm ('x')",
+            "window . confirm('x')",
+            r#"if (!window["confirm"]("x")) return;"#,
+            "window['confirm']('x')",
+            "window[`confirm`]('x')",
+            "window[ 'confirm' ]",
+            "var ask = window.confirm; ask('y');",
+            "const ask = window.confirm",
+            "window.confirm.call(window, 'x')",
+            "window.confirm.bind(window)",
+            "window?.confirm?.('x')",
+            "self.confirm('x')",
+            "globalThis.confirm('x')",
+            "top.confirm('x')",
+            "parent.confirm('x')",
+            "confirm('x')",
+            "if(!confirm('x'))return;",
+            "confirm ('y');",
+        ] {
+            assert_eq!(
+                browser_confirm_references(spelling),
+                vec![format!("1: {spelling}")],
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_only_contains_confirm_is_not_a_reference() {
+        for text in [
+            "await window.impresspressConfirm({question: 'x'})",
+            "askToConfirm(a)",
+            "confirmed(b)",
+            r#"document.body.addEventListener("htmx:confirm", f)"#,
+            r#"b.getAttribute("data-confirm-tone")"#,
+            r#"'[data-action="confirm-accept"]'"#,
+            "window.confirmDialog = d",
+            "myWindow.confirm",
+            "// asked in the shared dialog, never the browser's confirm dialog",
+        ] {
+            assert!(browser_confirm_references(text).is_empty(), "{text}");
+        }
+        assert_eq!(
+            browser_confirm_references("a();\nb();\n  window.confirm('x');"),
+            vec!["3: window.confirm('x');"]
+        );
+    }
+
+    #[test]
+    fn an_inline_script_that_reaches_the_browser_confirm_is_a_problem() {
+        let html = concat!(
+            r#"<script src="/b/static/x.js"></script>"#,
+            r#"<script>var ok = 1;</script>"#,
+            r#"<script>function f(){ if (!window["confirm"]("Really?")) return; }</script>"#,
+        );
+        assert_eq!(
+            confirm_problems(html),
+            vec![
+                r#"an inline <script> refers to the browser's confirm, at its line 1: function f(){ if (!window["confirm"]("Really?")) return; } (ask in the shared dialog: window.impresspressConfirm)"#
+            ]
         );
     }
 

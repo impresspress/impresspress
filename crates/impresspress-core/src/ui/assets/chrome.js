@@ -512,8 +512,8 @@ document.addEventListener("input", function (e) {
 //
 // Every "are you sure?" in the tree is asked in ONE page-built dialog,
 // `components::confirm_dialog` (`#confirm-dialog`), which `ui::layout::page`
-// renders once per document. Nothing calls the browser's `window.confirm`: its
-// OK / Cancel names no action, it cannot be styled as destructive, and it
+// renders once per document. Nothing asks through the browser's own confirm
+// dialog: its OK / Cancel names no action, it cannot be styled as destructive, and it
 // leaves focus wherever the browser likes. The dialog is a modal like any
 // other, so everything above holds for it — Cancel has focus as it opens (a
 // stray Enter cancels), Tab wraps inside it, Esc and the backdrop close it, and
@@ -522,8 +522,11 @@ document.addEventListener("input", function (e) {
 // - The action's own words. Its title and its confirm button both read the
 //   action's label ("Revoke session", "Delete files"), never "OK".
 // - The action's tone. The dialog renders two confirm buttons, a danger one
-//   and a primary one, both hidden; the tone shows one of them — `danger` for
-//   a destructive step, `primary` for one that is not. The classes are the
+//   and a primary one, both hidden; the tone shows one of them. The rule:
+//   `danger` when this app cannot undo the action — data is deleted, access
+//   is taken from someone, a Stripe object is archived — and `primary` when
+//   the app offers its undo (Disable has Enable, Archive product has Publish,
+//   Reset to environment holds until the restart). The classes are the
 //   markup's (`components::Action`), so no script writes a button class.
 // - Focus after the action, not just after the dialog. A confirmed htmx
 //   request often swaps out the very row its control sat in (a revoked
@@ -545,12 +548,23 @@ document.addEventListener("input", function (e) {
 //   window.impresspressConfirm({question, label, tone[, opener]}), for a
 //     block's own script: a promise of true (confirmed) or false (cancelled,
 //     however). `opener` is where focus returns; it defaults to the focused
-//     control.
+//     control, which a mouse click does not always leave on the button (Safari,
+//     Firefox on macOS), so a caller passes the button it has. What has focus
+//     once the script's own action has re-rendered its list is the script's
+//     to decide: the after-the-swap placement below is htmx's path only.
 // A confirm without a question, a label or a tone of danger or primary is a
-// TypeError, not a generic "OK". `htmx_guard::every_page_confirms_through_the
-// _one_shared_dialog` keeps every rendered `hx-confirm` labelled and toned, and
-// `ui::components::modal`'s source guards keep `window.confirm` and a block's
-// own confirm dialog out of the tree.
+// TypeError, not a generic "OK".
+//
+// Two guards keep this the only way to ask. Both use
+// `test_support::dom::browser_confirm_references`, which finds any reference
+// to the browser's own confirm — a global's (`window`, `self`, `globalThis`,
+// `top`, `parent`) `.confirm` or `["confirm"]`, called, aliased or not, and a
+// call of the bare name:
+// - `ui::components::modal::tests::no_shipped_script_refers_to_the_browser
+//   _confirm` reads every script file under `crates/` and `packages/`;
+// - `htmx_guard::every_page_confirms_through_the_one_shared_dialog` reads every
+//   crawled page: its inline scripts, every `hx-confirm` (labelled and toned),
+//   and every dialog (none but the shared one holds a danger confirm).
 //
 // ## The delegated-action rule
 //
@@ -1148,7 +1162,10 @@ document.addEventListener("input", function (e) {
     // document, so it reaches <body> either way. The second time `detail.elt`
     // is that ancestor (htmx sets it to whatever the event fires on), so the
     // request is recognised by `detail.requestConfig.elt`, the element that
-    // issued it. Focus is only placed when it was lost: a control still there
+    // issued it. That field is not one htmx documents: it is there because
+    // htmx dispatches `htmx:configRequest` with the request config AS its
+    // detail, and every dispatch stamps `detail.elt` (htmx 2.0.4, and 1.9 the
+    // same way). Check it again on an htmx upgrade; `chrome_dom.mjs` models it. Focus is only placed when it was lost: a control still there
     // keeps it, and a response that moved it somewhere on purpose (a modal it
     // opened, a field it named) is left be.
     document.body.addEventListener("htmx:afterRequest", function (e) {

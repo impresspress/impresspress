@@ -178,9 +178,18 @@ pub const CONFIRM_DIALOG_ID: &str = "confirm-dialog";
 /// `autofocus`, so it is what `showModal()` focuses: a stray Enter cancels.
 ///
 /// There are two confirm buttons, both hidden until chrome.js shows the one
-/// the action's tone names: `danger` for a destructive step, `primary` for
-/// one that is not. Each is an [`Action`], so the class is written here and
-/// never by a script, and the dialog shows exactly one: its own primary.
+/// the action's tone names. Each is an [`Action`], so the class is written
+/// here and never by a script, and the dialog shows exactly one: its own
+/// primary.
+///
+/// The tone rule, for every `data-confirm-tone` and `impresspressConfirm`
+/// caller:
+/// - `danger` when this app cannot undo the action: data is deleted, access
+///   is taken from someone (a session, a key, a share link, a linked
+///   provider), or a Stripe object is archived;
+/// - `primary` when the app offers its undo: Disable has Enable, Archive
+///   product has Publish, Reset to environment holds until the restart,
+///   Discover / Load / Unload models can be run again.
 pub fn confirm_dialog() -> Markup {
     let question = format!("{CONFIRM_DIALOG_ID}-question");
     Modal::new(CONFIRM_DIALOG_ID, "Confirm")
@@ -389,42 +398,15 @@ mod tests {
         out
     }
 
-    /// Where `src` calls a function named `confirm` — `window.confirm(`,
-    /// `confirm (`, `globalThis.confirm(` — as `line: text`.
-    fn confirm_calls(src: &str) -> Vec<String> {
-        src.lines()
-            .enumerate()
-            .filter(|(_, line)| {
-                line.match_indices("confirm").any(|(at, word)| {
-                    let before = line[..at].chars().next_back();
-                    let after = line[at + word.len()..].trim_start();
-                    !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-                        && after.starts_with('(')
-                })
-            })
-            .map(|(n, line)| format!("{}: {}", n + 1, line.trim()))
-            .collect()
-    }
-
-    #[test]
-    fn confirm_calls_finds_every_spelling_of_the_browser_confirm() {
-        let src = "if (!window.confirm('x')) return;\nconfirm ('y');\nglobalThis.confirm(z)\n\
-                   await window.impresspressConfirm({});\naskToConfirm(a);\nconfirmed(b);\n// confirm it";
-        assert_eq!(
-            confirm_calls(src),
-            vec![
-                "1: if (!window.confirm('x')) return;",
-                "2: confirm ('y');",
-                "3: globalThis.confirm(z)"
-            ]
-        );
-    }
-
-    /// No script the repository ships asks through the browser's
-    /// `window.confirm`: every confirm is the shared page-built dialog, asked
+    /// No script file the repository ships reaches the browser's own
+    /// `confirm`, by any spelling `dom::browser_confirm_references` knows: a
+    /// global's `.confirm` or `["confirm"]`, called or not, or a bare
+    /// `confirm(`. Every confirm is the shared page-built dialog, asked
     /// through `window.impresspressConfirm` or an `hx-confirm` (chrome.js).
+    /// Scripts a page carries inline are held to the same rule by
+    /// `htmx_guard::every_page_confirms_through_the_one_shared_dialog`.
     #[test]
-    fn no_shipped_script_calls_the_browser_confirm() {
+    fn no_shipped_script_refers_to_the_browser_confirm() {
         let scripts = shipped_scripts();
         assert!(
             scripts.len() > 40,
@@ -440,7 +422,7 @@ mod tests {
         let found: Vec<String> = scripts
             .iter()
             .flat_map(|(rel, src)| {
-                confirm_calls(src)
+                crate::test_support::dom::browser_confirm_references(src)
                     .into_iter()
                     .map(move |at| format!("{rel}:{at}"))
             })
