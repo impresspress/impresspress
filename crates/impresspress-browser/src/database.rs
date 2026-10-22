@@ -67,9 +67,9 @@
 //! bridge and goes through the same helper. There is one durability contract
 //! for the crate, not one per service.
 //!
-//! The multi-write operations — `create_many`, `batch` and the guarded writes —
-//! are one logical mutation each, so a `create_many` of a thousand rows is one
-//! flush, not a thousand. They reach sql.js through
+//! The multi-write operations — `create_many`, `batch`, the guarded writes and
+//! `exec_raw_transaction` — are one logical mutation each, so a `create_many`
+//! of a thousand rows is one flush, not a thousand. They reach sql.js through
 //! [`DbExec::run_transaction`], which this backend runs between `BEGIN` and
 //! `COMMIT` (see [`in_transaction`]).
 //!
@@ -98,8 +98,9 @@ use wafer_core::interfaces::database::{
     exec::{DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
     service::{
-        CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-        RecordData, Table, UpsertSpec, WriteOp, WriteOutcome,
+        CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
+        RawStatement, Record, RecordData, Table, TransactionError, UpsertSpec, WriteOp,
+        WriteOutcome,
     },
 };
 use wafer_sql_utils::{introspect, Backend};
@@ -496,9 +497,20 @@ impl DbExec for BrowserDatabaseService {
     /// back on the first failure — see [`in_transaction`]. Like every other
     /// primitive here it does not flush; the `DatabaseService` method that
     /// called it does, once.
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+    ///
+    /// The statements run one at a time on the connection, so a statement's
+    /// failure names it ([`TransactionError::at`]). A refused `BEGIN` or
+    /// `COMMIT`, or a failed transaction that could not be rolled back, is
+    /// [`TransactionError::whole`].
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
         in_transaction(bridge_control, || {
-            ops.iter().map(|op| self.run_tx_op(op)).collect()
+            ops.iter()
+                .enumerate()
+                .map(|(index, op)| {
+                    self.run_tx_op(op)
+                        .map_err(|failed| TransactionError::at(index, failed))
+                })
+                .collect()
         })
     }
 }
@@ -546,6 +558,19 @@ impl TxError for DatabaseError {
 
     fn stuck(message: String) -> Self {
         DatabaseError::Internal(message)
+    }
+}
+
+/// [`DbExec::run_transaction`]'s error. The framing's own failures are no
+/// statement's: a refused `BEGIN` or `COMMIT`, or a connection left inside
+/// the failed transaction, whichever statement started it.
+impl TxError for TransactionError {
+    fn refused(message: String) -> Self {
+        TransactionError::whole(DatabaseError::refused(message))
+    }
+
+    fn stuck(message: String) -> Self {
+        TransactionError::whole(DatabaseError::stuck(message))
     }
 }
 
@@ -679,7 +704,7 @@ fn rollback(control: &mut impl FnMut(&str) -> Result<(), String>) -> Result<(), 
 //
 // Written with `forward_database_service!` rather than by hand. The macro's
 // `ops { … }` block names EVERY operation on the trait and refuses to expand
-// if one is missing, so the twenty-seven lines below are a ledger of what this
+// if one is missing, so the thirty lines below are a ledger of what this
 // backend does with each: `forward` = the shared `DbExec` default, `custom` =
 // written here, `inherit` = deliberately the `DatabaseService` trait default.
 // Eight of those trait defaults are not pass-throughs (`take_where` is a
@@ -710,6 +735,7 @@ wafer_core::forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: custom,
+            exec_raw_transaction: custom,
             delete_where: custom,
             delete_where_count: custom,
             take_where: custom,
@@ -760,6 +786,19 @@ wafer_core::forward_database_service! {
             args: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
             self.with_flush(DbExec::exec_raw(self, query, args)).await
+        }
+
+        /// One transaction ([`DbExec::run_transaction`]), one flush, however
+        /// many statements. A flush failure names no statement: what it
+        /// failed to write is the whole database.
+        async fn exec_raw_transaction(
+            &self,
+            statements: &[RawStatement],
+        ) -> Result<Vec<i64>, TransactionError> {
+            with_flush_mapped(DbExec::exec_raw_transaction(self, statements), |flush| {
+                TransactionError::whole(DatabaseError::Internal(flush))
+            })
+            .await
         }
 
         async fn delete_where(
@@ -1760,7 +1799,9 @@ mod transaction_framing {
 mod sql_js_transactions {
     use std::collections::HashMap;
 
-    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService, WriteOp};
+    use wafer_core::interfaces::database::service::{
+        DatabaseError, DatabaseService, RawStatement, WriteOp,
+    };
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::{
@@ -1859,6 +1900,85 @@ mod sql_js_transactions {
         assert_eq!(opfs_writes() - before, 1, "one logical write, one flush");
 
         assert_eq!(durable_ids(&svc).await, ["keep", "new"]);
+    }
+
+    fn raw(query: &str) -> RawStatement {
+        RawStatement {
+            query: query.to_string(),
+            args: vec![],
+        }
+    }
+
+    const FILE_TABLE: &str = "sql_js_tx_file";
+
+    /// Whether `table` is in the database the flushed OPFS image holds.
+    async fn durable_table(svc: &BrowserDatabaseService, table: &str) -> bool {
+        crate::db_init().await.expect("reopen from OPFS");
+        svc.schema_table_exists(table).await.expect("table lookup")
+    }
+
+    /// **A raw transaction is one logical write:** its DDL and DML commit
+    /// together, and the database is written to OPFS exactly once, holding
+    /// all of it. Fails when `exec_raw_transaction` is `forward` (no flush:
+    /// nothing durable) or flushes per statement.
+    #[wasm_bindgen_test]
+    async fn a_raw_transaction_commits_whole_and_flushes_once() {
+        let svc = fresh().await;
+
+        let before = opfs_writes();
+        let counts = svc
+            .exec_raw_transaction(&[
+                raw(&format!("CREATE TABLE {FILE_TABLE} (id TEXT PRIMARY KEY)")),
+                raw(&format!("ALTER TABLE {FILE_TABLE} ADD COLUMN note TEXT")),
+                raw(&format!(
+                    "INSERT INTO {FILE_TABLE} (id, note) VALUES ('k', 'kept')"
+                )),
+            ])
+            .await
+            .expect("the transaction commits");
+        assert_eq!(counts.len(), 3);
+        assert_eq!(counts[2], 1, "the insert's count");
+        assert_eq!(opfs_writes() - before, 1, "one logical write, one flush");
+
+        assert!(durable_table(&svc, FILE_TABLE).await);
+        let row = svc.get(FILE_TABLE, "k").await.expect("the durable row");
+        assert_eq!(row.data.get("note"), Some(&serde_json::json!("kept")));
+    }
+
+    /// **All or nothing, DDL included.** A taken key after a `CREATE TABLE`
+    /// and an insert refuses the transaction: the table is in neither the
+    /// open database nor the flushed image, and the error is the taken key
+    /// at the statement that took it — sql.js runs the statements one at a
+    /// time, so it knows which one failed.
+    #[wasm_bindgen_test]
+    async fn a_refused_raw_transaction_leaves_nothing_and_names_its_statement() {
+        let svc = fresh().await;
+
+        let err = svc
+            .exec_raw_transaction(&[
+                raw(&format!("CREATE TABLE {FILE_TABLE} (id TEXT PRIMARY KEY)")),
+                raw(&format!("INSERT INTO {FILE_TABLE} (id) VALUES ('k')")),
+                raw(&format!("INSERT INTO {FILE_TABLE} (id) VALUES ('k')")),
+            ])
+            .await
+            .expect_err("a taken key refuses the transaction");
+        assert_eq!(err.statement, Some(2), "{err}");
+        match &err.error {
+            DatabaseError::AlreadyExists(message) => {
+                assert!(
+                    message.contains(FILE_TABLE),
+                    "sql.js's own message: {message}"
+                );
+            }
+            other => panic!("a taken key is AlreadyExists, not {other:?}"),
+        }
+        assert!(
+            !svc.schema_table_exists(FILE_TABLE)
+                .await
+                .expect("table lookup"),
+            "the CREATE rolled back"
+        );
+        assert!(!durable_table(&svc, FILE_TABLE).await, "nor was it flushed");
     }
 
     /// **Fails on the pre-change tree.** A transaction left open on the
