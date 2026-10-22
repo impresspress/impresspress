@@ -423,7 +423,7 @@ fn render_right_rail(
                 div .model-progress {
                     div .flex .items-center .gap-2 .mb-2 {
                         span .text-sm .font-medium { "Loading model..." }
-                        button #model-unload-btn .btn.btn--sm.btn--ghost type="button" data-action="llm-unload-model" .ml-auto {
+                        button #model-unload-btn .btn.btn--sm.btn--quiet type="button" data-action="llm-unload-model" .ml-auto {
                             "Cancel"
                         }
                     }
@@ -437,7 +437,7 @@ fn render_right_rail(
                 }
             }
 
-            a .btn.btn--ghost.btn--sm .chat-options__settings href="/b/llm/settings" {
+            a .btn.btn--quiet.btn--sm .chat-options__settings href="/b/llm/settings" {
                 (ui::icons::settings())
                 span .chat-options__settings-text { "Settings" }
             }
@@ -612,7 +612,7 @@ fn render_overrides_table(rows: &[repo::settings::ThreadSettingRow]) -> Markup {
                 components::timestamp(&ov.updated_at),
                 html! {
                     button
-                        .btn.btn--sm.btn--icon.btn--ghost-danger
+                        .btn.btn--sm.btn--icon.btn--quiet-danger
                         type="button"
                         hx-delete={"/b/llm/api/config/" (ov.id)}
                         hx-confirm={"Remove override for thread " (tid) "?"}

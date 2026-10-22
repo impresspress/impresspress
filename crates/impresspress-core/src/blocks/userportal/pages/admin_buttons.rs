@@ -180,7 +180,7 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
                 html! { (btn.i64_field("sort_order")) },
                 html! {
                     div .flex .gap-1 {
-                        button .btn .btn--ghost .btn--sm .btn--icon type="button"
+                        button .btn .btn--quiet .btn--sm .btn--icon type="button"
                             hx-get=(format!("/b/userportal/admin/buttons/{}/edit", btn.id))
                             hx-target="#edit-button-slot"
                             // Stable across the table's re-render, so focus
@@ -192,7 +192,7 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
                         {
                             (icons::edit())
                         }
-                        button .btn .btn--ghost-danger .btn--sm .btn--icon type="button"
+                        button .btn .btn--quiet-danger .btn--sm .btn--icon type="button"
                             hx-delete=(format!("/b/userportal/admin/buttons/{}", btn.id))
                             hx-target="#buttons-table"
                             hx-swap="outerHTML"
@@ -569,7 +569,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"class="btn btn--ghost-danger btn--sm btn--icon" type="button""#)
+            html.contains(r#"class="btn btn--quiet-danger btn--sm btn--icon" type="button""#)
                 && html.contains(r#"aria-label="Delete Files""#),
             "{html}"
         );

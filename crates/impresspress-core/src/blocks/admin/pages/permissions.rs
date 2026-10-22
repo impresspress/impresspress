@@ -210,7 +210,7 @@ pub(crate) async fn grants_custom_tab(
                 access_badge(grant.write),
                 html! { (grant.description) },
                 html! {
-                    button .btn .btn--ghost-danger .btn--icon
+                    button .btn .btn--quiet-danger .btn--icon
                         type="button"
                         title="Delete grant"
                         aria-label=(format!("Delete grant of {} to {grantee}", grant.resource))

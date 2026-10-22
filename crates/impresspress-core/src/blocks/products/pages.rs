@@ -2858,14 +2858,14 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     components::status_badge(r.str_field("status")),
                     components::timestamp(r.str_field("created_at")),
                     html! { div .products-actions {
-                        button .btn .btn--ghost .btn--sm .btn--icon type="button"
+                        button .btn .btn--quiet .btn--sm .btn--icon type="button"
                             aria-label={ "Edit " (name) } title="Edit"
                             data-record-id=(r.id) data-record-name=(name) data-record-description=(description) data-record-status=(r.str_field("status"))
                             data-action="pc-edit-group"
                         { (icons::edit()) }
                         // Destructive, so set apart: the danger colour, and
                         // the script asks before it deletes.
-                        button .btn .btn--ghost-danger .btn--sm .btn--icon type="button"
+                        button .btn .btn--quiet-danger .btn--sm .btn--icon type="button"
                             aria-label={ "Delete " (name) } title="Delete"
                             data-record-id=(r.id) data-record-name=(name)
                             data-action="pc-delete"

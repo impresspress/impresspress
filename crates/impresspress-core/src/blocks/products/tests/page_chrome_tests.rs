@@ -334,7 +334,7 @@ async fn groups_rows_dash_an_empty_description_and_mark_delete() {
         "{html}"
     );
     assert!(
-        html.contains(r#"class="btn btn--ghost-danger btn--sm btn--icon" type="button" aria-label="Delete Consulting""#),
+        html.contains(r#"class="btn btn--quiet-danger btn--sm btn--icon" type="button" aria-label="Delete Consulting""#),
         "{html}"
     );
     assert!(html.contains(r#"aria-label="Edit Consulting""#), "{html}");

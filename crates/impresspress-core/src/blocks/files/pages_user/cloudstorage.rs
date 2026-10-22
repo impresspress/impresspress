@@ -146,7 +146,7 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
                         // action is `DELETE /b/cloudstorage/shares/{id}`,
                         // which is keyed on the row id.
                         html! {
-                            button .btn .btn--ghost-danger .btn--icon
+                            button .btn .btn--quiet-danger .btn--icon
                                 type="button"
                                 data-action="revoke-share"
                                 data-share-id=(r.id)

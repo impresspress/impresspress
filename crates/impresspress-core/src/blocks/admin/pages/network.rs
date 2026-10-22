@@ -344,7 +344,7 @@ fn inbound_row(route: &PathSummary) -> components::TableRow {
     };
     components::TableRow::new(vec![
         html! {
-            button .btn .btn--ghost .btn--icon .network-row__toggle
+            button .btn .btn--quiet .btn--icon .network-row__toggle
                 type="button"
                 aria-expanded="false"
                 aria-controls=(id)
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn a_route_expands_through_a_labelled_button() {
         let html = rendered_inbound_row("GET", "'); alert(document.cookie); //");
-        assert!(html.contains(r#"<button class="btn btn--ghost btn--icon network-row__toggle" type="button" aria-expanded="false""#), "{html}");
+        assert!(html.contains(r#"<button class="btn btn--quiet btn--icon network-row__toggle" type="button" aria-expanded="false""#), "{html}");
         assert!(
             html.contains(r#"aria-label="Requests to GET &#39;); alert(document.cookie); //""#)
                 || html.contains(r#"aria-label="Requests to GET '); alert(document.cookie); //""#),

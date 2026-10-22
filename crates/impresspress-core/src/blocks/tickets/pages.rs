@@ -946,7 +946,7 @@ pub(super) fn types_region(types: &[db::Record]) -> Markup {
                 },
                 html! { span .ticket-number { (number_field(kind, "sort_order")) } },
                 html! {
-                    button .btn .btn--ghost .btn--icon type="button"
+                    button .btn .btn--quiet .btn--icon type="button"
                         id={ "edit-type-open-" (kind.id) }
                         data-action="modal-open" data-modal-target=(edit_type_modal_id(&kind.id))
                         aria-label={ "Edit " (title) } {

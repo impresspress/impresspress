@@ -437,7 +437,7 @@ fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> 
     ];
     if manages {
         cells.push(html! {
-            button .btn.btn--sm.btn--icon.btn--ghost type="button"
+            button .btn.btn--sm.btn--icon.btn--quiet type="button"
                 data-action="modal-open" data-modal-target=(edit_modal_id(id))
                 aria-label={"Edit " (cfg.name)}
                 title="Edit provider"
@@ -460,7 +460,7 @@ fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> 
                 "Discover"
             }
             button
-                .btn.btn--sm.btn--icon.btn--ghost-danger
+                .btn.btn--sm.btn--icon.btn--quiet-danger
                 type="button"
                 hx-delete={"/b/llm/api/providers/" (id)}
                 hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
@@ -644,7 +644,7 @@ fn model_cells(model: &ModelInfo) -> Vec<Markup> {
                 "Load"
             }
             button
-                .btn.btn--sm.btn--ghost
+                .btn.btn--sm.btn--quiet
                 type="button"
                 hx-post=(unload_url)
                 hx-swap="none"
@@ -971,10 +971,10 @@ mod tests {
             m.contains(r#"aria-label="Discover models for openai-main""#),
             "got: {m}"
         );
-        // The delete control is an icon: a ghost-danger icon button whose
+        // The delete control is an icon: a quiet-danger icon button whose
         // only name is its label.
         assert!(
-            m.contains(r#"class="btn btn--sm btn--icon btn--ghost-danger""#),
+            m.contains(r#"class="btn btn--sm btn--icon btn--quiet-danger""#),
             "got: {m}"
         );
         assert!(m.contains(r#"aria-label="Delete openai-main""#), "got: {m}");

@@ -367,7 +367,7 @@ mod tests {
             r#"<span class="badge badge-info">SQLite · 3 tables</span>"#,
             r#"<a class="btn btn--secondary" href="/x">Open <span class="sr-only">(new tab)</span></a>"#,
             r#"<button class="btn btn--secondary" hidden>Save</button>"#,
-            r#"<button class="btn btn--ghost">Quiet</button>"#,
+            r#"<button class="btn btn--quiet">Quiet</button>"#,
             r#"<button class="btn btn--primary">Publish</button>"#,
             r#"</div></header><main><button class="btn btn--primary">Body</button></main>"#,
         );
@@ -377,7 +377,7 @@ mod tests {
                 r#"status "SQLite · 3 tables""#,
                 r#"secondary "Open (new tab)""#,
                 r#"secondary "Save" hidden"#,
-                r#"button.btn.btn--ghost "Quiet""#,
+                r#"button.btn.btn--quiet "Quiet""#,
                 r#"primary "Publish""#,
             ]
         );

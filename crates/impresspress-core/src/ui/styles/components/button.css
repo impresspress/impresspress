@@ -7,7 +7,7 @@
  *     .btn-sm  (44 uses)   vs  .btn--sm  (59)
  *     .btn-primary (28)    vs  .btn--primary (30)
  *     .btn-secondary (24)  vs  .btn--secondary
- *     .btn-ghost (25)      vs  .btn--ghost
+ *     .btn-ghost (25)      vs  .btn--ghost (since renamed .btn--quiet)
  *     .btn-danger (5)      vs  .btn--danger
  *
  * Because both `.btn` rules matched every button, each one rendered as a
@@ -28,7 +28,8 @@
  *
  * Every button is a rounded rectangle (`--radius-md`, 8px), not a pill. The
  * variants are the five emphases `components::Action` draws -- primary,
- * secondary, quiet (`--ghost`), quiet danger (`--ghost-danger`) and danger.
+ * secondary, quiet, quiet danger and danger, one class each, named as the
+ * emphasis is (`.btn--quiet` for `Emphasis::Quiet`).
  * `.btn--primary` is meant to have `Action` as its only writer; pages that
  * still hand-write it move to `Action` as each one is redesigned.
  */
@@ -65,10 +66,10 @@
 .btn--secondary:hover:not(:disabled) { background: var(--bg-hover); }
 
 /* Keeps the transparent 1px border the base sets (rather than `border: none`,
-   which the legacy `.btn-ghost` used) so a ghost button is exactly as tall as
+   which the legacy `.btn-ghost` used) so a quiet button is exactly as tall as
    the solid buttons it sits beside in a row. */
-.btn--ghost { background: transparent; color: var(--text-primary); }
-.btn--ghost:hover:not(:disabled) { background: var(--bg-hover); }
+.btn--quiet { background: transparent; color: var(--text-primary); }
+.btn--quiet:hover:not(:disabled) { background: var(--bg-hover); }
 
 /* --accent-danger (#ef4444) under white text is 3.76:1 -- below AA;
    --accent-danger-text (6.47:1, computed) is dark enough to serve this role
@@ -81,8 +82,8 @@
    pointed at, so a column of them does not read as a column of alarms; the
    confirm step it keeps is the real guard. --accent-danger-text is 6.47:1 on
    white and on --bg-hover. */
-.btn--ghost-danger { background: transparent; color: var(--accent-danger-text); }
-.btn--ghost-danger:hover:not(:disabled) { background: var(--bg-hover); }
+.btn--quiet-danger { background: transparent; color: var(--accent-danger-text); }
+.btn--quiet-danger:hover:not(:disabled) { background: var(--bg-hover); }
 
 /* A button is as wide as its label at every width; nothing widens buttons
    globally. A row whose buttons span the screen on a phone says so on the

@@ -255,7 +255,7 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                             title="Disable user"
                         { "Disable" }
                     }
-                    button .btn .btn--ghost-danger .btn--icon
+                    button .btn .btn--quiet-danger .btn--icon
                         type="button"
                         hx-delete={"/b/admin/users/" (record.id)}
                         hx-target={"#user-row-" (record.id)}
@@ -524,7 +524,7 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 },
                 html! {
                     @if !is_system {
-                        button .btn .btn--ghost-danger .btn--icon
+                        button .btn .btn--quiet-danger .btn--icon
                             type="button"
                             hx-delete={"/b/admin/iam/roles/" (record.id)}
                             hx-target="#iam-content"
@@ -1049,7 +1049,7 @@ mod tests {
             roles.contains(r#"aria-label="Delete role editor""#),
             "{roles}"
         );
-        assert!(roles.contains("btn--ghost-danger btn--icon"), "{roles}");
+        assert!(roles.contains("btn--quiet-danger btn--icon"), "{roles}");
     }
 
     /// A disabled user's row offers Enable as a plain secondary button, the

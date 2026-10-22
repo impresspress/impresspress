@@ -305,7 +305,7 @@ mod tests {
             .into_string();
         assert!(
             alone.contains(
-                r#"</div><div class="card__actions"><a class="btn btn--ghost" href="/v">Edit in variables</a></div></header>"#
+                r#"</div><div class="card__actions"><a class="btn btn--quiet" href="/v">Edit in variables</a></div></header>"#
             ),
             "{alone}"
         );

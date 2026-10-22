@@ -99,7 +99,7 @@ pub(super) async fn storage_logs_tab(
                         // The whole stored path, for a search elsewhere: copied
                         // from the hidden element (chrome.js `copy-text`).
                         span #(full_id) hidden { (path) }
-                        button .btn .btn--ghost .btn--sm type="button"
+                        button .btn .btn--quiet .btn--sm type="button"
                             data-action="copy-text" data-copy-source=(full_id)
                             aria-label=(format!("Copy the full path {path}"))
                         { "Copy" }

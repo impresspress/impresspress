@@ -369,7 +369,7 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
         html! {
             div .flex .gap-1 {
                 @if editable(row.key) {
-                    button .btn .btn--ghost .btn--icon
+                    button .btn .btn--quiet .btn--icon
                         type="button"
                         hx-get={"/b/admin/variables/" (url_path_encode(row.key)) "/edit"}
                         hx-target="#edit-var-slot"
@@ -526,7 +526,7 @@ fn delete_button(key: &str, declared: bool) -> Markup {
         format!("Delete {key}")
     };
     html! {
-        button .btn .btn--ghost-danger .btn--icon
+        button .btn .btn--quiet-danger .btn--icon
             type="button"
             hx-delete={"/b/admin/variables/" (url_path_encode(key))}
             hx-target="#content"
@@ -563,7 +563,7 @@ fn is_declared(ctx: &dyn Context, key: &str) -> bool {
 /// does not take effect until a restart either.
 fn reset_to_environment_button(key: &str) -> Markup {
     html! {
-        button .btn .btn--ghost .btn--icon type="button"
+        button .btn .btn--quiet .btn--icon type="button"
             hx-post={"/b/admin/variables/" (url_path_encode(key)) "/reset-to-environment"}
             hx-swap="none"
             hx-confirm={

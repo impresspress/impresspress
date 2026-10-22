@@ -140,7 +140,7 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
                 // Named by its session ("Revoke Password 2026-10-22 09:14
                 // UTC"), so a list of them is not six bare "Revoke"s.
                 html! {
-                    button .btn .btn--ghost-danger .btn--sm
+                    button .btn .btn--quiet-danger .btn--sm
                         type="button"
                         id=(format!("revoke-{}", r.family))
                         aria-labelledby=(format!("revoke-{0} session-{0} last-used-{0}", r.family))
@@ -397,7 +397,7 @@ mod tests {
         );
         // Quiet in the row: the confirmation is the guard.
         assert_eq!(
-            html.matches(r#"class="btn btn--ghost-danger btn--sm""#)
+            html.matches(r#"class="btn btn--quiet-danger btn--sm""#)
                 .count(),
             2,
             "{html}"

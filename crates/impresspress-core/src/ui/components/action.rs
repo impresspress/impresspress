@@ -19,12 +19,12 @@ use super::card::{is_data_name, with_data_attributes};
 /// |---|---|---|---|
 /// | `Primary` | `.btn--primary` | `--primary-button`, white text | the page's one main action |
 /// | `Secondary` | `.btn--secondary` | `--surface-1`, 1px border | every other action |
-/// | `Quiet` | `.btn--ghost` | transparent | in-row and in-card controls |
-/// | `QuietDanger` | `.btn--ghost-danger` | transparent, danger text | an in-row destructive control |
+/// | `Quiet` | `.btn--quiet` | transparent | in-row and in-card controls |
+/// | `QuietDanger` | `.btn--quiet-danger` | transparent, danger text | an in-row destructive control |
 /// | `Danger` | `.btn--danger` | danger fill, white text | a destructive confirm |
 ///
-/// `Quiet` and `QuietDanger` draw the existing `.btn--ghost` /
-/// `.btn--ghost-danger` rules, which hand-written in-row buttons also use.
+/// `Quiet` and `QuietDanger` draw the existing `.btn--quiet` /
+/// `.btn--quiet-danger` rules, which hand-written in-row buttons also use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emphasis {
     Primary,
@@ -39,8 +39,8 @@ impl Emphasis {
         match self {
             Emphasis::Primary => "btn--primary",
             Emphasis::Secondary => "btn--secondary",
-            Emphasis::Quiet => "btn--ghost",
-            Emphasis::QuietDanger => "btn--ghost-danger",
+            Emphasis::Quiet => "btn--quiet",
+            Emphasis::QuietDanger => "btn--quiet-danger",
             Emphasis::Danger => "btn--danger",
         }
     }
@@ -357,11 +357,11 @@ mod tests {
             ),
             (
                 Action::quiet("Go", ActionTarget::Link("/x")),
-                "btn btn--ghost",
+                "btn btn--quiet",
             ),
             (
                 Action::quiet_danger("Go", ActionTarget::Link("/x")),
-                "btn btn--ghost-danger",
+                "btn btn--quiet-danger",
             ),
             (
                 Action::danger("Go", ActionTarget::Link("/x")),
@@ -425,7 +425,7 @@ mod tests {
         );
         assert!(
             s.starts_with(
-                r#"<button class="btn btn--ghost-danger btn--sm" id="remove-1" hidden type="button" data-action="remove-row"><svg"#
+                r#"<button class="btn btn--quiet-danger btn--sm" id="remove-1" hidden type="button" data-action="remove-row"><svg"#
             ),
             "{s}"
         );

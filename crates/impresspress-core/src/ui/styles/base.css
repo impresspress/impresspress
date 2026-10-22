@@ -72,7 +72,7 @@ summary { cursor: pointer; }
    outline (the shell body's inset ring, `--focus-ring-inset`, has its own
    rule in layouts/shell.css, held to the same outline by the same guard).
    `.btn` covers every button variant (`.btn--icon`,
-   `.btn--ghost-danger`, ...), which are modifiers on it. */
+   `.btn--quiet-danger`, ...), which are modifiers on it. */
 .btn:focus-visible,
 .topbar__palette:focus-visible,
 .shell__drawer-toggle:focus-visible,
