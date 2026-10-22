@@ -217,6 +217,8 @@ pub(crate) async fn grants_custom_tab(
                         hx-delete={"/b/admin/grants/rules/" (grant.id)}
                         hx-target="#content"
                         hx-confirm="Delete this grant?"
+                        data-confirm-label="Delete grant"
+                        data-confirm-tone="danger"
                     { (icons::trash()) }
                 },
             ])

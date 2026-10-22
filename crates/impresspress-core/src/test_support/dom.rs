@@ -164,6 +164,118 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
         .collect()
 }
 
+/// Every way the page departs from the one confirm mechanism
+/// (`ui::components::confirm_dialog`, asked through by chrome.js), as one line
+/// each:
+///
+/// - a whole document that loads chrome.js (which asks every confirm), or
+///   that holds an `hx-confirm`, and does not carry the shared dialog exactly
+///   once; and the shared dialog as anything but an `alertdialog`. A document
+///   with neither (`templates::public_page`) asks nothing, so needs none;
+/// - any other `<dialog>` holding a `.btn--danger`, the class a destructive
+///   confirm's button is drawn in: that is a block's own confirm dialog, a
+///   second mechanism beside the shared one;
+/// - an inline `<script>` that reaches the browser's own `confirm`
+///   ([`browser_confirm_references`]): a script embedded in a page is held
+///   to the rule the shipped script files are;
+/// - an element with `hx-confirm` that does not name its action
+///   (`data-confirm-label`, not empty) and its tone (`data-confirm-tone`,
+///   `danger` or `primary`), without which chrome.js refuses to ask.
+///
+/// A fragment (an htmx answer) is held to the last two only: the document it
+/// lands in carries the dialog.
+pub fn confirm_problems(html: &str) -> Vec<String> {
+    use crate::ui::components::CONFIRM_DIALOG_ID;
+
+    let doc = Html::parse_document(html);
+    let mut problems = Vec::new();
+    let shared: Vec<ElementRef<'_>> = doc
+        .select(&selector("dialog"))
+        .filter(|dialog| dialog.value().id() == Some(CONFIRM_DIALOG_ID))
+        .collect();
+    let asks = html.contains(&crate::ui::assets::chrome_js_url())
+        || doc.select(&selector("[hx-confirm]")).next().is_some();
+    if crate::ui::layout::is_document(html) && asks && shared.len() != 1 {
+        problems.push(format!(
+            "the document carries {} dialog#{CONFIRM_DIALOG_ID}, not one",
+            shared.len()
+        ));
+    }
+    for dialog in &shared {
+        if dialog.value().attr("role") != Some("alertdialog") {
+            problems.push(format!(
+                "dialog#{CONFIRM_DIALOG_ID} is not an alertdialog: {}",
+                describe(*dialog)
+            ));
+        }
+    }
+    for dialog in doc.select(&selector("dialog")) {
+        if dialog.value().id() == Some(CONFIRM_DIALOG_ID) {
+            continue;
+        }
+        for danger in dialog.select(&selector(".btn--danger")) {
+            problems.push(format!(
+                "dialog#{} holds its own destructive confirm, {}; confirm through the \
+                 shared dialog instead",
+                dialog.value().id().unwrap_or_default(),
+                describe(danger)
+            ));
+        }
+    }
+    for script in doc.select(&selector("script:not([src])")) {
+        let text: String = script.text().collect();
+        for at in browser_confirm_references(&text) {
+            problems.push(format!(
+                "an inline <script> refers to the browser's confirm, at its line {at} \
+                 (ask in the shared dialog: window.impresspressConfirm)"
+            ));
+        }
+    }
+    for asker in doc.select(&selector("[hx-confirm]")) {
+        let label = asker.value().attr("data-confirm-label").unwrap_or_default();
+        let tone = asker.value().attr("data-confirm-tone").unwrap_or_default();
+        if label.trim().is_empty() || !matches!(tone, "danger" | "primary") {
+            problems.push(format!(
+                "{} asks {:?} without a data-confirm-label and a data-confirm-tone of \
+                 danger or primary (label {label:?}, tone {tone:?})",
+                describe(asker),
+                asker.value().attr("hx-confirm").unwrap_or_default()
+            ));
+        }
+    }
+    problems
+}
+
+/// Every place script `src` reaches the browser's own `confirm`, as
+/// `line: text`. Not only a call: any reference to a global's `confirm` —
+/// `window`, `self`, `globalThis`, `top` or `parent`, then `.confirm` (or
+/// `?.confirm`) or `["confirm"]` with any quote — whether it is called there,
+/// aliased (`var ask = window.confirm`) or called through `.call`. And a bare
+/// `confirm(`, which is the same global. Words that only contain the name —
+/// `impresspressConfirm(`, `htmx:confirm`, `data-confirm-tone`,
+/// `confirm-accept` — are not references to it.
+///
+/// Prose in a script comment is held to it too: a comment that names the
+/// browser's confirm writes it as "the browser's confirm dialog".
+pub fn browser_confirm_references(src: &str) -> Vec<String> {
+    static GLOBAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?x)
+            (?:^|[^\w$.])(?:window|self|globalThis|top|parent)\s*
+            (?: (?:\?\.|\.)\s*confirm(?:[^\w$]|$)
+              | (?:\?\.)?\s*\[\s*["'`]confirm["'`]\s*\] )
+            | (?:^|[^\w$])confirm\s*\(
+            "#,
+        )
+        .expect("a valid pattern")
+    });
+    src.lines()
+        .enumerate()
+        .filter(|(_, line)| GLOBAL.is_match(line))
+        .map(|(n, line)| format!("{}: {}", n + 1, line.trim()))
+        .collect()
+}
+
 /// How a guard names an element: `button.btn.btn--primary "Save"`.
 pub fn describe(el: ElementRef<'_>) -> String {
     let mut out = el.value().name().to_string();
@@ -511,7 +623,155 @@ mod tests {
         assert_eq!(heading_outline(&html), vec![(1, "Title".to_string())]);
         let (page, per_dialog) = visible_primaries(&html);
         assert!(page.is_empty());
-        assert_eq!(per_dialog, vec![vec![primary("Ok")]]);
+        // The page's own dialog, then the shared confirm dialog every
+        // document carries, whose confirm buttons are hidden until it asks.
+        assert_eq!(per_dialog, vec![vec![primary("Ok")], vec![]]);
+        assert_eq!(confirm_problems(&html), Vec::<String>::new());
+    }
+
+    // ── confirm_problems ─────────────────────────────────────────────────
+
+    #[test]
+    fn a_confirm_must_name_its_action_and_tone() {
+        let html = concat!(
+            r#"<button hx-delete="/a" hx-confirm="Delete a?" data-confirm-label="Delete a" data-confirm-tone="danger">A</button>"#,
+            r#"<button hx-delete="/b" hx-confirm="Delete b?">B</button>"#,
+            r#"<button hx-post="/c" hx-confirm="Load c?" data-confirm-label=" " data-confirm-tone="primary">C</button>"#,
+            r#"<button hx-post="/d" hx-confirm="Load d?" data-confirm-label="Load d" data-confirm-tone="ok">D</button>"#,
+        );
+        let problems = confirm_problems(html);
+        assert_eq!(problems.len(), 3, "{problems:#?}");
+        for (at, name) in [(0, "\"B\""), (1, "\"C\""), (2, "\"D\"")] {
+            assert!(
+                problems[at].starts_with(&format!("button {name} asks")),
+                "{problems:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialog_of_its_own_with_a_danger_button_is_a_second_mechanism() {
+        let html = concat!(
+            r#"<dialog id="delete-confirm"><p></p>"#,
+            r#"<button class="btn btn--secondary">Cancel</button>"#,
+            r#"<button class="btn btn--danger" data-confirm>Delete</button></dialog>"#,
+            r#"<dialog id="edit"><button class="btn btn--primary">Save</button></dialog>"#,
+        );
+        assert_eq!(
+            confirm_problems(html),
+            vec![
+                r#"dialog#delete-confirm holds its own destructive confirm, button.btn.btn--danger "Delete"; confirm through the shared dialog instead"#
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_carries_the_shared_dialog_once_as_an_alertdialog() {
+        let shared = crate::ui::components::confirm_dialog().into_string();
+        // A whole document, spelled with maud's own doctype so this file
+        // writes no page chrome of its own (`scripts/grep-guard-html.sh`).
+        let document = |head: &str, body: &str| {
+            format!("{}<head>{head}</head><body>{body}</body>", maud::DOCTYPE.0)
+        };
+        let chrome = format!(
+            r#"<script src="{}" defer></script>"#,
+            crate::ui::assets::chrome_js_url()
+        );
+        let with_chrome = |body: &str| document(&chrome, body);
+        assert!(confirm_problems(&with_chrome(&shared)).is_empty());
+        assert_eq!(
+            confirm_problems(&with_chrome("<p>x</p>")),
+            vec!["the document carries 0 dialog#confirm-dialog, not one"]
+        );
+        assert_eq!(
+            confirm_problems(&with_chrome(&format!("{shared}{shared}"))),
+            vec!["the document carries 2 dialog#confirm-dialog, not one"]
+        );
+        assert_eq!(
+            confirm_problems(&with_chrome(r#"<dialog id="confirm-dialog"></dialog>"#)),
+            vec!["dialog#confirm-dialog is not an alertdialog: dialog"]
+        );
+        // A fragment lands in a document that carries the dialog, and a
+        // document that loads no chrome.js and holds no `hx-confirm` (a
+        // public page) asks nothing.
+        assert!(confirm_problems("<tr><td>x</td></tr>").is_empty());
+        assert!(confirm_problems(&document("", "<p>x</p>")).is_empty());
+        assert_eq!(
+            confirm_problems(&document(
+                "",
+                r#"<button hx-delete="/x" hx-confirm="X?" data-confirm-label="Delete x" data-confirm-tone="danger">X</button>"#
+            )),
+            vec!["the document carries 0 dialog#confirm-dialog, not one"]
+        );
+    }
+
+    // ── browser_confirm_references ────────────────────────────────────
+
+    #[test]
+    fn every_spelling_of_the_browser_confirm_is_a_reference() {
+        for spelling in [
+            "if (!window.confirm('x')) return;",
+            "window.confirm ('x')",
+            "window . confirm('x')",
+            r#"if (!window["confirm"]("x")) return;"#,
+            "window['confirm']('x')",
+            "window[`confirm`]('x')",
+            "window[ 'confirm' ]",
+            "var ask = window.confirm; ask('y');",
+            "const ask = window.confirm",
+            "window.confirm.call(window, 'x')",
+            "window.confirm.bind(window)",
+            "window?.confirm?.('x')",
+            "self.confirm('x')",
+            "globalThis.confirm('x')",
+            "top.confirm('x')",
+            "parent.confirm('x')",
+            "confirm('x')",
+            "if(!confirm('x'))return;",
+            "confirm ('y');",
+        ] {
+            assert_eq!(
+                browser_confirm_references(spelling),
+                vec![format!("1: {spelling}")],
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_only_contains_confirm_is_not_a_reference() {
+        for text in [
+            "await window.impresspressConfirm({question: 'x'})",
+            "askToConfirm(a)",
+            "confirmed(b)",
+            r#"document.body.addEventListener("htmx:confirm", f)"#,
+            r#"b.getAttribute("data-confirm-tone")"#,
+            r#"'[data-action="confirm-accept"]'"#,
+            "window.confirmDialog = d",
+            "myWindow.confirm",
+            "// asked in the shared dialog, never the browser's confirm dialog",
+        ] {
+            assert!(browser_confirm_references(text).is_empty(), "{text}");
+        }
+        assert_eq!(
+            browser_confirm_references("a();\nb();\n  window.confirm('x');"),
+            vec!["3: window.confirm('x');"]
+        );
+    }
+
+    #[test]
+    fn an_inline_script_that_reaches_the_browser_confirm_is_a_problem() {
+        let html = concat!(
+            r#"<script src="/b/static/x.js"></script>"#,
+            r#"<script>var ok = 1;</script>"#,
+            r#"<script>function f(){ if (!window["confirm"]("Really?")) return; }</script>"#,
+        );
+        assert_eq!(
+            confirm_problems(html),
+            vec![
+                r#"an inline <script> refers to the browser's confirm, at its line 1: function f(){ if (!window["confirm"]("Really?")) return; } (ask in the shared dialog: window.impresspressConfirm)"#
+            ]
+        );
     }
 
     // ── describe ─────────────────────────────────────────────────────────

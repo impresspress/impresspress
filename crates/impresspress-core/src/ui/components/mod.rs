@@ -30,7 +30,9 @@ pub use chart::{ChartCard, ChartHistory};
 pub use empty::{empty_note, empty_state};
 pub use endpoints::endpoint_table;
 pub use form::{password_field, reveal_toggle, FilterInput, PasswordPurpose, SearchInput};
-pub use modal::{modal, modal_cancel, modal_footer, Modal, ModalSize};
+pub use modal::{
+    confirm_dialog, modal, modal_cancel, modal_footer, Modal, ModalSize, CONFIRM_DIALOG_ID,
+};
 pub use pagination::pagination;
 pub use section::section_header;
 pub use stat::{stat_row, Stat, MAX_STATS};

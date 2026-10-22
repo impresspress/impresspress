@@ -1,6 +1,7 @@
 import { expect, test, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { answerConfirm, confirmChrome } from "./fixtures/confirm";
 
 const bundlesUrl = new URL(
   "../../../impresspress-core/src/blocks/products/assets/",
@@ -46,6 +47,7 @@ function sellerHtml(status: "active" | "suspended") {
     <h1>maker_1</h1><p>Seller status: ${status}</p>
     <button data-seller-action="${action}" data-action="psa-set-state">${label}</button>
   </main>
+  ${confirmChrome}
   <script>window.__sellerAdminConfig={action_url:'/b/products/api/admin/sellers/seller_1/${action}',action:'${action}'};</script>
   <script>${bundle("products-seller-admin.js")}</script>
 </body></html>`;
@@ -115,7 +117,6 @@ test.describe("products seller governance", () => {
     let status: "active" | "suspended" = "active";
     let suspensionAttempts = 0;
     const requests: string[] = [];
-    page.on("dialog", (dialog) => dialog.accept());
     await page.route(`${adminOrigin}/**`, async (route) => {
       const request = route.request();
       const path = new URL(request.url()).pathname;
@@ -149,12 +150,14 @@ test.describe("products seller governance", () => {
     await page.goto(`${adminOrigin}/b/products/admin/sellers/seller_1`);
     const suspend = page.getByRole("button", { name: "Suspend seller" });
     await suspend.click();
+    await answerConfirm(page, "Suspend seller", "confirm", "Suspend this seller?");
     await expect(page.getByRole("alert")).toHaveText(
       "Stripe rejected catalog reconciliation",
     );
     await expect(suspend).toBeEnabled();
     await expect(suspend).toHaveText("Suspend seller");
     await suspend.click();
+    await answerConfirm(page, "Suspend seller", "confirm");
     const reactivate = page.getByRole("button", { name: "Reactivate seller" });
     await expect(reactivate).toBeVisible();
     await reactivate.click();

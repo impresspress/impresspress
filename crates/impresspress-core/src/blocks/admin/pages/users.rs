@@ -250,6 +250,8 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                             hx-target={"#user-row-" (record.id)}
                             hx-swap="outerHTML"
                             hx-confirm={"Disable " (email) "?"}
+                            data-confirm-label="Disable user"
+                            data-confirm-tone="primary"
                             title="Disable user"
                         { "Disable" }
                     }
@@ -259,6 +261,8 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                         hx-target={"#user-row-" (record.id)}
                         hx-swap="outerHTML"
                         hx-confirm={"Delete " (email) "? This cannot be undone."}
+                        data-confirm-label="Delete user"
+                        data-confirm-tone="danger"
                         title="Delete user"
                         aria-label=(format!("Delete user {email}"))
                     { (icons::trash()) }
@@ -525,6 +529,8 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                             hx-delete={"/b/admin/iam/roles/" (record.id)}
                             hx-target="#iam-content"
                             hx-confirm={"Delete role \"" (name) "\"? Everyone it is assigned to loses it."}
+                            data-confirm-label="Delete role"
+                            data-confirm-tone="danger"
                             title="Delete role"
                             aria-label=(format!("Delete role {name}"))
                         { (icons::trash()) }
@@ -624,6 +630,8 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                             hx-post={"/b/admin/api-keys/" (record.id) "/revoke"}
                             hx-target="#users-tab-content"
                             hx-confirm="Revoke this API key?"
+                            data-confirm-label="Revoke key"
+                            data-confirm-tone="danger"
                         { "Revoke" }
                     }
                 },

@@ -14,7 +14,8 @@
 //! asset.
 
 /// Vanilla-JS bundle for the file-browser surfaces — drag-drop upload, bulk
-/// select, row menus, share revoke, the share and new-bucket modals' forms, confirm-delete. Consumed
+/// select, row menus, share revoke, the share and new-bucket modals' forms, and the delete and
+/// revoke confirms it asks in the page's shared confirm dialog. Consumed
 /// by [`super::pages_user::objects::object_list_page`],
 /// [`super::pages_user::cloudstorage::cloudstorage_page`] and the admin
 /// storage pages.

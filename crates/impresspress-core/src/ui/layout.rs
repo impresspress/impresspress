@@ -6,7 +6,7 @@
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-use super::{assets, SiteConfig};
+use super::{assets, components, SiteConfig};
 
 /// The `htmx-config` every page carries. See the comment where it is emitted.
 const HTMX_CONFIG: &str = r#"{"allowEval":false,"historyCacheSize":0,"refreshOnHistoryMiss":true}"#;
@@ -88,6 +88,12 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
             }
             body {
                 (body)
+                // The one dialog every "are you sure?" is asked in, for an
+                // htmx `hx-confirm` and a block script's
+                // `window.impresspressConfirm` alike (chrome.js, section 4).
+                // On every page, beside the toasts, because every page loads
+                // the script that asks through it.
+                (components::confirm_dialog())
                 div #toast-container .toast-container role="status" aria-live="polite" {}
                 // What a list search found (`components::SearchInput`),
                 // written by chrome.js. Outside `main#content`, which each
@@ -179,5 +185,29 @@ mod tests {
                 "{marker} is still inlined into the page: {rendered}"
             );
         }
+    }
+
+    /// Every page carries the shared confirm dialog, once: chrome.js asks
+    /// every confirm on every page through it.
+    #[test]
+    fn every_page_carries_the_one_confirm_dialog() {
+        let config = SiteConfig {
+            app_name: "Test".into(),
+            logo_url: String::new(),
+            logo_icon_url: String::new(),
+            favicon_url: String::new(),
+            primary_color: String::new(),
+            embedded_scripts: Vec::new(),
+            auth_headline: String::new(),
+            auth_tagline: String::new(),
+        };
+        let rendered = page("Title", &config, maud::html! { p { "body" } }).into_string();
+        let dialog = components::confirm_dialog().into_string();
+        assert_eq!(rendered.matches(&dialog).count(), 1, "{rendered}");
+        assert_eq!(
+            rendered.matches(r#"id="confirm-dialog""#).count(),
+            1,
+            "{rendered}"
+        );
     }
 }

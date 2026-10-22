@@ -787,13 +787,14 @@ mod integration_tests {
             "missing empty state copy: {body}"
         );
         // The header's "Create index" is the page's one primary; the empty
-        // state's copy is a secondary, and the dialog has its own.
+        // state's copy is a secondary, and the dialog has its own. The
+        // shared confirm dialog shows none until it asks.
         let (page, dialogs) = crate::test_support::dom::visible_primaries(&body);
         assert_eq!(page.len(), 1, "{page:?}");
         assert!(page[0].contains("Create index"), "{page:?}");
         assert_eq!(
             dialogs.iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![1],
+            vec![1, 0],
             "{dialogs:?}"
         );
     }

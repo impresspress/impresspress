@@ -101,11 +101,17 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
         .map(|r| {
             let is_current = current_family == Some(r.family.as_str());
             // Revoking the session this page was loaded with signs the
-            // reader out, which the confirmation says.
-            let confirm = if is_current {
-                "Revoke your current session? You will be signed out on this device."
+            // reader out, which the confirmation says, and its button too.
+            let (confirm, confirm_label) = if is_current {
+                (
+                    "Revoke your current session? You will be signed out on this device.",
+                    "Revoke and sign out",
+                )
             } else {
-                "Revoke this session? That device will be signed out."
+                (
+                    "Revoke this session? That device will be signed out.",
+                    "Revoke session",
+                )
             };
             TableRow::new(vec![
                 html! {
@@ -142,6 +148,8 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
                         hx-target="closest tr"
                         hx-swap="outerHTML"
                         hx-confirm=(confirm)
+                        data-confirm-label=(confirm_label)
+                        data-confirm-tone="danger"
                     { "Revoke" }
                 },
             ])
@@ -396,7 +404,11 @@ mod tests {
             2,
             "{html}"
         );
-        assert!(!html.contains("btn--danger"), "{html}");
+        // The only danger button is the shared confirm dialog's.
+        let (list, _) = html
+            .split_once(r#"<dialog class="modal" id="confirm-dialog""#)
+            .expect("the page carries the shared confirm dialog");
+        assert!(!list.contains("btn--danger"), "{html}");
         // Each Revoke is named by its session: its own label, the method
         // and when the device was last used.
         assert!(
@@ -432,6 +444,20 @@ mod tests {
         assert_eq!(
             html.matches(r#"hx-confirm="Revoke this session?"#).count(),
             1,
+            "{html}"
+        );
+        // Asked in the shared confirm dialog, in danger red, on a button
+        // that says what it does.
+        assert!(
+            html.contains(
+                r#"signed out on this device." data-confirm-label="Revoke and sign out" data-confirm-tone="danger">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"That device will be signed out." data-confirm-label="Revoke session" data-confirm-tone="danger">"#
+            ),
             "{html}"
         );
     }

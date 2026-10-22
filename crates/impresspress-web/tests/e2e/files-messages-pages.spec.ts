@@ -2,6 +2,7 @@ import { expect, request as playwrightRequest, test, type Page } from '@playwrig
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
 import { WIDTHS, isWrong, layout } from './fixtures/layout';
 import { PHONE, targetFloor } from './fixtures/targets';
+import { seedBucket } from './fixtures/storage';
 
 /**
  * The storage and messages pages, driven in a browser against the real server.
@@ -117,56 +118,6 @@ test('a bucket created from the modal takes an upload with labelled row controls
   expect((await del.boundingBox())!.height).toBeGreaterThan(floor - 0.5);
 });
 
-/** A bucket holding `keys` (tiny text files), made through the API. */
-async function seedBucket(baseURL: string | undefined, keys: string[]): Promise<{
-  bucket: string;
-  share: (key: string) => Promise<string>;
-  revoke: (id: string) => Promise<void>;
-  remove: (key: string) => Promise<void>;
-  drop: () => Promise<void>;
-}> {
-  const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
-  const Authorization = await adminBearer(api);
-  const bucket = `e2e-bulk-${Date.now().toString(36)}`;
-  const made = await api.post('/b/storage/api/buckets', {
-    headers: { Authorization, 'Content-Type': 'application/json' },
-    data: { name: bucket, public: false },
-  });
-  expect(made.status(), await made.text()).toBe(200);
-  for (const key of keys) {
-    const up = await api.post(`/b/storage/api/buckets/${bucket}/objects?key=${encodeURIComponent(key)}`, {
-      headers: { Authorization, 'Content-Type': 'text/plain' },
-      data: Buffer.from(key),
-    });
-    expect(up.status(), await up.text()).toBe(200);
-  }
-  return {
-    bucket,
-    share: async (key) => {
-      const made = await api.post('/b/cloudstorage/shares', {
-        headers: { Authorization, 'Content-Type': 'application/json' },
-        data: { bucket, key, expires_in_hours: 24 },
-      });
-      expect(made.status(), await made.text()).toBe(200);
-      return (await made.json()).id as string;
-    },
-    revoke: async (id) => {
-      const gone = await api.delete(`/b/cloudstorage/shares/${encodeURIComponent(id)}`, { headers: { Authorization } });
-      expect(gone.ok(), await gone.text()).toBe(true);
-    },
-    remove: async (key) => {
-      const gone = await api.delete(`/b/storage/api/buckets/${bucket}/objects/${encodeURIComponent(key)}`, {
-        headers: { Authorization },
-      });
-      expect(gone.ok(), await gone.text()).toBe(true);
-    },
-    drop: async () => {
-      const gone = await api.delete(`/b/storage/api/buckets/${bucket}`, { headers: { Authorization } });
-      expect(gone.ok(), await gone.text()).toBe(true);
-    },
-  };
-}
-
 test('a bulk delete confirms in the dialog, removes the rows and says so', async ({ page, baseURL }) => {
   const { bucket } = await seedBucket(baseURL, ['one.txt', 'two.txt', 'three.txt']);
   await loginAsAdmin(page);
@@ -177,7 +128,7 @@ test('a bulk delete confirms in the dialog, removes the rows and says so', async
   const del = page.getByRole('button', { name: 'Delete selected' });
   await del.click();
 
-  const dialog = page.getByRole('dialog', { name: 'Delete files' });
+  const dialog = page.getByRole('alertdialog', { name: 'Delete files' });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("Delete 2 files? This can't be undone.");
   // Cancel, not the destructive button, has focus: a stray Enter cancels.
@@ -187,7 +138,7 @@ test('a bulk delete confirms in the dialog, removes the rows and says so', async
   await expect(page.getByRole('checkbox', { name: 'Select one.txt' })).toBeChecked();
 
   await del.click();
-  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Delete files', exact: true }).click();
   await expect(page.locator('[data-bulk-count]')).toHaveText('2 files deleted');
   await expect(page.locator('#toast-container')).toContainText('2 files deleted');
   await expect(page.getByRole('checkbox', { name: 'Select one.txt' })).toHaveCount(0);
@@ -205,7 +156,7 @@ test('a file that could not be deleted is reported, not passed over', async ({ p
   await page.getByRole('button', { name: 'Delete selected' }).click();
   // Someone else deletes one of them while the dialog is open.
   await remove('gone.txt');
-  await page.getByRole('dialog', { name: 'Delete files' }).getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.getByRole('alertdialog', { name: 'Delete files' }).getByRole('button', { name: 'Delete files', exact: true }).click();
 
   const outcome = "1 file deleted, 1 couldn't be deleted: gone.txt";
   await expect(page.locator('[data-bulk-count]')).toHaveText(outcome);
@@ -227,7 +178,7 @@ test('revoking a share link confirms in the dialog and updates the list in place
 
   const revoke = page.getByRole('button', { name: `Revoke the share link for ${bucket}/report.txt` });
   await revoke.click();
-  const dialog = page.getByRole('dialog', { name: 'Revoke share link' });
+  const dialog = page.getByRole('alertdialog', { name: 'Revoke link' });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText(`Revoke the link to ${bucket}/report.txt? Anyone who has it loses access.`);
   await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
@@ -236,7 +187,7 @@ test('revoking a share link confirms in the dialog and updates the list in place
   await expect(revoke).toBeFocused();
 
   await revoke.click();
-  await dialog.getByRole('button', { name: 'Revoke', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Revoke link', exact: true }).click();
   await expect(page.locator('#toast-container')).toContainText('Share link revoked');
   await expect(revoke).toHaveCount(0);
   await expect(page.getByRole('heading', { level: 2, name: 'Share links', exact: true })).toBeFocused();

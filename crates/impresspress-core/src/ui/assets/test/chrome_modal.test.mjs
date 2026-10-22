@@ -610,3 +610,24 @@ test('moving the toast container never re-inserts an announced alert', async () 
   assert.equal(toast.parentNode, page.toastContainer, 'still shown');
   assert.equal(toast.getAttribute('role'), null, 'but not announced a second time');
 });
+
+test('a modal reopened before its close event lands stays open, and Tab stays in it', async () => {
+  const page = loadChromeDom();
+  const { trigger, dialog, submit } = pageWithModal(page);
+  trigger.focus();
+  page.click(trigger);
+  page.click(dialog.querySelector('.modal__close'));
+  // Reopened while the `close` event is still queued.
+  page.click(trigger);
+  await tick();
+
+  assert.equal(dialog.open, true, 'the late close event closed nothing');
+  submit.focus();
+  const e = page.key('Tab');
+  assert.equal(e.defaultPrevented, true, 'Tab still wraps inside the reopened modal');
+  page.click(dialog.querySelector('.modal__close'));
+  await tick();
+  assert.equal(page.doc.activeElement, trigger);
+  // Nothing of either opening is left behind: Tab is the page's again.
+  assert.equal(page.key('Tab').defaultPrevented, false);
+});

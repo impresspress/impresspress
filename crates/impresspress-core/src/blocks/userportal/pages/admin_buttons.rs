@@ -197,6 +197,8 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
                             hx-target="#buttons-table"
                             hx-swap="outerHTML"
                             hx-confirm={"Delete the " (label) " button?"}
+                            data-confirm-label="Delete button"
+                            data-confirm-tone="danger"
                             title="Delete"
                             aria-label={"Delete " (label)}
                         {
@@ -572,7 +574,9 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"hx-confirm="Delete the Files button?""#),
+            html.contains(
+                r#"hx-confirm="Delete the Files button?" data-confirm-label="Delete button" data-confirm-tone="danger""#
+            ),
             "{html}"
         );
     }
