@@ -125,21 +125,21 @@ pub fn auth_config_vars() -> Vec<ConfigVar> {
             ),
             &SESSION_LIFETIME_DAYS_DEFAULT.to_string(),
         )
-        .name("Session Lifetime (days)"),
+        .name("Session lifetime (days)"),
         ConfigVar::new(
             BOOTSTRAP_ADMIN_EMAIL_KEY,
             "Email of the first admin, created together with the password on first startup \
              (empty users table). Used only then; you may clear it afterwards.",
             "",
         )
-        .name("Bootstrap Admin Email")
+        .name("Bootstrap admin email")
         .optional(),
         ConfigVar::new(
             BOOTSTRAP_ADMIN_PASSWORD_KEY,
             "Password for the bootstrap admin account",
             "",
         )
-        .name("Bootstrap Admin Password")
+        .name("Bootstrap admin password")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
@@ -147,7 +147,7 @@ pub fn auth_config_vars() -> Vec<ConfigVar> {
             "One-time token for provisioning the first admin (sha256 stored)",
             "",
         )
-        .name("Bootstrap Admin Token")
+        .name("Bootstrap admin token")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
@@ -155,13 +155,13 @@ pub fn auth_config_vars() -> Vec<ConfigVar> {
             "Minimum password length enforced at signup. Existing accounts are not re-validated.",
             &PASSWORD_MIN_LENGTH_DEFAULT.to_string(),
         )
-        .name("Password Minimum Length"),
+        .name("Password minimum length"),
         ConfigVar::new(
             ACCESS_TOKEN_LIFETIME_SECS_KEY,
             "Lifetime of an issued JWT access token in seconds. Shorter values reduce the SEC-042 exposure window when a JWT leaks; longer values reduce refresh churn. Logout invalidates the in-flight JWT regardless via the blocklist, and password/disable/role changes invalidate it via auth_version. Hard-capped at 86400 (24h) regardless of this value.",
             &ACCESS_TOKEN_LIFETIME_SECS_DEFAULT.to_string(),
         )
-        .name("Access Token Lifetime (seconds)"),
+        .name("Access token lifetime (seconds)"),
     ]
 }
 
@@ -180,14 +180,14 @@ pub fn auth_identity_config_vars() -> Vec<ConfigVar> {
             "Require users to verify their email before they can log in.",
             "false",
         )
-        .name("Require Email Verification")
+        .name("Require email verification")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             ALLOWED_EMAIL_DOMAINS_KEY,
             "Restrict signup to specific email domains (comma-separated, e.g. \"company.com,org.com\"). Leave empty to allow all.",
             "",
         )
-        .name("Allowed Email Domains")
+        .name("Allowed email domains")
         .input_type(InputType::Text),
     ]
 }

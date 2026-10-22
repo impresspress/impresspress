@@ -782,7 +782,7 @@ mod tests {
         );
 
         // The token claims no roles at all; the grant is what decides.
-        let msg = bearer_msg(&access_token_for(&user.id, &[]));
+        let msg = bearer_msg(&access_token_for(&ctx, &user.id, &[]).await);
         let got = service
             .require_role(&*ctx, &msg, Role::Admin)
             .await
@@ -829,7 +829,7 @@ mod tests {
         let got = service
             .require_role(
                 &*ctx,
-                &bearer_msg(&access_token_for(&user.id, &[])),
+                &bearer_msg(&access_token_for(&ctx, &user.id, &[]).await),
                 Role::Admin,
             )
             .await
@@ -972,6 +972,7 @@ mod tests {
             .email_verified(true)
             .insert(&ctx)
             .await;
+        let token = crate::test_support::access_token_for(&ctx, &user.id, &["user"]).await;
         let ctx = refused_under_auth(ctx.refuse_database_op(
             "database.get",
             users::TABLE,
@@ -979,13 +980,7 @@ mod tests {
         ));
 
         let mut request = Message::new("retrieve");
-        request.set_meta(
-            "http.header.authorization",
-            format!(
-                "Bearer {}",
-                crate::test_support::access_token_for(&user.id, &["user"])
-            ),
-        );
+        request.set_meta("http.header.authorization", format!("Bearer {token}"));
         let out = match wafer_core::clients::auth::require_user(&ctx, &request).await {
             Ok(id) => panic!("a failed auth_version read must not authenticate {id}"),
             Err(e) => wafer_run::OutputStream::error(e),
@@ -1048,19 +1043,14 @@ mod tests {
                 .email_verified(true)
                 .insert(&ctx)
                 .await;
+            let token = crate::test_support::access_token_for(&ctx, &user.id, &["user"]).await;
             let ctx = refused_under_auth(ctx.refuse_database_op(
                 "database.get",
                 users::TABLE,
                 WaferError::new(code, DETAIL),
             ));
             let mut request = Message::new("retrieve");
-            request.set_meta(
-                "http.header.authorization",
-                format!(
-                    "Bearer {}",
-                    crate::test_support::access_token_for(&user.id, &["user"])
-                ),
-            );
+            request.set_meta("http.header.authorization", format!("Bearer {token}"));
             let (status, body) = require_user_response(&ctx, &request).await;
             assert_eq!(status, want_status, "JWT, {code:?}: {body}");
             assert!(!body.contains(DETAIL), "JWT, {code:?}: {body}");

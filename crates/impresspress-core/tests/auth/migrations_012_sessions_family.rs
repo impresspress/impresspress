@@ -1,11 +1,13 @@
-//! Migration 012 — `wafer_run__auth__sessions` is re-keyed on the refresh
-//! rotation `family` (B12), and the sweeper's singleton bookkeeping table is
-//! created alongside it.
+//! `wafer_run__auth__sessions` is keyed on the refresh rotation `family`
+//! (B12), and migration 012 creates the sweeper's singleton bookkeeping table.
 //!
-//! Two paths, because they are genuinely different: a fresh database (where
-//! 001 creates the old table moments before 012 replaces it) and a database
-//! that already holds the 001 table with rows in it — the shape every live
-//! deployment is in when this migration lands.
+//! 012 used to re-key the table itself, by dropping 001's
+//! `sha256(access_token)`-keyed layout and recreating it. That drop re-ran
+//! with every later auth migration and, once a session row became a family's
+//! liveness, signed every device out each time. The family-keyed layout now
+//! lives in 001 and nothing drops it. Two paths: a fresh database, and one
+//! that already holds the family-keyed table with rows in it, which is the
+//! shape every live deployment is in when this change lands.
 //!
 //! Same harness as `migrations_001`: `call_block("wafer-run/database", ..)`
 //! goes to a real `DatabaseBlock` over in-memory SQLite, so the migration
@@ -14,7 +16,6 @@
 //! explicit exception CLAUDE.md carves out.
 
 use impresspress_core::{blocks::auth::migrations, test_support::TestContext};
-use serde_json::json;
 use wafer_core::clients::database as db;
 
 use crate::common::auth_fixture;
@@ -48,7 +49,7 @@ async fn row_count(ctx: &TestContext, table: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn fresh_apply_keys_sessions_on_family_and_drops_the_token_hash_column() {
+async fn fresh_apply_keys_sessions_on_family_with_no_token_hash_column() {
     let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("apply migrations");
 
@@ -63,7 +64,7 @@ async fn fresh_apply_keys_sessions_on_family_and_drops_the_token_hash_column() {
     ] {
         assert!(
             cols.contains(&expected.to_string()),
-            "012 must declare `{expected}` on the sessions table (got {cols:?})"
+            "the auth set must declare `{expected}` on the sessions table (got {cols:?})"
         );
     }
     assert!(
@@ -71,13 +72,12 @@ async fn fresh_apply_keys_sessions_on_family_and_drops_the_token_hash_column() {
         "the access-token key must be gone — a session row is a login family now (got {cols:?})"
     );
 
-    // `db::create` synthesizes an `id` and stamps `updated_at`; both are
-    // declared by 012 itself rather than by a later ALTER, because the table
-    // is created fresh.
+    // `db::create` synthesizes an `id` and stamps `updated_at`; 010 adds
+    // both.
     for bookkeeping in ["id", "updated_at"] {
         assert!(
             cols.contains(&bookkeeping.to_string()),
-            "012 must declare `{bookkeeping}` for `db::create` (got {cols:?})"
+            "the auth set must declare `{bookkeeping}` for `db::create` (got {cols:?})"
         );
     }
 
@@ -118,20 +118,18 @@ async fn fresh_apply_creates_the_maintenance_singleton() {
     );
 }
 
-/// The path a live deployment takes: the 001 sessions table already exists,
-/// with rows keyed by hashes of access tokens. Those rows cannot be converted
-/// — no family is recoverable from a token hash — and they are not
-/// credentials, so 012 drops them with the table. What must not happen is the
-/// migration silently leaving the old shape in place, which is exactly what
-/// `CREATE TABLE IF NOT EXISTS` alone would do.
+/// The path a live deployment takes: the family-keyed table already exists,
+/// created by the old 012, with a signed-in device in it. Running the set
+/// again (any auth migration change does) must leave the row, since the row
+/// is what keeps the device signed in.
 #[tokio::test]
-async fn apply_over_an_existing_001_table_with_rows_replaces_the_shape() {
+async fn apply_over_an_existing_family_table_keeps_its_rows() {
     let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
 
-    // 1. The pre-012 world, spelled out rather than derived from the
-    //    migration list: this is the on-disk shape a deployment running 011
-    //    has, and pinning it verbatim is the point — a later edit to 001 must
-    //    not quietly change what this test claims to upgrade from.
+    // 1. The post-B12 world, spelled out rather than derived from the
+    //    migration list: the on-disk shape the old 012 left, pinned verbatim
+    //    so a later edit to 001 cannot quietly change what this test claims
+    //    to upgrade from.
     for stmt in [
         "CREATE TABLE wafer_run__auth__users ( \
              id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, \
@@ -140,8 +138,9 @@ async fn apply_over_an_existing_001_table_with_rows_replaces_the_shape() {
              email_verified INTEGER NOT NULL DEFAULT 0, \
              created_at TEXT NOT NULL, updated_at TEXT NOT NULL )",
         "CREATE TABLE wafer_run__auth__sessions ( \
-             token_hash BLOB PRIMARY KEY, \
+             family TEXT PRIMARY KEY, \
              user_id TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE, \
+             auth_method TEXT NOT NULL DEFAULT '', \
              created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, \
              expires_at TEXT NOT NULL, id TEXT, updated_at TEXT )",
         "CREATE INDEX wafer_run__auth__sessions_user_id_idx \
@@ -149,17 +148,12 @@ async fn apply_over_an_existing_001_table_with_rows_replaces_the_shape() {
         "CREATE INDEX wafer_run__auth__sessions_expires_at_idx \
              ON wafer_run__auth__sessions (expires_at)",
     ] {
-        db::ddl(&ctx, stmt).await.expect("build the pre-012 schema");
-    }
-    assert!(
-        columns(&ctx, "wafer_run__auth__sessions")
+        db::ddl(&ctx, stmt)
             .await
-            .contains(&"token_hash".to_string()),
-        "precondition: the pre-012 sessions table is keyed by token_hash"
-    );
+            .expect("build the post-B12 schema");
+    }
 
-    // 2. A user and a session row of the old shape, the way a live database
-    //    holds them.
+    // 2. A user and a signed-in device, the way a live database holds them.
     db::exec_raw(
         &ctx.fixture(),
         "INSERT INTO wafer_run__auth__users \
@@ -173,49 +167,28 @@ async fn apply_over_an_existing_001_table_with_rows_replaces_the_shape() {
     db::exec_raw(
         &ctx.fixture(),
         "INSERT INTO wafer_run__auth__sessions \
-         (token_hash, user_id, created_at, last_used_at, expires_at) \
-         VALUES ('deadbeef', 'u1', '2026-01-01T00:00:00Z', \
+         (family, user_id, auth_method, created_at, last_used_at, expires_at) \
+         VALUES ('fam-1', 'u1', 'password', '2026-01-01T00:00:00Z', \
          '2026-01-01T00:00:00Z', '2099-01-01T00:00:00Z')",
         &[],
     )
     .await
-    .expect("seed pre-existing session row");
-    assert_eq!(row_count(&ctx, "wafer_run__auth__sessions").await, 1);
+    .expect("seed a signed-in device");
 
-    // 3. The full apply, 012 included.
+    // 3. The full apply.
     migrations::apply(&ctx).await.expect("apply migrations");
 
-    let cols = columns(&ctx, "wafer_run__auth__sessions").await;
-    assert!(
-        cols.contains(&"family".to_string()) && !cols.contains(&"token_hash".to_string()),
-        "012 must replace the old shape on an existing table, not skip it (got {cols:?})"
-    );
     assert_eq!(
         row_count(&ctx, "wafer_run__auth__sessions").await,
-        0,
-        "the old rows are hashes of long-expired tokens; they go with the table"
-    );
-    assert_eq!(
-        row_count(&ctx, "wafer_run__auth__users").await,
         1,
-        "only the sessions table is replaced — the user row is untouched"
+        "the signed-in device survives the set"
     );
-
-    // The new shape accepts a family row.
-    let mut data = std::collections::HashMap::new();
-    data.insert("family".to_string(), json!("fam-1"));
-    data.insert("user_id".to_string(), json!("u1"));
-    data.insert("auth_method".to_string(), json!("password"));
-    data.insert("created_at".to_string(), json!("2026-02-01T00:00:00Z"));
-    data.insert("last_used_at".to_string(), json!("2026-02-01T00:00:00Z"));
-    data.insert("expires_at".to_string(), json!("2099-01-01T00:00:00Z"));
-    db::create(&ctx, "wafer_run__auth__sessions", data)
+    assert!(columns(&ctx, "wafer_run__auth__sessions")
         .await
-        .expect("a family-keyed row writes through db::create after 012");
+        .contains(&"family".to_string()));
 }
 
-/// A second full apply is a no-op on everything except the sessions table it
-/// deliberately drops, and leaves both tables in the post-012 shape.
+/// A second full apply is a no-op, and leaves both tables in their shape.
 #[tokio::test]
 async fn migration_012_is_idempotent() {
     let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;

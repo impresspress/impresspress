@@ -650,8 +650,10 @@ async fn every_page_header_holds_exactly_the_actions_it_names() {
 /// Every tab on every page the crawl renders is a text label in sentence
 /// case (design rules 4 and 7): no icon or other element inside the `.tab`,
 /// a capital on the first word, and no word after it capitalised, except an
-/// acronym ("API keys", "SQL editor", "Database & config"). `components::Tab` has no icon field,
-/// so this pins the labels each page writes, and any hand-written `.tab`.
+/// acronym or a proper noun ("API keys", "SQL editor", "Database & config"),
+/// by [`crate::test_support::case::is_sentence_case`]. `components::Tab` has
+/// no icon field, so this pins the labels each page writes, and any
+/// hand-written `.tab`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_tab_is_a_sentence_case_text_label() {
     let mut wrong: Vec<String> = Vec::new();
@@ -667,7 +669,7 @@ async fn every_tab_is_a_sentence_case_text_label() {
             for label in crate::test_support::dom::tab_labels(&html) {
                 checked += 1;
                 match label {
-                    Ok(text) if is_sentence_case(&text) => {}
+                    Ok(text) if crate::test_support::case::is_sentence_case(&text) => {}
                     Ok(text) => {
                         wrong.push(format!("{}: tab {text:?} is not sentence case", page.url()))
                     }
@@ -680,41 +682,6 @@ async fn every_tab_is_a_sentence_case_text_label() {
     wrong.dedup();
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     assert!(checked > 50, "only {checked} tabs were checked");
-}
-
-/// Whether `label` capitalises its first word and only that, plus any
-/// acronym (a word with no lowercase letter): "API keys" and "SQL editor"
-/// are; "Audit Logs" and "api keys" are not.
-fn is_sentence_case(label: &str) -> bool {
-    let first_is_capital = label.chars().next().is_some_and(|c| !c.is_lowercase());
-    first_is_capital
-        && label.split_whitespace().skip(1).all(|word| {
-            let starts_upper = word.chars().next().is_some_and(char::is_uppercase);
-            !starts_upper || !word.chars().any(char::is_lowercase)
-        })
-}
-
-#[test]
-fn sentence_case_allows_acronyms_and_refuses_a_capitalised_word() {
-    for ok in [
-        "API keys",
-        "SQL editor",
-        "Database & config",
-        "Explore WASM blocks",
-        "Overview",
-    ] {
-        assert!(is_sentence_case(ok), "{ok}");
-    }
-    for bad in [
-        "API Keys",
-        "Audit Logs",
-        "Database & Config",
-        "Storage Access",
-        "api keys",
-        "audit logs",
-    ] {
-        assert!(!is_sentence_case(bad), "{bad}");
-    }
 }
 
 /// The guard's failure, by page: each row named but not rendered, each row

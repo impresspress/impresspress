@@ -922,6 +922,15 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // Fault injectors: each user-portal route's WRAP-denial test
             // refuses the table its database site reads or writes.
             "blocks/userportal/error_mapping_tests.rs",
+            // `fail_inserts_into(.., sessions::TABLE)` — a sign-in whose
+            // session row fails leaves no refresh row (one batch).
+            "blocks/auth_ui/api/login.rs",
+            // `AfterDbOpContext` points on the session row's touch and
+            // delete — a device revoke racing that device's refresh.
+            "blocks/userportal/pages/sessions.rs",
+            // `("database.update_where_count", sessions::TABLE)` — a
+            // rotation whose session-row touch fails ends its family.
+            "blocks/auth_ui/api/refresh.rs",
         ],
     ),
     (
@@ -948,6 +957,9 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // `("database.delete_where_count", tokens::TABLE)` — the sweep's
             // "one failing table is named and the others still run" test
             "blocks/auth/maintenance.rs",
+            // A row count of `tokens::TABLE` for one user — a sign-in whose
+            // session row fails leaves no refresh row behind.
+            "blocks/auth_ui/api/login.rs",
         ],
     ),
     (

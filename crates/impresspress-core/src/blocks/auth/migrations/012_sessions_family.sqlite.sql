@@ -1,51 +1,22 @@
--- [B12] A session row is a login family, not an access token.
+-- [B12] The sweeper's bookkeeping table. What this file used to do first is
+-- recorded here because a live database may still carry its effects.
 --
--- Before this migration `wafer_run__auth__sessions` was keyed by
--- `sha256(access_token)`: one row per issuance, so a browser tab wrote a new
--- row roughly every 30 minutes, each living 30 days, none deleted on logout,
--- and every one of them shown on `/b/userportal/sessions` as a separate
--- device. The table is now keyed by the refresh-rotation `family` — one row
--- per device, touched on rotation, deleted on logout and on revoke, expiring
--- exactly when the refresh row it mirrors does.
+-- It used to re-key `wafer_run__auth__sessions` from `sha256(access_token)`
+-- to the refresh-rotation `family`, by `DROP TABLE IF EXISTS` and a fresh
+-- `CREATE`. Auth migrations re-run as a SET whenever any one of them
+-- changes, so that DROP fired again on every later auth schema change and
+-- emptied the table. Once a session row became a login family's liveness
+-- (`blocks::auth::repo::sessions`: a refresh whose family has no row is
+-- refused, and nothing re-creates one), every such re-run signed every
+-- device out. THIS FILE MUST NOT DROP THE TABLE.
 --
--- The old rows cannot be converted: their key is a hash of a token that has
--- long since expired, and no family can be recovered from it. They are UX
--- rows, not credentials — nothing authenticates against this table — so
--- dropping them signs nobody out. `CREATE TABLE IF NOT EXISTS` is a no-op on
--- an existing table, which is why the drop is explicit rather than an edit to
--- `001_auth_schema`.
---
--- Migrations re-run in full whenever the block's SQL hash changes, so this
--- drop fires again on any future auth migration. `sessions::touch` reports
--- the rows it affected and `issue_tokens_and_cookie` inserts when it affected
--- none, so a device whose row went away re-appears on its next token refresh
--- instead of vanishing from the list until the user signs in again. That same
--- fallback is what re-materialises the families that already exist when this
--- migration first lands.
-DROP TABLE IF EXISTS wafer_run__auth__sessions;
-
-CREATE TABLE IF NOT EXISTS wafer_run__auth__sessions (
-    family         TEXT PRIMARY KEY,
-    user_id        TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE,
-    -- "password", "oauth.<provider>", "bootstrap" — the claim the refresh
-    -- token preserves across rotation, so the device list can say how the
-    -- session was established.
-    auth_method    TEXT NOT NULL DEFAULT '',
-    created_at     TEXT NOT NULL,
-    last_used_at   TEXT NOT NULL,
-    expires_at     TEXT NOT NULL,
-    -- `db::create` synthesizes an `id` and stamps `updated_at` on every
-    -- insert; both are declared here (rather than added by a later ALTER the
-    -- way `010_strict_schema_columns` had to) because this table is created
-    -- fresh. Nullable for the same reason 010 gives: no read path treats
-    -- these bookkeeping columns as significant.
-    id             TEXT,
-    updated_at     TEXT
-);
-CREATE INDEX IF NOT EXISTS wafer_run__auth__sessions_user_id_idx
-    ON wafer_run__auth__sessions (user_id);
-CREATE INDEX IF NOT EXISTS wafer_run__auth__sessions_expires_at_idx
-    ON wafer_run__auth__sessions (expires_at);
+-- The family-keyed layout is now created by `001_auth_schema`, so a fresh
+-- database never has the old one. A database that already applied this file
+-- has the family-keyed table, which 001's `CREATE TABLE IF NOT EXISTS` and
+-- the rest of the set leave as it is, rows included
+-- (`re_run_survival_tests::session_rows_survive_a_full_re_run`). A database
+-- last migrated before this file first existed still holds the old layout
+-- and is not converted; RELEASE.md says to recreate it.
 
 -- [B12] The sweeper's singleton bookkeeping row, mirroring
 -- `impresspress__tickets__maintenance`. `auth::maintenance::sweep_if_due`

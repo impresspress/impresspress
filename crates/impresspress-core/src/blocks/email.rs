@@ -96,7 +96,7 @@ pub(crate) fn resolve_base_url(configured: &str) -> &str {
 pub(crate) fn config_vars() -> Vec<ConfigVar> {
     vec![
         ConfigVar::new(MAILGUN_API_KEY, "API key from your Mailgun account.", "")
-            .name("Mailgun API Key")
+            .name("Mailgun API key")
             .input_type(InputType::Password)
             .optional(),
         ConfigVar::new(
@@ -104,29 +104,29 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Sending domain configured in Mailgun (e.g. mg.example.com).",
             "",
         )
-        .name("Mailgun Domain")
+        .name("Mailgun domain")
         .optional(),
         ConfigVar::new(
             MAILGUN_FROM,
             "Sender address for emails. Leave empty to send from \
-             noreply@<Mailgun domain> under the App Name.",
+             noreply@<Mailgun domain> under the app name.",
             "",
         )
-        .name("From Address")
+        .name("From address")
         .optional(),
         ConfigVar::new(
             MAILGUN_REPLY_TO,
             "Reply-to address for emails. Leave empty to omit.",
             "",
         )
-        .name("Reply-To Address")
+        .name("Reply-to address")
         .optional(),
         ConfigVar::new(
             MAILGUN_BASE_URL,
             "Mailgun API base URL (US: https://api.mailgun.net, EU: https://api.eu.mailgun.net)",
             DEFAULT_MAILGUN_BASE_URL,
         )
-        .name("Mailgun Base URL")
+        .name("Mailgun base URL")
         // A real URL field (unlike the shared helper's other optional/blank
         // text fields) — SEC/SSRF: mark it `Url` so `settings_form::save_settings`
         // runs it through `validate_url_value` on write. The old hand-rolled
@@ -139,7 +139,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
              all recipients (0 disables this ceiling)",
             &DEFAULT_RATE_LIMIT_MAX.to_string(),
         )
-        .name("Rate Limit (max emails per caller)")
+        .name("Rate limit (max emails per caller)")
         .input_type(InputType::Number)
         .optional(),
         ConfigVar::new(
@@ -150,7 +150,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
              the quota every transactional email shares.",
             &DEFAULT_RATE_LIMIT_PER_RECIPIENT_MAX.to_string(),
         )
-        .name("Rate Limit (max emails per recipient)")
+        .name("Rate limit (max emails per recipient)")
         .input_type(InputType::Number)
         .optional(),
         ConfigVar::new(
@@ -158,7 +158,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Rate limit window in seconds, shared by both limits above",
             &DEFAULT_RATE_LIMIT_WINDOW_SECS.to_string(),
         )
-        .name("Rate Limit Window (seconds)")
+        .name("Rate limit window (seconds)")
         .input_type(InputType::Number)
         .optional(),
         ConfigVar::new(
@@ -167,7 +167,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
              `*@example.com,admin@*`). Empty = allow all (with startup warning).",
             "",
         )
-        .name("Allowed Recipient Patterns")
+        .name("Allowed recipient patterns")
         .optional(),
     ]
 }
@@ -1055,7 +1055,7 @@ mod tests {
     // ---- From header ------------------------------------------------------------
 
     /// With no `MAILGUN_FROM` set, the display name on a sent mail is the
-    /// deployment's configured App Name — not the product's name spelled in
+    /// deployment's configured App name — not the product's name spelled in
     /// this block.
     #[tokio::test]
     async fn the_default_from_carries_the_configured_app_name() {
@@ -1073,7 +1073,7 @@ mod tests {
         );
     }
 
-    /// A blank App Name falls back to the declared default rather than
+    /// A blank App name falls back to the declared default rather than
     /// sending an empty display name.
     #[tokio::test]
     async fn a_blank_app_name_sends_under_the_declared_default() {
@@ -1093,7 +1093,7 @@ mod tests {
         );
     }
 
-    /// An App Name carrying CR/LF, a comma and a quote still produces ONE
+    /// An App name carrying CR/LF, a comma and a quote still produces ONE
     /// mailbox on ONE header line: the line break cannot start a `Bcc:`
     /// header, and the comma cannot start a second address.
     #[tokio::test]
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     /// An explicitly configured `MAILGUN_FROM` is sent as the operator wrote
-    /// it; the App Name only fills the default.
+    /// it; the App name only fills the default.
     #[tokio::test]
     async fn a_configured_from_address_wins() {
         let (ctx, requests) = ConfigCtx::with_mailgun();

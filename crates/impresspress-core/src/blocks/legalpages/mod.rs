@@ -198,7 +198,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Background color for public legal pages (empty = use design token default)",
             "",
         )
-        .name("Background Color")
+        .name("Background color")
         .input_type(InputType::Color)
         .optional(),
         ConfigVar::new(
@@ -206,10 +206,10 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Back button URL in the header (e.g., your website homepage)",
             "/",
         )
-        .name("Back Button URL")
+        .name("Back button URL")
         .input_type(InputType::Url),
         ConfigVar::new(FOOTER_KEY, "Custom footer text (HTML allowed)", "")
-            .name("Footer Text")
+            .name("Footer text")
             .input_type(InputType::Textarea)
             .optional(),
     ]

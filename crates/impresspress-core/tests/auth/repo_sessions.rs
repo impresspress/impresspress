@@ -99,9 +99,9 @@ async fn find_for_user_missing_family_returns_none() {
     assert!(hit.is_none());
 }
 
-/// `touch` reporting zero is the signal issuance uses to insert a row
-/// instead, which is what makes a device re-appear on the list after its row
-/// was swept or dropped by migration 012.
+/// `touch` reporting zero is the signal a rotation uses to refuse: the family
+/// has no row, so it was revoked, swept or dropped by migration 012, and the
+/// rotation revokes it rather than continuing it.
 #[tokio::test]
 async fn touch_on_an_unknown_family_reports_zero_rather_than_erroring() {
     let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;

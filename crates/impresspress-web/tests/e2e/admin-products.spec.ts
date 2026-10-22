@@ -217,7 +217,7 @@ test.describe.serial('products admin pages', () => {
     expect((await api.delete(`/b/products/api/admin/products/${deletedId}`, { headers: auth })).status()).toBe(200);
 
     const settings = '/b/products/admin/settings';
-    const userProducts = page.getByRole('switch', { name: 'User Products' });
+    const userProducts = page.getByRole('switch', { name: 'User products' });
     /** The settings page, with the collapsed seller-products section open. */
     const openSettings = async () => {
       await page.goto(settings, { waitUntil: 'networkidle' });

@@ -237,14 +237,14 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
             "Display name shown in UI and emails",
             DEFAULT_APP_NAME,
         )
-        .name("App Name")
+        .name("App name")
         .input_type(InputType::Text),
         ConfigVar::new(
             ALLOW_SIGNUP_KEY,
             "Allow new user registration",
             "true",
         )
-        .name("Allow Signup")
+        .name("Allow signup")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             ENABLE_OAUTH_KEY,
@@ -258,7 +258,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
             "URL to redirect to after login",
             "/b/admin/",
         )
-        .name("Post-Login Redirect")
+        .name("Post-login redirect")
         .input_type(InputType::Text),
         ConfigVar::new(
             FRONTEND_URL_KEY,
@@ -279,28 +279,28 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
             "Brand accent (CSS color) for buttons, links, and highlights; blank keeps the default",
             "",
         )
-        .name("Primary Color")
+        .name("Primary color")
         .input_type(InputType::Text),
         ConfigVar::new(
             LOGO_ICON_URL_KEY,
             "Small icon logo (sidebar brand mark; the only mark shown when the sidebar is collapsed)",
             &crate::ui::assets::logo_icon_url(),
         )
-        .name("Logo Icon URL")
+        .name("Logo icon URL")
         .input_type(InputType::Url),
         ConfigVar::new(
             AUTH_LOGO_URL_KEY,
             "Logo on login/signup pages (falls back to Logo URL)",
             "",
         )
-        .name("Auth Logo URL")
+        .name("Auth logo URL")
         .input_type(InputType::Url),
         ConfigVar::new(
             AUTH_HEADLINE_KEY,
             "Headline on the login/signup/etc. left-hand brand panel",
             DEFAULT_AUTH_HEADLINE,
         )
-        .name("Auth Headline")
+        .name("Auth headline")
         .input_type(InputType::Text),
         ConfigVar::new(
             AUTH_TAGLINE_KEY,
@@ -309,7 +309,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
              blank hides it",
             DEFAULT_AUTH_TAGLINE,
         )
-        .name("Auth Tagline")
+        .name("Auth tagline")
         .input_type(InputType::Text),
         ConfigVar::new(
             FAVICON_URL_KEY,
@@ -323,7 +323,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
             "Allow users to create their own products",
             "false",
         )
-        .name("User Products")
+        .name("User products")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             ENVIRONMENT_KEY,
@@ -337,7 +337,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
             "Whether this project has a dispatcher service binding",
             "false",
         )
-        .name("Dispatcher Binding")
+        .name("Dispatcher binding")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             HAS_LANDING_PAGE_KEY,
@@ -345,7 +345,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
              redirecting anonymous visitors to the login page",
             "false",
         )
-        .name("Has Landing Page")
+        .name("Has landing page")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             EMBEDDED_SCRIPTS_KEY,
@@ -354,7 +354,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
              page-side model engines; they need not be listed here).",
             "",
         )
-        .name("Embedded Scripts")
+        .name("Embedded scripts")
         .input_type(InputType::Text),
         ConfigVar::new(
             CORS_ALLOWED_ORIGINS_KEY,
@@ -364,7 +364,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
              origin requests (fail closed).",
             "",
         )
-        .name("CORS Allowed Origins")
+        .name("CORS allowed origins")
         .input_type(InputType::Text),
         ConfigVar::new(
             CSP_DIRECTIVES_KEY,
@@ -376,7 +376,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
              frame-ancestors is not settable here.",
             DEFAULT_CSP_DIRECTIVES,
         )
-        .name("CSP Directives")
+        .name("CSP directives")
         .input_type(InputType::Text),
     ];
     // Auth-scoped shared vars (wafer-run/auth reads these; admin writes them).
@@ -1006,6 +1006,32 @@ mod shared_vars_tests {
     use super::{
         shared_config_vars, CORS_ALLOWED_ORIGINS_KEY, CSP_DIRECTIVES_KEY, DEFAULT_CSP_DIRECTIVES,
     };
+
+    /// Every declared config var — the shared ones, each block's
+    /// `config_keys` and the auth-identity vars, the set
+    /// [`super::collect_all_config_vars`] gathers — carries a display name
+    /// in sentence case. That name is the field's label on the settings
+    /// forms and the variable's name in the Variables table, so this is the
+    /// one place the case of either is decided.
+    #[test]
+    fn every_declared_config_var_is_named_in_sentence_case() {
+        let vars = super::collect_all_config_vars(&crate::blocks::all_block_infos());
+        let wrong: Vec<String> = vars
+            .iter()
+            .filter(|v| v.name.is_empty() || !crate::test_support::case::is_sentence_case(&v.name))
+            .map(|v| format!("{}: {:?}", v.key, v.name))
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "these config vars are not named in sentence case:\n{}",
+            wrong.join("\n")
+        );
+        assert!(
+            vars.len() > 50,
+            "only {} config vars were checked",
+            vars.len()
+        );
+    }
 
     /// Every shared var must be declared exactly once. A duplicate key means
     /// two competing defaults for the same setting — which one the seeder

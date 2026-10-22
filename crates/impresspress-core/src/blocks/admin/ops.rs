@@ -59,6 +59,27 @@ use crate::{
     util::RecordExt,
 };
 
+/// Every config var this runtime declares, by key: the shared set and each
+/// registered block's `config_keys`.
+///
+/// The one answer to "does a declaration own this key, and what does it call
+/// it". The Variables page and `GET /b/admin/api/settings/all` both name a
+/// declared key from here, so the declaration is the only source of a declared
+/// variable's label, description and warning. A key no declaration names is
+/// unowned, and only its stored row can describe it.
+pub(super) fn declared_vars(ctx: &dyn Context) -> HashMap<String, wafer_run::ConfigVar> {
+    let mut declared: HashMap<String, wafer_run::ConfigVar> = ctx
+        .registered_blocks()
+        .iter()
+        .flat_map(|block| block.config_keys.iter().cloned())
+        .map(|var| (var.key.clone(), var))
+        .collect();
+    for var in crate::config_vars::shared_config_vars() {
+        declared.insert(var.key.clone(), var);
+    }
+    declared
+}
+
 /// Bulk-fetch the roles assigned to each of `user_ids` in a single `In`-filter
 /// query, bucketed back into a `user_id -> [role]` map.
 ///

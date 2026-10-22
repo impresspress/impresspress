@@ -55,9 +55,15 @@ pub async fn auth_fixture(block: &str) -> TestContext {
 /// real crypto service, called by `impresspress/auth-ui`, so the service
 /// signs with `sign_for(AUTH_UI_BLOCK_ID, ..)` — the derived key
 /// `crypto::verify_access_token` verifies against.
+///
+/// Like a real sign-in, the token belongs to a login family that has its
+/// session row: a fresh `family` unless the case sets one in `extra`, written
+/// through [`impresspress_core::test_support::seed_login_family`]. So `sub`
+/// must be an existing account.
 pub(crate) trait MintAccessToken {
-    /// `sub`, `type`, and `iss` are filled in; `extra` adds or overrides
-    /// anything else the case needs (`family`, `roles`, `auth_version`, ...).
+    /// `sub`, `type`, `iss` and `family` are filled in; `extra` adds or
+    /// overrides anything else the case needs (`family`, `roles`,
+    /// `auth_version`, ...).
     async fn mint_access_token(
         &self,
         sub: &str,
@@ -77,9 +83,18 @@ impl MintAccessToken for TestContext {
         claims.insert("sub".to_string(), serde_json::json!(sub));
         claims.insert("type".to_string(), serde_json::json!("access"));
         claims.insert("iss".to_string(), serde_json::json!(TEST_ISSUER));
+        claims.insert(
+            "family".to_string(),
+            serde_json::json!(uuid::Uuid::now_v7().to_string()),
+        );
         for (k, v) in extra {
             claims.insert((*k).to_string(), v.clone());
         }
+        let family = claims["family"]
+            .as_str()
+            .expect("a case that sets `family` sets it to a string")
+            .to_string();
+        impresspress_core::test_support::seed_login_family(self, sub, &family).await;
         let as_auth_ui = self
             .fixture()
             .running_as(impresspress_core::blocks::auth_ui::AUTH_UI_BLOCK_ID);

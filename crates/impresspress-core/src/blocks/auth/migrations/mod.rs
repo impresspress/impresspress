@@ -105,9 +105,15 @@ pub(crate) const API_KEY_EXPIRY_CANONICAL: &str = "015_api_key_expiry_canonical"
 ///   `ddl` must keep migration files as the stated exception; 014's `UPDATE`
 ///   already relies on it, and at runtime auth may append to the table
 ///   (`blocks/admin/mod.rs`'s grants).
-/// - **What it costs.** Adding the file re-runs the auth list, and 004 and 012
-///   drop the refresh-token and session tables: every user is signed out once
-///   (RELEASE.md). Inline admins keep admin, as grants. A dev data snapshot
+/// - **What it costs.** Adding the file re-runs the auth list. 004 no longer
+///   drops the refresh-token table, and since the family-keyed sessions
+///   layout moved into 001, 012 no longer drops the session table either, so
+///   a re-run by a binary carrying both keeps every session. A binary
+///   carrying 016 with 012's old DROP emptied the device list, which signed
+///   nobody out then (issuance re-created a missing row) and signs every
+///   device out at its next refresh under the session-row liveness rule
+///   (RELEASE.md, the 016 note's correction). Inline admins keep admin, as
+///   grants. A dev data snapshot
 ///   carrying users must be re-exported (`data_snapshot::SCHEMA_VERSION` 2).
 ///
 /// The upgrade itself, on both dialects, is tested in
@@ -207,10 +213,8 @@ mod strict_upgrade_tests {
     use crate::migration_helper::apply_ddl_via_service;
 
     /// SQL of every auth migration BEFORE 010 — the pre-upgrade on-disk
-    /// schema. `take_while`, not a filter: 012 comes *after* 010 and creates
-    /// the sessions table with the columns 010 adds, so excluding only 010
-    /// would build a schema that already has them and the precondition below
-    /// would be vacuous.
+    /// schema. `take_while`, not a filter: every file before 010 is the
+    /// schema 010 upgrades, and only those.
     fn base_migrations_sql() -> Vec<&'static str> {
         SQLITE_MIGRATIONS
             .iter()
@@ -333,9 +337,9 @@ mod strict_upgrade_tests {
         );
 
         // A session write exercises the synthesized `id` + `updated_at` on a
-        // table whose real PK is token_hash.
+        // table whose real PK is `family`.
         let mut sess = HashMap::new();
-        sess.insert("token_hash".to_string(), json!("deadbeef"));
+        sess.insert("family".to_string(), json!("fam-1"));
         sess.insert("user_id".to_string(), json!("u1"));
         sess.insert("created_at".to_string(), json!("2026-01-03T00:00:00Z"));
         sess.insert("last_used_at".to_string(), json!("2026-01-03T00:00:00Z"));
@@ -924,13 +928,14 @@ mod re_run_survival_tests {
         );
     }
 
-    /// The one drop the set still carries, stated rather than discovered:
-    /// `012_sessions_family` recreates `wafer_run__auth__sessions`. Nothing
-    /// authenticates against that table — it is the device list, and
-    /// `record_login_family` re-inserts a device on its next token refresh —
-    /// so emptying it signs nobody out. RELEASE.md says so on both notes.
+    /// `012_sessions_family` used to open with `DROP TABLE IF EXISTS
+    /// wafer_run__auth__sessions`. A row there is a login family's liveness
+    /// (`repo::sessions`): a refresh whose family has no row is refused, and
+    /// nothing re-creates one. So that drop signed every device out on every
+    /// later auth schema change. The family-keyed layout now lives in 001 and
+    /// no file drops it.
     #[tokio::test]
-    async fn the_device_list_is_the_only_thing_a_re_run_empties() {
+    async fn session_rows_survive_a_full_re_run() {
         let ctx = upgrading_deployment().await;
         sessions::insert(
             &ctx,
@@ -947,9 +952,67 @@ mod re_run_survival_tests {
 
         re_run_the_whole_set(&ctx).await;
 
-        assert!(sessions::list_for_user(&ctx, "u1")
-            .await
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            sessions::list_for_user(&ctx, "u1").await.unwrap().len(),
+            1,
+            "a device row must survive an auth schema change"
+        );
+    }
+
+    /// The outcome the two survival tests above add up to, through the real
+    /// handlers: a device signed in before a full re-run of the auth set
+    /// still refreshes after it.
+    #[tokio::test]
+    async fn a_signed_in_device_still_refreshes_after_a_full_re_run() {
+        use crate::{
+            blocks::{
+                auth::repo::users::InitialRole,
+                auth_ui::api::{login, refresh},
+            },
+            test_support::{json_post_msg, output_json},
+        };
+
+        let mut ctx = TestContext::with_auth_and_crypto().await;
+        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
+        ctx.seed_account(
+            "rerun@example.com",
+            "correct-horse-battery",
+            InitialRole::User,
+        )
+        .await;
+        let body =
+            |v: serde_json::Value| wafer_run::InputStream::from_bytes(v.to_string().into_bytes());
+        let signed_in = output_json(
+            login::handle(
+                &ctx,
+                &json_post_msg("/b/auth/api/login"),
+                body(serde_json::json!({
+                    "email": "rerun@example.com",
+                    "password": "correct-horse-battery",
+                })),
+            )
+            .await,
+        )
+        .await;
+        let token = signed_in["refresh_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the sign-in succeeds: {signed_in}"))
+            .to_string();
+
+        re_run_the_whole_set(&ctx.clone().running_as(crate::blocks::auth::AUTH_BLOCK_ID)).await;
+
+        let refreshed = output_json(
+            refresh::handle(
+                &ctx,
+                &json_post_msg("/b/auth/api/refresh"),
+                body(serde_json::json!({ "refresh_token": token })),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            refreshed["refresh_token"].is_string(),
+            "an auth schema change signs nobody out: {refreshed}"
+        );
     }
 }

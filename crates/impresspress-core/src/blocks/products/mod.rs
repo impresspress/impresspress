@@ -206,7 +206,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Stripe API secret key",
             "",
         )
-        .name("Stripe Secret Key")
+        .name("Stripe secret key")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
@@ -214,7 +214,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Stripe publishable key used by embedded Checkout and static storefronts. This key is safe to send to browsers, but is masked in admin storage and pages to prevent accidental configuration disclosure.",
             "",
         )
-        .name("Stripe Publishable Key")
+        .name("Stripe publishable key")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
@@ -222,7 +222,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Stripe webhook signing secret",
             "",
         )
-        .name("Stripe Webhook Secret")
+        .name("Stripe webhook secret")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
@@ -237,14 +237,14 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Stripe API version sent with every provider request and expected by the webhook destination",
             "2026-02-25.clover",
         )
-        .name("Stripe API Version")
+        .name("Stripe API version")
         .input_type(InputType::Text),
         ConfigVar::new(
             DEFAULT_CURRENCY,
             "Currency preselected for new products and offers",
             "USD",
         )
-        .name("Default Currency")
+        .name("Default currency")
         .input_type(InputType::Select)
         .options(CURRENCY_OPTIONS),
         ConfigVar::new(
@@ -252,7 +252,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Country of the platform Stripe account; also the seller onboarding default",
             "",
         )
-        .name("Platform Country")
+        .name("Platform country")
         .input_type(InputType::Select)
         .options(COUNTRY_OPTIONS)
         .optional(),
@@ -261,14 +261,14 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Enable Stripe automatic tax by default for new offers",
             "false",
         )
-        .name("Automatic Tax")
+        .name("Automatic tax")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             CHECKOUT_ALLOWED_ORIGINS,
             "Comma-separated HTTPS origins allowed for Checkout return and cancel URLs; localhost HTTP origins are accepted in development",
             "",
         )
-        .name("Checkout Allowed Origins")
+        .name("Checkout allowed origins")
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
@@ -276,21 +276,21 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Platform application fee for connected-account sales, in basis points (0-10000)",
             "0",
         )
-        .name("Seller Application Fee (bps)")
+        .name("Seller application fee (bps)")
         .input_type(InputType::Number),
         ConfigVar::new(
             SELLER_MODERATION_REQUIRED,
             "Require admin approval before a user-owned product can be published",
             "true",
         )
-        .name("Moderate Seller Products")
+        .name("Moderate seller products")
         .input_type(InputType::Toggle),
         ConfigVar::new(
             SELLER_ALLOWED_TEMPLATES,
             "Optional comma-separated product template IDs sellers may use; blank allows every template",
             "",
         )
-        .name("Seller Allowed Templates")
+        .name("Seller allowed templates")
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
@@ -298,7 +298,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Optional comma-separated ISO currency codes sellers may use; blank allows every valid currency",
             "",
         )
-        .name("Seller Allowed Currencies")
+        .name("Seller allowed currencies")
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
@@ -306,7 +306,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Optional comma-separated product categories sellers may use; blank allows every category",
             "",
         )
-        .name("Seller Allowed Categories")
+        .name("Seller allowed categories")
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
@@ -314,14 +314,14 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Maximum non-deleted products per seller; 0 means unlimited",
             "0",
         )
-        .name("Seller Product Limit")
+        .name("Seller product limit")
         .input_type(InputType::Number),
         ConfigVar::new(
             WEBHOOK_URL,
             "Webhook URL for billing events",
             "",
         )
-        .name("Billing Webhook URL")
+        .name("Billing webhook URL")
         .input_type(InputType::Url)
         .optional(),
         ConfigVar::new(
@@ -329,7 +329,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Webhook signing secret",
             "",
         )
-        .name("Billing Webhook Secret")
+        .name("Billing webhook secret")
         .input_type(InputType::Password)
         .auto_generate(),
     ]
