@@ -4413,8 +4413,11 @@ mod credential_check_tests {
 
     /// An access token for `sub` carrying a `jti`, signed and issued the way
     /// `test_support::access_token_for` signs one, so step 2 reads the
-    /// blocklist as well as `auth_version`.
-    fn bearer(sub: &str) -> String {
+    /// blocklist and the login family's session row as well as
+    /// `auth_version`. The family is given its row, as a sign-in would.
+    async fn bearer(ctx: &TestContext, sub: &str) -> String {
+        let family = uuid::Uuid::new_v4().to_string();
+        crate::test_support::seed_login_family(ctx, sub, &family).await;
         let derived = primitives::derive_block_key(
             TEST_JWT_SECRET.as_bytes(),
             crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
@@ -4431,6 +4434,7 @@ mod credential_check_tests {
             "jti".to_string(),
             serde_json::json!(uuid::Uuid::new_v4().to_string()),
         );
+        claims.insert("family".to_string(), serde_json::json!(family));
         let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
             .expect("test jwt_sign");
         format!("Bearer {token}")
@@ -4499,7 +4503,8 @@ mod credential_check_tests {
     #[tokio::test]
     async fn a_signed_in_caller_reaches_the_route_while_the_database_answers() {
         let (ctx, uid) = signed_in_fixture().await;
-        let (status, _, body) = answer(get_me(&ctx, &bearer(&uid), false).await).await;
+        let token = bearer(&ctx, &uid).await;
+        let (status, _, body) = answer(get_me(&ctx, &token, false).await).await;
         assert_eq!(status, 200, "{body}");
         assert!(body.contains(&uid), "{body}");
     }
@@ -4510,16 +4515,17 @@ mod credential_check_tests {
     #[tokio::test]
     async fn a_failed_auth_version_read_is_a_503_not_a_sign_out() {
         let (ctx, uid) = signed_in_fixture().await;
+        let token = bearer(&ctx, &uid).await;
         let down = FailingDbOpContext::new(ctx, vec![("database.get", users::TABLE)]);
 
-        let (status, location, body) = answer(get_me(&down, &bearer(&uid), false).await).await;
+        let (status, location, body) = answer(get_me(&down, &token, false).await).await;
         assert_eq!(status, 503, "{body}");
         assert!(
             body.contains("Authentication is temporarily unavailable"),
             "the fault's own text stays in the log: {body}"
         );
 
-        let (status, location_html, body) = answer(get_me(&down, &bearer(&uid), true).await).await;
+        let (status, location_html, body) = answer(get_me(&down, &token, true).await).await;
         assert_eq!(status, 503, "{body}");
         assert!(
             location.is_empty() && location_html.is_empty(),
@@ -4533,9 +4539,10 @@ mod credential_check_tests {
     #[tokio::test]
     async fn a_failed_blocklist_read_is_a_503_not_a_sign_out() {
         let (ctx, uid) = signed_in_fixture().await;
+        let token = bearer(&ctx, &uid).await;
         let down = FailingDbOpContext::new(ctx, vec![("database.list", jwt_blocklist::TABLE)]);
 
-        let (status, location, body) = answer(get_me(&down, &bearer(&uid), true).await).await;
+        let (status, location, body) = answer(get_me(&down, &token, true).await).await;
         assert_eq!(status, 503, "{body}");
         assert!(
             location.is_empty(),
@@ -4547,11 +4554,32 @@ mod credential_check_tests {
         );
     }
 
+    /// The login family read (`sessions::is_live`) failing is refused the
+    /// same way: it decides whether the token's device is still signed in,
+    /// and a read that could not run has not decided that it is not.
+    #[tokio::test]
+    async fn a_failed_login_family_read_is_a_503_not_a_sign_out() {
+        let (ctx, uid) = signed_in_fixture().await;
+        let token = bearer(&ctx, &uid).await;
+        let down = FailingDbOpContext::new(
+            ctx,
+            vec![("database.list", crate::blocks::auth::repo::sessions::TABLE)],
+        );
+
+        let (status, location, body) = answer(get_me(&down, &token, true).await).await;
+        assert_eq!(status, 503, "{body}");
+        assert!(
+            location.is_empty(),
+            "no redirect to the login form: {location}"
+        );
+    }
+
     /// A WRAP refusal keeps the code the database classifier gives it — the
     /// 403 "Access denied" — instead of becoming the login redirect.
     #[tokio::test]
     async fn a_refused_auth_version_read_keeps_its_403() {
         let (ctx, uid) = signed_in_fixture().await;
+        let token = bearer(&ctx, &uid).await;
         let refused = FailingDbOpContext::failing_with(
             ctx,
             vec![("database.get", users::TABLE)],
@@ -4561,7 +4589,7 @@ mod credential_check_tests {
             ),
         );
 
-        let (status, location, body) = answer(get_me(&refused, &bearer(&uid), true).await).await;
+        let (status, location, body) = answer(get_me(&refused, &token, true).await).await;
         assert_eq!(status, 403, "{body}");
         assert!(
             location.is_empty(),
@@ -4602,12 +4630,13 @@ mod credential_check_tests {
     #[tokio::test]
     async fn a_public_route_is_refused_only_when_it_presents_a_credential() {
         let (ctx, uid) = signed_in_fixture().await;
+        let token = bearer(&ctx, &uid).await;
         let down = FailingDbOpContext::new(ctx, vec![("database.get", users::TABLE)]);
 
         let (status, _, body) = answer(get_login_page(&down, None).await).await;
         assert_eq!(status, 200, "no credential, nothing to check: {body}");
 
-        let (status, _, body) = answer(get_login_page(&down, Some(&bearer(&uid))).await).await;
+        let (status, _, body) = answer(get_login_page(&down, Some(&token)).await).await;
         assert_eq!(status, 503, "{body}");
     }
 

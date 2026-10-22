@@ -1510,13 +1510,22 @@ mod tests {
     }
 
     /// A rotation that has claimed its predecessor when a password change
-    /// lands writes its successor after the change's revocation, so the
-    /// successor row is live. It was minted from the account read before the
-    /// change, and the next rotation refuses it.
+    /// lands is refused. The change deletes the account's session rows before
+    /// it revokes the refresh rows (`helpers::end_all_families`), so the
+    /// rotation writes its successor after the revocation but finds no row to
+    /// touch: it revokes the family, the successor included, and hands out
+    /// nothing. Before the change ended the devices' rows, the successor was
+    /// handed out live and only the next rotation refused it, on its stale
+    /// `auth_version`.
     #[tokio::test]
-    async fn a_rotation_racing_a_password_change_leaves_a_successor_that_is_refused() {
+    async fn a_rotation_racing_a_password_change_is_refused() {
         let ctx = TestContext::with_auth_and_crypto().await;
         let token = fresh_refresh_token(&ctx).await;
+        let family = tokens::find_by_token(&ctx, &token)
+            .await
+            .expect("token lookup")
+            .expect("the live row")
+            .family;
         let uid = race_user_id(&ctx).await;
 
         // The claim is the rotation's last write before its insert.
@@ -1526,36 +1535,22 @@ mod tests {
             tokens::TABLE,
             change_password_now(ctx.clone(), uid, OLD_PASSWORD, NEW_PASSWORD),
         );
-        let rotated = output_json(
-            handle(
-                &racing,
-                &crate::test_support::json_post_msg("/b/auth/api/refresh"),
-                refresh_with(&token),
-            )
-            .await,
+        let rotated = handle(
+            &racing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&token),
         )
         .await;
         assert!(
-            racing.fired(),
-            "the change must land inside the rotation: {rotated}"
+            output_is_error(rotated, "Unauthenticated").await,
+            "a rotation the password change landed inside must hand out nothing"
         );
-        let successor = rotated["refresh_token"]
-            .as_str()
-            .unwrap_or_else(|| panic!("the rotation claimed its predecessor first: {rotated}"));
-
+        assert!(racing.fired(), "the change must land inside the rotation");
         assert!(
-            output_is_error(
-                handle(
-                    &ctx,
-                    &crate::test_support::json_post_msg("/b/auth/api/refresh"),
-                    refresh_with(successor)
-                )
-                .await,
-                "Unauthenticated"
-            )
-            .await,
-            "a successor minted from the account as it was before the password \
-             change must not outlive it"
+            !tokens::family_has_live_row(&ctx, &family)
+                .await
+                .expect("family lookup"),
+            "the successor the rotation wrote after the revocation is revoked too"
         );
     }
 

@@ -573,8 +573,8 @@ pub(crate) async fn current_auth_version(
 /// is answered with.
 ///
 /// Both request-time credential checks read the database —
-/// `crate::crypto::verify_access_token` (the JWT blocklist and
-/// `auth_version`) and [`authenticate_api_key`] (the key, its user and their
+/// `crate::crypto::verify_access_token` (the JWT blocklist, the login
+/// family's session row and `auth_version`) and [`authenticate_api_key`] (the key, its user and their
 /// roles) — and a failed read decides neither way: the request is not
 /// authenticated, and it is not anonymous either, because answering it as
 /// anonymous tells a signed-in client it has been signed out. So the request
@@ -695,43 +695,85 @@ pub(crate) async fn bump_auth_version(
     Ok(())
 }
 
-/// End every session `user_id` holds after its password changed
-/// (`auth_ui::api::{change_password,reset_password}`).
+/// End everything durable `user_id` holds after its password changed
+/// (`auth_ui::api::{change_password,reset_password}`): every device, every API
+/// key, and every access token already issued.
 ///
-/// The [`bump_auth_version`] is the invalidation: it retires already-issued
-/// access JWTs (`crate::crypto::verify_access_token`) and every refresh family
-/// issued before it (`auth_ui::api::refresh`), including one whose row a
-/// racing sign-in writes after the revocation below has run. It runs whether
-/// or not that revocation succeeded, and its failure is the one returned: the
-/// credential has already changed, so an account whose version did not move
-/// must not be answered as secured. There is no cross-op transaction primitive
-/// available to block code, so the error is the durable partial-failure
-/// signal.
+/// Three steps, and all three always run:
 ///
-/// The revocation marks the rows revoked, keeping them as reuse-detection
-/// tombstones (SEC-032/039), so a later presentation takes the row-level
-/// refusal without reading the account. It is housekeeping, the status
-/// `refresh`'s stale-family refusal gives it too: a failed revocation is
-/// logged, and the bump still refuses every token it left live.
+/// 1. [`helpers::end_all_families`]: delete the account's session rows, then
+///    revoke its refresh rows. Deleting the rows is what signs the devices
+///    out — their access tokens stop authenticating
+///    (`crate::crypto::verify_access_token` requires a live family) and their
+///    refresh is refused — and it empties the device list. The refresh rows
+///    are revoked rather than deleted, as reuse-detection tombstones
+///    (SEC-032/039).
+/// 2. [`repo::api_keys::revoke_all_for_user`]. A key does not check
+///    `auth_version`, deliberately (every role change bumps it too), so
+///    nothing else would end a key the old password's holder minted.
+/// 3. [`bump_auth_version`]. It retires every access JWT and refresh family
+///    issued before it, including one whose rows a racing sign-in with the
+///    old password writes after step 1 has run: that sign-in read the version
+///    before it checked the password.
+///
+/// **Failure policy.** The password has already changed when this runs, and
+/// there is no cross-op transaction primitive available to block code, so the
+/// returned error is the durable partial-failure signal. The steps after a
+/// failed one still run, so one failure costs only what that step covers.
+///
+/// - **Fails closed** (the first such error, in step order, is returned, and
+///   the caller does not answer success):
+///   - session-row deletion: the devices would stay signed in, and listed,
+///     until the bump is read, which logout already treats as a failure;
+///   - API-key revocation: it leaves a credential nothing else reaches;
+///   - the bump: an account whose version did not move.
+/// - **Logged only:** refresh-row revocation after the rows were deleted.
+///   Nothing it covers is left alive — the families have no rows, and the
+///   bump refuses their tokens as well — so a failure there is housekeeping.
+///
+/// A reset gives the link back on an error, and the retry repeats every step;
+/// a change is retried by changing the password again.
 pub(crate) async fn end_sessions_after_password_change(
     ctx: &dyn wafer_run::context::Context,
     user_id: &str,
 ) -> Result<(), WaferError> {
-    if let Err(e) = repo::tokens::revoke_all_for_user(ctx, user_id).await {
-        tracing::warn!(
+    let devices = match helpers::end_all_families(ctx, user_id).await {
+        Ok(()) => Ok(()),
+        Err(helpers::DevicesNotEnded::RefreshRowsLive(e)) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %e,
+                "password changed but refresh-token revocation failed; \
+                 the devices' rows are gone and the auth_version bump refuses those tokens"
+            );
+            Ok(())
+        }
+        Err(helpers::DevicesNotEnded::StillSignedIn(e)) => {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "password changed but its devices could not be signed out"
+            );
+            Err(e)
+        }
+    };
+    let keys = repo::api_keys::revoke_all_for_user(ctx, user_id).await;
+    if let Err(e) = &keys {
+        tracing::error!(
             user_id = %user_id,
             error = %e,
-            "password changed but refresh-token revocation failed; \
-             the auth_version bump still refuses those tokens"
+            "password changed but its API keys could not be revoked"
         );
     }
-    bump_auth_version(ctx, user_id).await.inspect_err(|e| {
+    let version = bump_auth_version(ctx, user_id).await;
+    if let Err(e) = &version {
         tracing::error!(
             user_id = %user_id,
             error = %e,
             "password changed but auth_version bump failed"
         );
-    })
+    }
+    devices.and(keys).and(version)
 }
 
 #[cfg(test)]
@@ -1011,10 +1053,14 @@ pub(crate) mod helpers {
 
     /// End the access token the request presented: put its `jti` on the
     /// blocklist until the token's own expiry, so `extract_auth_meta` refuses
-    /// it from the next request on (SEC-042). An access JWT is otherwise
-    /// structurally valid until its `exp`, whatever happened to its refresh
-    /// family, so this is what makes "you are signed out on this device"
-    /// true at once. Per-`jti`: the account's other sessions are untouched.
+    /// it from the next request on (SEC-042). Per-`jti`: the account's other
+    /// sessions are untouched.
+    ///
+    /// Both callers also delete the token's family row ([`end_family`],
+    /// [`end_all_families`]), which ends the token by itself:
+    /// `crate::crypto::verify_access_token` refuses a token whose family has
+    /// no live row. The blocklist entry is the older, per-token record of the
+    /// same end, written before an access token's family was checked.
     ///
     /// No-op for a request that presented no verified token. The expiry is
     /// the token's own `exp` (`META_AUTH_EXP`), which `extract_auth_meta`
@@ -1564,6 +1610,59 @@ pub(crate) mod helpers {
     ) -> Result<(), WaferError> {
         super::repo::sessions::delete(ctx, family).await?;
         super::repo::tokens::revoke_family(ctx, family).await
+    }
+
+    /// [`end_family`] for every family `user_id` holds: delete all of their
+    /// session rows, then revoke all of their refresh rows, in that order for
+    /// the reason [`end_family`] gives. Logout and a password change or reset
+    /// end a whole account's devices through here.
+    ///
+    /// Stops at the first error, like [`end_family`], and says which step it
+    /// was ([`DevicesNotEnded`]): the two leave the account in different
+    /// states, and the callers weigh them differently.
+    ///
+    /// One race is left, and it is cosmetic: a sign-in of this account whose
+    /// batch lands between the delete and the revocation keeps its session
+    /// row while its refresh row is revoked. That device cannot refresh, but
+    /// its row stays listed, and its first access token authenticates, until
+    /// the row expires or is revoked. A second delete after the revocation
+    /// would only move the window, onto a sign-in landing between the two.
+    /// After a password change it is harmless: a sign-in with the old
+    /// password read the account's version before the bump that follows, so
+    /// that bump refuses its tokens, and a sign-in with the new one is the
+    /// account's owner.
+    pub(crate) async fn end_all_families(
+        ctx: &dyn wafer_run::context::Context,
+        user_id: &str,
+    ) -> Result<(), DevicesNotEnded> {
+        super::repo::sessions::delete_all_for_user(ctx, user_id)
+            .await
+            .map_err(DevicesNotEnded::StillSignedIn)?;
+        super::repo::tokens::revoke_all_for_user(ctx, user_id)
+            .await
+            .map_err(DevicesNotEnded::RefreshRowsLive)
+    }
+
+    /// Which step of [`end_all_families`] failed.
+    #[derive(Debug)]
+    pub(crate) enum DevicesNotEnded {
+        /// The session rows could not be deleted, so every device is still
+        /// signed in: its access tokens authenticate and it can refresh.
+        StillSignedIn(WaferError),
+        /// The rows are gone, so every device is signed out, but the refresh
+        /// rows could not be revoked. Each one's next presentation is still
+        /// refused — a rotation finds no row to touch — but it does not take
+        /// the revoked-row refusal, and it is not yet a reuse-detection
+        /// tombstone.
+        RefreshRowsLive(WaferError),
+    }
+
+    impl DevicesNotEnded {
+        pub(crate) fn into_error(self) -> WaferError {
+            match self {
+                Self::StillSignedIn(e) | Self::RefreshRowsLive(e) => e,
+            }
+        }
     }
 
     /// The answer to a refresh token that can no longer refresh: rotated away,

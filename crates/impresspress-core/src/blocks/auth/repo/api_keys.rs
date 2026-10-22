@@ -189,6 +189,38 @@ pub async fn revoke(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
     Ok(())
 }
 
+/// Revoke every key `user_id` still holds: stamp `revoked_at` on each of
+/// their keys that has none. A key revoked earlier keeps the time it was
+/// revoked.
+///
+/// Called when the account's password changes or is reset
+/// (`auth::end_sessions_after_password_change`). A key is a credential of its
+/// own: [`crate::blocks::auth::authenticate_api_key`] checks the key's revocation,
+/// expiry and the account's status, not `auth_version`, so the version bump
+/// that retires the account's access tokens does not reach it. It is not made
+/// to: every role change bumps the version too, and a role change must not
+/// end a user's keys.
+pub async fn revoke_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<(), WaferError> {
+    let filters = vec![
+        Filter {
+            field: "user_id".into(),
+            operator: FilterOp::Equal,
+            value: json!(user_id),
+        },
+        Filter {
+            field: "revoked_at".into(),
+            operator: FilterOp::IsNull,
+            value: Value::Null,
+        },
+    ];
+    let mut data: HashMap<String, Value> = HashMap::new();
+    data.insert("revoked_at".into(), json!(now_iso()));
+    db::update_by_filters(ctx, TABLE, filters, data)
+        .await
+        .map_err(|e| db_failed("api_keys revoke_all_for_user", e))?;
+    Ok(())
+}
+
 /// Hard-delete an API-key row by id.
 pub async fn delete(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
     db::delete(ctx, TABLE, id)
@@ -274,6 +306,48 @@ mod tests {
         delete(&ctx, &a.id).await.unwrap();
         assert!(find_by_id(&ctx, &a.id).await.unwrap().is_none());
         assert_eq!(list_for_user(&ctx, "user-a").await.unwrap().len(), 1);
+    }
+
+    /// `revoke_all_for_user` ends every live key of that account, leaves an
+    /// earlier revocation's time as it was, and touches no one else's key.
+    #[tokio::test]
+    async fn revoke_all_for_user_revokes_only_that_accounts_live_keys() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        for user_id in ["user-a", "user-b"] {
+            seed_user(&ctx, user_id).await;
+        }
+        let key = |user_id: &'static str, hash: &'static str| NewApiKey {
+            user_id,
+            name: hash,
+            key_hash: hash,
+            key_prefix: "sb_x",
+            expires_at: None,
+        };
+        let live = insert(&ctx, key("user-a", "h-live")).await.unwrap();
+        let earlier = insert(&ctx, key("user-a", "h-earlier")).await.unwrap();
+        let other = insert(&ctx, key("user-b", "h-other")).await.unwrap();
+        let mut stamp = HashMap::new();
+        stamp.insert("revoked_at".to_string(), json!("2000-01-01T00:00:00Z"));
+        db::update(&ctx, TABLE, &earlier.id, stamp).await.unwrap();
+
+        revoke_all_for_user(&ctx, "user-a").await.unwrap();
+
+        let reread = |id: String| {
+            let ctx = &ctx;
+            async move { find_by_id(ctx, &id).await.unwrap().unwrap() }
+        };
+        assert!(reread(live.id).await.is_revoked());
+        assert_eq!(
+            reread(earlier.id).await.revoked_at.as_deref(),
+            Some("2000-01-01T00:00:00Z"),
+            "an earlier revocation keeps its time"
+        );
+        assert!(
+            !reread(other.id).await.is_revoked(),
+            "another account's key is untouched"
+        );
     }
 
     fn at(ts: &str) -> chrono::DateTime<chrono::Utc> {

@@ -10,7 +10,9 @@
 //!
 //! ## The row is the family's liveness
 //!
-//! A family whose row is gone is signed out: its next refresh is refused, and
+//! A family whose row is gone is signed out: its access tokens stop
+//! authenticating at once ([`is_live`], which `crypto::verify_access_token`
+//! asks on every request), its next refresh is refused, and
 //! every revocation deletes the row before it revokes the refresh rows
 //! (`helpers::end_family`). Its first refresh row
 //! and this row are written in one batch ([`create_op`] beside
@@ -191,6 +193,39 @@ pub async fn find_for_user(
     }
 }
 
+/// Whether `family` is a signed-in device of `user_id`: its row exists, it
+/// belongs to that account, and it has not expired.
+///
+/// This is the liveness check every access token passes
+/// (`crate::crypto::verify_access_token`, with the token's `family` and `sub`
+/// claims). A revocation deletes the row ([`delete`], [`delete_all_for_user`]),
+/// so the device's access tokens stop authenticating at once rather than at
+/// their expiry. The expiry is checked here too because a row outlives its
+/// `expires_at` until the maintenance sweep ([`delete_expired`]) reaches it,
+/// and a family past it is signed out: its refresh token has expired with it.
+///
+/// One unique-key read on `family`, the primary key. It is not cached:
+/// a revocation must bite on the next request.
+pub async fn is_live(ctx: &dyn Context, user_id: &str, family: &str) -> Result<bool, WaferError> {
+    let records = db_read::list_bounded(
+        ctx,
+        TABLE,
+        vec![
+            family_filter(family),
+            user_filter(user_id),
+            Filter {
+                field: "expires_at".into(),
+                operator: FilterOp::GreaterThan,
+                value: json!(now_iso()),
+            },
+        ],
+        Bound::UniqueKey("sessions.family is the PRIMARY KEY"),
+    )
+    .await
+    .map_err(|e| db_failed("session is_live", e))?;
+    Ok(!records.is_empty())
+}
+
 /// Return all of `user_id`'s families, ordered by `last_used_at` DESC so the
 /// most recently active device sorts first.
 pub async fn list_for_user(
@@ -228,10 +263,10 @@ pub async fn delete(ctx: &dyn Context, family: &str) -> Result<u64, WaferError> 
 
 /// Delete every row for `user_id`. Returns the number deleted.
 ///
-/// Logout's counterpart to `tokens::revoke_all_for_user`: the two run
-/// together so the device list and the refresh tokens agree about which
-/// devices are still signed in. This one runs first, for the reason
-/// `helpers::end_family` gives.
+/// Signs every device of the account out. Its one caller,
+/// `helpers::end_all_families` (logout, a password change or reset), runs it
+/// before `tokens::revoke_all_for_user`, for the reason `helpers::end_family`
+/// gives.
 pub async fn delete_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<u64, WaferError> {
     let n = db::delete_by_filters_count(ctx, TABLE, vec![user_filter(user_id)])
         .await
@@ -350,7 +385,8 @@ mod tests {
     }
 
     /// `touch` on a family with no row reports zero rather than erroring —
-    /// that is the signal issuance uses to insert one instead.
+    /// that is the signal a rotation uses to refuse a family revoked while it
+    /// ran.
     #[tokio::test]
     async fn touch_reports_zero_for_an_unknown_family() {
         let ctx = TestContext::with_auth()
@@ -422,6 +458,49 @@ mod tests {
         let rows = list_for_user(&ctx, "user-a").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].family, "fam-live");
+    }
+
+    /// `is_live` answers yes only for a row that exists, belongs to the
+    /// account asking, and has not expired.
+    #[tokio::test]
+    async fn is_live_needs_the_accounts_own_unexpired_row() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        for user_id in ["user-a", "user-b"] {
+            seed_user(&ctx, user_id).await;
+        }
+        insert(&ctx, fake_session("user-a", "fam-live"))
+            .await
+            .unwrap();
+        insert(
+            &ctx,
+            NewSession {
+                expires_at: "2000-01-01T00:00:00Z".into(),
+                ..fake_session("user-a", "fam-expired")
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(is_live(&ctx, "user-a", "fam-live").await.unwrap());
+        assert!(
+            !is_live(&ctx, "user-b", "fam-live").await.unwrap(),
+            "another account's family"
+        );
+        assert!(
+            !is_live(&ctx, "user-a", "fam-expired").await.unwrap(),
+            "a row past its expiry"
+        );
+        assert!(
+            !is_live(&ctx, "user-a", "fam-missing").await.unwrap(),
+            "no row"
+        );
+        delete(&ctx, "fam-live").await.unwrap();
+        assert!(
+            !is_live(&ctx, "user-a", "fam-live").await.unwrap(),
+            "a deleted row"
+        );
     }
 
     /// `insert` round-trips every column the device list renders.

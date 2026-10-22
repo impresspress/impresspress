@@ -1267,8 +1267,8 @@ impl TestContext {
     /// credential off the `Authorization` header or the `auth_token` cookie
     /// and records which, then
     /// [`crate::pipeline::handle_request`] verifies it — a JWT's signature,
-    /// issuer, blocklist entry and `auth_version`; an API key's row, owner
-    /// and roles — writes the `auth.*` meta from what verified, applies the
+    /// issuer, blocklist entry, login family and `auth_version`; an API key's
+    /// row, owner and roles — writes the `auth.*` meta from what verified, applies the
     /// CSRF origin policy to a cookie-authenticated write, routes, and logs.
     /// It is not the whole of what a deployment runs: in the `site-main` flow
     /// ([`crate::flows::site_main`]) the `security-headers`, `cors`,

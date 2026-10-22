@@ -58,14 +58,16 @@ pub async fn expected_issuer(
 /// The claims of a verified access token, in the shape both consumers need.
 ///
 /// Produced by [`verify_access_token`] and nowhere else: a value of this type
-/// means the token's signature, `type`, issuer, blocklist status and
-/// `auth_version` have all been checked. `roles` is already joined the way the
-/// meta wants it, and the string fields are empty (not absent) when the claim
-/// was missing, because every reader treats the two the same.
+/// means the token's signature, `type`, issuer, blocklist status, login
+/// family and `auth_version` have all been checked. `roles` is already joined
+/// the way the meta wants it, and the optional string fields are empty (not
+/// absent) when the claim was missing, because every reader treats the two
+/// the same.
 #[derive(Debug, Clone)]
 pub struct AccessClaims {
-    /// `sub` — the user id. `None` when the token carries no subject.
-    pub sub: Option<String>,
+    /// `sub` — the user id. Never empty: a token without one has no family
+    /// that could be its account's, so it does not verify.
+    pub sub: String,
     /// `email`, or `None` when absent.
     pub email: Option<String>,
     /// The `roles` array joined with `,`, falling back to the legacy `role`
@@ -77,8 +79,8 @@ pub struct AccessClaims {
     /// [`JwtExpPolicy::Required`] — but typed as an `Option` because the claim
     /// is read back out of the decoded map rather than out of the policy.
     pub exp: Option<i64>,
-    /// `family` — the refresh-rotation family this login belongs to, or `""`
-    /// on a token minted before the claim existed.
+    /// `family` — the login family this token belongs to, whose session row
+    /// was live when it was checked. Never empty.
     pub family: String,
     /// `auth_method` — how the session was established (`"password"`,
     /// `"oauth.github"`, …), or `""` on a token that does not carry it.
@@ -109,7 +111,16 @@ pub struct AccessClaims {
 ///    would otherwise silently 401 every request.
 /// 4. [SEC-042] `jti` is not blocklisted. A blocklisted token was logged out
 ///    before its natural `exp`; it is treated exactly as if it had expired.
-/// 5. [P2c] The embedded `auth_version` is not behind the user's stored
+/// 5. [SEC-02] The token's login family is live: its `family` claim names a
+///    session row of the `sub` account that has not expired
+///    (`blocks::auth::repo::sessions::is_live`). That row is the family's
+///    liveness, and every revocation deletes it first (`auth::helpers::end_family`,
+///    logout, a password change), so revoking a device ends its access tokens
+///    on their next request rather than at their `exp`. A token without a
+///    `sub` or a `family` names no family and is refused: every issuance
+///    stamps both (`auth::helpers::generate_tokens`). The read is not cached,
+///    because a revocation must bite at once.
+/// 6. [P2c] The embedded `auth_version` is not behind the user's stored
 ///    value — a password change, disable, soft-delete or role change (all of
 ///    which call `blocks::auth::bump_auth_version`) invalidates every
 ///    already-issued access JWT here instead of waiting out its expiry. A
@@ -118,7 +129,9 @@ pub struct AccessClaims {
 ///    read goes through `current_auth_version`'s short-lived cache, so this
 ///    costs no DB round trip per request.
 ///
-/// Rules 4 and 5 read the database, and a read that fails is neither answer:
+/// Rules 4 to 6 read the database, and they read it together
+/// (`futures::join!`): one round trip of up to three statements, not three
+/// round trips one after another. A read that fails is neither answer:
 /// accepting the token could honour a revoked credential, and rejecting it
 /// tells a signed-in caller they are signed out — the router redirects their
 /// pages to the login form, so a database blip would sign every user out of
@@ -166,31 +179,46 @@ pub async fn verify_access_token(
         }
     }
 
+    let sub = claims.get("sub").and_then(|v| v.as_str()).unwrap_or("");
+    let family = claims.get("family").and_then(|v| v.as_str()).unwrap_or("");
+    if sub.is_empty() || family.is_empty() {
+        return Ok(None);
+    }
+
     let jti = claims.get("jti").and_then(|v| v.as_str()).unwrap_or("");
-    if !jti.is_empty()
-        && crate::blocks::auth::repo::jwt_blocklist::contains(ctx, jti)
-            .await
-            .map_err(|e| {
-                crate::blocks::auth::credential_check_failed(e, "auth: jwt blocklist lookup")
-            })?
+    let blocklisted = async {
+        if jti.is_empty() {
+            return Ok(false);
+        }
+        crate::blocks::auth::repo::jwt_blocklist::contains(ctx, jti).await
+    };
+    let (blocklisted, live, current_version) = futures::join!(
+        blocklisted,
+        crate::blocks::auth::repo::sessions::is_live(ctx, sub, family),
+        crate::blocks::auth::current_auth_version(ctx, sub),
+    );
+
+    if blocklisted.map_err(|e| {
+        crate::blocks::auth::credential_check_failed(e, "auth: jwt blocklist lookup")
+    })? {
+        return Ok(None);
+    }
+
+    if !live
+        .map_err(|e| crate::blocks::auth::credential_check_failed(e, "auth: login family lookup"))?
     {
         return Ok(None);
     }
 
-    let sub = claims.get("sub").and_then(|v| v.as_str());
-    if let Some(uid) = sub {
-        let claim_version = claims
-            .get(crate::blocks::auth::repo::users::AUTH_VERSION_FIELD)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let current = crate::blocks::auth::current_auth_version(ctx, uid)
-            .await
-            .map_err(|e| {
-                crate::blocks::auth::credential_check_failed(e, "auth: auth_version lookup")
-            })?;
-        if claim_version < current {
-            return Ok(None);
-        }
+    let claim_version = claims
+        .get(crate::blocks::auth::repo::users::AUTH_VERSION_FIELD)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let current = current_version.map_err(|e| {
+        crate::blocks::auth::credential_check_failed(e, "auth: auth_version lookup")
+    })?;
+    if claim_version < current {
+        return Ok(None);
     }
 
     // Roles: the `roles` array `generate_tokens` mints. A token without one
@@ -208,7 +236,7 @@ pub async fn verify_access_token(
         .unwrap_or_default();
 
     Ok(Some(AccessClaims {
-        sub: sub.map(str::to_owned),
+        sub: sub.to_string(),
         email: claims
             .get("email")
             .and_then(|v| v.as_str())
@@ -216,11 +244,7 @@ pub async fn verify_access_token(
         roles,
         jti: jti.to_string(),
         exp: claims.get("exp").and_then(|v| v.as_i64()),
-        family: claims
-            .get("family")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        family: family.to_string(),
         auth_method: claims
             .get("auth_method")
             .and_then(|v| v.as_str())
@@ -232,8 +256,8 @@ pub async fn verify_access_token(
 /// Extract JWT claims from an `Authorization: Bearer <token>` header and
 /// set auth meta fields on the message.
 ///
-/// Sets: `auth.user_id`, `auth.user_email`, `auth.user_roles`, and (when
-/// present in the JWT) `auth.jti`, `auth.exp` and `auth.family`.
+/// Sets: `auth.user_id`, `auth.user_roles`, `auth.family`, and (when present
+/// in the JWT) `auth.user_email`, `auth.jti` and `auth.exp`.
 ///
 /// Sets nothing when [`verify_access_token`] refuses the token — the request
 /// continues as unauthenticated. Returns its `Err` when the check could not
@@ -257,9 +281,7 @@ pub async fn extract_auth_meta(
         return Ok(());
     };
 
-    if let Some(sub) = claims.sub.as_deref() {
-        msg.set_meta(META_AUTH_USER_ID, sub);
-    }
+    msg.set_meta(META_AUTH_USER_ID, &claims.sub);
     if let Some(email) = claims.email.as_deref() {
         msg.set_meta(META_AUTH_USER_EMAIL, email);
     }
@@ -275,9 +297,7 @@ pub async fn extract_auth_meta(
     if let Some(exp) = claims.exp {
         msg.set_meta(META_AUTH_EXP, exp.to_string());
     }
-    if !claims.family.is_empty() {
-        msg.set_meta(META_AUTH_FAMILY, &claims.family);
-    }
+    msg.set_meta(META_AUTH_FAMILY, &claims.family);
     Ok(())
 }
 
@@ -411,7 +431,7 @@ mod tests {
             .await
             .expect("the check completes")
             .expect("a freshly minted access token must verify");
-        assert_eq!(claims.sub.as_deref(), Some("user-a"));
+        assert_eq!(claims.sub, "user-a");
         assert_eq!(claims.jti, "jti-1");
     }
 
@@ -555,17 +575,20 @@ mod tests {
         assert_eq!(msg.get_meta(META_AUTH_FAMILY), "fam-42");
     }
 
-    /// A token with no `family` claim leaves the meta empty rather than
-    /// stamping a blank value that a reader could mistake for a match.
+    /// A token with no `family` claim names no login family that could be
+    /// live, so it does not authenticate: no auth meta at all, not a request
+    /// signed in with a blank family.
     ///
     /// No sign-in mints such a token, so it is signed here by hand rather
     /// than through the signers above, which all give their token a family.
+    /// Its account exists, so the family is the only thing it lacks.
     #[tokio::test]
-    async fn extract_auth_meta_leaves_the_family_empty_when_the_token_has_none() {
+    async fn extract_auth_meta_refuses_a_token_without_a_family() {
         use wafer_run::Message;
         let ctx = crate::test_support::TestContext::with_auth()
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        ctx.seed_auth_user("user-a").await;
         let secret = "test-secret";
         let derived = primitives::derive_block_key(
             secret.as_bytes(),
@@ -580,7 +603,67 @@ mod tests {
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await
             .expect("the check completes");
+        assert_eq!(msg.get_meta(wafer_run::META_AUTH_USER_ID), "");
         assert_eq!(msg.get_meta(META_AUTH_FAMILY), "");
+    }
+
+    /// A family that was signed in and then ended — a device revoke, logout,
+    /// a password change — no longer authenticates its access token, which
+    /// still carries a good signature, no blocklisted `jti` and a current
+    /// `auth_version`.
+    #[tokio::test]
+    async fn verify_access_token_rejects_a_token_whose_family_has_ended() {
+        let ctx = crate::test_support::TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let secret = "test-secret";
+        let token = sign_access_jwt_with(&ctx, secret, |claims| {
+            claims.insert("sub".to_string(), serde_json::json!("user-a"));
+            claims.insert("family".to_string(), serde_json::json!("fam-ended"));
+        })
+        .await;
+        assert!(verify_access_token(&ctx, &token, secret, "")
+            .await
+            .expect("the check completes")
+            .is_some());
+
+        crate::blocks::auth::repo::sessions::delete(&ctx.fixture(), "fam-ended")
+            .await
+            .expect("end the family");
+        assert!(verify_access_token(&ctx, &token, secret, "")
+            .await
+            .expect("the check completes")
+            .is_none());
+    }
+
+    /// A family's row names the account it belongs to, and a token whose
+    /// `sub` is another account does not borrow it.
+    #[tokio::test]
+    async fn verify_access_token_rejects_another_accounts_family() {
+        let ctx = crate::test_support::TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let secret = "test-secret";
+        sign_access_jwt_with(&ctx, secret, |claims| {
+            claims.insert("sub".to_string(), serde_json::json!("user-a"));
+            claims.insert("family".to_string(), serde_json::json!("fam-of-a"));
+        })
+        .await;
+        ctx.seed_auth_user("user-b").await;
+        let derived = primitives::derive_block_key(
+            secret.as_bytes(),
+            crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
+        );
+        let mut claims = BTreeMap::new();
+        claims.insert("sub".to_string(), serde_json::json!("user-b"));
+        claims.insert("type".to_string(), serde_json::json!("access"));
+        claims.insert("family".to_string(), serde_json::json!("fam-of-a"));
+        let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
+            .expect("test jwt_sign");
+        assert!(verify_access_token(&ctx, &token, secret, "")
+            .await
+            .expect("the check completes")
+            .is_none());
     }
 
     /// `sign_access_jwt` with arbitrary extra claims. `type` and a fresh

@@ -931,6 +931,14 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // `("database.update_where_count", sessions::TABLE)` — a
             // rotation whose session-row touch fails ends its family.
             "blocks/auth_ui/api/refresh.rs",
+            // `("database.delete_where_count", sessions::TABLE)` — a
+            // password change whose session-row deletion fails is not
+            // answered as done.
+            "blocks/auth_ui/api/change_password.rs",
+            // `("database.list", sessions::TABLE)` — an access token's
+            // login-family read failing refuses the request (503) instead of
+            // signing the caller out, `pipeline::credential_check_tests`.
+            "pipeline.rs",
         ],
     ),
     (

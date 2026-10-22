@@ -104,9 +104,9 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
         return crud::db_error_internal(e, "Failed to update password");
     }
 
-    // The credential has changed, so every session the old password opened
-    // must end — this is the account-recovery path, where a session that
-    // survives is the attacker's. A reset whose sessions did not end must not
+    // The credential has changed, so every session and API key the old
+    // password opened must end — this is the account-recovery path, where a
+    // session or key that survives is the attacker's. A reset whose sessions did not end must not
     // be answered as success, and it gives the link back: the retry writes
     // the same password again and ends the sessions this attempt could not.
     if let Err(e) = end_sessions_after_password_change(ctx, &user.id).await {
@@ -280,8 +280,10 @@ mod tests {
 
     /// A refresh-row revocation that fails must not keep the account's
     /// sessions alive — on the recovery path least of all, where a surviving
-    /// session is the attacker's. The `auth_version` bump is what ends them,
-    /// so it runs whatever the revocation did.
+    /// session is the attacker's — and does not: the session rows were
+    /// deleted before it ran, and the `auth_version` bump runs whatever the
+    /// revocation did. So the failure is housekeeping, and the reset is
+    /// answered as done.
     #[tokio::test]
     async fn a_failed_revocation_still_ends_every_session() {
         let ctx = ctx_with_crypto().await;
@@ -664,5 +666,98 @@ mod tests {
         let out = handle(&ctx, body(&token, "new-horse-battery-2026")).await;
 
         assert_eq!(output_http_status(out).await, 500);
+    }
+
+    /// Decision 2, on the recovery path: a reset revokes the account's API
+    /// keys and signs out every device, through the production request path
+    /// (`TestContext::request`, which verifies each credential the way a
+    /// deployment does). A key checks no `auth_version`, so without the
+    /// revocation the key of whoever held the account would outlive the
+    /// recovery.
+    #[tokio::test]
+    async fn a_reset_ends_every_device_and_api_key() {
+        use crate::{
+            blocks::auth::repo::{sessions, users::InitialRole},
+            test_support::{anon_msg, api_key_header},
+        };
+
+        async fn status(out: OutputStream) -> u16 {
+            wafer_block::http_codec::collect_http_response(out)
+                .await
+                .status
+        }
+
+        let ctx = TestContext::with_auth().await.with_sign_in_added();
+        let email = "recovered@example.com";
+        let password = "original-horse-battery1";
+        let user_id = ctx.seed_account(email, password, InitialRole::User).await;
+        let device = ctx.sign_in(email, password).await;
+        let key = device.create_api_key(&ctx, "ci").await;
+        let me_with_key =
+            || ctx.request(api_key_header(anon_msg("retrieve", "/b/auth/api/me"), &key));
+        let me_on_device = || ctx.request(device.bearer(anon_msg("retrieve", "/b/auth/api/me")));
+        assert_eq!(status(me_with_key().await).await, 200, "the key works");
+        assert_eq!(status(me_on_device().await).await, 200);
+
+        let raw = "test-raw-reset-token-recovered-0123456789";
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        users::set_reset_token(
+            &ctx.fixture(),
+            &user_id,
+            &sha256_hex(raw.as_bytes()),
+            &expires,
+        )
+        .await
+        .unwrap();
+        let reset = ctx
+            .request_json(
+                anon_msg("create", "/b/auth/api/reset-password"),
+                &serde_json::json!({"token": raw, "new_password": "new-horse-battery-2026"}),
+            )
+            .await;
+        assert_eq!(status(reset).await, 200, "the reset is answered as done");
+
+        assert_eq!(
+            status(me_with_key().await).await,
+            401,
+            "an API key minted before the reset no longer authenticates"
+        );
+        assert_eq!(status(me_on_device().await).await, 401);
+        assert!(
+            sessions::list_for_user(&ctx.fixture(), &user_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no device is listed as signed in after the reset"
+        );
+    }
+
+    /// A key revocation that fails is not answered as a reset that worked,
+    /// and gives the link back so the retry can finish the job.
+    #[tokio::test]
+    async fn a_failed_api_key_revocation_is_not_reported_as_success() {
+        use crate::blocks::auth::repo::api_keys;
+
+        let ctx = ctx_with_crypto().await;
+        let user_id = signup_user(&ctx, "keyfail@example.com", "original-horse-battery1").await;
+        let token = issue_reset_token(&ctx, &user_id).await;
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.update_where", api_keys::TABLE)],
+        );
+
+        assert!(
+            output_is_error(
+                handle(&failing, body(&token, "new-horse-battery-2026")).await,
+                "Internal"
+            )
+            .await,
+            "a reset whose API keys were not revoked must not report success"
+        );
+        assert_eq!(
+            output_http_status(handle(&ctx, body(&token, "new-horse-battery-2026")).await).await,
+            200,
+            "the link was given back, and the retry completes the reset"
+        );
     }
 }

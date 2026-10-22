@@ -45,9 +45,9 @@ const MISMATCH: &str = "New passwords do not match.";
 ///
 /// The htmx answer replaces the whole form ([`FORM_ID`], `HX-Retarget` +
 /// `HX-Reswap: outerHTML`) rather than landing in the result slot. The change
-/// revokes every refresh token AND bumps the user's `auth_version`, which
-/// retires the access token the page itself is holding (see the
-/// `auth_version` check in [`crate::crypto::verify_access_token`]) — so the
+/// ends every device and API key and bumps the user's `auth_version`
+/// ([`end_sessions_after_password_change`]), which retires the access token
+/// the page itself is holding (see [`crate::crypto::verify_access_token`]) — so the
 /// form, still filled in with the old and new password, has nothing left to
 /// submit. What replaces it says so and offers the way back in, landing on
 /// the page they were on.
@@ -57,7 +57,7 @@ fn changed_response(msg: &Message) -> OutputStream {
             div id=(FORM_ID) .change-password-done {
                 (alert_message(
                     AlertVariant::Success,
-                    "Password changed. You have been signed out everywhere — sign in again with your new password.",
+                    "Password changed. You have been signed out everywhere and your API keys have been revoked — sign in again with your new password.",
                 ))
                 // `autofocus`: htmx focuses it once swapped in, so focus is
                 // not left on the submit button the swap just removed.
@@ -245,8 +245,9 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         return crud::db_error_internal(e, "Update failed");
     }
 
-    // The credential has changed, so every session the old password opened
-    // must end, and a failure to end them must not be answered as success.
+    // The credential has changed, so every session and API key the old
+    // password opened must end, and a failure to end them must not be
+    // answered as success.
     if let Err(e) = end_sessions_after_password_change(ctx, user_id).await {
         return crud::db_error_internal(e, "Password changed but session invalidation failed");
     }
@@ -697,10 +698,11 @@ mod tests {
     }
 
     /// A refresh-row revocation that fails must not keep the account's
-    /// sessions alive. The `auth_version` bump is what ends them, so it runs
-    /// whatever the revocation did: the version moves, and the refresh token
-    /// the old password opened — whose row the failed revocation left live —
-    /// is refused.
+    /// sessions alive, and does not: the session rows were deleted before it
+    /// ran, and the `auth_version` bump runs whatever the revocation did. The
+    /// refresh token the old password opened — whose row the failed
+    /// revocation left live — is refused, so the failure is housekeeping and
+    /// the change is answered as done.
     #[tokio::test]
     async fn a_failed_revocation_still_ends_every_session() {
         use crate::blocks::{
@@ -960,5 +962,148 @@ mod tests {
         .await;
 
         assert_eq!(output_http_status(out).await, 500);
+    }
+
+    /// What a change ends, through the production request path
+    /// (`TestContext::request`: the router block and
+    /// `pipeline::handle_request`, which verifies each credential the way a
+    /// deployment does).
+    mod what_a_change_ends {
+        use crate::{
+            blocks::auth::repo::{sessions, users::InitialRole},
+            test_support::{anon_msg, api_key_header, Session, TestContext},
+        };
+
+        const EMAIL: &str = "changes@example.com";
+        const PASSWORD: &str = "original-horse-battery1";
+        const NEW_PASSWORD: &str = "new-horse-battery-2026";
+
+        async fn status(out: wafer_run::OutputStream) -> u16 {
+            wafer_block::http_codec::collect_http_response(out)
+                .await
+                .status
+        }
+
+        /// `GET /b/auth/api/me`, a route only a signed-in caller reaches.
+        async fn me_with_session(ctx: &TestContext, session: &Session) -> u16 {
+            status(
+                ctx.request(session.bearer(anon_msg("retrieve", "/b/auth/api/me")))
+                    .await,
+            )
+            .await
+        }
+
+        async fn me_with_key(ctx: &TestContext, key: &str) -> u16 {
+            status(
+                ctx.request(api_key_header(anon_msg("retrieve", "/b/auth/api/me"), key))
+                    .await,
+            )
+            .await
+        }
+
+        /// Decision 2: a password change revokes the account's API keys, and
+        /// it signs out every device, the one that made the change included
+        /// (it re-issues none). A key checks no `auth_version`, so without
+        /// the revocation it would outlive the change.
+        #[tokio::test]
+        async fn a_password_change_ends_every_device_and_api_key() {
+            let ctx = TestContext::with_auth().await.with_sign_in_added();
+            let user_id = ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
+            let here = ctx.sign_in(EMAIL, PASSWORD).await;
+            let elsewhere = ctx.sign_in(EMAIL, PASSWORD).await;
+            let key = here.create_api_key(&ctx, "ci").await;
+            assert_eq!(me_with_key(&ctx, &key).await, 200, "the key works");
+            assert_eq!(me_with_session(&ctx, &elsewhere).await, 200);
+
+            let changed = ctx
+                .request_json(
+                    here.bearer(anon_msg("create", "/b/auth/api/change-password")),
+                    &serde_json::json!({
+                        "current_password": PASSWORD,
+                        "new_password": NEW_PASSWORD,
+                    }),
+                )
+                .await;
+            assert_eq!(status(changed).await, 200, "the change is answered as done");
+
+            assert_eq!(
+                me_with_key(&ctx, &key).await,
+                401,
+                "an API key minted before the change no longer authenticates"
+            );
+            assert_eq!(me_with_session(&ctx, &elsewhere).await, 401);
+            assert_eq!(me_with_session(&ctx, &here).await, 401);
+            assert!(
+                sessions::list_for_user(&ctx.fixture(), &user_id)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "no device is listed as signed in after the change"
+            );
+        }
+    }
+
+    /// A key revocation that fails leaves a credential nothing else ends — a
+    /// key checks no `auth_version` — so the change is not answered as done.
+    #[tokio::test]
+    async fn a_failed_api_key_revocation_is_not_reported_as_success() {
+        use crate::blocks::auth::repo::{api_keys, users};
+
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let user_id = signup_user(&ctx, "keys@example.com", "original-horse-battery1").await;
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.update_where", api_keys::TABLE)],
+        );
+
+        let msg = auth_msg("update", "/b/auth/api/change-password", &user_id);
+        let out = handle(
+            &failing,
+            &msg,
+            body("original-horse-battery1", "new-horse-battery-2026"),
+        )
+        .await;
+
+        assert!(
+            output_is_error(out, "Internal").await,
+            "a change whose API keys were not revoked must not report success"
+        );
+        assert_eq!(
+            users::auth_version(&ctx, &user_id).await.unwrap(),
+            1,
+            "the steps after the failed one still run"
+        );
+    }
+
+    /// A session-row deletion that fails leaves every device signed in (and
+    /// listed) until the bump is read, so the change is not answered as done.
+    #[tokio::test]
+    async fn a_failed_session_row_deletion_is_not_reported_as_success() {
+        use crate::blocks::auth::repo::{sessions, users};
+
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let user_id = signup_user(&ctx, "rows@example.com", "original-horse-battery1").await;
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.delete_where_count", sessions::TABLE)],
+        );
+
+        let msg = auth_msg("update", "/b/auth/api/change-password", &user_id);
+        let out = handle(
+            &failing,
+            &msg,
+            body("original-horse-battery1", "new-horse-battery-2026"),
+        )
+        .await;
+
+        assert!(
+            output_is_error(out, "Internal").await,
+            "a change whose devices were not signed out must not report success"
+        );
+        assert_eq!(
+            users::auth_version(&ctx, &user_id).await.unwrap(),
+            1,
+            "the steps after the failed one still run"
+        );
     }
 }
