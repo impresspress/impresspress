@@ -17,12 +17,24 @@ use crate::{
 };
 
 /// `GET /b/admin/api/settings/all`.
+///
+/// A declared key's `name`, `description` and `warning` are its declaration's
+/// ([`ops::declared_vars`]), as on the Variables page, so a rename in a
+/// declaration reaches this listing with no write to the stored row. Rows
+/// written by the settings forms store an empty name, and rows written before
+/// a rename store the old one; neither is what the variable is called. Only an
+/// unowned key is described by its stored row.
 pub(super) async fn handle_list_full(ctx: &dyn Context) -> OutputStream {
     match variables::list_all(ctx).await {
         Ok(rows) => {
+            let declared = ops::declared_vars(ctx);
             let vars: Vec<_> = rows
                 .iter()
                 .map(|row| {
+                    let (name, description, warning) = match declared.get(&row.key) {
+                        Some(var) => (&var.name, &var.description, &var.warning),
+                        None => (&row.name, &row.description, &row.warning),
+                    };
                     let is_sensitive = ops::is_sensitive_key(&row.key, i64::from(row.sensitive));
                     let is_system = row.key.starts_with("WAFER_RUN_SHARED__");
                     // Mask sensitive values even in the "full" listing
@@ -33,10 +45,10 @@ pub(super) async fn handle_list_full(ctx: &dyn Context) -> OutputStream {
                     };
                     serde_json::json!({
                         "key": row.key,
-                        "name": row.name,
-                        "description": row.description,
+                        "name": name,
+                        "description": description,
                         "value": value,
-                        "warning": row.warning,
+                        "warning": warning,
                         "sensitive": is_sensitive,
                         "system": is_system,
                         "updated_at": row.updated_at,
@@ -949,6 +961,85 @@ mod tests {
             seed_payload_hash(&crate::config_vars::shared_config_vars()),
             "a seed that could not read the table must not stamp the gate"
         );
+    }
+
+    /// `GET /b/admin/api/settings/all` names a declared key from its
+    /// declaration. A block var saved through the settings forms
+    /// (`variables::set_by_admin`) is stored with an empty name, and the
+    /// listing still calls it what the block declares; a key nothing declares
+    /// is described by its stored row.
+    #[tokio::test]
+    async fn the_full_listing_names_a_declared_key_from_its_declaration() {
+        use wafer_run::Block as _;
+
+        use crate::test_support::output_json;
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        let info = crate::blocks::email::EmailBlock::new().info();
+        ctx.register_block_info(&info.name.clone(), info);
+
+        let key = crate::blocks::email::MAILGUN_DOMAIN;
+        variables::set_by_admin(
+            &ctx.database_service(),
+            key,
+            "mg.acme.example",
+            Some(false),
+            crate::features::USER_EDITED_SENTINEL,
+        )
+        .await
+        .expect("save the block var as the settings form does");
+        assert_eq!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read")
+                .expect("row")
+                .name,
+            "",
+            "precondition: the settings-form write stores no name"
+        );
+        let unowned = crate::blocks::admin::fixture_keys::LEGACY_THING;
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: unowned.to_string(),
+                value: "kept".to_string(),
+                name: "Legacy thing".to_string(),
+                description: "stored description".to_string(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: String::new(),
+                block: variables::block_for_key(unowned),
+            },
+        )
+        .await
+        .expect("store an unowned row");
+
+        let listing = output_json(handle_list_full(&ctx).await).await;
+        let entry = |k: &str| {
+            listing
+                .as_array()
+                .expect("an array")
+                .iter()
+                .find(|v| v["key"] == k)
+                .cloned()
+                .unwrap_or_else(|| panic!("{k} is listed: {listing}"))
+        };
+        let declared = crate::config_vars::var_in(
+            &crate::blocks::email::EmailBlock::new().info().config_keys,
+            key,
+        );
+        let mailgun = entry(key);
+        assert_eq!(mailgun["name"], declared.name.as_str());
+        assert_eq!(mailgun["description"], declared.description.as_str());
+        assert_eq!(mailgun["value"], "mg.acme.example");
+        let legacy = entry(unowned);
+        assert_eq!(legacy["name"], "Legacy thing");
+        assert_eq!(legacy["description"], "stored description");
     }
 
     /// This release's upgrade, for a shared var: a row stored under the old
