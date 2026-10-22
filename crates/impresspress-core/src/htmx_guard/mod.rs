@@ -684,6 +684,40 @@ async fn every_tab_is_a_sentence_case_text_label() {
     assert!(checked > 50, "only {checked} tabs were checked");
 }
 
+/// Every page confirms through the one shared dialog, and nothing else
+/// (`test_support::dom::confirm_problems`): each document carries
+/// `components::confirm_dialog` once, no other dialog is a destructive
+/// confirm of its own, and every `hx-confirm` names its action and tone, so
+/// chrome.js can ask it. The other half — no script calls `window.confirm` —
+/// is a source guard beside the dialog (`ui/components/modal.rs`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_page_confirms_through_the_one_shared_dialog() {
+    let mut wrong: Vec<String> = Vec::new();
+    let (mut documents, mut asked) = (0, 0);
+    for entry in entries() {
+        let Some(make) = entry.fixture else {
+            continue;
+        };
+        let fixture = make().await;
+        for view in crawl(&fixture).await {
+            let page = view.page(&fixture);
+            let html = crate::test_support::htmx::render(&fixture, &page).await;
+            if crate::ui::layout::is_document(&html) {
+                documents += 1;
+            }
+            asked += html.matches(" hx-confirm=").count();
+            for problem in crate::test_support::dom::confirm_problems(&html) {
+                wrong.push(format!("{}: {problem}", page.url()));
+            }
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(documents > 50, "only {documents} documents were checked");
+    assert!(asked > 10, "only {asked} hx-confirm controls were checked");
+}
+
 /// The guard's failure, by page: each row named but not rendered, each row
 /// rendered but not named, one per line, then the rendered table ready to
 /// paste over `EXPECTED_HEADERS` once the change is the intended one.

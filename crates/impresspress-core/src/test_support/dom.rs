@@ -164,6 +164,76 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
         .collect()
 }
 
+/// Every way the page departs from the one confirm mechanism
+/// (`ui::components::confirm_dialog`, asked through by chrome.js), as one line
+/// each:
+///
+/// - a whole document that loads chrome.js (which asks every confirm), or
+///   that holds an `hx-confirm`, and does not carry the shared dialog exactly
+///   once; and the shared dialog as anything but an `alertdialog`. A document
+///   with neither (`templates::public_page`) asks nothing, so needs none;
+/// - any other `<dialog>` holding a `.btn--danger`, the class a destructive
+///   confirm's button is drawn in: that is a block's own confirm dialog, a
+///   second mechanism beside the shared one;
+/// - an element with `hx-confirm` that does not name its action
+///   (`data-confirm-label`, not empty) and its tone (`data-confirm-tone`,
+///   `danger` or `primary`), without which chrome.js refuses to ask.
+///
+/// A fragment (an htmx answer) is held to the last two only: the document it
+/// lands in carries the dialog.
+pub fn confirm_problems(html: &str) -> Vec<String> {
+    use crate::ui::components::CONFIRM_DIALOG_ID;
+
+    let doc = Html::parse_document(html);
+    let mut problems = Vec::new();
+    let shared: Vec<ElementRef<'_>> = doc
+        .select(&selector("dialog"))
+        .filter(|dialog| dialog.value().id() == Some(CONFIRM_DIALOG_ID))
+        .collect();
+    let asks = html.contains(&crate::ui::assets::chrome_js_url())
+        || doc.select(&selector("[hx-confirm]")).next().is_some();
+    if crate::ui::layout::is_document(html) && asks && shared.len() != 1 {
+        problems.push(format!(
+            "the document carries {} dialog#{CONFIRM_DIALOG_ID}, not one",
+            shared.len()
+        ));
+    }
+    for dialog in &shared {
+        if dialog.value().attr("role") != Some("alertdialog") {
+            problems.push(format!(
+                "dialog#{CONFIRM_DIALOG_ID} is not an alertdialog: {}",
+                describe(*dialog)
+            ));
+        }
+    }
+    for dialog in doc.select(&selector("dialog")) {
+        if dialog.value().id() == Some(CONFIRM_DIALOG_ID) {
+            continue;
+        }
+        for danger in dialog.select(&selector(".btn--danger")) {
+            problems.push(format!(
+                "dialog#{} holds its own destructive confirm, {}; confirm through the \
+                 shared dialog instead",
+                dialog.value().id().unwrap_or_default(),
+                describe(danger)
+            ));
+        }
+    }
+    for asker in doc.select(&selector("[hx-confirm]")) {
+        let label = asker.value().attr("data-confirm-label").unwrap_or_default();
+        let tone = asker.value().attr("data-confirm-tone").unwrap_or_default();
+        if label.trim().is_empty() || !matches!(tone, "danger" | "primary") {
+            problems.push(format!(
+                "{} asks {:?} without a data-confirm-label and a data-confirm-tone of \
+                 danger or primary (label {label:?}, tone {tone:?})",
+                describe(asker),
+                asker.value().attr("hx-confirm").unwrap_or_default()
+            ));
+        }
+    }
+    problems
+}
+
 /// How a guard names an element: `button.btn.btn--primary "Save"`.
 pub fn describe(el: ElementRef<'_>) -> String {
     let mut out = el.value().name().to_string();
@@ -511,7 +581,86 @@ mod tests {
         assert_eq!(heading_outline(&html), vec![(1, "Title".to_string())]);
         let (page, per_dialog) = visible_primaries(&html);
         assert!(page.is_empty());
-        assert_eq!(per_dialog, vec![vec![primary("Ok")]]);
+        // The page's own dialog, then the shared confirm dialog every
+        // document carries, whose confirm buttons are hidden until it asks.
+        assert_eq!(per_dialog, vec![vec![primary("Ok")], vec![]]);
+        assert_eq!(confirm_problems(&html), Vec::<String>::new());
+    }
+
+    // ── confirm_problems ─────────────────────────────────────────────────
+
+    #[test]
+    fn a_confirm_must_name_its_action_and_tone() {
+        let html = concat!(
+            r#"<button hx-delete="/a" hx-confirm="Delete a?" data-confirm-label="Delete a" data-confirm-tone="danger">A</button>"#,
+            r#"<button hx-delete="/b" hx-confirm="Delete b?">B</button>"#,
+            r#"<button hx-post="/c" hx-confirm="Load c?" data-confirm-label=" " data-confirm-tone="primary">C</button>"#,
+            r#"<button hx-post="/d" hx-confirm="Load d?" data-confirm-label="Load d" data-confirm-tone="ok">D</button>"#,
+        );
+        let problems = confirm_problems(html);
+        assert_eq!(problems.len(), 3, "{problems:#?}");
+        for (at, name) in [(0, "\"B\""), (1, "\"C\""), (2, "\"D\"")] {
+            assert!(
+                problems[at].starts_with(&format!("button {name} asks")),
+                "{problems:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialog_of_its_own_with_a_danger_button_is_a_second_mechanism() {
+        let html = concat!(
+            r#"<dialog id="delete-confirm"><p></p>"#,
+            r#"<button class="btn btn--secondary">Cancel</button>"#,
+            r#"<button class="btn btn--danger" data-confirm>Delete</button></dialog>"#,
+            r#"<dialog id="edit"><button class="btn btn--primary">Save</button></dialog>"#,
+        );
+        assert_eq!(
+            confirm_problems(html),
+            vec![
+                r#"dialog#delete-confirm holds its own destructive confirm, button.btn.btn--danger "Delete"; confirm through the shared dialog instead"#
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_carries_the_shared_dialog_once_as_an_alertdialog() {
+        let shared = crate::ui::components::confirm_dialog().into_string();
+        // A whole document, spelled with maud's own doctype so this file
+        // writes no page chrome of its own (`scripts/grep-guard-html.sh`).
+        let document = |head: &str, body: &str| {
+            format!("{}<head>{head}</head><body>{body}</body>", maud::DOCTYPE.0)
+        };
+        let chrome = format!(
+            r#"<script src="{}" defer></script>"#,
+            crate::ui::assets::chrome_js_url()
+        );
+        let with_chrome = |body: &str| document(&chrome, body);
+        assert!(confirm_problems(&with_chrome(&shared)).is_empty());
+        assert_eq!(
+            confirm_problems(&with_chrome("<p>x</p>")),
+            vec!["the document carries 0 dialog#confirm-dialog, not one"]
+        );
+        assert_eq!(
+            confirm_problems(&with_chrome(&format!("{shared}{shared}"))),
+            vec!["the document carries 2 dialog#confirm-dialog, not one"]
+        );
+        assert_eq!(
+            confirm_problems(&with_chrome(r#"<dialog id="confirm-dialog"></dialog>"#)),
+            vec!["dialog#confirm-dialog is not an alertdialog: dialog"]
+        );
+        // A fragment lands in a document that carries the dialog, and a
+        // document that loads no chrome.js and holds no `hx-confirm` (a
+        // public page) asks nothing.
+        assert!(confirm_problems("<tr><td>x</td></tr>").is_empty());
+        assert!(confirm_problems(&document("", "<p>x</p>")).is_empty());
+        assert_eq!(
+            confirm_problems(&document(
+                "",
+                r#"<button hx-delete="/x" hx-confirm="X?" data-confirm-label="Delete x" data-confirm-tone="danger">X</button>"#
+            )),
+            vec!["the document carries 0 dialog#confirm-dialog, not one"]
+        );
     }
 
     // ── describe ─────────────────────────────────────────────────────────

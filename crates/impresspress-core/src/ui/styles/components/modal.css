@@ -140,3 +140,11 @@ dialog.modal.modal--lg { max-width: 720px; }
 .modal-description { font-size: var(--text-sm); color: var(--text-muted); line-height: 1.6; margin-bottom: var(--space-4); }
 .modal-section-title { font-size: var(--text-sm); font-weight: 600; margin: var(--space-4) 0 var(--space-2); }
 .modal-tech { font-size: var(--text-sm); color: var(--text-muted); }
+
+/* The shared confirm dialog's question (`components::confirm_dialog`). It
+   quotes what it acts on — a file name, a variable key, an email — which may
+   be one unbroken word, so it breaks anywhere rather than widen the dialog. */
+.confirm-dialog__question {
+	margin: 0;
+	overflow-wrap: anywhere;
+}

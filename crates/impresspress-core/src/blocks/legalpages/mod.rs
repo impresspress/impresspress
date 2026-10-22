@@ -1856,7 +1856,11 @@ mod tests {
             html.contains(r#"<a class="btn btn--ghost" href="/b/legalpages/terms" target="_blank" rel="noopener">"#),
             "{html}"
         );
-        assert_eq!(html.matches("btn--primary").count(), 1, "{html}");
+        assert_eq!(
+            crate::test_support::dom::visible_primaries(&html).0,
+            [r#"button.btn.btn--primary "Save settings""#],
+            "{html}"
+        );
     }
 }
 

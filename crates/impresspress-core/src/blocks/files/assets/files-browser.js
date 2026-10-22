@@ -106,32 +106,18 @@
     updateBulkBar();
   }
 
-  // Every destructive action asks first, through the block's one confirm
-  // dialog (`pages_user::render_confirm_modal`): `question` in it, Cancel
-  // focused, and `action` run when its `data-confirm` button is pressed.
-  // `opener` is where focus goes back if it is cancelled.
-  let pendingConfirm = null;
-
-  function askToConfirm(dialogId, question, opener, action) {
-    const dlg = document.getElementById(dialogId);
-    if (!dlg) return;
-    pendingConfirm = { dialog: dlg, action: action };
-    // textContent, never innerHTML: file names are user-chosen.
-    dlg.querySelector('#' + dialogId + '-question').textContent = question;
-    document.body.dispatchEvent(
-      new CustomEvent('openModal', { detail: { id: dialogId, opener: opener } })
-    );
-  }
-
-  function confirmButtons() {
-    document.addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-confirm]');
-      if (!btn || !pendingConfirm || !pendingConfirm.dialog.contains(btn)) return;
-      const job = pendingConfirm;
-      pendingConfirm = null;
-      job.dialog.close();
-      job.action();
+  // Every destructive action asks first, in the page's shared confirm dialog
+  // (`window.impresspressConfirm`, ui/assets/chrome.js): `question` in it,
+  // `label` on its danger button, Cancel focused, and `action` run once it is
+  // confirmed. `opener` is where focus goes back if it is cancelled.
+  async function askToConfirm(question, label, opener, action) {
+    const confirmed = await window.impresspressConfirm({
+      question: question,
+      label: label,
+      tone: 'danger',
+      opener: opener,
     });
+    if (confirmed) action();
   }
 
   function dragDropHandler(boot) {
@@ -223,8 +209,11 @@
     if (!boot.bucket || !keys.length || deleting) return;
     const bucket = boot.bucket;
     const name = keys.length === 1 ? keys[0].split('/').pop() : plural(keys.length, 'file');
-    askToConfirm('delete-confirm', 'Delete ' + name + "? This can't be undone.", opener, () =>
-      deleteKeys(bucket, keys, opener)
+    askToConfirm(
+      'Delete ' + name + "? This can't be undone.",
+      keys.length === 1 ? 'Delete file' : 'Delete files',
+      opener,
+      () => deleteKeys(bucket, keys, opener)
     );
   }
 
@@ -391,8 +380,8 @@
       const trigger = e.target.closest('[data-action="revoke-share"]');
       if (!trigger) return;
       askToConfirm(
-        'revoke-confirm',
         'Revoke the link to ' + trigger.dataset.file + '? Anyone who has it loses access.',
+        'Revoke link',
         trigger,
         () => revokeShare(trigger.dataset.shareId)
       );
@@ -572,7 +561,6 @@
       // The row menus and revoke buttons need no bootstrap (the shares page
       // has none).
       rowMenus();
-      confirmButtons();
       revokeButtons();
       // The share modal lives on the object list; the bucket-create modal on
       // the bucket lists (no boot bucket). Each binds only where it is.

@@ -165,12 +165,6 @@ fn render_bulk_bar() -> Markup {
     }
 }
 
-/// The dialog that confirms deleting one file or a selection: "Delete 40
-/// files? This can't be undone." (`files-browser.js` asks the question).
-pub(crate) fn render_delete_confirm_modal() -> Markup {
-    super::render_confirm_modal("delete-confirm", "Delete files", "Delete")
-}
-
 /// Folder/file table for `/b/storage/{bucket}/...` views.
 ///
 /// The table narrows by its own width (table.css `.object-table`): where it
@@ -388,7 +382,6 @@ pub async fn object_list_page(
         input #file-upload-input type="file" multiple hidden;
         (table)
         (render_share_modal())
-        (render_delete_confirm_modal())
         (super::render_bootstrap_script(bucket, current_prefix))
     };
 
@@ -782,26 +775,6 @@ mod tests {
             html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--ghost-danger" type="button" data-bulk-delete hidden>"#),
             "{html}"
         );
-    }
-
-    /// Deleting asks through the shared dialog, and Cancel — not the
-    /// destructive button — is what opening it focuses.
-    #[test]
-    fn the_delete_confirmation_focuses_cancel() {
-        let html = render_delete_confirm_modal().into_string();
-        assert!(
-            html.contains(r#"<dialog class="modal" id="delete-confirm""#),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"<p id="delete-confirm-question"></p>"#),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
-            "{html}"
-        );
-        assert!(html.contains(r#"data-confirm>Delete</button>"#), "{html}");
     }
 
     /// An empty folder offers the upload it is waiting for, and no

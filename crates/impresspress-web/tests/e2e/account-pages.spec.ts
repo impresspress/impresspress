@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { test, expect, request as apiRequest, type APIRequestContext, type Page } from '@playwright/test';
 import { WIDTHS, isWrong, layout } from './fixtures/layout';
+import { answerConfirm } from './fixtures/confirm';
 
 /**
  * The signed-in account pages in a browser: which frame each renders in, the
@@ -158,11 +159,8 @@ test.describe('account pages', () => {
     await expect(current).toHaveCount(1);
     const target = rows.filter({ hasNotText: 'Current session' }).first();
 
-    page.once('dialog', (dialog) => {
-      expect(dialog.message()).toContain('Revoke this session?');
-      void dialog.accept();
-    });
     await target.getByRole('button', { name: 'Revoke' }).click();
+    await answerConfirm(page, 'Revoke session', 'confirm', 'Revoke this session?');
     await expect(rows).toHaveCount(before - 1);
     await expect(current).toHaveCount(1);
 
@@ -177,11 +175,8 @@ test.describe('account pages', () => {
     const current = page.locator('.data-table tbody tr').filter({ hasText: 'Current session' });
     await expect(current).toHaveCount(1);
 
-    page.once('dialog', (dialog) => {
-      expect(dialog.message()).toContain('You will be signed out on this device');
-      void dialog.accept();
-    });
     await current.getByRole('button', { name: 'Revoke' }).click();
+    await answerConfirm(page, 'Revoke and sign out', 'confirm', 'You will be signed out on this device');
     await expect(page).toHaveURL(/\/b\/auth\/login/);
 
     // And it stays that way: the account pages send this browser to sign in.

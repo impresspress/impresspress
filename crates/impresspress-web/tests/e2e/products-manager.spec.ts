@@ -1,6 +1,7 @@
 import { expect, test, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { answerConfirm, confirmChrome } from "./fixtures/confirm";
 
 const bundlesUrl = new URL(
   "../../../impresspress-core/src/blocks/products/assets/",
@@ -98,6 +99,7 @@ function configurableManagerHtml() {
         </div>
       </section>
     </main>
+    ${confirmChrome}
     <script>${bundle("products-manager.js")}</script>
   </body>
 </html>`;
@@ -520,8 +522,8 @@ test.describe("products manager Stripe catalog actions", () => {
       "Six seats",
     );
 
-    page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Archive preset" }).click();
+    await answerConfirm(page, "Archive preset", "confirm", "Archive preset Six seats?");
     await expect(page.locator("[data-checkout-presets]")).toContainText(
       "Archived",
     );

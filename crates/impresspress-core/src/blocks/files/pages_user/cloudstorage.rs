@@ -186,13 +186,6 @@ pub fn render_share_links_card(shares: &CappedList<ShareRow>) -> Markup {
     .render()
 }
 
-/// The dialog that confirms revoking a share link: "Revoke the link to
-/// photos/a.png? Anyone who has it loses access." (`files-browser.js` asks
-/// the question).
-fn render_revoke_confirm_modal() -> Markup {
-    super::render_confirm_modal("revoke-confirm", "Revoke share link", "Revoke")
-}
-
 /// The user's share links, or the failure that stopped us reading them.
 ///
 /// The quota card on the same page already refuses to render a figure it
@@ -246,7 +239,6 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     let body = html! {
         (render_quota_card(&quota))
         (render_share_links_card(&shares))
-        (render_revoke_confirm_modal())
         (super::render_bootstrap_script("", ""))
     };
 
@@ -340,25 +332,6 @@ mod tests {
             html.starts_with(r#"<section class="card"><header class="card__head"><div><h2 class="card__title">Storage</h2>"#),
             "the quota is a card titled Storage: {html}"
         );
-    }
-
-    /// Revoking asks through the block's one confirm dialog, Cancel focused.
-    #[test]
-    fn revoking_confirms_in_the_shared_dialog() {
-        let html = render_revoke_confirm_modal().into_string();
-        assert!(
-            html.contains(r#"<dialog class="modal" id="revoke-confirm""#),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"<p id="revoke-confirm-question"></p>"#),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
-            "{html}"
-        );
-        assert!(html.contains(r#"data-confirm>Revoke</button>"#), "{html}");
     }
 
     #[test]

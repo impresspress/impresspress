@@ -428,9 +428,11 @@ mod integration_tests {
         let (page, dialogs) = crate::test_support::dom::visible_primaries(&body);
         assert_eq!(page.len(), 1, "one primary on the page: {page:?}");
         assert!(page[0].contains("New bucket"), "{page:?}");
+        // The modal's submit; the shared confirm dialog shows none until it
+        // asks.
         assert_eq!(
             dialogs.iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![1],
+            vec![1, 0],
             "{dialogs:?}"
         );
         assert!(

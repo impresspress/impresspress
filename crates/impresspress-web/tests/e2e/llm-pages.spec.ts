@@ -2,6 +2,7 @@ import { expect, request as playwrightRequest, test, type Page } from '@playwrig
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
 import { WIDTHS, isWrong, layout } from './fixtures/layout';
 import { PHONE, targetFloor } from './fixtures/targets';
+import { answerConfirm } from './fixtures/confirm';
 
 /**
  * The LLM block's admin pages, driven in a browser against the real server.
@@ -122,9 +123,9 @@ test.describe.serial('LLM providers and models', () => {
   test('Delete is a labelled icon, confirmed, and the row goes', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/llm/providers');
-    page.once('dialog', (confirm) => confirm.accept());
     const reloaded = page.waitForEvent('load');
     await page.getByRole('button', { name: `Delete ${name}` }).click();
+    await answerConfirm(page, 'Delete provider', 'confirm', `Delete provider "${name}"?`);
     await reloaded;
     await expect(page.locator('tr', { hasText: name })).toHaveCount(0);
   });

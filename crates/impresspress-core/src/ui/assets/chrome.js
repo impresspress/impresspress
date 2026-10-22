@@ -508,6 +508,50 @@ document.addEventListener("input", function (e) {
 //   Esc regardless of what `cancel` does, so a refusal would be a promise
 //   the page cannot keep.
 //
+// ## The confirm dialog
+//
+// Every "are you sure?" in the tree is asked in ONE page-built dialog,
+// `components::confirm_dialog` (`#confirm-dialog`), which `ui::layout::page`
+// renders once per document. Nothing calls the browser's `window.confirm`: its
+// OK / Cancel names no action, it cannot be styled as destructive, and it
+// leaves focus wherever the browser likes. The dialog is a modal like any
+// other, so everything above holds for it — Cancel has focus as it opens (a
+// stray Enter cancels), Tab wraps inside it, Esc and the backdrop close it, and
+// focus goes back to the control that asked. What it adds:
+//
+// - The action's own words. Its title and its confirm button both read the
+//   action's label ("Revoke session", "Delete files"), never "OK".
+// - The action's tone. The dialog renders two confirm buttons, a danger one
+//   and a primary one, both hidden; the tone shows one of them — `danger` for
+//   a destructive step, `primary` for one that is not. The classes are the
+//   markup's (`components::Action`), so no script writes a button class.
+// - Focus after the action, not just after the dialog. A confirmed htmx
+//   request often swaps out the very row its control sat in (a revoked
+//   session, a deleted user), and focus would fall to <body>. Before the
+//   request goes, the asking control's place is noted — its row, that row's
+//   position in its list, the control's position among the row's tab stops —
+//   and if the control is gone once the request has landed, focus goes to the
+//   same control in the row now at that place (the replacement row, or the
+//   one that moved up), else the nearest row after or before it that has a
+//   control, else `main#content`. A list re-rendered whole by the response is
+//   found again inside the request's target by its position there.
+//
+// Two ways in, and no other:
+//   hx-confirm="<question>" on an htmx control, with
+//     data-confirm-label="<label>" and data-confirm-tone="danger|primary"
+//     beside it. htmx asks through its `htmx:confirm` event, which this answers
+//     for every request that has a question; the request goes only once the
+//     confirm button is pressed.
+//   window.impresspressConfirm({question, label, tone[, opener]}), for a
+//     block's own script: a promise of true (confirmed) or false (cancelled,
+//     however). `opener` is where focus returns; it defaults to the focused
+//     control.
+// A confirm without a question, a label or a tone of danger or primary is a
+// TypeError, not a generic "OK". `htmx_guard::every_page_confirms_through_the
+// _one_shared_dialog` keeps every rendered `hx-confirm` labelled and toned, and
+// `ui::components::modal`'s source guards keep `window.confirm` and a block's
+// own confirm dialog out of the tree.
+//
 // ## The delegated-action rule
 //
 // Page markup carries no `on*=` attribute. A control declares WHAT it does with
@@ -552,6 +596,9 @@ document.addEventListener("input", function (e) {
 //   copy-text     + data-copy-source="<id>"    put that element's text on the
 //                                              clipboard and flash "Copied" on
 //                                              the button for 1.5s
+//   confirm-accept                             the shared confirm dialog's
+//                                              confirm button: close it, and
+//                                              answer what it asked with yes
 //   drawer-open / drawer-close                 section 2 above
 //
 // Plus an attribute with no verb, because it describes the element rather
@@ -601,6 +648,7 @@ document.addEventListener("input", function (e) {
     function openModal(id, opener) {
         var dialog = modalById(id);
         if (!dialog || dialog.open) return;
+        settleClosed(dialog);
         var from = usable(opener) ? opener : document.activeElement;
         if (!usable(from)) from = lastRequester;
         from = usable(from) ? from : null;
@@ -749,14 +797,38 @@ document.addEventListener("input", function (e) {
     // after htmx has finished the swap that came in the same response — by
     // then a swapped-out opener has its replacement, which `focusOpenerOf`
     // finds.
+    //
+    // The confirm dialog's answer is given here too, last: by then focus is
+    // back on the control that asked, so the action it starts starts there.
+    function finishClose(entry, refocus) {
+        open.splice(open.indexOf(entry), 1);
+        discardNote(entry.dialog, false);
+        homeToasts();
+        if (refocus) focusOpenerOf(entry);
+        if (asking && asking.dialog === entry.dialog) {
+            var answered = asking;
+            asking = null;
+            answered.resolve(answered.accepted);
+        }
+    }
     document.addEventListener("close", function (e) {
         var entry = entryFor(e.target);
-        if (!entry) return;
-        open.splice(open.indexOf(entry), 1);
-        discardNote(e.target, false);
-        homeToasts();
-        focusOpenerOf(entry);
+        // Open again: this is the late `close` of a closing already settled
+        // when the dialog reopened (`settleClosed`), not of this opening.
+        if (!entry || e.target.open) return;
+        finishClose(entry, true);
     }, true);
+
+    // A dialog that has closed but whose `close` event — a queued task — has
+    // not landed yet is opened again: a quick reader asks twice, or presses
+    // Esc and then the same control. Its last closing is finished now, so the
+    // new opening starts clean and the late event finds nothing to undo. The
+    // browser has already put focus back (`close()` does that itself), so
+    // none is moved here.
+    function settleClosed(dialog) {
+        var stale = entryFor(dialog);
+        if (stale && !dialog.open) finishClose(stale, false);
+    }
 
     document.body.addEventListener("htmx:beforeRequest", function (e) {
         var elt = e.detail && e.detail.elt;
@@ -898,6 +970,12 @@ document.addEventListener("input", function (e) {
         } else if (action === "copy-text") {
             copyText(el);
             e.preventDefault();
+        } else if (action === "confirm-accept") {
+            if (asking && asking.dialog.contains(el)) {
+                asking.accepted = true;
+                closeDialog(asking.dialog);
+            }
+            e.preventDefault();
         }
     });
 
@@ -948,6 +1026,144 @@ document.addEventListener("input", function (e) {
     document.body.addEventListener("openModal", function (e) {
         var d = e.detail || {};
         if (d.id) openModal(d.id, d.opener instanceof Element ? d.opener : null);
+    });
+
+    // ## The confirm dialog (see the head of this section)
+
+    var CONFIRM_ID = "confirm-dialog";
+    // The question the confirm dialog is asking now: `{dialog, resolve,
+    // accepted}`, answered from the dialog's `close` event.
+    var asking = null;
+
+    function askToConfirm(options) {
+        var o = options || {};
+        if (typeof o.question !== "string" || o.question === "" ||
+            typeof o.label !== "string" || o.label === "" ||
+            (o.tone !== "danger" && o.tone !== "primary")) {
+            throw new TypeError(
+                "a confirm needs a question, a label and a tone of danger or primary; got " +
+                JSON.stringify({ question: o.question, label: o.label, tone: o.tone })
+            );
+        }
+        var dialog = modalById(CONFIRM_ID);
+        if (!dialog) throw new Error("this page has no #" + CONFIRM_ID + " to confirm in");
+        // One question at a time. The page behind an open dialog is inert, so
+        // a second can only come from a script, and it is not asked.
+        if (dialog.open) return Promise.resolve(false);
+        // The last question's answer, if its `close` has not landed yet.
+        settleClosed(dialog);
+        // Text, never markup: a question quotes names people chose.
+        document.getElementById(CONFIRM_ID + "-title").textContent = o.label;
+        document.getElementById(CONFIRM_ID + "-question").textContent = o.question;
+        var buttons = dialog.querySelectorAll('[data-action="confirm-accept"]');
+        for (var i = 0; i < buttons.length; i++) {
+            var b = buttons[i];
+            b.textContent = o.label;
+            if (b.getAttribute("data-confirm-tone") === o.tone) b.removeAttribute("hidden");
+            else b.setAttribute("hidden", "");
+        }
+        return new Promise(function (resolve) {
+            asking = { dialog: dialog, resolve: resolve, accepted: false };
+            openModal(CONFIRM_ID, o.opener instanceof Element ? o.opener : null);
+        });
+    }
+
+    // The confirm half's one global: a block script's way in. A function
+    // rather than an event, because the caller needs the answer back.
+    window.impresspressConfirm = askToConfirm;
+
+    // Where focus goes once a confirmed htmx request has landed, noted before
+    // it goes (see the head of this section).
+    var keeping = null;
+
+    // The lists with `tag`'s name in `scope`, `scope` itself first if it is
+    // one, in document order — the same walk before and after a swap, so a
+    // position in it names the same list in the re-rendered markup.
+    function listsIn(scope, tag) {
+        var found = scope.tagName === tag ? [scope] : [];
+        return found.concat(Array.prototype.slice.call(scope.querySelectorAll(tag.toLowerCase())));
+    }
+
+    function noteFocusPlace(opener, target) {
+        var row = opener.closest("tr, li");
+        var list = row ? row.parentNode : null;
+        var scope = target instanceof Element ? target : null;
+        keeping = {
+            opener: opener,
+            list: list,
+            rowAt: list ? Array.prototype.indexOf.call(list.children, row) : -1,
+            controlAt: row ? tabbable(row).indexOf(opener) : -1,
+            scope: scope,
+            scopeId: scope ? scope.id : "",
+            listAt: list && scope && scope.contains(list) ? listsIn(scope, list.tagName).indexOf(list) : -1
+        };
+    }
+
+    function placeAfterSwap(k) {
+        if (k.opener.id) {
+            var same = document.getElementById(k.opener.id);
+            if (usable(same)) return same;
+        }
+        var list = k.list && k.list.isConnected === true ? k.list : null;
+        if (!list && k.listAt >= 0) {
+            var scope = k.scope && k.scope.isConnected === true ? k.scope :
+                (k.scopeId ? document.getElementById(k.scopeId) : null);
+            if (scope) list = listsIn(scope, k.list.tagName)[k.listAt] || null;
+        }
+        if (!list || k.rowAt < 0) return null;
+        var rows = list.children;
+        var order = [];
+        for (var i = k.rowAt; i < rows.length; i++) order.push(rows[i]);
+        for (var j = Math.min(k.rowAt, rows.length) - 1; j >= 0; j--) order.push(rows[j]);
+        for (var n = 0; n < order.length; n++) {
+            var items = tabbable(order[n]);
+            if (items.length) return items[Math.min(Math.max(k.controlAt, 0), items.length - 1)];
+        }
+        return null;
+    }
+
+    // htmx asks before any request whose element (or an ancestor) has
+    // `hx-confirm`; without one there is no question and nothing to answer.
+    // The label and tone are read off the element that asks the question.
+    document.body.addEventListener("htmx:confirm", function (e) {
+        var d = e.detail || {};
+        if (!d.question) return;
+        e.preventDefault();
+        var elt = d.elt instanceof Element ? d.elt : null;
+        var asker = elt ? elt.closest("[hx-confirm]") || elt : null;
+        askToConfirm({
+            question: d.question,
+            label: asker ? asker.getAttribute("data-confirm-label") : null,
+            tone: asker ? asker.getAttribute("data-confirm-tone") : null,
+            opener: elt
+        }).then(function (yes) {
+            if (!yes) return;
+            if (elt) noteFocusPlace(elt, d.target);
+            d.issueRequest(true);
+        });
+    });
+
+    // htmx fires `htmx:afterRequest` on the issuing element, and, when the
+    // swap took that element out, again on its nearest ancestor still in the
+    // document, so it reaches <body> either way. The second time `detail.elt`
+    // is that ancestor (htmx sets it to whatever the event fires on), so the
+    // request is recognised by `detail.requestConfig.elt`, the element that
+    // issued it. Focus is only placed when it was lost: a control still there
+    // keeps it, and a response that moved it somewhere on purpose (a modal it
+    // opened, a field it named) is left be.
+    document.body.addEventListener("htmx:afterRequest", function (e) {
+        var k = keeping;
+        var cfg = e.detail && e.detail.requestConfig;
+        if (!k || !cfg || cfg.elt !== k.opener) return;
+        keeping = null;
+        if (k.opener.isConnected === true || usable(document.activeElement)) return;
+        var place = placeAfterSwap(k);
+        if (place) {
+            place.focus();
+            return;
+        }
+        var content = document.getElementById("content");
+        if (usable(content)) content.focus();
     });
 })();
 

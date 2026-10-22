@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
 import { WIDTHS, isWrong, layout } from './fixtures/layout';
+import { answerConfirm } from './fixtures/confirm';
 
 /**
  * The core admin pages' own controls, in a real browser: the network page's
@@ -115,14 +116,9 @@ test.describe('core admin pages', () => {
     const remove = page.getByRole('button', { name: `Delete ${key}` });
     await expect(remove).toBeVisible();
 
-    let confirmText = '';
-    page.once('dialog', (dialog) => {
-      confirmText = dialog.message();
-      void dialog.accept();
-    });
     await remove.click();
+    await answerConfirm(page, 'Delete variable', 'confirm', `Delete ${key}? This cannot be undone.`);
     await expect(page.locator('#toast-container .toast', { hasText: 'Variable deleted' })).toBeVisible();
-    expect(confirmText).toBe(`Delete ${key}? This cannot be undone.`);
     await expect(page.getByRole('button', { name: `Delete ${key}` })).toHaveCount(0);
     // The page was redrawn under the search box, which kept its query.
     await expect(page.getByRole('searchbox', { name: 'Search variables by key, name or description' })).toHaveValue(key);
@@ -174,8 +170,8 @@ test.describe('core admin pages', () => {
     } finally {
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.goto('/b/admin/settings/permissions?subtab=database', { waitUntil: 'networkidle' });
-      page.once('dialog', (d) => void d.accept());
       await row.locator('button[aria-label^="Delete grant"]').click();
+      await answerConfirm(page, 'Delete grant', 'confirm');
       await expect(row).toHaveCount(0);
     }
   });
@@ -248,8 +244,8 @@ test.describe('core admin pages', () => {
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
       for (const label of labels) {
-        page.once('dialog', (d) => void d.accept());
         await page.getByRole('button', { name: `Delete ${label}` }).click();
+        await answerConfirm(page, 'Delete button', 'confirm');
         await expect(page.locator('#buttons-table tr', { hasText: label })).toHaveCount(0);
       }
     }

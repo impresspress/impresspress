@@ -220,6 +220,8 @@ fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>)
                 hx-confirm=(format!(
                     "Unlink {provider}? You will no longer be able to sign in with it."
                 ))
+                data-confirm-label=(format!("Unlink {provider}"))
+                data-confirm-tone="danger"
             { "Unlink" }
             @if let Some(message) = error {
                 p .form-error .m-0 { (message) }

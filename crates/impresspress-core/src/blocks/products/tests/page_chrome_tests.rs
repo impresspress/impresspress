@@ -215,7 +215,8 @@ async fn product_detail_has_one_visible_primary() {
         [r#"button.btn.btn--primary "Publish product""#],
         "{html}"
     );
-    assert!(dialogs.is_empty(), "{dialogs:?}");
+    // Only the shared confirm dialog, which shows no primary until it asks.
+    assert_eq!(dialogs, [Vec::<String>::new()], "{dialogs:?}");
     assert!(
         body(&html).contains(r#"<section class="card"><header class="card__head"><div><h2 class="card__title">Product details</h2>"#),
         "{html}"
@@ -551,7 +552,8 @@ async fn the_wizard_steps_are_cards_with_one_visible_primary() {
     }
     let (page, dialogs) = dom::visible_primaries(&html);
     assert_eq!(page, [r#"button.btn.btn--primary "Continue""#], "{html}");
-    assert!(dialogs.is_empty());
+    // Only the shared confirm dialog, which shows no primary until it asks.
+    assert_eq!(dialogs, [Vec::<String>::new()], "{dialogs:?}");
     assert!(
         html.contains(r#"<button data-wizard-intent="publish" class="btn btn--primary" id="wizard-publish" hidden type="button" data-action="pw-submit">Create and publish</button>"#),
         "{html}"
@@ -645,9 +647,14 @@ async fn the_group_editor_is_a_dialog_with_its_own_primary() {
     let html = admin_page(&ctx, "/b/products/admin/groups").await;
     let (page, dialogs) = dom::visible_primaries(&html);
     assert_eq!(page, [r#"button.btn.btn--primary "New group""#], "{html}");
+    // The editor's own primary, then the shared confirm dialog's, hidden
+    // until it asks.
     assert_eq!(
         dialogs,
-        [vec![r#"button.btn.btn--primary "Save group""#.to_string()]],
+        [
+            vec![r#"button.btn.btn--primary "Save group""#.to_string()],
+            vec![]
+        ],
         "{html}"
     );
     assert!(

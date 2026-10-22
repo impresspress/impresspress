@@ -411,6 +411,8 @@ export function loadChromeDom() {
 
   return {
     doc,
+    // What chrome.js put on `window`: `impresspressConfirm`.
+    window,
     body: doc.body,
     toastContainer,
     el,
@@ -470,12 +472,33 @@ export function loadChromeDom() {
       afterSwap(target) {
         target.dispatchEvent(new StubCustomEvent('htmx:afterSwap', { bubbles: true, detail: { target } }));
       },
+      /**
+       * htmx asking before a request: `htmx:confirm` on the issuing element,
+       * with the question its `hx-confirm` holds (null when it has none) and
+       * the `issueRequest` the answer calls. Returns the event and every
+       * `issueRequest` argument, in order.
+       */
+      confirm(elt, question, target = null) {
+        const issued = [];
+        const e = new StubCustomEvent('htmx:confirm', {
+          bubbles: true,
+          detail: { elt, question, target, issueRequest: (skip) => issued.push(skip) },
+        });
+        e.cancelable = true;
+        elt.dispatchEvent(e);
+        return { event: e, issued };
+      },
       afterRequest(elt, successful = true) {
         // htmx fires it on the issuing element; once that element was swapped
-        // out, the event no longer reaches `body` from it, so it goes to body.
+        // out, it fires it again on the nearest ancestor still in the document
+        // (here: body), and sets `detail.elt` to that ancestor — the element
+        // that issued the request is `detail.requestConfig.elt` either way.
         const from = elt.isConnected ? elt : doc.body;
         from.dispatchEvent(
-          new StubCustomEvent('htmx:afterRequest', { bubbles: true, detail: { elt, successful } })
+          new StubCustomEvent('htmx:afterRequest', {
+            bubbles: true,
+            detail: { elt: from, successful, requestConfig: { elt } },
+          })
         );
       },
       /** An `HX-Trigger` header event, which htmx fires on the issuing element. */

@@ -116,7 +116,7 @@ async function loadStripeWebhookEvents(){
   }
 }
 async function replayStripeWebhookEvent(id,button){
-  if(!window.confirm('Replay this Stripe webhook through the normal validation pipeline?'))return;
+  if(!(await window.impresspressConfirm({question:'Replay this Stripe webhook through the normal validation pipeline?',label:'Replay webhook',tone:'primary',opener:button})))return;
   var error=document.getElementById('stripe-webhook-error');
   button.disabled=true;button.textContent='Replaying…';error.hidden=true;
   try{

@@ -531,6 +531,8 @@ fn delete_button(key: &str, declared: bool) -> Markup {
             hx-delete={"/b/admin/variables/" (url_path_encode(key))}
             hx-target="#content"
             hx-confirm=(confirm)
+            data-confirm-label=(if declared { "Remove value" } else { "Delete variable" })
+            data-confirm-tone="danger"
             title=(if declared { "Remove stored value" } else { "Delete" })
             aria-label=(label)
         { (icons::trash()) }
@@ -569,6 +571,8 @@ fn reset_to_environment_button(key: &str) -> Markup {
                  precedence, and the next restart seeds this key from the process \
                  environment again."
             }
+            data-confirm-label="Reset to environment"
+            data-confirm-tone="primary"
             data-error-label="Could not hand this variable back to the environment"
             title="Reset to environment"
             aria-label=(format!("Reset {key} to environment"))
@@ -639,6 +643,8 @@ fn reset_pinned_at_upgrade_button(count: usize) -> Markup {
                  values stop taking precedence, and the next restart seeds those keys from \
                  the process environment again. Keys an admin edited here are not affected."
             }
+            data-confirm-label="Reset keys"
+            data-confirm-tone="primary"
             data-error-label="Could not hand the keys pinned at upgrade back to the environment"
             title="Reset every key the upgrade boot pinned"
         { (icons::refresh_cw()) "Reset all keys pinned at upgrade (" (count) ")" }
