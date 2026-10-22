@@ -139,11 +139,11 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
     .await
 }
 
-/// The buttons list's columns: the label is each card's title on a phone,
-/// the row's two icon actions sit beside it. A path may be a pasted URL, so
-/// it breaks anywhere. Narrow, the icon and the order move into one line
-/// under the label (table.css `.portal-button-table`, which hides the
-/// headers by position: a column moved here must move there).
+/// The buttons list's columns: the label is each card's title on a phone, the
+/// row's two icon actions sit beside it. A path may be a pasted URL, so it
+/// breaks anywhere. Narrow, the icon and the order move into one line under the
+/// label (table.css `.portal-button-table`, which hides headers and cells by
+/// their label: a column renamed here is renamed there).
 const BUTTON_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Label").primary(),
     components::TableCol::new("Icon"),

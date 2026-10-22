@@ -93,8 +93,8 @@ fn url_encode_prefix(prefix: &str) -> String {
     parts.join("/") + "/"
 }
 
-/// Column order is part of table.css `.object-table`, which hides narrow-layout
-/// headers by position (`th:nth-child`): reorder both together.
+/// table.css `.object-table` hides headers and cells by their label, so a
+/// column renamed here is renamed there.
 const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Select").select(),
     TableCol::new("Name").primary(),
@@ -712,11 +712,11 @@ mod tests {
         );
         // The select and actions columns are headed for screen readers only.
         assert!(
-            html.contains(r#"<th><span class="sr-only">Select</span></th>"#),
+            html.contains(r#"<th data-label="Select"><span class="sr-only">Select</span></th>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<th><span class="sr-only">Actions</span></th>"#),
+            html.contains(r#"<th data-label="Actions"><span class="sr-only">Actions</span></th>"#),
             "{html}"
         );
         // The folder row's control, size and date cells are empty cells.

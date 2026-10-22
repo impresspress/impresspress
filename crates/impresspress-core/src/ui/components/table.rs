@@ -330,7 +330,10 @@ enum Layout {
 /// its value, and empty cells are hidden. Each `<td>` carries
 /// `data-label="{column label}"` for that. Cells are matched to columns
 /// positionally; a cell beyond the declared columns (shouldn't happen) gets
-/// an empty label.
+/// an empty label. Each `<th>` carries its column's `data-label` too, so a
+/// stylesheet that hides a column below some width selects the header and
+/// the cells by the same name (`:is(th, td)[data-label="Created"]`), never
+/// by position: reordering a `*_COLUMNS` list cannot hide the wrong header.
 ///
 /// `rows` is a `Vec` because the component needs to know whether it is empty:
 /// an empty table renders the empty slot in place of the whole table, header
@@ -459,8 +462,8 @@ impl<'a> DataTable<'a> {
                                 // genuine runtime value, so it's handed to CSS as
                                 // a custom property rather than a literal inline
                                 // width declaration.
-                                Some(w) => th .data-table__col-w style=(format!("--col-width:{w}")) { (label) },
-                                None => th { (label) },
+                                Some(w) => th .data-table__col-w style=(format!("--col-width:{w}")) data-label=(col.label) { (label) },
+                                None => th data-label=(col.label) { (label) },
                             }
                         }
                         @if linked { th .data-table__row-href { span .sr-only { "Open" } } }
@@ -807,12 +810,12 @@ mod tests {
             .render()
             .into_string();
         assert!(
-            s.contains(r#"<th><span class="sr-only">Select</span></th>"#),
+            s.contains(r#"<th data-label="Select"><span class="sr-only">Select</span></th>"#),
             "{s}"
         );
-        assert!(s.contains(r#"<th>Email</th>"#), "{s}");
+        assert!(s.contains(r#"<th data-label="Email">Email</th>"#), "{s}");
         assert!(
-            s.contains(r#"<th><span class="sr-only">Actions</span></th>"#),
+            s.contains(r#"<th data-label="Actions"><span class="sr-only">Actions</span></th>"#),
             "{s}"
         );
         // The row-link column has a header too, so header and row have the
@@ -886,8 +889,9 @@ mod tests {
             ])
             .render()
             .into_string();
-        assert!(kept.contains("<th>Roles</th>"), "{kept}");
-        assert_eq!(kept.matches(r#"data-label="Roles""#).count(), 2, "{kept}");
+        assert!(kept.contains(r#"<th data-label="Roles">Roles</th>"#), "{kept}");
+        // The header and the two cells.
+        assert_eq!(kept.matches(r#"data-label="Roles""#).count(), 3, "{kept}");
     }
 
     /// A non-optional column stays even when it is empty everywhere.
@@ -898,7 +902,7 @@ mod tests {
             .rows(vec![TableRow::new(vec![html! { "a" }, html! {}])])
             .render()
             .into_string();
-        assert!(s.contains("<th>Note</th>"), "{s}");
+        assert!(s.contains(r#"<th data-label="Note">Note</th>"#), "{s}");
     }
 
     /// `.empty_state(..)` renders the shared empty state in place of the

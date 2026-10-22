@@ -2549,7 +2549,7 @@ mod tests {
             ])])
             .render()
             .into_string()
-            .contains(r#"<th class="data-table__col-w" style="--col-width:35%">Value</th>"#));
+            .contains(r#"<th class="data-table__col-w" style="--col-width:35%" data-label="Value">Value</th>"#));
         let cells = var_row(&VarRow {
             key: crate::config_vars::FRONTEND_URL_KEY,
             name: Some("Frontend URL"),

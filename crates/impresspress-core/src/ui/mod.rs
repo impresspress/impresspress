@@ -3879,6 +3879,89 @@ mod tests {
         assert!(owner_writes >= 10, "the builders' own writes were not found: {owner_writes}");
     }
 
+    /// The labels a stylesheet selects table cells and headers by
+    /// (`[data-label="…"]`), and the selectors that pick a header or a cell
+    /// by its place (`th:nth-child(2)`), over `css`.
+    fn table_selectors(css: &str) -> (Vec<String>, Vec<String>) {
+        static LABEL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static PLACE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let label = LABEL.get_or_init(|| regex::Regex::new(r#"\[data-label="([^"]*)"\]"#).unwrap());
+        // A `th`/`td` compound with a `:nth-*` pseudo-class anywhere in it,
+        // `:is(…)` included.
+        let place = PLACE.get_or_init(|| {
+            regex::Regex::new(r"(?:^|[\s>+~(,])t[hd](?:[.:\[][^\s>+~,]*)?:(?:is\([^)]*)?nth-").unwrap()
+        });
+        let mut labels = Vec::new();
+        let mut placed = Vec::new();
+        for (selector, _) in super::test_support::css_rules(&strip_css_comments(css)) {
+            labels.extend(label.captures_iter(&selector).map(|c| c[1].to_string()));
+            for part in selector.split(',') {
+                if place.is_match(part.trim()) {
+                    placed.push(part.trim().to_string());
+                }
+            }
+        }
+        (labels, placed)
+    }
+
+    #[test]
+    fn the_table_selector_scan_finds_labels_and_places() {
+        let (labels, placed) = table_selectors(concat!(
+            r#".a :is(th, td):is([data-label="Type"], [data-label="Created"]) { display: none; }"#,
+            "\n.b > table > thead > tr > th:nth-child(2), .c td:nth-child(n+3) { display: none; }",
+            "\n.d th:is(:nth-child(1), :nth-child(3)) { x: y; }",
+            "\n.e > .stat:nth-child(3) { x: y; } .f th { x: y; }",
+        ));
+        assert_eq!(labels, ["Type", "Created"]);
+        assert_eq!(placed.len(), 3, "{placed:?}");
+    }
+
+    /// The narrowing tables hide a column's header and its cells by the
+    /// column's label (`DataTable` writes `data-label` on each `th` and
+    /// `td`), never by place: a header picked by `th:nth-child(n)` hides the
+    /// wrong one the day its `*_COLUMNS` list is reordered, while the cells,
+    /// picked by label, follow. And every label a stylesheet selects is a
+    /// column some production table declares (`TableCol::new("…")`), so a
+    /// renamed column cannot leave a rule selecting nothing.
+    #[test]
+    fn tables_hide_columns_by_label_not_by_place() {
+        let declared: std::collections::HashSet<String> = production_rust_sources()
+            .iter()
+            .flat_map(|(_, src)| {
+                let at: Vec<usize> = src.match_indices("TableCol::new(\"").map(|(i, _)| i).collect();
+                at.into_iter()
+                    .filter_map(|i| {
+                        let rest = &src[i + "TableCol::new(\"".len()..];
+                        rest.find('"').map(|end| rest[..end].to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(declared.len() > 50, "only {} column labels found", declared.len());
+        let mut wrong = Vec::new();
+        let mut selected = 0;
+        for entry in walkdir::WalkDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "css"))
+        {
+            let css = std::fs::read_to_string(entry.path()).unwrap();
+            let (labels, placed) = table_selectors(&css);
+            let file = entry.path().display();
+            for label in labels {
+                selected += 1;
+                if !declared.contains(&label) {
+                    wrong.push(format!("{file}: [data-label={label:?}] names no declared column"));
+                }
+            }
+            for part in placed {
+                wrong.push(format!("{file}: `{part}` picks a header or cell by its place"));
+            }
+        }
+        assert!(selected > 50, "only {selected} label selectors found");
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// The colour literals outside `ui/styles/tokens.css`, by file, with
     /// their exact count. A ratchet (PLAN §5.3, N10): every colour is meant
     /// to come from a token, so a dark theme is a second set of token values

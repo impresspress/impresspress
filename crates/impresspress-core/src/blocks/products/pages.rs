@@ -162,8 +162,8 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
 
 /// A seller's recent failed orders. Narrow (table.css
 /// `.commerce-table--failures`), the date becomes the line under the order.
-/// Column order is part of that rule (headers hidden by position): reorder
-/// both together.
+/// That rule hides headers and cells by their label, so a column renamed here
+/// is renamed there.
 const FAILURE_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Order").primary(),
     components::TableCol::new("Amount"),
@@ -776,9 +776,8 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// the currency and the updated date leave their columns for one line under
 /// the name (`.product-table__meta`).
 ///
-/// Column order is part of table.css `.product-table--live`, which hides the
-/// narrow layout's headers by position (`th:nth-child`): reorder both
-/// together.
+/// table.css `.product-table--live` hides headers and cells by their label, so
+/// a column renamed here is renamed there.
 const PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Availability"),
@@ -787,10 +786,10 @@ const PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Updated"),
 ];
 
-/// The administration's Deleted view. Narrow, the owner, the currency and
-/// the deletion date become the line under the name, so the two ways out
-/// stay in view. Column order is part of table.css `.product-table--deleted`
-/// (headers hidden by position): reorder both together.
+/// The administration's Deleted view. Narrow, the owner, the currency and the
+/// deletion date become the line under the name, so the two ways out stay in
+/// view. table.css `.product-table--deleted` hides headers and cells by their
+/// label, so a column renamed here is renamed there.
 const DELETED_PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Owner"),
@@ -799,10 +798,9 @@ const DELETED_PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Actions").actions(),
 ];
 
-/// A seller's product list (My products). Narrow, the currency and the
-/// created date become the line under the name. Column order is part of
-/// table.css `.product-table--own` (headers hidden by position): reorder
-/// both together.
+/// A seller's product list (My products). Narrow, the currency and the created
+/// date become the line under the name. table.css `.product-table--own` hides
+/// headers and cells by their label, so a column renamed here is renamed there.
 const OWN_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Status"),
@@ -810,10 +808,10 @@ const OWN_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Created"),
 ];
 
-/// A seller's Deleted view (My products). Narrow, the currency and the
-/// deletion date become the line under the name, as in administration's.
-/// Column order is part of table.css `.product-table--own-deleted` (headers
-/// hidden by position): reorder both together.
+/// A seller's Deleted view (My products). Narrow, the currency and the deletion
+/// date become the line under the name, as in administration's. table.css
+/// `.product-table--own-deleted` hides headers and cells by their label, so a
+/// column renamed here is renamed there.
 const OWN_DELETED_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Currency"),
@@ -1119,10 +1117,10 @@ pub async fn deleted_product_close(
 // Admin: seller governance and moderation
 // ---------------------------------------------------------------------------
 
-/// The seller accounts list. Narrow (table.css `.commerce-table--sellers`),
-/// the payment and payout states and the listing count become the line under
-/// the seller. Column order is part of that rule (headers hidden by
-/// position): reorder both together.
+/// The seller accounts list. Narrow (table.css `.commerce-table--sellers`), the
+/// payment and payout states and the listing count become the line under the
+/// seller. That rule hides headers and cells by their label, so a column
+/// renamed here is renamed there.
 const SELLER_COLUMNS: [components::TableCol<'static>; 6] = [
     components::TableCol::new("Seller").primary(),
     components::TableCol::new("Selling"),
@@ -1134,8 +1132,8 @@ const SELLER_COLUMNS: [components::TableCol<'static>; 6] = [
 
 /// A seller's own products, on the seller's admin page. Narrow (table.css
 /// `.commerce-table--owned`), the update date becomes the line under the
-/// product. Column order is part of that rule (headers hidden by position):
-/// reorder both together.
+/// product. That rule hides headers and cells by their label, so a column
+/// renamed here is renamed there.
 const OWNED_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Product").primary(),
     components::TableCol::new("Status"),
@@ -2786,10 +2784,10 @@ fn new_offer_definition(
 /// empty list. `products-catalog-admin.js` clears the editor and opens it.
 const NEW_GROUP: (&str, ActionTarget<'static>) = ("New group", ActionTarget::Delegated("pc-new"));
 
-/// The groups list. Narrow (table.css `.group-table`), the description
-/// column drops and the created date becomes one line under the name, so the
-/// edit and delete controls stay in view. Column order is part of that rule,
-/// which hides the headers by position: reorder both together.
+/// The groups list. Narrow (table.css `.group-table`), the description column
+/// drops and the created date becomes one line under the name, so the edit and
+/// delete controls stay in view. That rule hides headers and cells by their
+/// label, so a column renamed here is renamed there.
 const GROUP_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Description"),
@@ -2977,8 +2975,8 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// the customer and the date leave their columns for one line under the
 /// order (`.commerce-table__meta`), so the total keeps its room.
 ///
-/// Column order is part of that rule, which hides the narrow layout's
-/// headers by position (`th:nth-child`): reorder both together.
+/// That rule hides headers and cells by their label, so a column renamed here
+/// is renamed there.
 const ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Order").primary(),
     components::TableCol::new("Customer"),
@@ -2988,9 +2986,9 @@ const ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
 ];
 
 /// A seller's order list. Narrow (table.css `.commerce-table--seller-orders`),
-/// the subscription and the date become the line under the buyer. Column
-/// order is part of that rule (headers hidden by position): reorder both
-/// together.
+/// the subscription and the date become the line under the buyer. That rule
+/// hides headers and cells by their label, so a column renamed here is renamed
+/// there.
 const SELLER_ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Buyer").primary(),
     components::TableCol::new("Status"),
@@ -2999,10 +2997,10 @@ const SELLER_ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Date"),
 ];
 
-/// A buyer's purchases. Each row is titled by its order number, as the
-/// order's own page is; narrow (table.css `.commerce-table--purchases`), the
-/// provider and the date become the line under it. Column order is part of
-/// that rule (headers hidden by position): reorder both together.
+/// A buyer's purchases. Each row is titled by its order number, as the order's
+/// own page is; narrow (table.css `.commerce-table--purchases`), the provider
+/// and the date become the line under it. That rule hides headers and cells by
+/// their label, so a column renamed here is renamed there.
 const PURCHASE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Order").primary(),
     components::TableCol::new("Status"),
@@ -3791,8 +3789,8 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
 }
 
 /// An order's line items. Narrow (table.css `.commerce-table--items`), the
-/// quantity and unit price become the line under the item. Column order is
-/// part of that rule (headers hidden by position): reorder both together.
+/// quantity and unit price become the line under the item. That rule hides
+/// headers and cells by their label, so a column renamed here is renamed there.
 const ITEM_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Item").primary(),
     components::TableCol::new("Quantity"),
@@ -3802,9 +3800,9 @@ const ITEM_COLUMNS: [components::TableCol<'static>; 5] = [
 ];
 
 /// An order's refunds, each titled by its amount. Narrow (table.css
-/// `.commerce-table--refunds`), the date and Stripe's refund id become the
-/// line under it. Column order is part of that rule (headers hidden by
-/// position): reorder both together.
+/// `.commerce-table--refunds`), the date and Stripe's refund id become the line
+/// under it. That rule hides headers and cells by their label, so a column
+/// renamed here is renamed there.
 const REFUND_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Amount").primary(),
     components::TableCol::new("Status"),
@@ -3829,9 +3827,9 @@ fn dispute_reason(code: &str) -> String {
 }
 
 /// An order's disputes, each titled by its amount. Narrow (table.css
-/// `.commerce-table--disputes`), the evidence deadline and Stripe's dispute
-/// id become the line under it. Column order is part of that rule (headers
-/// hidden by position): reorder both together.
+/// `.commerce-table--disputes`), the evidence deadline and Stripe's dispute id
+/// become the line under it. That rule hides headers and cells by their label,
+/// so a column renamed here is renamed there.
 const DISPUTE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Amount").primary(),
     components::TableCol::new("Status"),

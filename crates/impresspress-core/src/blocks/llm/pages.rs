@@ -576,9 +576,9 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// Where the block's variables — the two defaults among them — are edited.
 const VARIABLES_PAGE: &str = "/b/admin/settings/variables";
 
-/// The overrides table's columns. Narrow, the provider, model and date move
-/// to a line under the thread (table.css `.llm-table--overrides`, which
-/// hides the headers by position: a column moved here must move there).
+/// The overrides table's columns. Narrow, the provider, model and date move to
+/// a line under the thread (table.css `.llm-table--overrides`, which hides
+/// headers and cells by their label: a column renamed here is renamed there).
 const OVERRIDE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Thread").primary(),
     components::TableCol::new("Provider"),
