@@ -3,9 +3,11 @@
 //!
 //! [B12] A row is a login family, so the list has one entry per device rather
 //! than one per access token the device was ever issued, and revoking an entry
-//! actually signs that device out: the revoke burns the refresh family in
-//! `tokens` before deleting the row. Before this it removed the list entry and
-//! nothing else, so the device kept refreshing and simply re-appeared.
+//! actually signs that device out: the row is the family's liveness, and the
+//! revoke deletes it and then burns the refresh family in `tokens`
+//! ([`handle_revoke`] says why in that order). Before B12 it removed the list
+//! entry and nothing else, so the device kept refreshing and simply
+//! re-appeared.
 
 use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
@@ -13,8 +15,8 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            helpers::{build_auth_cookie, end_presented_access_token},
-            repo::{sessions, tokens},
+            helpers::{clear_auth_cookie, end_family, end_presented_access_token},
+            repo::sessions,
         },
         crud,
     },
@@ -147,13 +149,24 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
 ///    called. A family that is not the caller's looks exactly like one that
 ///    does not exist (200, no body — htmx removes the row either way), so the
 ///    response never reveals which.
-/// 2. Revoke every refresh row in the family. This is what actually signs the
-///    device out; skipping it (what this handler used to do) removed the list
-///    entry while the device kept rotating tokens and re-appeared on the next
-///    refresh.
-/// 3. Delete the session row.
+/// 2. Delete the session row. The row is the family's liveness
+///    (`auth::repo::sessions`, module doc): from here on, a rotation of this
+///    family finds no row to touch, revokes the family and refuses.
+/// 3. Revoke every refresh row in the family, so the rows agree with the
+///    liveness: a token the device still holds reads as revoked.
 /// 4. When that was the session the request itself belongs to, end the access
 ///    token it presented and clear the cookie, and send the page to sign in.
+///
+/// Steps 2 and 3 are `auth::helpers::end_family`, which every revocation of a
+/// family shares, and they must run in that order. A refresh rotates by
+/// claiming its token, inserting the successor's refresh row and then
+/// touching the session row (`auth::helpers::establish_family`). With the row
+/// deleted first, every interleaving ends the family: a touch after the delete
+/// finds nothing and the rotation revokes and refuses; a touch before it
+/// means the successor row already existed when step 3 revoked the family.
+/// The other order lets a rotation claim before step 2, insert after it and
+/// touch before step 3, leaving a live successor row behind. No transaction
+/// spans the two.
 ///
 /// Steps 2 to 4 propagate their errors (a WRAP denial as 403, a quota as
 /// 429, anything else as 500). "Revoked" that silently did
@@ -187,11 +200,9 @@ pub async fn handle_revoke(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Err(e) => return crud::db_error_internal(e, "Could not look up the session"),
     }
 
-    if let Err(e) = tokens::revoke_family(ctx, &family).await {
+    // Row first, refresh rows second: see the order note in the doc above.
+    if let Err(e) = end_family(ctx, &family).await {
         return crud::db_error_internal(e, "Could not revoke the session");
-    }
-    if let Err(e) = sessions::delete(ctx, &family).await {
-        return crud::db_error_internal(e, "Could not remove the session");
     }
 
     // Revoking the session this request belongs to signs the reader out
@@ -203,7 +214,7 @@ pub async fn handle_revoke(ctx: &dyn Context, msg: &Message) -> OutputStream {
         if let Err(e) = end_presented_access_token(ctx, msg).await {
             return crud::db_error_internal(e, "Could not end the current session");
         }
-        let cookie = match build_auth_cookie("", 0, ctx).await {
+        let cookie = match clear_auth_cookie(ctx).await {
             Ok(cookie) => cookie,
             Err(e) => return crud::db_error_internal(e, "Could not clear the session cookie"),
         };
@@ -226,7 +237,10 @@ mod tests {
     use super::*;
     use crate::{
         blocks::{
-            auth::repo::sessions::{insert, NewSession},
+            auth::repo::{
+                sessions::{insert, NewSession},
+                tokens,
+            },
             userportal::test_support::routed,
         },
         crypto::META_AUTH_FAMILY,
@@ -766,5 +780,325 @@ mod tests {
         let msg = routed(auth_msg("delete", "/b/userportal/sessions/fam-1", "user-a"));
         assert_eq!(output_status(handle_revoke(&ctx, &msg).await).await, 200);
         assert!(!tokens::family_has_live_row(&ctx, "fam-1").await.unwrap());
+    }
+
+    /// A device revocation racing that device's own token refresh, driven
+    /// through the real handlers on both sides: two sign-ins through
+    /// `login::handle`, the refresh through `refresh::handle`, and the revoke
+    /// through [`handle_revoke`] running as the userportal. The interleaving is
+    /// forced with [`AfterDbOpContext`], never mocked.
+    mod revoke_racing_a_refresh {
+        use super::*;
+        use crate::{
+            blocks::{
+                auth::repo::users::InitialRole,
+                auth_ui::api::{login, refresh},
+                userportal::UserPortalBlock,
+            },
+            test_support::{json_post_msg, output_is_error, output_json, AfterDbOpContext},
+        };
+
+        const EMAIL: &str = "two-devices@example.com";
+        const PASSWORD: &str = "correct-horse-battery";
+
+        struct Devices {
+            ctx: TestContext,
+            user_id: String,
+            /// Device A's refresh token: the device that does the revoking.
+            a_refresh: String,
+            a_family: String,
+            /// Device B's refresh token: the device being revoked.
+            b_refresh: String,
+            b_family: String,
+        }
+
+        fn json_input(value: serde_json::Value) -> wafer_run::InputStream {
+            wafer_run::InputStream::from_bytes(value.to_string().into_bytes())
+        }
+
+        async fn sign_in(ctx: &TestContext) -> (String, String) {
+            let resp = output_json(
+                login::handle(
+                    ctx,
+                    &json_post_msg("/b/auth/api/login"),
+                    json_input(serde_json::json!({"email": EMAIL, "password": PASSWORD})),
+                )
+                .await,
+            )
+            .await;
+            let refresh_token = resp["refresh_token"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the sign-in succeeds: {resp}"))
+                .to_string();
+            let family = tokens::find_by_token(ctx, &refresh_token)
+                .await
+                .expect("token lookup")
+                .expect("the sign-in wrote its refresh row")
+                .family;
+            (refresh_token, family)
+        }
+
+        /// One account signed in on two devices, A and B.
+        async fn two_devices() -> Devices {
+            let ctx = TestContext::with_auth_and_crypto().await;
+            let user_id = ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
+            let (a_refresh, a_family) = sign_in(&ctx).await;
+            let (b_refresh, b_family) = sign_in(&ctx).await;
+            assert_ne!(a_family, b_family);
+            Devices {
+                ctx,
+                user_id,
+                a_refresh,
+                a_family,
+                b_refresh,
+                b_family,
+            }
+        }
+
+        /// Device A revoking device B through the sessions page, run as the
+        /// userportal. Asserts the page answered 200.
+        fn revoke_b(d: &Devices) -> impl std::future::Future<Output = ()> + Send + 'static {
+            let ctx = d.ctx.clone().running_as(UserPortalBlock::BLOCK_NAME);
+            let msg = with_family(
+                routed(auth_msg(
+                    "delete",
+                    &format!("/b/userportal/sessions/{}", d.b_family),
+                    &d.user_id,
+                )),
+                &d.a_family,
+            );
+            async move {
+                assert_eq!(output_status(handle_revoke(&ctx, &msg).await).await, 200);
+            }
+        }
+
+        async fn refresh_with(ctx: &dyn Context, token: &str) -> OutputStream {
+            refresh::handle(
+                ctx,
+                &json_post_msg("/b/auth/api/refresh"),
+                json_input(serde_json::json!({ "refresh_token": token })),
+            )
+            .await
+        }
+
+        async fn b_is_gone(d: &Devices) {
+            assert!(
+                !tokens::family_has_live_row(&d.ctx, &d.b_family)
+                    .await
+                    .unwrap(),
+                "every refresh row of the revoked device is revoked"
+            );
+            assert!(
+                sessions::find_for_user(&d.ctx, &d.user_id, &d.b_family)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the revoked device is not listed again"
+            );
+            let a_refreshed = output_json(refresh_with(&d.ctx, &d.a_refresh).await).await;
+            assert!(
+                a_refreshed["refresh_token"].is_string(),
+                "the device that revoked is untouched: {a_refreshed}"
+            );
+        }
+
+        /// The whole revoke lands after the refresh claimed its token and
+        /// before it wrote the successor's row, so the revoke's refresh-row
+        /// revocation cannot reach the successor. The touch then finds no
+        /// row, and the refresh revokes the family itself, the successor
+        /// included, before it refuses. Left live, that row would read as the
+        /// family's current generation to the replay check, which would
+        /// report a replay of the old token as theft.
+        #[tokio::test]
+        async fn a_revoke_between_the_claim_and_the_successor_insert_revokes_the_successor() {
+            let d = two_devices().await;
+            let racing = AfterDbOpContext::new(
+                d.ctx.clone(),
+                "database.update_where_count",
+                tokens::TABLE,
+                revoke_b(&d),
+            );
+
+            let out = refresh_with(&racing, &d.b_refresh).await;
+            assert!(racing.fired(), "the revoke must land inside the refresh");
+            assert!(
+                output_is_error(out, "Unauthenticated").await,
+                "a refresh of a device revoked mid-rotation is refused"
+            );
+            b_is_gone(&d).await;
+        }
+
+        /// The revoke lands after the refresh wrote its successor's row and
+        /// before it touched the session row. The touch finds no row, so the
+        /// refresh revokes the family and is refused. It used to re-insert the
+        /// row it found missing, which brought the revoked device back onto
+        /// the list with a live successor token.
+        #[tokio::test]
+        async fn a_revoke_between_the_successor_insert_and_the_touch_ends_the_family() {
+            let d = two_devices().await;
+            let racing = AfterDbOpContext::new(
+                d.ctx.clone(),
+                "database.create",
+                tokens::TABLE,
+                revoke_b(&d),
+            );
+
+            let out = refresh_with(&racing, &d.b_refresh).await;
+            assert!(racing.fired(), "the revoke must land inside the refresh");
+            assert!(
+                output_is_error(out, "Unauthenticated").await,
+                "a refresh of a device revoked mid-rotation is refused"
+            );
+            b_is_gone(&d).await;
+        }
+
+        /// The revoke lands after the refresh touched the session row. The
+        /// refresh has handed out a successor, but the revoke deletes the row
+        /// and then revokes the family, the successor's row included, so the
+        /// successor cannot refresh.
+        #[tokio::test]
+        async fn a_revoke_after_the_touch_revokes_the_successor() {
+            let d = two_devices().await;
+            let racing = AfterDbOpContext::new(
+                d.ctx.clone(),
+                "database.update_where_count",
+                sessions::TABLE,
+                revoke_b(&d),
+            );
+
+            let rotated = output_json(refresh_with(&racing, &d.b_refresh).await).await;
+            assert!(racing.fired(), "the revoke must land inside the refresh");
+            let successor = rotated["refresh_token"].as_str().unwrap_or_else(|| {
+                panic!("the touch came first, so the refresh answered: {rotated}")
+            });
+            assert!(
+                output_is_error(refresh_with(&d.ctx, successor).await, "Unauthenticated").await,
+                "the successor of a revoked device cannot refresh"
+            );
+            b_is_gone(&d).await;
+        }
+
+        /// Device B's refresh, interleaved with `revoke` at the revoke's
+        /// FIRST write: the refresh claims its token, then the revoke makes its
+        /// first write (the session-row delete or the refresh-row revoke,
+        /// whichever it makes first), then the refresh inserts its successor
+        /// and touches the session row, then the revoke makes its second write.
+        /// Returns the refresh's answer once the revoke has finished; the
+        /// revoke must answer `revoke_status`.
+        ///
+        /// `revoke` is given the context to run on, paused at that point.
+        async fn refresh_across_the_first_revoke_write<F>(
+            d: &Devices,
+            revoke_ctx: TestContext,
+            revoke_status: u16,
+            revoke: impl FnOnce(AfterDbOpContext) -> F,
+        ) -> OutputStream
+        where
+            F: std::future::Future<Output = OutputStream> + Send + 'static,
+        {
+            let (first_write_done, first_write_seen) = tokio::sync::oneshot::channel::<()>();
+            let (finish, finish_seen) = tokio::sync::oneshot::channel::<()>();
+            let paused = AfterDbOpContext::new(
+                revoke_ctx,
+                "database.delete_where_count",
+                sessions::TABLE,
+                async move {
+                    first_write_done.send(()).expect("the test is waiting");
+                    finish_seen.await.expect("the test releases the revoke");
+                },
+            )
+            .or_after("database.update_where", tokens::TABLE);
+            let revoke = revoke(paused.clone());
+            let task = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+            // The refresh starts the revoke once it has claimed its token, and
+            // continues once the revoke's first write has landed.
+            let started = task.clone();
+            let racing = AfterDbOpContext::new(
+                d.ctx.clone(),
+                "database.update_where_count",
+                tokens::TABLE,
+                async move {
+                    let revoke = tokio::spawn(async move { output_status(revoke.await).await });
+                    *started.lock().unwrap() = Some(revoke);
+                    first_write_seen
+                        .await
+                        .expect("the revoke made its first write");
+                },
+            );
+
+            let out = refresh_with(&racing, &d.b_refresh).await;
+            assert!(
+                racing.fired() && paused.fired(),
+                "both sides reached their points"
+            );
+            finish.send(()).expect("the revoke is paused");
+            let revoke = task.lock().unwrap().take().expect("the revoke was started");
+            assert_eq!(revoke.await.expect("the revoke ran"), revoke_status);
+            out
+        }
+
+        /// The order the device revoke writes in.
+        ///
+        /// With the session row deleted first, the touch finds nothing and the
+        /// refresh is refused. Revoking the refresh rows first instead lets
+        /// the refresh's successor be written after the revocation and touch a
+        /// row that still exists: it answers 200 and leaves a live successor
+        /// row behind.
+        #[tokio::test]
+        async fn the_revoke_deletes_the_row_before_it_revokes_the_tokens() {
+            let d = two_devices().await;
+            let msg = with_family(
+                routed(auth_msg(
+                    "delete",
+                    &format!("/b/userportal/sessions/{}", d.b_family),
+                    &d.user_id,
+                )),
+                &d.a_family,
+            );
+            let out = refresh_across_the_first_revoke_write(
+                &d,
+                d.ctx.clone().running_as(UserPortalBlock::BLOCK_NAME),
+                200,
+                |ctx| async move { handle_revoke(&ctx, &msg).await },
+            )
+            .await;
+
+            assert!(
+                output_is_error(out, "Unauthenticated").await,
+                "a refresh whose touch came after the revoke's first write is refused"
+            );
+            b_is_gone(&d).await;
+        }
+
+        /// Logout ends every device by the same rule, so it writes in the
+        /// same order: every session row, then every refresh row.
+        #[tokio::test]
+        async fn logout_deletes_the_rows_before_it_revokes_the_tokens() {
+            use crate::blocks::auth_ui::api::logout;
+
+            let d = two_devices().await;
+            let msg = auth_msg("update", "/b/auth/api/logout", &d.user_id);
+            let out =
+                refresh_across_the_first_revoke_write(&d, d.ctx.clone(), 303, |ctx| async move {
+                    logout::handle(&ctx, &msg).await
+                })
+                .await;
+
+            assert!(
+                output_is_error(out, "Unauthenticated").await,
+                "a refresh whose touch came after logout's first write is refused"
+            );
+            for family in [&d.a_family, &d.b_family] {
+                assert!(
+                    !tokens::family_has_live_row(&d.ctx, family).await.unwrap(),
+                    "logout leaves no live refresh row in {family}"
+                );
+            }
+            assert!(sessions::list_for_user(&d.ctx, &d.user_id)
+                .await
+                .unwrap()
+                .is_empty());
+        }
     }
 }

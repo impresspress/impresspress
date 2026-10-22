@@ -67,14 +67,16 @@
 //! digests), `orgs`, `rate_limits`.
 //!
 //! `wafer_run__auth__sessions` is the one worth spelling out, because its name
-//! argues for inclusion and its schema does not. Migration
-//! `012_sessions_family` DROPPED the table and recreated it keyed on the
-//! refresh-rotation `family`: the columns are `family`, `user_id`,
+//! argues for inclusion and its schema does not. It is keyed on the
+//! refresh-rotation `family` (B12; migration 012 first re-keyed it, and 001
+//! now declares that layout): the columns are `family`, `user_id`,
 //! `auth_method` and timestamps, and the `token_hash` that made it look like
-//! bearer storage is gone. Its own repo module says it outright — "a row here
-//! is a *device*, not a credential… Nothing authenticates against this table".
-//! Refusing it would cost an operator an ad hoc read of a device list for no
-//! security gain. The first draft of this module registered it anyway, on a
+//! bearer storage is gone. A row says THAT a device is signed in — a refresh
+//! is refused once its family's row is gone (`blocks::auth::repo::sessions`)
+//! — but it holds nothing a caller could present: no request is
+//! authenticated by naming a family, only by a signed token. Refusing it
+//! would cost an operator an ad hoc read of a device list for no security
+//! gain. The first draft of this module registered it anyway, on a
 //! column that had not existed for a migration; the guard test in
 //! `sql_explorer_secrets.rs` now models `DROP TABLE` precisely so that class
 //! of claim fails rather than reads plausibly.

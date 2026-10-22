@@ -51,10 +51,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS wafer_run__auth__orgs_verified_uniq
     ON wafer_run__auth__orgs (verified_via, verified_ref)
     WHERE is_reserved = 0;
 
--- Sessions (token_hash is sha256(raw))
+-- Sessions: one row per login family (B12). A row is a signed-in device:
+-- the refresh rotation `family` is the key, and the row is the family's
+-- liveness (`blocks::auth::repo::sessions`). It used to be keyed by
+-- `sha256(access_token)`, and 012 replaced that layout with this one and
+-- dropped the old table to do it, which re-fired on every later auth
+-- migration and, once the row became liveness, signed every device out.
+-- The layout now lives here, so no file in the set ever drops it. `id` and
+-- `updated_at` (which `db::create` writes) are added by 010.
 CREATE TABLE IF NOT EXISTS wafer_run__auth__sessions (
-    token_hash     BLOB PRIMARY KEY,
+    family         TEXT PRIMARY KEY,
     user_id        TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE,
+    -- "password", "oauth.<provider>", "bootstrap" — the claim the refresh
+    -- token preserves across rotation, so the device list can say how the
+    -- session was established.
+    auth_method    TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL,
     last_used_at   TEXT NOT NULL,
     expires_at     TEXT NOT NULL

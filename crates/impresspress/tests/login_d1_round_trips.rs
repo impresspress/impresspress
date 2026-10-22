@@ -487,9 +487,10 @@ async fn sign_in(site: &Site, email: &str, password: &str) -> Cost {
     }
 }
 
-/// A warm sign-in's response waits on five sequential D1 round trips, five
-/// statements: the account by email, its credential, its role grants, the
-/// refresh-token row and the device-list row. Each lookup is the one
+/// A warm sign-in's response waits on four sequential D1 round trips, five
+/// statements: the account by email, its credential, its role grants, and one
+/// batch that writes the login family's refresh-token row and session row
+/// together (`helpers::establish_family`). Each lookup is the one
 /// `SELECT … LIMIT 1` `db::get_by_field` sends, with no `COUNT(*)` beside it.
 /// The tokens' `auth_version` is the one on the account row read first — the
 /// version must be read no later than the roles
@@ -508,14 +509,15 @@ async fn sign_in(site: &Site, email: &str, password: &str) -> Cost {
 /// it creates into, the config snapshot, the timing-equalization hash) and
 /// runs the hourly retention pass.
 ///
-/// The counts fail on earlier code: the roles' two reads ran one after the
+/// The counts fail on earlier code: the family's two rows were two writes,
+/// one after the other, the roles' two reads ran one after the
 /// other, a brand-new login family was first "touched" by an UPDATE that could
 /// match nothing, the retention throttle read and the last-login UPDATE ran
 /// before the response, the users row was read twice more, for the roles
 /// and for the version, each lookup carried an unread `COUNT(*)`, and the
 /// second create into an insert-only table probed its id source again.
 #[tokio::test]
-async fn a_warm_sign_in_waits_on_five_round_trips() {
+async fn a_warm_sign_in_waits_on_four_round_trips() {
     let site = start().await;
     let cold = sign_in(&site, ADMIN_EMAIL, ADMIN_PASSWORD).await;
     assert_eq!(cold.status, 200);
@@ -530,7 +532,7 @@ async fn a_warm_sign_in_waits_on_five_round_trips() {
 
     assert_eq!(
         Cost::waves(&warm.response),
-        5,
+        4,
         "sequential D1 round trips before the response\n{trace}"
     );
     assert_eq!(
@@ -570,13 +572,20 @@ async fn a_warm_sign_in_waits_on_five_round_trips() {
             < wave_of("FROM \"impresspress__admin__user_roles\""),
         "the account row must be read before the role grants\n{trace}"
     );
-    // The refresh-token row is written before the response: without it the
-    // refresh token handed out could never be used.
-    assert!(
+    // The family's two rows are written before the response, in ONE round
+    // trip: without the refresh row the refresh token handed out could never
+    // be used, and without the session row its first refresh is refused.
+    let wave_of_insert = |table: &str| {
         warm.response
             .iter()
-            .any(|t| t.sql.contains("INSERT INTO \"wafer_run__auth__tokens\"")),
-        "{trace}"
+            .find(|t| t.sql.contains(&format!("INSERT INTO \"{table}\"")))
+            .map(|t| t.wave)
+            .unwrap_or_else(|| panic!("no insert into {table} on the response path\n{trace}"))
+    };
+    assert_eq!(
+        wave_of_insert("wafer_run__auth__tokens"),
+        wave_of_insert("wafer_run__auth__sessions"),
+        "the refresh row and the session row are one batch\n{trace}"
     );
 }
 

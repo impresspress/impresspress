@@ -1063,6 +1063,11 @@ pub(crate) mod helpers {
 
     /// Returns (access_token, refresh_token, family).
     ///
+    /// Private to `helpers`, where [`issue_tokens_and_cookie`] is its one
+    /// caller, so no session token is minted without the
+    /// [`crate::csrf::SessionIssuance`] that function demands and the family
+    /// rows it writes.
+    ///
     /// `auth_method` records *how* the user authenticated for this token —
     /// `"password"` for email/password login or signup, `"oauth.<provider>"`
     /// for OAuth (e.g. `"oauth.github"`). The claim rides on both access and
@@ -1094,7 +1099,7 @@ pub(crate) mod helpers {
     /// on verify instead of only at its natural expiry, and ends the refresh
     /// token's family at its next rotation. [`TokenGrant`] says why the
     /// version and the roles come in together.
-    pub(crate) async fn generate_tokens(
+    async fn generate_tokens(
         ctx: &dyn wafer_run::context::Context,
         lifetime: &SessionLifetime,
         user_id: &str,
@@ -1234,38 +1239,6 @@ pub(crate) mod helpers {
         Ok((access_token, refresh_token, family))
     }
 
-    /// Persist a freshly minted refresh token.
-    ///
-    /// Stores only the SHA-256 hash of the raw JWT (SEC-032); the JWT itself
-    /// never lands in the database. New families start at `generation = 0`;
-    /// rotation from `auth_ui::api::refresh::handle` calls this with the same
-    /// `family` and `generation = prev + 1` (SEC-039).
-    ///
-    /// The row is the token: `refresh::handle` looks the presented JWT up by
-    /// hash and refuses it when no row matches. A failure here therefore has
-    /// to abort issuance rather than be logged — handing the caller a JWT with
-    /// no row gives them a credential that is already dead, and on rotation it
-    /// is worse, because the predecessor row was revoked first and the family
-    /// has no live generation left to refresh from.
-    pub(crate) async fn store_refresh_token(
-        ctx: &dyn wafer_run::context::Context,
-        lifetime: &SessionLifetime,
-        user_id: &str,
-        token: &str,
-        family: &str,
-        generation: i64,
-    ) -> Result<(), WaferError> {
-        super::repo::tokens::insert(
-            ctx,
-            user_id,
-            token,
-            family,
-            generation,
-            &lifetime.expires_at,
-        )
-        .await
-    }
-
     /// The `; Secure` attribute, or nothing on a development deployment that
     /// serves plain HTTP (where a `Secure` cookie would be dropped by the
     /// browser and nothing would work).
@@ -1283,7 +1256,13 @@ pub(crate) mod helpers {
         })
     }
 
-    pub(crate) async fn build_auth_cookie(
+    /// The `auth_token` cookie carrying `token`.
+    ///
+    /// Private to `helpers`, like [`generate_tokens`]: a cookie that signs a
+    /// browser in is built only by [`issue_tokens_and_cookie`].
+    /// [`clear_auth_cookie`] is the one other cookie of this name, and it
+    /// carries nothing.
+    async fn auth_cookie(
         token: &str,
         max_age: u64,
         ctx: &dyn wafer_run::context::Context,
@@ -1294,6 +1273,14 @@ pub(crate) mod helpers {
             max_age,
             cookie_secure_attribute(ctx).await?
         ))
+    }
+
+    /// An `auth_token` cookie that clears the browser's: empty and expired.
+    /// What logout and revoking the current device answer with.
+    pub(crate) async fn clear_auth_cookie(
+        ctx: &dyn wafer_run::context::Context,
+    ) -> Result<String, WaferError> {
+        auth_cookie("", 0, ctx).await
     }
 
     /// Resolve the configured minimum signup password length
@@ -1342,13 +1329,12 @@ pub(crate) mod helpers {
     /// value the refresh JWT's `exp`, the refresh row's `expires_at` and the
     /// session row's `expires_at` are all taken from.
     ///
-    /// [`generate_tokens`] signs the refresh JWT with `ttl_secs`,
-    /// [`store_refresh_token`] writes the row's `expires_at`, and
-    /// [`issue_tokens_and_cookie`] gives the session row the same expiry, so
-    /// the device list cannot claim a session outlives its token. Derived
-    /// from [`session_lifetime_days`] rather than a constant of its own: two
-    /// constants for one lifetime is what let them disagree (30 days on the
-    /// row, 7 on the token).
+    /// [`generate_tokens`] signs the refresh JWT with `ttl_secs`, and
+    /// [`establish_family`] writes the same `expires_at` on the refresh row
+    /// and the session row, so the device list cannot claim a session
+    /// outlives its token. Derived from [`session_lifetime_days`] rather than
+    /// a constant of its own: two constants for one lifetime is what let them
+    /// disagree (30 days on the row, 7 on the token).
     ///
     /// Resolving it is the only step of issuance that reads configuration, and
     /// it can fail. So every handler resolves it BEFORE it consumes anything
@@ -1409,8 +1395,8 @@ pub(crate) mod helpers {
     /// Outcome of [`issue_tokens_and_cookie`]: the freshly minted token pair,
     /// the access-token lifetime (seconds) and the ready-to-set `auth_token`
     /// cookie. Callers add only their response shape (JSON body vs. 302
-    /// redirect). The rotation family is persisted internally (on the refresh
-    /// row); no caller needs it back, so it is intentionally not surfaced here.
+    /// redirect). The rotation family is persisted internally (on the family's
+    /// rows); no caller needs it back, so it is intentionally not surfaced here.
     pub(crate) struct IssuedLogin {
         pub access_token: String,
         pub refresh_token: String,
@@ -1418,67 +1404,121 @@ pub(crate) mod helpers {
         pub cookie: String,
     }
 
-    /// Shared token-issuance tail for every login flow (password login, signup,
-    /// bootstrap redemption, OAuth callback, and refresh rotation).
+    /// Why [`establish_family`] wrote no family.
+    enum FamilyNotEstablished {
+        /// The rotation's family has no session row: it was revoked while the
+        /// rotation ran (or expired and was swept). Its refresh rows have been
+        /// revoked; the request is refused like any other dead refresh token.
+        Ended,
+        /// A write could not run, so whether the family is alive is unknown.
+        Failed(WaferError, &'static str),
+    }
+
+    /// [B12] Write the rows that make `family` a signed-in device: the refresh
+    /// row for the token just minted, and the family's session row, which is
+    /// the family's liveness (`repo::sessions`, module doc).
     ///
-    /// [B12] Record this login family on the userportal device list.
+    /// [`Rotation::NewFamily`]: both rows in one `db::batch`, so either both
+    /// land or neither does. A family `generate_tokens` has just drawn at
+    /// random has no row anywhere yet, so there is nothing to touch first.
     ///
-    /// A family `generate_tokens` has just minted (`rotation` is
-    /// [`Rotation::NewFamily`]) is random and was drawn a moment ago, so no
-    /// row can carry it yet: its row is inserted outright. Touching first
-    /// would be a guaranteed no-op, and on Cloudflare it is a D1 write the
-    /// sign-in would wait on.
+    /// [`Rotation::Within`]: the successor's refresh row, then a
+    /// [`sessions::touch`](super::repo::sessions::touch) of the family's row.
+    /// A touch that finds no row means the family was revoked after this
+    /// rotation claimed its predecessor: the family's refresh rows, the
+    /// successor's among them, are revoked and the rotation refuses
+    /// ([`FamilyNotEstablished::Ended`]). A missing row is never re-created —
+    /// that is what let a refresh racing a device revocation bring the device
+    /// back.
     ///
-    /// A rotation within an established family touches the row it already
-    /// has, and inserts one only when it has none, because "no row" is not
-    /// the same question as "new family". A family can lose its row —
-    /// migration 012 drops the pre-B12 table and re-runs whenever any auth
-    /// migration changes the block's SQL hash, and the sweeper removes rows
-    /// whose expiry has passed. Without the fallback such a device would
-    /// rotate its tokens forever while never appearing on the list again.
+    /// A touch that fails refuses too, since the row could not be confirmed,
+    /// and the family is ended ([`end_family`], best-effort: the request is
+    /// already failing). Its predecessor is claimed and its successor's JWT is
+    /// never handed out, so the device cannot continue anyway; ending it keeps
+    /// the rows saying so. Left live, the successor's row would make the
+    /// client's retry with its old token read as a replay of a stolen one,
+    /// and the device would stay listed as signed in.
     ///
-    /// Best-effort by design: a failure here loses a list entry, not a
-    /// session, and must not turn a successful login into a 500.
-    async fn record_login_family(
+    /// The order — successor row, then touch — is half of the invariant that
+    /// lets a revocation race a rotation without a transaction; the other half
+    /// is [`end_family`]'s order.
+    async fn establish_family(
         ctx: &dyn wafer_run::context::Context,
+        lifetime: &SessionLifetime,
         user_id: &str,
+        refresh_token: &str,
         family: &str,
         rotation: Rotation<'_>,
         auth_method: &str,
-        expires_at: &str,
-    ) {
-        use super::repo::sessions;
+    ) -> Result<(), FamilyNotEstablished> {
+        use super::repo::{sessions, tokens};
 
-        if let Rotation::Within { .. } = rotation {
-            match sessions::touch(ctx, family, expires_at).await {
-                Ok(0) => {}
-                Ok(_) => return,
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        family = %family,
-                        "failed to touch session row on rotation: {e}"
-                    );
-                    return;
+        match rotation {
+            Rotation::NewFamily => {
+                let ops = vec![
+                    tokens::create_op(user_id, refresh_token, family, 0, &lifetime.expires_at),
+                    sessions::create_op(sessions::NewSession {
+                        family: family.to_string(),
+                        user_id: user_id.to_string(),
+                        auth_method: auth_method.to_string(),
+                        expires_at: lifetime.expires_at.clone(),
+                    }),
+                ];
+                wafer_core::clients::database::batch(ctx, ops)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| {
+                        FamilyNotEstablished::Failed(
+                            repo::db_failed("login family insert", e),
+                            "Could not record the sign-in",
+                        )
+                    })
+            }
+            Rotation::Within { generation, .. } => {
+                tokens::insert(
+                    ctx,
+                    user_id,
+                    refresh_token,
+                    family,
+                    generation,
+                    &lifetime.expires_at,
+                )
+                .await
+                .map_err(|e| {
+                    FamilyNotEstablished::Failed(e, "Could not persist the refresh token")
+                })?;
+                match sessions::touch(ctx, family, &lifetime.expires_at).await {
+                    Ok(0) => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            family = %family,
+                            "refresh: the login family was revoked during rotation; revoking it"
+                        );
+                        tokens::revoke_family(ctx, family).await.map_err(|e| {
+                            FamilyNotEstablished::Failed(
+                                e,
+                                "Refresh could not revoke the token family",
+                            )
+                        })?;
+                        Err(FamilyNotEstablished::Ended)
+                    }
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        if let Err(end) = end_family(ctx, family).await {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                family = %family,
+                                error = %end,
+                                "refresh: could not end a family whose session row was unreadable"
+                            );
+                        }
+                        Err(FamilyNotEstablished::Failed(
+                            e,
+                            "Refresh could not confirm the login family",
+                        ))
+                    }
                 }
             }
-        }
-        if let Err(e) = sessions::insert(
-            ctx,
-            sessions::NewSession {
-                family: family.to_string(),
-                user_id: user_id.to_string(),
-                auth_method: auth_method.to_string(),
-                expires_at: expires_at.to_string(),
-            },
-        )
-        .await
-        {
-            tracing::warn!(
-                user_id = %user_id,
-                auth_method = %auth_method,
-                "failed to persist session row for login: {e}"
-            );
         }
     }
 
@@ -1501,6 +1541,42 @@ pub(crate) mod helpers {
         });
     }
 
+    /// End one login family: delete its session row, then revoke its refresh
+    /// rows. Every revocation of a family goes through here — a device revoke,
+    /// reuse detection, a stale family, a rotation that could not confirm its
+    /// row — so the order lives in one place.
+    ///
+    /// The order is what lets a revocation race a rotation without a
+    /// transaction. A rotation claims its token, inserts the successor's
+    /// refresh row, then touches the session row ([`establish_family`]). With
+    /// the row deleted first, a touch after the delete finds nothing and the
+    /// rotation revokes and refuses, and a touch before it means the
+    /// successor's row already existed when the refresh rows were revoked.
+    /// The other order lets a rotation claim before the revoke, insert after
+    /// it and touch before the delete, leaving a live successor behind.
+    /// Logout keeps the same order over all of a user's families.
+    ///
+    /// Stops at the first error, so a failed delete leaves the refresh rows
+    /// as they were for a retry to find.
+    pub(crate) async fn end_family(
+        ctx: &dyn wafer_run::context::Context,
+        family: &str,
+    ) -> Result<(), WaferError> {
+        super::repo::sessions::delete(ctx, family).await?;
+        super::repo::tokens::revoke_family(ctx, family).await
+    }
+
+    /// The answer to a refresh token that can no longer refresh: rotated away,
+    /// issued before the account's latest `auth_version`, or of a family that
+    /// has been revoked. The client is told the same thing in every case,
+    /// since it cannot act on the difference.
+    pub(crate) fn refresh_token_revoked() -> wafer_run::OutputStream {
+        crate::blocks::errors::error_response(
+            crate::blocks::errors::ErrorCode::InvalidToken,
+            "Refresh token has been revoked",
+        )
+    }
+
     /// The rotation family an issuance belongs to, and the refresh-row
     /// generation it persists.
     #[derive(Clone, Copy)]
@@ -1512,12 +1588,12 @@ pub(crate) mod helpers {
         Within { family: &'a str, generation: i64 },
     }
 
-    /// Mints the access + refresh JWTs, persists the refresh-token row,
-    /// records the login family on the userportal device list, and builds the
-    /// `auth_token` cookie — the exact sequence that was previously
-    /// copy-pasted across all five handlers (and which the OAuth copy had
-    /// drifted from, silently omitting the session row). Centralising it
-    /// guarantees every authentication path is visible on the device list.
+    /// Shared token-issuance tail for every login flow (password login, signup,
+    /// bootstrap redemption, OAuth callback, and refresh rotation): mints the
+    /// access + refresh JWTs, writes the family's rows ([`establish_family`]),
+    /// and builds the `auth_token` cookie. It is the only path that does any
+    /// of the three within the crate: [`generate_tokens`] and [`auth_cookie`]
+    /// are private to `helpers`, and this is their one caller there.
     ///
     /// `rotation` says which family the tokens belong to: see [`Rotation`].
     ///
@@ -1527,11 +1603,14 @@ pub(crate) mod helpers {
     /// row's, so the list cannot claim a device is signed in after its refresh
     /// token has expired.
     ///
-    /// The SESSION row is the only write here that may fail without aborting
-    /// issuance: it is a device-list entry, not a credential, so losing it
-    /// costs a row on a UX surface and is logged rather than raised. The
-    /// REFRESH-token row is a credential — [`store_refresh_token`] explains
-    /// why its failure returns an error and no tokens are handed out.
+    /// Every write here is part of the session, so none fails quietly. The
+    /// refresh row is the token: `auth_ui::api::refresh` refuses a JWT whose
+    /// hash has no row. The session row is the family's liveness: a rotation
+    /// whose family has lost it is refused, so a sign-in that wrote no row
+    /// would hand out a session that ends at its first refresh. A failed
+    /// write answers 500 and hands out no tokens; a rotation whose family was
+    /// revoked meanwhile gets the dead-refresh-token answer
+    /// ([`refresh_token_revoked`]).
     ///
     /// The [`crate::csrf::SessionIssuance`] is the caller's proof that this
     /// request may be given a session at all (`crate::csrf`, layer 1b): its
@@ -1554,34 +1633,29 @@ pub(crate) mod helpers {
         auth_method: &str,
         rotation: Rotation<'_>,
     ) -> std::result::Result<IssuedLogin, wafer_run::OutputStream> {
-        let (family, generation) = match rotation {
-            Rotation::NewFamily => (None, 0),
-            Rotation::Within { family, generation } => (Some(family), generation),
+        let family = match rotation {
+            Rotation::NewFamily => None,
+            Rotation::Within { family, .. } => Some(family),
         };
         let (access_token, refresh_token, issued_family) =
             generate_tokens(ctx, lifetime, user_id, email, grant, auth_method, family).await?;
 
-        store_refresh_token(
+        establish_family(
             ctx,
             lifetime,
             user_id,
             &refresh_token,
             &issued_family,
-            generation,
-        )
-        .await
-        .map_err(|e| {
-            crate::blocks::crud::db_error_internal(e, "Could not persist the refresh token")
-        })?;
-        record_login_family(
-            ctx,
-            user_id,
-            &issued_family,
             rotation,
             auth_method,
-            &lifetime.expires_at,
         )
-        .await;
+        .await
+        .map_err(|refused| match refused {
+            FamilyNotEstablished::Ended => refresh_token_revoked(),
+            FamilyNotEstablished::Failed(e, what) => {
+                crate::blocks::crud::db_error_internal(e, what)
+            }
+        })?;
 
         // [B12] Retention runs from here because it is the one path every
         // deployment exercises on its own: no operator has to remember to POST
@@ -1600,7 +1674,7 @@ pub(crate) mod helpers {
         let access_lifetime = access_token_lifetime_secs(ctx)
             .await
             .map_err(wafer_run::OutputStream::error)?;
-        let cookie = build_auth_cookie(&access_token, access_lifetime, ctx)
+        let cookie = auth_cookie(&access_token, access_lifetime, ctx)
             .await
             .map_err(wafer_run::OutputStream::error)?;
 

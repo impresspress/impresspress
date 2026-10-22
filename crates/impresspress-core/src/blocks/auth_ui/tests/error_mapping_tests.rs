@@ -201,13 +201,16 @@ async fn login_user_lookup_outage_is_still_500() {
 }
 
 /// `auth::helpers::issue_tokens_and_cookie` persists the refresh row every
-/// sign-in path shares; a denied insert there is the deployment's grant, not
-/// an outage.
+/// sign-in path shares, in the batch that writes the family's session row; a
+/// denied insert there is the deployment's grant, not an outage.
 #[tokio::test]
 async fn refresh_row_insert_denial_is_403_not_500() {
     let ctx = TestContext::with_auth_and_crypto().await;
     signup(&ctx, "persist@example.com").await;
-    let ctx = denied(ctx, vec![("database.create", tokens::TABLE)]);
+    let ctx = BatchDenied {
+        inner: ctx,
+        table: tokens::TABLE,
+    };
     assert_eq!(
         status(&ctx, login_msg(), login_body("persist@example.com")).await,
         403

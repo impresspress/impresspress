@@ -1748,7 +1748,10 @@ mod discovery_tests {
         features: &dyn FeatureConfig,
     ) -> serde_json::Value {
         let secret = TEST_JWT_SECRET;
-        let auth_header = roles.map(bearer_for_roles);
+        let auth_header = match roles {
+            Some(roles) => Some(bearer_for_roles(ctx, roles).await),
+            None => None,
+        };
 
         let mut msg = anon_msg("retrieve", "/b/webmcp/manifest.json");
         msg.set_meta("http.header.host", "impresspress.example.com");
@@ -1822,7 +1825,7 @@ mod discovery_tests {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
-        let bearer = bearer_for_roles(&["admin"]);
+        let bearer = bearer_for_roles(&ctx, &["admin"]).await;
         let mut msg = anon_msg("retrieve", "/openapi.json");
         msg.set_meta("http.header.host", "impresspress.example.com");
         let out = handle_request(

@@ -154,9 +154,15 @@ No user is signed out (nothing authenticates against the table; the `Creds`
 enum has only Jwt and Pat), and issuance re-materialises a row for each device
 on its next refresh, which is also the fallback that repopulates it. If a
 future PR wants the list to survive, rename the table instead of dropping it.
+(Superseded by `fix/family-row-is-written-atomically`: the row is now a
+family's liveness and nothing re-creates a missing one, so the DROP would
+have signed every device out at its next refresh. That PR moved the
+family-keyed layout into 001 and removed 012's DROP. See RELEASE.md.)
 Also owed from #25: `AuthConfig.session_lifetime_days` is a dead field;
-refresh reuse-detection revokes the family but leaves the session row (not a
-correctness issue since the family is dead); Phase 4 owes the Worker
+refresh reuse-detection revoked the family but left the session row (fixed by
+`fix/family-row-is-written-atomically`: once the row is the family's
+liveness, a left row let a rotation racing the burn carry the family on, and
+kept the burned device listed; the burn now deletes the row first); Phase 4 owes the Worker
 `scheduled` handler for the sweeper; Phase 5 could render `auth_method` on the
 device list (the column is written; a UI change was avoided because the
 `portal-sessions` visual baseline is only verifiable from CI).

@@ -3189,14 +3189,19 @@ impl Context for RendezvousDbOpContext {
 /// the interleaving a race between a request and a concurrent mutation needs
 /// forced rather than hoped for. The hook runs once; later matching calls
 /// pass straight through. [`Self::fired`] says whether the point was reached.
+/// [`Self::or_after`] adds further `(op, collection)` points, so the hook runs
+/// after whichever of them comes first — for a test that must pause a
+/// sequence "after its first write" whatever order its writes come in.
 ///
 /// `#[cfg(test)]` for the reason [`RendezvousDbOpContext`] gives.
 #[cfg(test)]
 #[derive(Clone)]
 pub struct AfterDbOpContext {
     inner: TestContext,
-    op: &'static str,
-    collection: &'static str,
+    points: Vec<(&'static str, &'static str)>,
+    /// Matching calls still to pass before the hook runs (see
+    /// [`Self::skipping`]). Shared across clones.
+    skips_left: Arc<std::sync::atomic::AtomicUsize>,
     /// Taken by the first matching call; shared across clones, so a
     /// handler's `clone_arc` sees the same one-shot.
     hook: Arc<Mutex<Option<futures::future::BoxFuture<'static, ()>>>>,
@@ -3213,10 +3218,27 @@ impl AfterDbOpContext {
     ) -> Self {
         Self {
             inner,
-            op,
-            collection,
+            points: vec![(op, collection)],
+            skips_left: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             hook: Arc::new(Mutex::new(Some(Box::pin(hook)))),
         }
+    }
+
+    /// Let the first `n` matching calls through and run the hook after the
+    /// next one: for a sequence that makes the matched call more than once
+    /// (a lookup, then a check, on the same table) when the point is a later
+    /// one.
+    pub fn skipping(self, n: usize) -> Self {
+        self.skips_left
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    /// Also run the hook after an `(op, collection)` call, if that one comes
+    /// before every other point.
+    pub fn or_after(mut self, op: &'static str, collection: &'static str) -> Self {
+        self.points.push((op, collection));
+        self
     }
 
     /// Whether a matching call has been made and the hook has run.
@@ -3252,7 +3274,8 @@ impl Context for AfterDbOpContext {
     }
 
     async fn call_block(&self, name: &str, msg: Message, input: InputStream) -> OutputStream {
-        if !(name == "wafer-run/database" && msg.action() == self.op) {
+        let op = msg.action().to_string();
+        if !(name == "wafer-run/database" && self.points.iter().any(|(o, _)| *o == op)) {
             return self.inner.call_block(name, msg, input).await;
         }
         let bytes = match input.collect_to_bytes().await {
@@ -3260,13 +3283,26 @@ impl Context for AfterDbOpContext {
             Err(e) => return OutputStream::error(e),
         };
         let matches = wafer_block::codec::decode::<CollectionPeek>(&bytes)
-            .map(|p| p.collection == self.collection)
+            .map(|p| {
+                self.points
+                    .iter()
+                    .any(|(o, c)| *o == op && *c == p.collection)
+            })
             .unwrap_or(false);
         let out = self
             .inner
             .call_block(name, msg, InputStream::from_bytes(bytes))
             .await;
-        if matches {
+        let skipped = matches
+            && self
+                .skips_left
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+        if matches && !skipped {
             let hook = self.hook.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(hook) = hook {
                 hook.await;
@@ -4451,18 +4487,49 @@ pub fn real_block_infos() -> Vec<BlockInfo> {
 /// The JWT secret every `handle_request` test call passes.
 pub const TEST_JWT_SECRET: &str = "test-jwt-secret";
 
-/// An access token for `sub` carrying `roles`, signed the way `auth_ui` signs
-/// one: the block-derived key from [`TEST_JWT_SECRET`] and `expected_issuer`'s
-/// default issuer. Both `crate::crypto::verify_access_token` (and so
-/// `pipeline::handle_request`'s step 2 and `AuthServiceImpl`) accept it.
+/// Write the session row a real sign-in writes for `family`, owned by
+/// `user_id` (an account that must exist: the row references it).
+///
+/// The row is a login family's liveness (`blocks::auth::repo::sessions`), so
+/// a fixture that signs an access token outside the issuance path, and stamps
+/// a `family` claim on it, gives that family its row through this — the same
+/// row `helpers::issue_tokens_and_cookie` writes. A token whose family has no
+/// row is one no real sign-in produces.
+pub async fn seed_login_family(ctx: &TestContext, user_id: &str, family: &str) {
+    use crate::blocks::auth::repo::sessions;
+    let expires_at = (chrono::Utc::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    sessions::insert(
+        &ctx.fixture(),
+        sessions::NewSession {
+            family: family.to_string(),
+            user_id: user_id.to_string(),
+            auth_method: "password".to_string(),
+            expires_at,
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("seed the login family {family} of {user_id}: {e:?}"));
+}
+
+/// An access token for the account `sub` carrying `roles`, signed the way
+/// `auth_ui` signs one: the block-derived key from [`TEST_JWT_SECRET`] and
+/// `expected_issuer`'s default issuer. Both `crate::crypto::verify_access_token`
+/// (and so `pipeline::handle_request`'s step 2 and `AuthServiceImpl`) accept
+/// it. Its `family` is a fresh one, given its session row through
+/// [`seed_login_family`], so `sub` must be an existing account.
 ///
 /// A `TestContext` that must *verify* one of these needs
 /// `set_config(blocks::auth::JWT_SECRET_KEY, TEST_JWT_SECRET)` — the secret is
 /// read from the config snapshot, not passed in.
-pub fn access_token_for(sub: &str, roles: &[&str]) -> String {
+pub async fn access_token_for(ctx: &TestContext, sub: &str, roles: &[&str]) -> String {
     use std::time::Duration;
 
     use wafer_block_crypto::primitives;
+
+    let family = uuid::Uuid::now_v7().to_string();
+    seed_login_family(ctx, sub, &family).await;
 
     let derived = primitives::derive_block_key(
         TEST_JWT_SECRET.as_bytes(),
@@ -4479,6 +4546,7 @@ pub fn access_token_for(sub: &str, roles: &[&str]) -> String {
         serde_json::json!("http://localhost:5173"),
     );
     claims.insert("roles".to_string(), serde_json::json!(roles));
+    claims.insert("family".to_string(), serde_json::json!(family));
     primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
         .expect("test jwt_sign")
 }
@@ -4486,9 +4554,12 @@ pub fn access_token_for(sub: &str, roles: &[&str]) -> String {
 /// A `Bearer` access token carrying `roles`, so
 /// `pipeline::handle_request`'s step 2 resolves it to a real identity with
 /// those roles. This is how a test asks for a document *as* an authenticated
-/// or admin caller.
-pub fn bearer_for_roles(roles: &[&str]) -> String {
-    format!("Bearer {}", access_token_for("user-test-1", roles))
+/// or admin caller. The token belongs to an account seeded for it, since its
+/// family's row must reference one.
+pub async fn bearer_for_roles(ctx: &TestContext, roles: &[&str]) -> String {
+    let email = format!("bearer-{}@example.com", uuid::Uuid::now_v7());
+    let user = seed_user(&email).insert(&ctx.fixture()).await;
+    format!("Bearer {}", access_token_for(ctx, &user.id, roles).await)
 }
 
 /// Fetch a discovery document (`/openapi.json` or `/.well-known/agent.json`)
@@ -5192,6 +5263,30 @@ mod tests {
     use wafer_core::clients::database as db;
 
     use super::*;
+
+    /// `access_token_for` signs a token whose `family` has its session row,
+    /// the way a real sign-in leaves one. A token whose family had no row
+    /// would be refused for that reason once the family is checked, and every
+    /// test using the helper would pass or fail for the wrong one.
+    #[tokio::test]
+    async fn access_token_for_establishes_the_tokens_family() {
+        let ctx = TestContext::with_auth().await;
+        let user = seed_user("family@example.com").insert(&ctx.fixture()).await;
+
+        let token = access_token_for(&ctx, &user.id, &["user"]).await;
+        let payload = token.split('.').nth(1).expect("a JWT has a payload");
+        let claims: serde_json::Value = serde_json::from_slice(
+            &wafer_block_crypto::primitives::b64url_decode(payload).expect("base64url payload"),
+        )
+        .expect("JSON claims");
+        let family = claims["family"].as_str().expect("the token names a family");
+
+        let row =
+            crate::blocks::auth::repo::sessions::find_for_user(&ctx.fixture(), &user.id, family)
+                .await
+                .expect("read the session row");
+        assert!(row.is_some(), "the token's family has its session row");
+    }
 
     #[tokio::test]
     async fn database_create_and_get_round_trip() {

@@ -180,11 +180,12 @@ async fn session_revoke_denials_are_403() {
         .await
         .expect("seed a refresh row");
     let path = "/b/userportal/sessions/fam-1";
-    // The ownership lookup, the family revoke, then the session row delete.
+    // The ownership lookup, the session row delete, then the family revoke —
+    // the handler's order, so each denial leaves the row the next step needs.
     for (failing, step) in [
         (denied(&ctx, sessions::TABLE), "lookup"),
-        (denied(&ctx, tokens::TABLE), "revoke"),
         (denied(&ctx, sessions::TABLE).after_passing(1), "delete"),
+        (denied(&ctx, tokens::TABLE), "revoke"),
     ] {
         assert_wrap_denial(
             &mut misses,

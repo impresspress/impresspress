@@ -513,9 +513,10 @@ const CLEARED_COLUMNS: &[(&str, &str, &str)] = &[
 /// **Migration ORDER and `DROP TABLE` are modelled, not ignored.** A union
 /// over every `CREATE TABLE` in a block's history is not the schema — it is
 /// the schema plus every column any earlier version ever had.
-/// `012_sessions_family` drops `wafer_run__auth__sessions` and recreates it
-/// without the `token_hash` that `001_auth_schema` declared, and a scan that
-/// unions the two reports a column no deployment has. That is not a corner:
+/// `012_sessions_family` used to drop `wafer_run__auth__sessions` and
+/// recreate it without the `token_hash` that `001_auth_schema` declared, and
+/// a scan that unioned the two reported a column no deployment has. (001 now
+/// declares the family-keyed layout itself.) That is not a corner:
 /// the guard tests below exist to catch a registry entry naming a column that
 /// is not there, and a history-union scan cannot see exactly that mistake.
 ///
@@ -989,7 +990,8 @@ fn the_scanner_panics_on_an_unknown_column_type() {
 /// This is the property the `sessions` entry needed and did not have: the
 /// registry claimed `sessions.token_hash`, the guard test passed, and the
 /// column had not existed since `012_sessions_family` dropped and recreated
-/// the table without it.
+/// the table without it. (001 now declares the family-keyed layout and 012
+/// drops nothing; the synthetic case below keeps the scanner honest.)
 #[test]
 fn the_scanner_honours_drop_table() {
     let schema = schema_of(
@@ -1016,18 +1018,17 @@ fn the_scanner_honours_drop_table() {
     assert!(schema.get("kept").is_some_and(|c| c.contains("id")));
 }
 
-/// And the same property, as the tree actually stands: `sessions` is the table
-/// it caught, so a regression that reintroduced history-unioning would show up
-/// here without anyone reading a synthetic fixture.
+/// And the table it caught, as the tree stands: `sessions` is declared keyed
+/// on `family`, with no `token_hash`.
 #[test]
-fn the_sessions_table_is_scanned_as_migration_012_left_it() {
+fn the_sessions_table_is_scanned_keyed_on_family() {
     let schema = migration_schema();
     let sessions = schema
         .get("wafer_run__auth__sessions")
         .expect("the sessions table is declared");
     assert!(
         !sessions.contains("token_hash"),
-        "`012_sessions_family` dropped this column: {sessions:?}"
+        "no deployment's sessions table has this column: {sessions:?}"
     );
     assert!(sessions.contains("family"), "{sessions:?}");
 }
