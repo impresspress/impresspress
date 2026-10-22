@@ -663,6 +663,13 @@ async fn the_bookkeeping_a_sign_in_defers_still_runs() {
 /// them. On the second, the version is a cache hit and the family read rides
 /// alone.
 ///
+/// The whole request is pinned as well, as the sign-in's is: the check, then
+/// `/me`'s own reads of the account (`users`) and its roles (`user_roles`).
+/// Cold, that is 3 round trips and 4 statements; warm, 3 and 3. The per-wave
+/// assertions say which statements share the check's round trip; the totals
+/// are what catch a statement added to the check after the join, which costs
+/// a round trip of its own and would otherwise hide among the handler's reads.
+///
 /// The first request is measured on a warm schema cache. The family read
 /// lists the sessions table, which needs its primary key, and on a cold cache
 /// that probe runs before the read and lands in the first wave or opens the
@@ -732,6 +739,16 @@ async fn an_access_token_is_checked_in_one_round_trip() {
             .any(|sql| sql.contains("FROM \"wafer_run__auth__users\"")),
         "the auth_version read shares the family read's round trip\n{trace}"
     );
+    assert_eq!(
+        Cost::waves(&cold.response),
+        3,
+        "sequential D1 round trips before the response\n{trace}"
+    );
+    assert_eq!(
+        Cost::statements(&cold.response),
+        4,
+        "D1 statements before the response\n{trace}"
+    );
 
     let warm = me().await;
     let trace = Cost::describe(&warm.response);
@@ -746,5 +763,15 @@ async fn an_access_token_is_checked_in_one_round_trip() {
         wave(&warm.response, 1).len(),
         1,
         "with auth_version cached, the family read rides alone\n{trace}"
+    );
+    assert_eq!(
+        Cost::waves(&warm.response),
+        3,
+        "sequential D1 round trips before the response\n{trace}"
+    );
+    assert_eq!(
+        Cost::statements(&warm.response),
+        3,
+        "D1 statements before the response\n{trace}"
     );
 }

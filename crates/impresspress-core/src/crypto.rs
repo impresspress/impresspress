@@ -342,10 +342,10 @@ mod tests {
 
     // -- extract_auth_meta -------------------------------------------------
     //
-    // The extract_auth_meta_* tests below sign via `sign_access_jwt`, which derives the auth-ui key from the
-    // master secret before signing — the same derivation
-    // `extract_auth_meta` verifies against, since the master-secret fallback
-    // no longer exists.
+    // The extract_auth_meta_* tests below sign via `sign_access_jwt`, which
+    // derives the auth-ui key from the master secret before signing — the
+    // same derivation `extract_auth_meta` verifies against, since the
+    // master-secret fallback no longer exists.
 
     //
     // Every signer here also gives its token a login family with its session

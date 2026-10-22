@@ -1120,10 +1120,17 @@ pub(crate) mod helpers {
     ///
     /// Refresh tokens carry a random `jti`: everything else on a refresh JWT
     /// is the same on both sides of a rotation — same user, same family, same
-    /// auth method, same issuer — and `iat`/`exp` are whole seconds. The signer encodes claims canonically, so without a
-    /// per-token nonce a rotation inside the second its predecessor was
-    /// minted in signs to exactly the predecessor's bytes, and its
-    /// `token_hash` collides with the row the rotation has just revoked.
+    /// auth method, same issuer — and `iat`/`exp` are whole seconds. The
+    /// signer encodes claims canonically, so without a per-token nonce a
+    /// rotation inside the second its predecessor was minted in signs to
+    /// exactly the predecessor's bytes, and its `token_hash` collides with
+    /// the row the rotation has just revoked.
+    ///
+    /// Access tokens carry no nonce, so two minted in the same second for the
+    /// same family, `auth_version` and roles (a rotation inside the second of
+    /// its predecessor's mint) are byte-identical. That is harmless: an access
+    /// token is identified by nothing. No row stores it or its hash, and it is
+    /// checked only by its signature, its claims and its family's session row.
     ///
     /// Both tokens also carry `grant`'s `auth_version` (P2c) — see the
     /// module-level docs above `current_auth_version` — so a later
