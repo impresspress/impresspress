@@ -186,10 +186,12 @@ pub fn dashboard_page(stats: Vec<Stat<'_>>, rows: Vec<DashboardRow>) -> Markup {
 /// to address it — the messages composer scrolls it after a post.
 pub const CHAT_MESSAGES_ID: &str = "chat-messages";
 
-/// Which of [`chat_page`]'s panes a phone shows. Below 720px the layout is
-/// one pane at a time, the way a chat app on a phone is: the thread list, or
-/// one conversation (with its rail above it as a toolbar). On a wider screen
-/// every pane is shown side by side and this changes nothing.
+/// Which of [`chat_page`]'s panes a narrow chat shows. The chat lays itself
+/// out by its own width, not the screen's (`.chat-page` is a size container,
+/// layouts/page.css): narrower than 40rem — a phone, or the column beside the
+/// sidebar on a small laptop — it is one pane at a time, the way a chat app
+/// on a phone is: the thread list, or one conversation (with its rail above
+/// it as a toolbar). Wider, every pane is shown and this changes nothing.
 ///
 /// The way back from a conversation to the list is the page's own trail and
 /// section link (the topbar crumb, the block's sub-nav), not a second scroll
@@ -229,7 +231,12 @@ pub struct ChatPane<'a> {
 /// background, filling the body's height, with its panes drawn edge to edge
 /// inside it. The shell draws no frame, so the template owns this one.
 ///
-/// `focus` decides which pane a phone shows — see [`ChatFocus`].
+/// The panes follow the chat's own width (`.chat-page`, the size container
+/// around the frame): the thread list, the conversation and the rail side by
+/// side from 60rem; below that the rail becomes a toolbar above the
+/// conversation, so the composer is never squeezed between two fixed
+/// columns; below 40rem one pane at a time. `focus` decides which pane that
+/// narrowest layout shows — see [`ChatFocus`].
 pub fn chat_page(
     focus: ChatFocus,
     threads: ChatPane<'_>,
@@ -238,14 +245,16 @@ pub fn chat_page(
     right_rail: Option<ChatPane<'_>>,
 ) -> Markup {
     html! {
-        div .page--chat data-chat-focus=(focus.as_str()) {
-            aside .chat-threads aria-label=(threads.label) { (threads.body) }
-            section .chat-main {
-                div .chat-messages #(CHAT_MESSAGES_ID) { (messages) }
-                div .chat-composer { (composer) }
-            }
-            @if let Some(r) = right_rail {
-                aside .chat-rail aria-label=(r.label) { (r.body) }
+        div .chat-page {
+            div .page--chat data-chat-focus=(focus.as_str()) {
+                aside .chat-threads aria-label=(threads.label) { (threads.body) }
+                section .chat-main {
+                    div .chat-messages #(CHAT_MESSAGES_ID) { (messages) }
+                    div .chat-composer { (composer) }
+                }
+                @if let Some(r) = right_rail {
+                    aside .chat-rail aria-label=(r.label) { (r.body) }
+                }
             }
         }
     }
@@ -630,7 +639,8 @@ mod tests {
         );
     }
 
-    /// The phone layout is keyed on which pane the page leads with.
+    /// The narrow layout is keyed on which pane the page leads with, and the
+    /// frame sits in the size container its layout is measured on.
     #[test]
     fn chat_page_says_which_pane_a_phone_shows() {
         for (focus, value) in [
@@ -641,7 +651,7 @@ mod tests {
                 chat_page(focus, pane("Threads", html! {}), html! {}, html! {}, None).into_string();
             assert!(
                 s.contains(&format!(
-                    r#"<div class="page--chat" data-chat-focus="{value}">"#
+                    r#"<div class="chat-page"><div class="page--chat" data-chat-focus="{value}">"#
                 )),
                 "{s}"
             );

@@ -64,9 +64,16 @@
 
   function badge(text, variant) {
     var el = document.createElement('span');
-    el.className = 'badge text-capitalize' + (variant ? ' ' + variant : '');
+    el.className = 'badge' + (variant ? ' ' + variant : '');
     el.textContent = text;
     return el;
+  }
+
+  // A role as a reader names it ("user" -> "User"), written at the source as
+  // the server's `entry_card` writes it: no CSS transforms case.
+  function roleLabel(role) {
+    var text = String(role || '');
+    return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
   function messageCard(role, content, date, opts) {
@@ -77,10 +84,10 @@
 
     var head = document.createElement('div');
     head.className = 'message-card__head';
-    head.appendChild(badge(role, role === 'system' ? 'badge-warning' : ''));
+    head.appendChild(badge(roleLabel(role), role === 'system' ? 'badge-warning' : ''));
     if (date) {
       var when = document.createElement('span');
-      when.className = 'text-muted text-xs';
+      when.className = 'message-card__date';
       when.textContent = date;
       head.appendChild(when);
     }
@@ -99,8 +106,8 @@
     return card;
   }
 
-  // The model a reply came from, beside the role. `text-capitalize` is for
-  // roles, not model ids, so this one is a plain badge.
+  // The model a reply came from, beside the role, written as the provider
+  // names it (a model id keeps its case).
   function modelBadge(model) {
     var el = document.createElement('span');
     el.className = 'badge';
@@ -396,6 +403,10 @@
   // Thread creation + selection
   // -------------------------------------------------------------------------
 
+  // A new thread's title until it is renamed, in sentence case like every
+  // other label.
+  var NEW_THREAD_TITLE = 'New chat';
+
   function createNewThread() {
     // LLM threads ARE messages contexts of type "conversation" (the thread
     // list is served from the same store). The old `/b/messages/api/threads`
@@ -403,7 +414,7 @@
     fetch('/b/messages/api/contexts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'conversation', title: 'New Chat' })
+      body: JSON.stringify({ type: 'conversation', title: NEW_THREAD_TITLE })
     })
     .then(function (r) { return r.json(); })
     .then(function (data) {
@@ -411,7 +422,8 @@
       if (id) {
         var list = document.getElementById('thread-list');
         if (list) {
-          var placeholder = list.querySelector('.thread-pane__empty');
+          // The server's "No threads yet" note (`components::empty_note`).
+          var placeholder = list.querySelector('.empty-note');
           if (placeholder) placeholder.remove();
           // Built with the DOM API and the same classes the server
           // renders (`thread_list_items` in blocks/llm/pages.rs), so the id
@@ -428,7 +440,7 @@
           row.className = 'thread-card__row';
           var name = document.createElement('span');
           name.className = 'thread-card__title';
-          name.textContent = 'New Chat';
+          name.textContent = NEW_THREAD_TITLE;
           var when = document.createElement('span');
           when.className = 'text-muted thread-card__date';
           when.textContent = new Date().toISOString().slice(0, 10);

@@ -8597,7 +8597,10 @@ async fn an_unreadable_fee_setting_leaves_the_admin_seller_pages_and_suspension_
 
     let (msg, input) = admin_get_msg("/b/products/admin/sellers");
     let list = output_to_html(dispatch(&ctx, msg, input).await).await;
-    assert!(list.contains("user_typo"), "the seller list renders");
+    assert!(
+        list.contains(r#"href="/b/products/admin/sellers/seller_typo""#),
+        "the seller list renders"
+    );
 
     let (msg, input) = admin_get_msg("/b/products/admin/sellers/seller_typo");
     let detail = output_to_html(dispatch(&ctx, msg, input).await).await;

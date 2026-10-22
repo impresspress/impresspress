@@ -526,3 +526,128 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.group-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(4)) { display: none; }
 	.group-table .group-table__meta { display: block; }
 }
+
+/* The commerce tables (`blocks/products/pages.rs`: the order lists, the
+   seller list and a seller's products, an order's items, refunds and
+   disputes) narrow by their own width the same way. Each keeps its title
+   column and the cells a reader acts on, and moves the rest into one line
+   under the title (`.commerce-table__meta`) below the width its full grid
+   needs in the CI font. Without these the tables scrolled sideways between
+   721 and about 1100px: the content column beside the sidebar, or a card
+   in it, is narrower than five or six columns.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `ORDER_COLUMNS`, `SELLER_ORDER_COLUMNS`, `PURCHASE_COLUMNS`,
+   `SELLER_COLUMNS`, `OWNED_PRODUCT_COLUMNS`, `ITEM_COLUMNS`,
+   `REFUND_COLUMNS`, `DISPUTE_COLUMNS` or `FAILURE_COLUMNS` must move here
+   too. */
+.commerce-table { container: commerce-table / inline-size; }
+.commerce-table__meta {
+	display: none; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+/* In the line a date may wrap at its spaces: unbroken, it set the title
+   column's minimum and the narrow table still scrolled at 721px. */
+.commerce-table__meta .datetime { white-space: normal; }
+@container commerce-table (max-width: 44rem) {
+	.commerce-table--orders td:is([data-label="Customer"], [data-label="Status"], [data-label="Placed"]),
+	.commerce-table--orders > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(5)) { display: none; }
+	.commerce-table--orders .commerce-table__meta { display: block; }
+	.commerce-table--disputes td:is([data-label="Evidence due"], [data-label="Provider dispute"]),
+	.commerce-table--disputes > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--disputes .commerce-table__meta { display: block; }
+}
+@container commerce-table (max-width: 43rem) {
+	.commerce-table--seller-orders td:is([data-label="Subscription"], [data-label="Date"]),
+	.commerce-table--seller-orders > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--seller-orders .commerce-table__meta { display: block; }
+}
+@container commerce-table (max-width: 40rem) {
+	.commerce-table--sellers td:is([data-label="Payments"], [data-label="Payouts"], [data-label="Listings"]),
+	.commerce-table--sellers > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--sellers .commerce-table__meta { display: block; }
+	.commerce-table--purchases td:is([data-label="Provider"], [data-label="Date"]),
+	.commerce-table--purchases > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--purchases .commerce-table__meta { display: block; }
+	.commerce-table--failures td[data-label="Date"],
+	.commerce-table--failures > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
+	.commerce-table--failures .commerce-table__meta { display: block; }
+}
+@container commerce-table (max-width: 38rem) {
+	.commerce-table--refunds td:is([data-label="Date"], [data-label="Provider refund"]),
+	.commerce-table--refunds > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--refunds .commerce-table__meta { display: block; }
+}
+@container commerce-table (max-width: 32rem) {
+	.commerce-table--items td:is([data-label="Quantity"], [data-label="Unit"]),
+	.commerce-table--items > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.commerce-table--items .commerce-table__meta { display: block; }
+}
+@container commerce-table (max-width: 34rem) {
+	.commerce-table--owned td[data-label="Updated"],
+	.commerce-table--owned > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
+	.commerce-table--owned .commerce-table__meta { display: block; }
+}
+
+/* The LLM tables (`blocks/llm/ui.rs`, `pages.rs`: providers, models and
+   the per-thread overrides) narrow by their own width the same way. A
+   provider's endpoint, key variable and budget field are always lines
+   under its name (`.llm-table__line`); below the width the full grid needs
+   in the CI font, the protocol, models and status (providers), the provider and
+   capabilities (models), or the provider, model and date (overrides) join
+   one more line under the title (`.llm-table__meta`). Without these the
+   tables scrolled sideways at every width on a real deployment's names,
+   Azure endpoints and model ids.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `PROVIDER_COLUMNS`, `MODEL_COLUMNS` or `OVERRIDE_COLUMNS` must
+   move here too. */
+.llm-table { container: llm-table / inline-size; }
+.llm-table__line, .llm-table__meta {
+	display: block; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+.llm-table__meta { display: none; }
+@container llm-table (max-width: 54rem) {
+	.llm-table--providers td:is([data-label="Protocol"], [data-label="Models"], [data-label="Status"]),
+	.llm-table--providers > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.llm-table--providers .llm-table__meta { display: block; }
+}
+@container llm-table (max-width: 46rem) {
+	.llm-table--models td:is([data-label="Provider"], [data-label="Capabilities"]),
+	.llm-table--models > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.llm-table--models .llm-table__meta { display: block; }
+}
+@container llm-table (max-width: 42rem) {
+	.llm-table--overrides td:is([data-label="Provider"], [data-label="Model"], [data-label="Updated"]),
+	.llm-table--overrides > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.llm-table--overrides .llm-table__meta { display: block; }
+}
+
+/* The tickets lists (`blocks/tickets/pages.rs`) narrow by their own width
+   the same way: the inbox moves a ticket's type, source and date, and the
+   types list a type's public form, default priority, escalation and order,
+   into one line under the title (`.ticket-table__meta`). Without these a
+   real type title ("Incorrect business information (opening hours, …)")
+   scrolled the inbox, and the page with it, from 721 to about 960px.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `TICKET_COLUMNS` or `TYPE_COLUMNS` must move here too. */
+.ticket-table { container: ticket-table / inline-size; }
+.ticket-table__meta {
+	display: none; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+/* A subject may be a pasted URL with no space: it breaks anywhere, or it
+   sets the narrowed grid's minimum and the inbox scrolls the page. */
+.ticket-table--inbox .data-table__title { overflow-wrap: anywhere; }
+@container ticket-table (max-width: 46rem) {
+	.ticket-table--inbox td:is([data-label="Type"], [data-label="Source"], [data-label="Created"]),
+	.ticket-table--inbox > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }
+	.ticket-table--inbox .ticket-table__meta { display: block; }
+}
+@container ticket-table (max-width: 40rem) {
+	.ticket-table--types td:is([data-label="Public form"], [data-label="Default priority"], [data-label="Escalation"], [data-label="Order"]),
+	.ticket-table--types > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }
+	.ticket-table--types .ticket-table__meta { display: block; }
+}

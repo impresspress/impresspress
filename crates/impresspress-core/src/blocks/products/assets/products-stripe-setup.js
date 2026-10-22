@@ -20,6 +20,22 @@ function stripeWebhookElement(tag,text,className){
   if(className)element.className=className;
   return element;
 }
+// A dotted or snake_case name (`checkout.session.completed`) that may break
+// after each `.` and `_` but never inside a word: a `<wbr>` after each
+// separator, so a narrow cell shows `checkout.` / `session.` / `completed`.
+// (The server's `components::breakable_id` breaks *before* a `.`, for
+// domains and file names; an event name reads better split after it.) An
+// id is an opaque token instead, so it takes `cell-wrap` and breaks
+// anywhere, as does the Last result cell, whose errors quote ids
+// (`No such subscription: 'sub_…'`).
+function stripeBreakableName(tag,text){
+  var element=document.createElement(tag);
+  text.split(/(?<=[._])/).forEach(function(part,index){
+    if(index)element.appendChild(document.createElement('wbr'));
+    element.appendChild(document.createTextNode(part));
+  });
+  return element;
+}
 function stripeWebhookDate(value){
   if(!value)return '—';
   var date=new Date(value);
@@ -40,23 +56,27 @@ function renderStripeWebhookEvents(data){
   }
   var table=stripeWebhookElement('table',undefined,'data-table');
   var head=document.createElement('thead'),headRow=document.createElement('tr');
-  ['Event','Status','Mode / attempts','Last result','Action'].forEach(function(label){headRow.appendChild(stripeWebhookElement('th',label))});
+  ['Event','Status','Last result','Action'].forEach(function(label){headRow.appendChild(stripeWebhookElement('th',label))});
   head.appendChild(headRow);table.appendChild(head);
   var body=document.createElement('tbody');
   records.forEach(function(event){
     var row=document.createElement('tr');
     var eventCell=document.createElement('td');
     eventCell.dataset.label='Event';
-    eventCell.appendChild(stripeWebhookElement('strong',event.event_type||'Unknown event'));
+    eventCell.appendChild(stripeBreakableName('strong',event.event_type||'Unknown event'));
     eventCell.appendChild(document.createElement('br'));
-    eventCell.appendChild(stripeWebhookElement('code',event.id));
-    if(event.stripe_account_id){eventCell.appendChild(document.createElement('br'));eventCell.appendChild(stripeWebhookElement('span',event.stripe_account_id,'text-muted text-sm'))}
+    eventCell.appendChild(stripeWebhookElement('code',event.id,'cell-wrap'));
+    if(event.stripe_account_id){eventCell.appendChild(document.createElement('br'));eventCell.appendChild(stripeWebhookElement('span',event.stripe_account_id,'text-muted text-sm cell-wrap'))}
+    // The mode and attempt count are facts about the event, so they are a
+    // line of its cell rather than a column of their own: one column fewer
+    // keeps the table inside its card at 721px.
+    eventCell.appendChild(document.createElement('br'));
+    eventCell.appendChild(stripeWebhookElement('span',(event.livemode?'Live':'Test')+' · '+event.attempts+' attempt'+(event.attempts===1?'':'s'),'text-muted text-sm'));
     row.appendChild(eventCell);
     var statusCell=document.createElement('td');statusCell.dataset.label='Status';
     var badgeClass=event.status==='processed'?'badge-success':event.status==='dead_letter'?'badge-danger':event.status==='failed'?'badge-warning':'badge-info';
     statusCell.appendChild(stripeWebhookElement('span',stripeWebhookStatus(event.status),'badge '+badgeClass));row.appendChild(statusCell);
-    var attempts=document.createElement('td');attempts.dataset.label='Mode / attempts';attempts.textContent=(event.livemode?'Live':'Test')+' · '+event.attempts;row.appendChild(attempts);
-    var result=document.createElement('td');result.dataset.label='Last result';
+    var result=document.createElement('td');result.dataset.label='Last result';result.className='cell-wrap';
     result.appendChild(stripeWebhookElement('span',event.last_error||'No processing error recorded.',event.last_error?'':'text-muted'));
     result.appendChild(document.createElement('br'));
     result.appendChild(stripeWebhookElement('span',event.next_retry_at?'Retry '+stripeWebhookDate(event.next_retry_at):stripeWebhookDate(event.updated_at),'text-muted text-sm'));
@@ -115,20 +135,23 @@ function renderStripeProviderOperations(data){
   if(!records.length){target.appendChild(stripeWebhookElement('p','No matching provider operations.','text-muted text-sm'));return}
   var table=stripeWebhookElement('table',undefined,'data-table');
   var head=document.createElement('thead'),headRow=document.createElement('tr');
-  ['Operation','Status','Attempts','Last result'].forEach(function(label){headRow.appendChild(stripeWebhookElement('th',label))});
+  ['Operation','Status','Last result'].forEach(function(label){headRow.appendChild(stripeWebhookElement('th',label))});
   head.appendChild(headRow);table.appendChild(head);var body=document.createElement('tbody');
   records.forEach(function(operation){
     var row=document.createElement('tr');
     var identity=document.createElement('td');identity.dataset.label='Operation';
-    identity.appendChild(stripeWebhookElement('strong',operation.operation_type||'Provider operation'));
-    identity.appendChild(document.createElement('br'));identity.appendChild(stripeWebhookElement('code',operation.aggregate_id||operation.id));
-    if(operation.stripe_account_id){identity.appendChild(document.createElement('br'));identity.appendChild(stripeWebhookElement('span',operation.stripe_account_id,'text-muted text-sm'))}
+    identity.appendChild(stripeBreakableName('strong',operation.operation_type||'Provider operation'));
+    identity.appendChild(document.createElement('br'));identity.appendChild(stripeWebhookElement('code',operation.aggregate_id||operation.id,'cell-wrap'));
+    if(operation.stripe_account_id){identity.appendChild(document.createElement('br'));identity.appendChild(stripeWebhookElement('span',operation.stripe_account_id,'text-muted text-sm cell-wrap'))}
+    // The attempt count is a line of the operation's cell, as an event's is.
+    var tries=operation.attempts||0;
+    identity.appendChild(document.createElement('br'));
+    identity.appendChild(stripeWebhookElement('span',tries+' attempt'+(tries===1?'':'s'),'text-muted text-sm'));
     row.appendChild(identity);
     var state=document.createElement('td');state.dataset.label='Status';
     var badgeClass=operation.status==='succeeded'?'badge-success':operation.status==='dead_letter'?'badge-danger':operation.status==='failed'?'badge-warning':'badge-info';
     state.appendChild(stripeWebhookElement('span',stripeWebhookStatus(operation.status),'badge '+badgeClass));row.appendChild(state);
-    var attempts=document.createElement('td');attempts.dataset.label='Attempts';attempts.textContent=String(operation.attempts||0);row.appendChild(attempts);
-    var result=document.createElement('td');result.dataset.label='Last result';
+    var result=document.createElement('td');result.dataset.label='Last result';result.className='cell-wrap';
     result.appendChild(stripeWebhookElement('span',operation.last_error||'No reconciliation error recorded.',operation.last_error?'':'text-muted'));
     result.appendChild(document.createElement('br'));
     result.appendChild(stripeWebhookElement('span',operation.next_attempt_at?'Retry '+stripeWebhookDate(operation.next_attempt_at):stripeWebhookDate(operation.updated_at),'text-muted text-sm'));

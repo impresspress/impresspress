@@ -81,6 +81,16 @@
    no head, it is padded on every side like a framed card's content. */
 .card--flush .empty-note { padding: 0 var(--card-pad) var(--card-pad); }
 .card--flush > .card__body:first-child .empty-note { padding-top: var(--card-pad); }
+/* Cards side by side (`.card-grid`, with the `.grid` utilities): the grid's
+   gap spaces them, so their own bottom margin goes and the grid takes it
+   instead. */
+.card-grid { margin-bottom: var(--space-4); }
+.card-grid > .card { margin-bottom: 0; }
+/* A page with no `.page` gap (the products commerce pages) lays its blocks
+   out in flow, and a stat row sets no outer margin: a card or a card grid
+   after one sits the gap below it that a card leaves under the card above
+   it. */
+.stat-row + :is(.card, .card-grid) { margin-top: var(--space-4); }
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 
@@ -439,10 +449,12 @@
 
 /* ===== Messages page (Contexts list) =====
    The New context card's form on one row, and the context list as rows
-   rather than raw anchor tags. */
+   rather than raw anchor tags. The type picker keeps the width of its
+   longest option ("Conversation", "Notification"): a `1fr` share of a
+   narrow card cut the chosen one to "Conversa" at 721px. */
 .messages-new__form {
 	display: grid;
-	grid-template-columns: 1fr 2fr auto;
+	grid-template-columns: max-content minmax(0, 1fr) auto;
 	gap: var(--space-2);
 	/* Labeled form-groups: align the Create button with the control row,
 	   not the label row. */
@@ -534,6 +546,9 @@
 .message-card__content--markdown { white-space: normal; line-height: 1.6; }
 .message-card__content--markdown > :first-child { margin-top: 0; }
 .message-card__content--markdown > :last-child { margin-bottom: 0; }
+/* A code block (a log line, a stack trace) keeps its lines and scrolls
+   inside itself rather than run out of the message and scroll the chat. */
+.message-card__content--markdown pre { overflow-x: auto; max-width: 100%; }
 .message-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
 .message-card__date { margin-left: auto; font-size: var(--text-sm); color: var(--text-muted); }
 
@@ -544,7 +559,7 @@
    bottom edge. */
 .composer { display: flex; align-items: flex-end; gap: var(--space-2); }
 .composer__input { flex: 1; min-width: 0; resize: none; }
-.composer__submit { flex: none; }
+.composer > .btn { flex: none; }
 /* The "Add entry" form's kind and role pickers, side by side above the
    composer; stacked on a phone. */
 .entry-form__meta { display: grid; grid-template-columns: repeat(2, minmax(0, 12rem)); gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
@@ -579,7 +594,6 @@
 	margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text-muted);
 }
 .thread-pane__scroll { overflow-y: auto; flex: 1; }
-.thread-pane__empty { padding: var(--space-4); font-size: var(--text-sm); }
 /* A thread is a link in the list, not a `components::Card`: it draws its
    own frame, and the active one takes the brand tint (layouts/page.css). */
 .thread-card {
@@ -639,15 +653,16 @@
 .share-token { overflow-wrap: anywhere; font-size: var(--text-xs); }
 
 /* ===== LLM chat options (the chat page's rail, blocks/llm/pages.rs) =====
-   A column in the desktop rail; on a phone the rail is a one-row toolbar
-   above the conversation (layouts/page.css), so the picker and the settings
-   link share a row and the link keeps only its icon -- the sub-nav above
-   names the same page in words. */
+   A column in the rail beside the conversation; when the chat is narrower
+   than 60rem the rail is a one-row toolbar above the conversation
+   (layouts/page.css, keyed on the `chat` size container), so the picker and
+   the settings link share a row and the link keeps only its icon -- the
+   sub-nav above names the same page in words. */
 .chat-options { display: flex; flex-direction: column; gap: var(--space-4); }
 .chat-options__settings { align-self: flex-start; }
 /* `#model-status` is empty until llm-chat.js has something to say. */
 .chat-options__status:empty { display: none; }
-@media (max-width: 720px) {
+@container chat (max-width: 59.99rem) {
 	.chat-options { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 	.chat-options__model { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
 	.chat-options__model .form-label { margin: 0; }
@@ -668,11 +683,13 @@
    The inbox filters, the ticket page's sections, timeline and analyses, and
    the type and settings tables' secondary lines. Everything else on these
    pages is a shared component (list/detail templates, DataTable, modal,
-   callout, section header). */
+   callout, Card). The ticket page's sections are `Card`s beside the meta
+   rail. */
 /* The filters' disclosure: a summary button below 720px, nothing above it
-   (`::details-content` shows the closed details' content). */
+   (`::details-content` shows the closed details' content). The summary is a
+   button lookalike, so it takes the buttons' 8px corners. */
 .ticket-filters-disclosure { width: 100%; }
-.ticket-filters-disclosure__summary { display: inline-flex; align-items: center; min-height: var(--target-min); padding: var(--space-2) var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-full); cursor: pointer; font-weight: 500; }
+.ticket-filters-disclosure__summary { display: inline-flex; align-items: center; min-height: var(--target-min); padding: var(--space-2) var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-md); cursor: pointer; font-weight: 500; }
 .ticket-filters-disclosure[open] .ticket-filters-disclosure__summary { margin-bottom: var(--space-3); }
 @media (min-width: 721px) {
 	.ticket-filters-disclosure__summary { display: none; }
@@ -682,8 +699,6 @@
 .ticket-filters .form-group { margin: 0; }
 .ticket-filters__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 .ticket-ref, .ticket-setting-key { display: block; margin-top: 2px; font-family: ui-monospace, Menlo, monospace; font-size: var(--text-sm); font-weight: 400; color: var(--text-muted); }
-.ticket-page { display: flex; flex-direction: column; gap: var(--space-6); }
-.ticket-section { margin: 0 0 var(--space-8); min-width: 0; }
 .ticket-section__intro { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); max-width: 68ch; }
 .ticket-report { margin: 0; line-height: 1.6; max-width: 72ch; overflow-wrap: anywhere; }
 .ticket-workflow__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-4); align-items: start; }
@@ -691,7 +706,7 @@
 @media (max-width: 720px) { .ticket-workflow__grid { grid-template-columns: minmax(0, 1fr); } }
 .ticket-link { display: inline-flex; align-items: center; min-height: var(--target-min); color: var(--primary-button); font-weight: 500; text-decoration: none; }
 /* The legal-hold box: a 24px box in its label row, all of it the target. */
-.ticket-section .form-checkbox input { width: 1.5rem; height: 1.5rem; flex: none; }
+.ticket-detail .form-checkbox input { width: 1.5rem; height: 1.5rem; flex: none; }
 /* Below the two-column width the metadata comes first, under the hero. */
 @media (max-width: 1023px) { .ticket-detail .detail-meta { order: -1; } }
 .ticket-link:hover { text-decoration: underline; }
@@ -703,7 +718,11 @@
 .ticket-event__actor { color: var(--text-secondary); }
 .ticket-event__head .datetime { color: var(--text-muted); }
 .ticket-event__body { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
-.ticket-analysis { padding: var(--space-4); margin-bottom: var(--space-3); border: 1px solid var(--border-light); border-radius: var(--radius-md); }
+/* Everything in an analysis is what the analysing system sent (a model
+   path, a summary quoting ids): it breaks anywhere rather than run past the
+   card on a phone. */
+.ticket-analysis { overflow-wrap: anywhere; }
+.ticket-analysis + .ticket-analysis { margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--border-light); }
 .ticket-analysis__title { margin: 0 0 var(--space-3); font-size: var(--text-base); font-weight: 600; }
 .ticket-analysis__heading { margin: var(--space-4) 0 var(--space-1); font-size: var(--text-sm); font-weight: 600; }
 .ticket-analysis__meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-4); margin: 0; font-size: var(--text-sm); }
@@ -843,6 +862,35 @@
 .product-template-card input { margin-top: var(--space-1); }
 .product-template-card strong, .product-template-card span { grid-column: 2; }
 .product-template-card strong { margin: 0 !important; }
+/* The commerce pages (orders, sellers, Stripe, the seller dashboard) lay
+   their sections out in flow on the page background. A currency's
+   analytics (`analytics_currency`) are its heading, the stat row, the card
+   of other figures and the top products' card; the next currency sits a
+   section's gap below. */
+.products-currency + .products-currency { margin-top: var(--space-8); }
+/* The Stripe page's recovery tools: a disclosure on the page background
+   (not a frame, so the cards it opens onto are not inside one), its summary
+   a muted line with the cards a gap under it. */
+.products-tools > .products-tools__summary {
+	cursor: pointer; padding: var(--space-2) 0;
+	font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary);
+}
+.products-tools[open] > .products-tools__summary { margin-bottom: var(--space-3); }
+/* One recovery tool (`stripe_ops_card`), a flush card: its toolbar (the
+   status filter, Refresh, any action) and its live lines take the card's
+   inset, and so does the list until it holds a table, which then runs edge
+   to edge as the card's own (layout rule 2). */
+.products-ops__bar {
+	display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3);
+	padding: 0 var(--card-pad);
+}
+.products-ops__bar > .form-group { margin: 0; min-width: min(100%, 14rem); }
+.products-ops__status { padding: 0 var(--card-pad); }
+.products-ops__status > p { margin: var(--space-3) 0 0; }
+.products-ops__status > p:empty, .products-ops__status > p[hidden] { display: none; }
+.products-ops__list { margin-top: var(--space-4); padding: 0 var(--card-pad) var(--card-pad); font-size: var(--text-sm); color: var(--text-secondary); }
+.products-ops__list:has(> table) { padding: 0; }
+.products-ops__list > p { margin: 0; }
 @media (max-width: 760px) {
 	.products-guide { grid-template-columns: 1fr; }
 	.product-template-grid { grid-template-columns: 1fr; }

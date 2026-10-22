@@ -48,8 +48,7 @@ pub(crate) fn admin_sections(active: &str) -> Markup {
 ///
 /// The overview is titled "Storage". A sub-page is titled by its own name
 /// under the trail `Storage ›`, which leads back to the overview — the rule
-/// Tickets' sub-pages follow too (LLM, Products and Legal adopt it in their
-/// own redesign PRs).
+/// every block's sub-pages follow (Tickets, Products, LLM and Legal too).
 async fn files_page(
     ctx: &dyn Context,
     msg: &Message,

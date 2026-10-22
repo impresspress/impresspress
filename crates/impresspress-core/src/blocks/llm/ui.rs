@@ -26,7 +26,11 @@ use super::{
 use crate::{
     db_read::{self, Bound},
     llm_wire::openai::MaxTokensField,
-    ui::{self, components, icons},
+    ui::{
+        self,
+        components::{self, Action, ActionTarget},
+        icons,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -103,19 +107,16 @@ pub(super) async fn providers_page(
         }
     };
 
-    let shell = ui::Shell::admin("LLM Providers", "Providers").subtitle(if manages {
-        "OpenAI, Anthropic and OpenAI-compatible endpoints the chat can route to"
-    } else {
-        "Read-only on this deployment"
-    });
+    let shell = ui::Shell::admin(super::pages::Section::Providers.window_title(), "Providers")
+        .trail(super::pages::llm_trail("Providers"))
+        .subtitle(if manages {
+            "OpenAI, Anthropic and OpenAI-compatible endpoints the chat can route to"
+        } else {
+            "Read-only on this deployment"
+        });
     let shell = if manages {
-        shell.primary_action(
-            components::HeaderAction::new(
-                "Add provider",
-                components::ActionTarget::Modal(ADD_PROVIDER_MODAL_ID),
-            )
-            .icon(icons::plus()),
-        )
+        let (label, target, icon) = ADD_PROVIDER;
+        shell.primary_action(components::HeaderAction::new(label, target).icon(icon()))
     } else {
         shell
     };
@@ -133,20 +134,24 @@ pub(super) async fn providers_page(
 /// `data-modal-target`.
 const ADD_PROVIDER_MODAL_ID: &str = "add-provider";
 
+/// The Add provider trigger: the header's primary and the empty list's
+/// secondary copy are drawn from this one label, target and icon.
+const ADD_PROVIDER: (&str, ActionTarget<'static>, fn() -> Markup) = (
+    "Add provider",
+    ActionTarget::Modal(ADD_PROVIDER_MODAL_ID),
+    icons::plus,
+);
+
 /// The element id of provider `id`'s edit modal.
 fn edit_modal_id(id: &str) -> String {
     format!("edit-provider-{id}")
 }
 
-/// The empty provider list's call to action: opens the Add provider modal.
+/// The empty provider list's call to action: the header's Add provider
+/// again, as a secondary — the header holds the page's one primary.
 fn add_provider_button() -> Markup {
-    html! {
-        button .btn.btn--primary type="button"
-            data-action="modal-open" data-modal-target=(ADD_PROVIDER_MODAL_ID)
-        {
-            (icons::plus()) "Add provider"
-        }
-    }
+    let (label, target, icon) = ADD_PROVIDER;
+    Action::secondary(label, target).icon(icon()).render()
 }
 
 /// What the page says instead of offering controls when the runtime holds a
@@ -314,20 +319,21 @@ fn provider_form(form: ProviderForm<'_>) -> Markup {
             }
             (components::modal_footer(html! {
                 (components::modal_cancel())
-                button .btn.btn--primary type="submit" { (submit) }
+                (Action::primary(submit, ActionTarget::Submit { form: None }).render())
             }))
         }
     }
 }
 
-/// The providers table's columns. The key variable and the budget field are
-/// optional: most deployments set neither on any provider.
-const PROVIDER_COLUMNS: [components::TableCol<'static>; 8] = [
-    components::TableCol::new("Name").primary(),
+/// The providers table's columns. A provider is named by its name with its
+/// endpoint, and the key variable and budget field it may set, on lines
+/// under it: eight columns of URLs and variable names did not fit the
+/// content column even at 1280px. Narrow, the protocol, the models and the
+/// status join those lines too (table.css `.llm-table--providers`, which
+/// hides the headers by position: a column moved here must move there).
+const PROVIDER_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Provider").primary(),
     components::TableCol::new("Protocol"),
-    components::TableCol::new("Endpoint"),
-    components::TableCol::new("Key variable").optional(),
-    components::TableCol::new("Budget field").optional(),
     components::TableCol::new("Models"),
     components::TableCol::new("Status"),
     components::TableCol::new("Actions").actions(),
@@ -336,14 +342,11 @@ const PROVIDER_COLUMNS: [components::TableCol<'static>; 8] = [
 /// The same columns less Actions, for a runtime that cannot manage
 /// providers: the buttons are the only things in that column, and a runtime
 /// that answers 501 to every one of them has no action to offer.
-const READ_ONLY_PROVIDER_COLUMNS: [components::TableCol<'static>; 7] = [
+const READ_ONLY_PROVIDER_COLUMNS: [components::TableCol<'static>; 4] = [
     PROVIDER_COLUMNS[0],
     PROVIDER_COLUMNS[1],
     PROVIDER_COLUMNS[2],
     PROVIDER_COLUMNS[3],
-    PROVIDER_COLUMNS[4],
-    PROVIDER_COLUMNS[5],
-    PROVIDER_COLUMNS[6],
 ];
 
 /// Render the providers table. Pure function of the loaded configs — used
@@ -365,47 +368,69 @@ fn render_providers_table(configs: &[(String, ProviderConfig)], manages: bool) -
         &READ_ONLY_PROVIDER_COLUMNS
     };
     let table = components::DataTable::new(columns).rows(rows);
-    if manages {
-        table
-            .empty_state(
-                "No providers yet",
-                "Add an OpenAI, Anthropic or OpenAI-compatible endpoint, and the chat can route to it.",
-                Some(add_provider_button()),
-            )
-            .render()
+    let table = if manages {
+        table.empty_state(
+            "No providers yet",
+            "Add an OpenAI, Anthropic or OpenAI-compatible endpoint, and the chat can route to it.",
+            Some(add_provider_button()),
+        )
     } else {
-        table
-            .empty_state(
-                "No providers",
-                "None are configured, and this deployment cannot add one.",
-                None,
-            )
-            .render()
+        table.empty_state(
+            "No providers",
+            "None are configured, and this deployment cannot add one.",
+            None,
+        )
+    };
+    html! { div .llm-table .llm-table--providers { (table.render()) } }
+}
+
+/// A provider's models as one line, or what the list says when it has none.
+fn models_text(cfg: &ProviderConfig) -> Markup {
+    if cfg.models.is_empty() {
+        html! { span .text-muted { "None yet" } }
+    } else {
+        html! {
+            @for (i, model) in cfg.models.iter().enumerate() {
+                @if i > 0 { ", " }
+                (components::breakable_id(model))
+            }
+        }
     }
 }
 
 /// One provider's cells, in [`PROVIDER_COLUMNS`] order; the Actions cell
 /// only when `manages`.
 fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> {
+    let key_var = cfg.key_var.as_deref();
+    let budget = cfg.max_tokens_field;
     let mut cells = vec![
-        html! { strong { (cfg.name) } },
+        html! {
+            strong .data-table__title { (components::breakable_id(&cfg.name)) }
+            span .llm-table__line { (components::breakable_id(&cfg.endpoint)) }
+            @if key_var.is_some() || budget.is_some() {
+                span .llm-table__line {
+                    @if let Some(kv) = key_var { "Key " code { (components::breakable_id(kv)) } }
+                    @if key_var.is_some() && budget.is_some() { " · " }
+                    @if let Some(field) = budget {
+                        "Budget field " code { (components::breakable_id(field.as_str())) }
+                    }
+                }
+            }
+            // The status, protocol and models columns, when the table is too
+            // narrow for them.
+            span .llm-table__meta {
+                @if !cfg.enabled {
+                    (components::badge(components::BadgeVariant::Secondary, "Disabled")) " "
+                }
+                (cfg.protocol.as_str()) " · " (models_text(cfg))
+            }
+        },
         components::badge(components::BadgeVariant::Secondary, cfg.protocol.as_str()),
-        html! { span .text-sm { (components::breakable_id(&cfg.endpoint)) } },
-        match cfg.key_var.as_deref() {
-            Some(kv) => html! { code .text-xs { (components::breakable_id(kv)) } },
-            None => html! {},
-        },
-        match cfg.max_tokens_field {
-            Some(field) => html! { code .text-xs { (field.as_str()) } },
-            None => html! {},
-        },
-        if cfg.models.is_empty() {
-            html! { span .text-muted { "None yet" } }
-        } else {
-            html! { span .text-sm { (cfg.models.join(", ")) } }
-        },
+        models_text(cfg),
+        // Only the state that is not the default (design rule 11): a
+        // provider is enabled unless it says otherwise.
         if cfg.enabled {
-            components::badge(components::BadgeVariant::Success, "Enabled")
+            html! {}
         } else {
             components::badge(components::BadgeVariant::Secondary, "Disabled")
         },
@@ -489,7 +514,8 @@ pub(super) async fn models_page(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("LLM Models", "Models")
+        ui::Shell::admin(super::pages::Section::Models.window_title(), "Models")
+            .trail(super::pages::llm_trail("Models"))
             .subtitle("Every model the configured providers offer"),
         ui::PageBody::from(render_models_table(&models))
             .with_subnav(super::pages::sections(super::pages::Section::Models)),
@@ -497,7 +523,9 @@ pub(super) async fn models_page(
     .await
 }
 
-/// The models table's columns.
+/// The models table's columns. Narrow, the provider and capabilities move
+/// to a line under the model (table.css `.llm-table--models`, which hides
+/// the headers by position: a column moved here must move there).
 const MODEL_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Model").primary(),
     components::TableCol::new("Provider"),
@@ -512,7 +540,7 @@ const MODEL_COLUMNS: [components::TableCol<'static>; 5] = [
 /// The empty state leads to the Providers page, which is where a model list
 /// comes from: a provider's own `models`, or Discover on its row.
 fn render_models_table(models: &[ModelInfo]) -> Markup {
-    components::DataTable::new(&MODEL_COLUMNS)
+    let table = components::DataTable::new(&MODEL_COLUMNS)
         .rows(
             models
                 .iter()
@@ -522,11 +550,11 @@ fn render_models_table(models: &[ModelInfo]) -> Markup {
         .empty_state(
             "No models yet",
             "Models appear here once a provider lists them. Add a provider, or use Discover on one.",
-            Some(html! {
-                a .btn.btn--primary href="/b/llm/providers" { "Go to providers" }
-            }),
+            // A way forward, not the page's main action: a secondary.
+            Some(Action::secondary("Go to providers", ActionTarget::Link("/b/llm/providers")).render()),
         )
-        .render()
+        .render();
+    html! { div .llm-table .llm-table--models { (table) } }
 }
 
 /// One model's cells, in [`MODEL_COLUMNS`] order. Status loads lazily on row
@@ -551,6 +579,17 @@ fn model_cells(model: &ModelInfo) -> Vec<Markup> {
         (caps.json_mode, "json"),
     ];
     let any_capability = capabilities.iter().any(|(on, _)| *on);
+    let capability_badges = html! {
+        @if any_capability {
+            div .flex .gap-1 .flex-wrap {
+                @for (on, name) in capabilities {
+                    @if on { (components::badge(components::BadgeVariant::Secondary, name)) }
+                }
+            }
+        } @else {
+            (components::NO_VALUE)
+        }
+    };
 
     let status_url = format!("/b/llm/api/models/{backend_id}/{model_id}/status");
     let load_url = format!("/b/llm/api/models/{backend_id}/{model_id}/load");
@@ -558,24 +597,22 @@ fn model_cells(model: &ModelInfo) -> Vec<Markup> {
 
     vec![
         html! {
-            strong .data-table__title { (display_name) }
+            strong .data-table__title { (components::breakable_id(display_name)) }
             @if display_name != model_id {
                 " "
-                code .text-xs { (model_id) }
+                code { (components::breakable_id(model_id)) }
+            }
+            // The provider and capabilities columns, when the table is too
+            // narrow for them.
+            div .llm-table__meta {
+                (components::breakable_id(backend_id))
+                (capability_badges)
             }
         },
-        components::badge(components::BadgeVariant::Secondary, backend_id),
-        html! {
-            @if any_capability {
-                div .flex .gap-1 .flex-wrap {
-                    @for (on, name) in capabilities {
-                        @if on { (components::badge(components::BadgeVariant::Secondary, name)) }
-                    }
-                }
-            } @else {
-                (components::NO_VALUE)
-            }
-        },
+        // A provider's name, not a state: plain text that wraps, where a
+        // badge cannot.
+        html! { (components::breakable_id(backend_id)) },
+        capability_badges,
         // Lazy-load the per-model status so a slow backend doesn't hold up
         // the initial render. The status route answers an htmx request with
         // the badge itself (`routes::models::status_badge`).
@@ -718,11 +755,13 @@ mod tests {
             "empty-state hint missing; got: {m}"
         );
         // The empty state's call to action opens the same modal the topbar's
-        // primary action does.
+        // primary action does, as a secondary: the header holds the page's
+        // one primary.
         assert!(
-            m.contains(r#"data-action="modal-open" data-modal-target="add-provider""#),
-            "the empty state must offer Add provider; got: {m}"
+            m.contains(r#"<button class="btn btn--secondary" type="button" data-action="modal-open" data-modal-target="add-provider">"#),
+            "the empty state must offer Add provider as a secondary; got: {m}"
         );
+        assert!(!m.contains("btn--primary"), "{m}");
         // No <table> element when empty — keeps the page compact.
         assert!(
             !m.contains("<table"),
@@ -848,7 +887,7 @@ mod tests {
         // A real way forward, not a sentence naming a button on another page.
         assert!(
             m.contains(
-                r#"<a class="btn btn--primary" href="/b/llm/providers">Go to providers</a>"#
+                r#"<a class="btn btn--secondary" href="/b/llm/providers">Go to providers</a>"#
             ),
             "the empty state must link to the providers page; got: {m}"
         );
@@ -931,6 +970,28 @@ mod tests {
             "got: {m}"
         );
         assert!(m.contains(r#"aria-label="Delete openai-main""#), "got: {m}");
+    }
+
+    /// The status column shows only the state that is not the default: a
+    /// disabled provider says "Disabled", an enabled one says nothing.
+    #[test]
+    fn only_a_disabled_provider_carries_a_status_badge() {
+        let mut configs = sample_configs();
+        let mut disabled = configs[0].clone();
+        disabled.0 = "row-2".to_string();
+        disabled.1.name = "openai-backup".to_string();
+        disabled.1.enabled = false;
+        configs.push(disabled);
+        let m = render_providers_table(&configs, true).into_string();
+        assert!(!m.contains(">Enabled<"), "{m}");
+        // One in the disabled row's Status cell, one in the line that
+        // replaces the column on a narrow table; none for the enabled row.
+        assert_eq!(
+            m.matches(r#"<span class="badge badge-secondary">Disabled</span>"#)
+                .count(),
+            2,
+            "{m}"
+        );
     }
 
     /// The create form waits in a modal and the edit form of each provider
