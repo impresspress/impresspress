@@ -586,7 +586,7 @@ mod test_support {
 /// so nothing else notices if the kind, the block id or the answer's shape
 /// moves. The Cloudflare `scheduled` handler is a `worker::Env` away from any
 /// test lane; what it does that is testable is exactly this pair, and it is
-/// tested here over the retention sweep's own four-table fixture.
+/// tested here over the retention sweep's own three-table fixture.
 #[cfg(test)]
 mod scheduled_maintenance_tests {
     use wafer_run::{Block, InputStream};
@@ -639,7 +639,6 @@ mod scheduled_maintenance_tests {
                 complete: true,
                 sessions_deleted: 1,
                 tokens_deleted: 1,
-                jwt_blocklist_deleted: 0,
                 oauth_pkce_deleted: 0,
                 errors: Vec::new(),
             },

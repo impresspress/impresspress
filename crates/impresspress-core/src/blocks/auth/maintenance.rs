@@ -1,9 +1,8 @@
-//! [B12] Retention for the four auth tables that carry an `expires_at`.
+//! [B12] Retention for the three auth tables that carry an `expires_at`.
 //!
-//! `sessions`, `tokens`, `jwt_blocklist` and `oauth_pkce` all accumulate rows
-//! that nothing will ever read again, and until this module none of them had a
-//! non-test caller for its `delete_expired`: two carried `#[allow(dead_code)]`
-//! and a third a "TODO: not yet wired". On a busy deployment `tokens` grows
+//! `sessions`, `tokens` and `oauth_pkce` all accumulate rows that nothing will
+//! ever read again, and until this module none of them had a non-test caller
+//! for its `delete_expired`. On a busy deployment `tokens` grows
 //! fastest — rotation revokes rather than deletes, so every 30-minute refresh
 //! left a tombstone forever.
 //!
@@ -34,10 +33,10 @@
 use serde::{Deserialize, Serialize};
 use wafer_run::context::Context;
 
-use super::repo::{jwt_blocklist, maintenance, oauth_pkce, sessions, tokens};
+use super::repo::{maintenance, oauth_pkce, sessions, tokens};
 
 /// How long a pass covers: at most one sweep an hour, however many logins
-/// arrive. Each pass is four filtered deletes, so the cost of running it a
+/// arrive. Each pass is three filtered deletes, so the cost of running it a
 /// little too often is small and the cost of never running it is unbounded
 /// table growth — an hour is the conservative end of that trade.
 pub const SWEEP_INTERVAL_SECS: i64 = 3_600;
@@ -61,22 +60,20 @@ pub struct SweepResult {
     pub sessions_deleted: u64,
     /// Expired refresh-token rows removed, revoked tombstones included.
     pub tokens_deleted: u64,
-    /// Blocklisted JWTs whose natural expiry has passed.
-    pub jwt_blocklist_deleted: u64,
     /// OAuth PKCE states for flows the user abandoned.
     pub oauth_pkce_deleted: u64,
     /// Names of the deletes that failed (`"sessions"`, `"tokens"`,
-    /// `"jwt_blocklist"`, `"oauth_pkce"`).
+    /// `"oauth_pkce"`).
     pub errors: Vec<String>,
 }
 
-/// Delete every row in the four tables whose `expires_at` is in the past.
+/// Delete every row in the three tables whose `expires_at` is in the past.
 ///
 /// Each table is an independent `db::delete_by_filters_count` — one statement
-/// per table, no list-then-delete-per-row — so a pass is four round trips
+/// per table, no list-then-delete-per-row — so a pass is three round trips
 /// regardless of how many rows it removes. A failure on one table is recorded
 /// and the pass continues: the tables are unrelated, and refusing to prune
-/// three of them because the fourth is unavailable helps nobody.
+/// two of them because the third is unavailable helps nobody.
 pub async fn sweep(ctx: &dyn Context) -> SweepResult {
     // A single cutoff for the whole pass, in the `…Z` form every auth table
     // writes (`repo::now_iso`), so the string comparison the filter does is
@@ -95,10 +92,6 @@ pub async fn sweep(ctx: &dyn Context) -> SweepResult {
     match tokens::delete_expired(ctx, &cutoff).await {
         Ok(n) => result.tokens_deleted = n,
         Err(e) => record_failure(&mut result, "tokens", &e.to_string()),
-    }
-    match jwt_blocklist::delete_expired(ctx, &cutoff).await {
-        Ok(n) => result.jwt_blocklist_deleted = n,
-        Err(e) => record_failure(&mut result, "jwt_blocklist", &e.to_string()),
     }
     match oauth_pkce::delete_expired(ctx, &cutoff).await {
         Ok(n) => result.oauth_pkce_deleted = n,
@@ -120,10 +113,10 @@ fn record_failure(result: &mut SweepResult, table: &str, error: &str) {
 ///
 /// The stamp is written *before* the sweep runs, so a pass that fails partway
 /// does not make every subsequent login retry it — the next window catches
-/// whatever it missed, and the four deletes are idempotent anyway. A failure
+/// whatever it missed, and the three deletes are idempotent anyway. A failure
 /// to read or write the stamp skips the sweep rather than running it
 /// unthrottled: an unreadable throttle on the login path must not turn into
-/// four deletes per login.
+/// three deletes per login.
 pub async fn sweep_if_due(ctx: &dyn Context) -> Option<SweepResult> {
     let last = match maintenance::last_swept_at(ctx).await {
         Ok(v) => v,
@@ -160,9 +153,7 @@ fn due(last_swept_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
 mod tests {
     use super::*;
     use crate::{
-        blocks::auth::repo::{
-            jwt_blocklist::NewBlocklistEntry, oauth_pkce::NewPkceState, sessions::NewSession,
-        },
+        blocks::auth::repo::{oauth_pkce::NewPkceState, sessions::NewSession},
         test_support::{FailingDbOpContext, TestContext},
     };
 
@@ -172,8 +163,8 @@ mod tests {
             .to_string()
     }
 
-    /// One expired and one live row in each of the four tables.
-    async fn seed_four_tables(ctx: &TestContext) {
+    /// One expired and one live row in each of the three tables.
+    async fn seed_three_tables(ctx: &TestContext) {
         ctx.seed_auth_user("user-a").await;
 
         for (family, expires_at) in [("fam-dead", iso(-60)), ("fam-live", iso(3600))] {
@@ -196,19 +187,6 @@ mod tests {
                 .expect("seed token");
         }
 
-        for (jti, expires_at) in [("jti-dead", iso(-60)), ("jti-live", iso(3600))] {
-            jwt_blocklist::insert(
-                ctx,
-                NewBlocklistEntry {
-                    jti,
-                    user_id: "user-a",
-                    expires_at: &expires_at,
-                },
-            )
-            .await
-            .expect("seed blocklist entry");
-        }
-
         for (state, expires_at) in [("pkce-dead", iso(-60)), ("pkce-live", iso(3600))] {
             oauth_pkce::insert(
                 ctx,
@@ -226,11 +204,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_deletes_only_the_expired_rows_in_all_four_tables() {
+    async fn sweep_deletes_only_the_expired_rows_in_all_three_tables() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        seed_four_tables(&ctx).await;
+        seed_three_tables(&ctx).await;
 
         let result = sweep(&ctx).await;
         assert_eq!(
@@ -239,7 +217,6 @@ mod tests {
                 complete: true,
                 sessions_deleted: 1,
                 tokens_deleted: 1,
-                jwt_blocklist_deleted: 1,
                 oauth_pkce_deleted: 1,
                 errors: Vec::new(),
             }
@@ -257,19 +234,17 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-        assert!(jwt_blocklist::contains(&ctx, "jti-live").await.unwrap());
-        assert!(!jwt_blocklist::contains(&ctx, "jti-dead").await.unwrap());
         assert!(oauth_pkce::take(&ctx, "pkce-live").await.unwrap().is_some());
     }
 
-    /// One unavailable table does not stop the other three from being pruned,
+    /// One unavailable table does not stop the other two from being pruned,
     /// and the pass says so rather than reporting success.
     #[tokio::test]
     async fn a_failing_table_is_named_and_the_others_still_run() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        seed_four_tables(&ctx).await;
+        seed_three_tables(&ctx).await;
         let failing =
             FailingDbOpContext::new(ctx, vec![("database.delete_where_count", tokens::TABLE)]);
 
@@ -277,7 +252,6 @@ mod tests {
         assert!(!result.complete);
         assert_eq!(result.errors, vec!["tokens".to_string()]);
         assert_eq!(result.sessions_deleted, 1);
-        assert_eq!(result.jwt_blocklist_deleted, 1);
         assert_eq!(result.oauth_pkce_deleted, 1);
     }
 
@@ -286,7 +260,7 @@ mod tests {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        seed_four_tables(&ctx).await;
+        seed_three_tables(&ctx).await;
 
         let first = sweep_if_due(&ctx).await.expect("no stamp means overdue");
         assert_eq!(first.sessions_deleted, 1);
@@ -302,7 +276,7 @@ mod tests {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        seed_four_tables(&ctx).await;
+        seed_three_tables(&ctx).await;
         maintenance::record_sweep(&ctx, &iso(-(SWEEP_INTERVAL_SECS + 60)))
             .await
             .expect("stamp an old pass");
@@ -322,13 +296,13 @@ mod tests {
     }
 
     /// An unreadable throttle skips the sweep. Running unthrottled instead
-    /// would put four deletes on every single login.
+    /// would put three deletes on every single login.
     #[tokio::test]
     async fn an_unreadable_stamp_skips_rather_than_sweeps() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        seed_four_tables(&ctx).await;
+        seed_three_tables(&ctx).await;
         let failing = FailingDbOpContext::new(ctx, vec![("database.get", maintenance::TABLE)]);
 
         assert!(sweep_if_due(&failing).await.is_none());

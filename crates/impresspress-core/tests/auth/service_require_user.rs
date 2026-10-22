@@ -13,7 +13,7 @@ use std::{sync::Arc, time::Duration};
 use impresspress_core::{
     blocks::auth::{
         migrations,
-        repo::{jwt_blocklist, pats, sessions, users},
+        repo::{pats, sessions, users},
         service::{hash_token, AuthServiceImpl},
     },
     test_support::{seed_user, TestContext},
@@ -215,40 +215,6 @@ async fn require_user_rejects_an_expired_access_jwt() {
         .require_user(&*ctx, &msg_with_bearer(&expired))
         .await
         .expect_err("an expired token must not authenticate");
-    assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
-}
-
-/// SEC-042: logout blocklists the in-flight token's `jti`. The service must
-/// honour the same blocklist the pipeline does, or a logged-out token would
-/// keep authenticating on the `auth@v1` surface.
-#[tokio::test]
-async fn require_user_rejects_a_blocklisted_jti() {
-    let (raw, ctx) = fixture().await;
-    let uid = seed_user_id(ctx.as_ref(), "blocked@example.com").await;
-
-    let token = raw
-        .mint_access_token(
-            &uid,
-            &[("jti", serde_json::json!("jti-blocked"))],
-            Duration::from_secs(3600),
-        )
-        .await;
-    jwt_blocklist::insert(
-        ctx.as_ref(),
-        jwt_blocklist::NewBlocklistEntry {
-            jti: "jti-blocked",
-            user_id: &uid,
-            expires_at: "2099-01-01T00:00:00Z",
-        },
-    )
-    .await
-    .expect("blocklist the jti");
-
-    let svc = AuthServiceImpl;
-    let err = svc
-        .require_user(&*ctx, &msg_with_bearer(&token))
-        .await
-        .expect_err("a blocklisted jti must not authenticate");
     assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
 }
 

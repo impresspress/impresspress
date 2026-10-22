@@ -141,7 +141,7 @@ fn is_expired(expires_at: &str) -> bool {
 /// Internal credential classification used by all three require_* methods.
 enum Creds {
     /// A verified access JWT; the payload is its `sub`, already checked
-    /// against the signature, `type`, issuer, blocklist, login-family and
+    /// against the signature, `type`, issuer, login-family and
     /// `auth_version` rules by [`crate::crypto::verify_access_token`].
     Jwt(String),
     /// A presented token that is not an access JWT, as the sha256 of the raw
@@ -153,7 +153,7 @@ enum Creds {
 ///
 /// A token that verifies as an access JWT is that; any other token is a
 /// candidate PAT; no token at all is unauthenticated. A token whose
-/// verification could not be completed (a failed blocklist, login-family or
+/// verification could not be completed (a failed login-family or
 /// `auth_version` read) is neither: it is `AuthError::Backend` with the
 /// error [`crate::crypto::verify_access_token`] classified. The token is whichever
 /// of the `Authorization: Bearer` header and the `auth_token` cookie the
@@ -221,27 +221,21 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // wildcard covers users / sessions / pats / provider_links /
         // bootstrap_tokens / orgs / api_keys without enumerating each.
         wafer_run::ResourceGrant::read_write("impresspress/auth-ui", "wafer_run__auth__*"),
-        // The pipeline router (ImpresspressRouterBlock, id `impresspress/router`)
-        // calls `jwt_blocklist::contains()` from `crate::crypto::verify_access_token`
-        // (through `extract_auth_meta`) during request preprocessing — SEC-042 logout invalidates JWTs
-        // via this table. The call runs in the router's context, so the
-        // router needs read access. Without it WRAP denies the read and
-        // every request bearing an access JWT is refused with 403 "Access
-        // denied" (`blocks::auth::credential_check_failed`).
-        wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__jwt_blocklist"),
-        // P2c: same pipeline-preprocessing shape as the blocklist grant
-        // above — `crate::crypto::verify_access_token` also calls
+        // P2c: the pipeline router (ImpresspressRouterBlock, id
+        // `impresspress/router`) checks every access JWT during request
+        // preprocessing — `crate::crypto::verify_access_token`, through
+        // `extract_auth_meta` — and that check calls
         // `blocks::auth::current_auth_version()`, which reads the users row
-        // through `repo::users::auth_version()`, in the router's context on
-        // every request bearing an access JWT. Without this grant WRAP
-        // denies the users-table read and every such request is refused
-        // with 403 "Access denied", the same as the blocklist read above.
+        // through `repo::users::auth_version()`, in the router's context.
+        // Without this grant WRAP denies the users-table read and every
+        // request bearing an access JWT is refused with 403 "Access denied"
+        // (`blocks::auth::credential_check_failed`).
         wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__users"),
         // [SEC-02] The same step asks whether the token's login family is
         // still signed in (`repo::sessions::is_live`), reading its session
         // row in the router's context on every request bearing an access
         // JWT. Without this grant WRAP denies the read and every such request
-        // is refused with 403 "Access denied", the same as the reads above.
+        // is refused with 403 "Access denied", the same as the read above.
         wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__sessions"),
         // The API-key half of the same step: `blocks::auth::authenticate_api_key`
         // looks the key up in the router's context on every request bearing
@@ -269,15 +263,6 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // ownership check that precedes it reads the session row, not this
         // table.
         wafer_run::ResourceGrant::read_write("impresspress/userportal", "wafer_run__auth__tokens"),
-        // Revoking the session the request itself belongs to also blocklists
-        // the access token it presented (`auth::helpers::end_presented_access_token`),
-        // the per-token record logout writes too; deleting the family's row
-        // is what ends that token. Append-only: the helper only ever adds a
-        // blocklist row.
-        wafer_run::ResourceGrant::append(
-            "impresspress/userportal",
-            "wafer_run__auth__jwt_blocklist",
-        ),
         // Userportal `/b/userportal/security` lists the caller's linked OAuth
         // providers and removes individual ones. Read+write because the
         // unlink deletes the row; both the list and the delete are scoped to
@@ -405,7 +390,7 @@ impl AuthService for AuthServiceImpl {
 
     async fn require_user(&self, ctx: &dyn Context, msg: &Message) -> Result<UserId, AuthError> {
         match extract_creds(ctx, msg).await? {
-            // The token's own expiry, issuer, blocklist status and
+            // The token's own expiry, issuer, login family and
             // `auth_version` were checked by `verify_access_token`; what is
             // left is the account lifecycle, which no token can carry.
             Creds::Jwt(sub) => {
@@ -699,13 +684,13 @@ mod tests {
             consumers.contains(&"impresspress/products"),
             "grants must include products: {consumers:?}"
         );
-        // The pipeline router (impresspress/router) calls
-        // jwt_blocklist::contains() from verify_access_token to honour
-        // SEC-042 (logout invalidates JWT). Without a grant, WRAP denies
-        // the read and every signed-in request is refused with a 403.
+        // The pipeline router (impresspress/router) reads the login
+        // family's session row and the account's auth_version from
+        // verify_access_token. Without a grant, WRAP denies the read and
+        // every signed-in request is refused with a 403.
         assert!(
             consumers.contains(&"impresspress/router"),
-            "grants must include router (SEC-042 blocklist read): {consumers:?}"
+            "grants must include router (access-token check reads): {consumers:?}"
         );
         // Sanity: at least one grant exists per consumer (non-empty list).
         assert!(

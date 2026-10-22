@@ -707,10 +707,6 @@ pub async fn run_scheduled_with_config<F, G>(
                     ("complete", &sweep.complete.to_string()),
                     ("sessions_deleted", &sweep.sessions_deleted.to_string()),
                     ("tokens_deleted", &sweep.tokens_deleted.to_string()),
-                    (
-                        "jwt_blocklist_deleted",
-                        &sweep.jwt_blocklist_deleted.to_string()
-                    ),
                     ("oauth_pkce_deleted", &sweep.oauth_pkce_deleted.to_string()),
                     ("errors", &sweep.errors.join(",")),
                 ],

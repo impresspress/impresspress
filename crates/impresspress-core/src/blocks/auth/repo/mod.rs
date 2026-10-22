@@ -36,7 +36,6 @@ use wafer_run::{ErrorCode, WaferError};
 
 pub mod api_keys;
 pub mod bootstrap_tokens;
-pub mod jwt_blocklist;
 pub mod local_credentials;
 pub mod maintenance;
 pub mod oauth_pkce;

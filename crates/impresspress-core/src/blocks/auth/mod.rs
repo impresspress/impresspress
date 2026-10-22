@@ -573,8 +573,8 @@ pub(crate) async fn current_auth_version(
 /// is answered with.
 ///
 /// Both request-time credential checks read the database —
-/// `crate::crypto::verify_access_token` (the JWT blocklist, the login
-/// family's session row and `auth_version`) and [`authenticate_api_key`] (the key, its user and their
+/// `crate::crypto::verify_access_token` (the login family's session row and
+/// `auth_version`) and [`authenticate_api_key`] (the key, its user and their
 /// roles) — and a failed read decides neither way: the request is not
 /// authenticated, and it is not anonymous either, because answering it as
 /// anonymous tells a signed-in client it has been signed out. So the request
@@ -1098,62 +1098,6 @@ pub(crate) mod helpers {
             .min(ACCESS_TOKEN_LIFETIME_SECS_MAX))
     }
 
-    /// End the access token the request presented: put its `jti` on the
-    /// blocklist until the token's own expiry, so `extract_auth_meta` refuses
-    /// it from the next request on (SEC-042). Per-`jti`: the account's other
-    /// sessions are untouched.
-    ///
-    /// Both callers also delete the token's family row ([`end_family`],
-    /// [`end_all_families`]), which ends the token by itself:
-    /// `crate::crypto::verify_access_token` refuses a token whose family has
-    /// no live row. The blocklist entry is the older, per-token record of the
-    /// same end, written before an access token's family was checked.
-    ///
-    /// No-op for a request that presented no verified token. The expiry is
-    /// the token's own `exp` (`META_AUTH_EXP`), which `extract_auth_meta`
-    /// sets for every token it accepts; only when that is missing does it
-    /// fall back to now + the configured access lifetime, the longest the
-    /// token could live. A failed write is returned — a token that stays
-    /// valid must not be reported as ended.
-    ///
-    /// Callers: `POST /b/auth/api/logout`, and the userportal's revoke of the
-    /// session the request itself belongs to.
-    pub(crate) async fn end_presented_access_token(
-        ctx: &dyn wafer_run::context::Context,
-        msg: &wafer_run::Message,
-    ) -> Result<(), WaferError> {
-        use crate::{
-            blocks::auth::repo::jwt_blocklist::{self, NewBlocklistEntry},
-            crypto::{META_AUTH_EXP, META_AUTH_JTI},
-        };
-        let jti = msg.get_meta(META_AUTH_JTI);
-        let user_id = msg.user_id();
-        if jti.is_empty() || user_id.is_empty() {
-            return Ok(());
-        }
-        let expires_at = match msg
-            .get_meta(META_AUTH_EXP)
-            .parse::<i64>()
-            .ok()
-            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-        {
-            Some(exp) => exp,
-            None => {
-                chrono::Utc::now()
-                    + chrono::Duration::seconds(access_token_lifetime_secs(ctx).await? as i64)
-            }
-        };
-        jwt_blocklist::insert(
-            ctx,
-            NewBlocklistEntry {
-                jti,
-                user_id,
-                expires_at: &expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            },
-        )
-        .await
-    }
-
     /// Returns (access_token, refresh_token, family).
     ///
     /// Private to `helpers`, where [`issue_tokens_and_cookie`] is its one
@@ -1174,14 +1118,9 @@ pub(crate) mod helpers {
     /// JWT's `family` claim agrees with the DB row that anchors reuse
     /// detection.
     ///
-    /// Access tokens carry a random `jti` so logout can blocklist the
-    /// in-flight JWT (SEC-042) without affecting other live sessions for
-    /// the same user.
-    ///
-    /// Refresh tokens carry one too, for a different reason: everything else
-    /// on a refresh JWT is the same on both sides of a rotation — same user,
-    /// same family, same auth method, same issuer — and `iat`/`exp` are whole
-    /// seconds. The signer encodes claims canonically, so without a
+    /// Refresh tokens carry a random `jti`: everything else on a refresh JWT
+    /// is the same on both sides of a rotation — same user, same family, same
+    /// auth method, same issuer — and `iat`/`exp` are whole seconds. The signer encodes claims canonically, so without a
     /// per-token nonce a rotation inside the second its predecessor was
     /// minted in signs to exactly the predecessor's bytes, and its
     /// `token_hash` collides with the row the rotation has just revoked.
@@ -1201,30 +1140,19 @@ pub(crate) mod helpers {
         auth_method: &str,
         family: Option<&str>,
     ) -> std::result::Result<(String, String, String), wafer_run::OutputStream> {
-        // Two per-token random ids: the access token's (SEC-042: logout
-        // revokes a single JWT without touching the user's other live
-        // sessions) and the refresh token's (what makes one rotation's
-        // output differ from the mint before it — see the doc comment).
-        // Both, plus the family id when minting a brand-new family
-        // (`family` is `None`), come out of ONE `crypto::random_bytes` call
-        // split into 16-byte pieces, because each call is a host round-trip
-        // on Cloudflare.
-        let want = if family.is_some() { 32 } else { 48 };
+        // The refresh token's random id (what makes one rotation's output
+        // differ from the mint before it — see the doc comment), plus the
+        // family id when minting a brand-new family (`family` is `None`),
+        // come out of ONE `crypto::random_bytes` call split into 16-byte
+        // pieces, because each call is a host round-trip on Cloudflare.
+        let want = if family.is_some() { 16 } else { 32 };
         let bytes = match crypto::random_bytes(ctx, want).await {
             Ok(bytes) => bytes,
             Err(e) => return Err(wafer_run::OutputStream::error(e)),
         };
-        let (family, jti, refresh_jti) = match family {
-            Some(f) => (
-                f.to_string(),
-                hex_encode(&bytes[..16]),
-                hex_encode(&bytes[16..]),
-            ),
-            None => (
-                hex_encode(&bytes[..16]),
-                hex_encode(&bytes[16..32]),
-                hex_encode(&bytes[32..]),
-            ),
+        let (family, refresh_jti) = match family {
+            Some(f) => (f.to_string(), hex_encode(&bytes)),
+            None => (hex_encode(&bytes[..16]), hex_encode(&bytes[16..])),
         };
 
         let access_lifetime_secs = access_token_lifetime_secs(ctx)
@@ -1261,7 +1189,6 @@ pub(crate) mod helpers {
             "auth_method".to_string(),
             serde_json::Value::String(auth_method.to_string()),
         );
-        access_claims.insert("jti".to_string(), serde_json::Value::String(jti));
         access_claims.insert("iss".to_string(), serde_json::Value::String(issuer.clone()));
         // [B12] The rotation family, carried on the access token as well as
         // the refresh token. It is what tells the userportal sessions page
@@ -1811,7 +1738,7 @@ pub(crate) mod helpers {
         // throttled to at most once an hour, so a login storm costs one sweep.
         //
         // After the response, not before it: the throttle check alone is a
-        // database read, and a due pass is four deletes, none of which the
+        // database read, and a due pass is three deletes, none of which the
         // tokens being handed out depend on. On Cloudflare every one of them
         // is a D1 round trip the sign-in would otherwise wait on.
         let sweep_ctx = ctx.clone_arc();
@@ -1956,17 +1883,19 @@ pub(crate) mod helpers {
             );
         }
 
-        /// The refresh token carries its own `jti`, not the access token's.
-        /// Its nonce is what makes a rotation's output differ from the mint
-        /// before it (see `generate_tokens`); a refresh token that reused the
-        /// access token's id would still differ per mint, so this pins the
-        /// two ids as separate draws rather than one value stamped twice.
+        /// The refresh token carries a `jti` of its own: a 16-byte nonce
+        /// drawn apart from the family id it is minted with. The nonce is what
+        /// makes a rotation's output differ from the mint before it (see
+        /// `generate_tokens`); one that reused the family id would be the
+        /// same on both sides of a rotation, so this pins the two as separate
+        /// draws. The access token carries none: nothing identifies an access
+        /// token by its id, since its family's session row is what ends it.
         #[tokio::test]
         async fn minted_refresh_token_carries_a_jti_of_its_own() {
             let ctx = ctx_with_crypto().await;
             let uid = seed_user(&ctx).await.id;
 
-            let Ok((access_token, refresh_token, _family)) = generate_tokens(
+            let Ok((access_token, refresh_token, family)) = generate_tokens(
                 &ctx,
                 &SessionLifetime::resolve(&ctx)
                     .await
@@ -1994,13 +1923,13 @@ pub(crate) mod helpers {
             let refresh = crypto::verify(&ctx, &refresh_token)
                 .await
                 .expect("verify refresh token");
-            let access_jti = jti(&access).expect("the access token carries a jti");
             let refresh_jti = jti(&refresh).expect("the refresh token carries a jti");
             assert_eq!(refresh_jti.len(), 32, "a 16-byte nonce, hex: {refresh_jti}");
             assert_ne!(
-                refresh_jti, access_jti,
-                "the refresh token's jti must be its own draw, not the access token's"
+                refresh_jti, family,
+                "the refresh token's jti must be its own draw, not the family id"
             );
+            assert_eq!(jti(&access), None, "the access token carries no jti");
         }
 
         #[tokio::test]

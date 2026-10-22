@@ -158,7 +158,7 @@ pub fn auth_config_vars() -> Vec<ConfigVar> {
         .name("Password minimum length"),
         ConfigVar::new(
             ACCESS_TOKEN_LIFETIME_SECS_KEY,
-            "Lifetime of an issued JWT access token in seconds. Shorter values reduce the SEC-042 exposure window when a JWT leaks; longer values reduce refresh churn. Logout invalidates the in-flight JWT regardless via the blocklist, and password/disable/role changes invalidate it via auth_version. Hard-capped at 86400 (24h) regardless of this value.",
+            "Lifetime of an issued JWT access token in seconds. Shorter values reduce the SEC-042 exposure window when a JWT leaks; longer values reduce refresh churn. Logout, revoking a device and a password change end the in-flight JWT at once by deleting its session, and disable/role changes end it via auth_version. Hard-capped at 86400 (24h) regardless of this value.",
             &ACCESS_TOKEN_LIFETIME_SECS_DEFAULT.to_string(),
         )
         .name("Access token lifetime (seconds)"),

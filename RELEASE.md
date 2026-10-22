@@ -19,6 +19,33 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: the JWT blocklist is retired
+
+**What changes.** Logout and revoking the device you are on no longer write
+the access token's id (`jti`) to `wafer_run__auth__jwt_blocklist`, and no
+request reads it. The blocklist had become a second record of the same end:
+both of its writers delete the device's row first, and an access token
+authenticates only while its device's row is live (the entry below), so a
+signed-out token is refused without it. Signing out, revoking a device and
+changing a password end access tokens exactly as before. Access tokens no
+longer carry a `jti`; one issued before this release still has one, and it is
+ignored. The retention sweep stops pruning the table, and its result (and the
+Cloudflare cron's log line) no longer reports `jwt_blocklist_deleted`.
+
+**Cost.** Every request carrying an access token sends D1 one statement fewer:
+its device row, plus its account's sign-in version when that is not cached.
+With the entry below, which added the device read, the two together add
+nothing per request.
+
+**The table stays, unused.** Dropping it is an auth migration, and any change
+to the auth migration list re-runs the whole list at the D1 budget of 1000
+(see the 016 entry). The drop waits until migrations are recorded per file.
+Until then the table keeps whatever rows it had; nothing reads them, they
+name tokens rather than hold them, and they stay out of every data export.
+
+**Deploying this release** adds no migration, re-runs nothing and signs
+nobody out.
+
 ### Auth: revoking a device ends its access token; a password change ends every device and API key
 
 **What changes.**
@@ -54,7 +81,8 @@ what it did happens on every native boot.
 **Cost.** Every request carrying an access token reads its device row: one
 more D1 statement per request, read in the same round trip as the token's
 other checks, so it adds no latency. It is not cached, because a revocation
-must take effect on the next request.
+must take effect on the next request. The JWT blocklist's retirement (the entry above)
+takes one statement away again.
 
 **Deploying this release** adds no migration and signs nobody out, with one
 exception: a device whose row an earlier auth upgrade emptied, and which has

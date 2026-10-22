@@ -253,8 +253,8 @@ pub async fn list_capped_sorted(
 /// **Precondition:** `collection` must give every row a distinct, non-empty
 /// `id`. That is not true of every table this crate reads — `auth.sessions`
 /// is keyed on `family`, `signal.rooms` on `code`, and
-/// `personal_access_tokens`, `oauth_pkce_states` and `jwt_blocklist` carry a
-/// *nullable* `id` added by a later migration — so it is a condition on the
+/// `personal_access_tokens` and `oauth_pkce_states` carry a *nullable* `id`
+/// added by a later migration — so it is a condition on the
 /// caller, not a property of the schema. A row whose `id` is empty cannot be
 /// a cursor, and walking past it would silently drop every row after it;
 /// [`walk_needs_an_id`] makes that an error instead.
