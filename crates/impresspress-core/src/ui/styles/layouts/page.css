@@ -19,7 +19,9 @@
 .detail-hero { display: flex; align-items: center; gap: var(--space-4); }
 .detail-hero__icon { flex-shrink: 0; }
 .detail-hero__text { flex: 1; }
-.detail-hero__title { font-size: var(--text-xl); font-weight: 500; margin: 0; }
+/* The subject a reporter typed, often a pasted page URL: it breaks anywhere
+   rather than run past a phone's screen. */
+.detail-hero__title { font-size: var(--text-xl); font-weight: 500; margin: 0; overflow-wrap: anywhere; }
 .detail-hero__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: var(--space-1) 0 0; }
 .detail-hero__badges { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .detail-hero__action { margin-left: auto; }
@@ -102,13 +104,31 @@
    exactly: `.shell__body` is the height-constrained flex child (flex:1 +
    min-height:0 up the chain), so 100% pins the composer to its bottom edge.
    The old `calc(100vh - 2rem)` ignored the topbar + shell gaps and pushed
-   the composer below the fold. */
+   the composer below the fold.
+
+   The panes follow the chat's own width, not the viewport's: `.chat-page`
+   is a size container around the frame. The sidebar leaves the column
+   anywhere from ~430px (721px screen) to ~990px (1280px), and two fixed
+   280px + 320px side panes in a viewport-keyed grid squeezed the
+   conversation to nothing in between (70px at 960, its placeholder one
+   letter per line). So:
+   - 60rem and wider: thread list | conversation | rail, the conversation
+     keeping at least 360px;
+   - 40rem to 60rem: thread list | conversation, with the rail a one-row
+     toolbar above the conversation (its `.chat-options` turn into a row,
+     components/card.css);
+   - narrower than 40rem: one pane at a time (`templates::ChatFocus`).
+     With no conversation open the thread list fills the body and is its
+     only scroller; with one open the conversation does, the rail sits
+     above it as the same toolbar, and the topbar crumb / sub-nav lead back
+     to the list. No pane scrolls inside another, and the model picker
+     stays on screen with the conversation it applies to. */
+.chat-page { container: chat / inline-size; height: 100%; }
 .page--chat {
 	display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; height: 100%;
 	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
 	overflow: hidden;
 }
-.page--chat:has(.chat-rail) { grid-template-columns: 280px minmax(0,1fr) 320px; }
 /* The rail had no padding at all, so `.thread-pane`'s "THREADS" heading sat
    flush against the left edge and its "+" button flush against the right and
    top -- the button's right edge was exactly the rail's (measured 0px gap).
@@ -128,14 +148,25 @@
 .chat-messages { flex: 1; overflow-y: auto; padding: var(--space-4) var(--space-6); }
 .chat-composer { border-top: 1px solid var(--border-light); padding: var(--space-4); background: var(--surface-1); }
 .chat-rail { background: var(--surface-3); border-left: 1px solid var(--border-light); overflow-y: auto; padding: var(--space-4); }
-/* Phone: one pane at a time (`templates::ChatFocus`). With no conversation
-   open the thread list fills the body and is its only scroller; with one
-   open the conversation does, the rail sits above it as a one-row toolbar,
-   and the topbar crumb / sub-nav lead back to the list. No pane scrolls
-   inside another, and the model picker stays on screen with the
-   conversation it applies to. */
-@media (max-width: 720px) {
-	.page--chat, .page--chat:has(.chat-rail) {
+@container chat (min-width: 60rem) {
+	.page--chat:has(> .chat-rail) { grid-template-columns: 280px minmax(0, 1fr) 320px; }
+}
+/* The rail as a toolbar: above the conversation, as wide as it. */
+@container chat (max-width: 59.99rem) {
+	.page--chat > .chat-rail {
+		overflow: visible;
+		border-left: none; border-bottom: 1px solid var(--border-light);
+		padding: var(--space-2) var(--space-4);
+	}
+}
+@container chat (min-width: 40rem) and (max-width: 59.99rem) {
+	.page--chat:has(> .chat-rail) { grid-template-rows: auto minmax(0, 1fr); }
+	.page--chat:has(> .chat-rail) > .chat-threads { grid-column: 1; grid-row: 1 / -1; }
+	.page--chat > .chat-rail { grid-column: 2; grid-row: 1; }
+	.page--chat:has(> .chat-rail) > .chat-main { grid-column: 2; grid-row: 2; }
+}
+@container chat (max-width: 39.99rem) {
+	.page--chat {
 		grid-template-columns: minmax(0, 1fr);
 		grid-template-rows: minmax(0, 1fr);
 	}
@@ -145,11 +176,7 @@
 	.page--chat[data-chat-focus="conversation"]:has(> .chat-rail) {
 		grid-template-rows: auto minmax(0, 1fr);
 	}
-	.page--chat > .chat-rail {
-		order: -1; overflow: visible;
-		border-left: none; border-bottom: 1px solid var(--border-light);
-		padding: var(--space-2) var(--space-4);
-	}
+	.page--chat > .chat-rail { order: -1; }
 	.chat-threads { border-right: none; }
 	.chat-messages { padding: var(--space-4); }
 }

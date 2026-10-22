@@ -134,7 +134,7 @@ test.describe.serial('products admin pages', () => {
     await expect(
       page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link', { name: 'All products' }),
     ).toBeVisible();
-    await expect(page.locator('.topbar__actions .badge')).toHaveText('draft');
+    await expect(page.locator('.topbar__actions .badge')).toHaveText('Draft');
 
     await expect(visiblePrimaries(page)).resolves.toEqual(['Publish product']);
     await expect(page.locator('#product-manager-form').getByRole('button', { name: 'Save product details' })).toHaveClass(/btn--secondary/);

@@ -15,7 +15,9 @@ use super::{
 use crate::{
     ui::{
         self,
-        components::{self, Badge, BadgeVariant, Card, HeaderStatus},
+        components::{
+            self, humanize, Action, ActionTarget, Badge, BadgeVariant, Card, HeaderStatus,
+        },
         icons,
         shell::Crumb,
     },
@@ -38,7 +40,7 @@ pub fn context_card(record: &db::Record) -> Markup {
     html! {
         a .messages-list__item href={"/b/messages/contexts/" (id)} {
             span .messages-list__type {
-                (Badge::new(BadgeVariant::Secondary).classes("text-capitalize").render(html! { (context_type) }))
+                (components::badge(BadgeVariant::Secondary, &humanize(context_type)))
             }
             span .messages-list__title {
                 @if title.is_empty() { "Untitled" } @else { (title) }
@@ -86,15 +88,17 @@ pub fn entry_card(record: &db::Record) -> Result<Markup, WaferError> {
     Ok(html! {
         div .message-card .(card_variant) {
             div .message-card__head {
-                (Badge::new(kind_badge).classes("text-capitalize").render(html! { (wire_str(&kind)) }))
+                // Kind and role in sentence case, written here as llm-chat.js
+                // writes the role of the cards it builds.
+                (components::badge(kind_badge, &humanize(&wire_str(&kind))))
                 @if let Some(role) = role {
-                    (Badge::new(BadgeVariant::Secondary).classes("text-capitalize").render(html! { (wire_str(&role)) }))
+                    (components::badge(BadgeVariant::Secondary, &humanize(&wire_str(&role))))
                 }
                 @if kind == EntryKind::Artifact
                     && !content_type.is_empty()
                     && content_type != "text/plain"
                 {
-                    span .text-muted .text-xs { (content_type) }
+                    span .text-muted { (content_type) }
                 }
                 @if !created_at.is_empty() {
                     span .message-card__date { (components::timestamp(created_at)) }
@@ -151,7 +155,7 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
             {
                 div .form-group {
                     label .form-label for="new-context-type" { "Type" }
-                    select .form-input .messages-new__type #new-context-type name="type" {
+                    select .form-input #new-context-type name="type" {
                         option value="conversation" { "Conversation" }
                         option value="task" { "Task" }
                         option value="notification" { "Notification" }
@@ -159,9 +163,10 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                 }
                 div .form-group {
                     label .form-label for="new-context-title" { "Title" }
-                    input .form-input .messages-new__title #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
+                    input .form-input #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
                 }
-                button .btn .btn--primary type="submit" { "Create" }
+                // The page's one primary.
+                (Action::primary("Create", ActionTarget::Submit { form: None }).render())
             }
         }).render())
 
@@ -307,15 +312,17 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
     };
 
     // A task or notification shows its type and status beside its title; a
-    // conversation is a chat, and needs neither.
+    // conversation is a chat, and needs neither. Both read in sentence case:
+    // the type through `humanize`, the status through `status_badge`, which
+    // labels with the same function.
     let shell = ui::Shell::admin(display_title, display_title).trail(detail_trail(display_title));
     let shell = if context.str_field("type") == "conversation" {
         shell
     } else {
         shell
             .status(HeaderStatus::badge(
-                Badge::new(BadgeVariant::Secondary).classes("text-capitalize"),
-                context.str_field("type"),
+                Badge::new(BadgeVariant::Secondary),
+                &humanize(context.str_field("type")),
             ))
             .status(HeaderStatus::status(context.str_field("status")))
     };
@@ -398,13 +405,10 @@ fn render_default_view(entries: &[db::Record], context_id: &str) -> Result<Marku
     Ok(html! {
         div #entries-list .entries-list--scroll .mb-6 {
             @if entries.is_empty() {
+                // One line in the list, not a framed surface: the entries are
+                // the list's, and the form under it is how one is added.
                 div #entries-empty {
-                    (components::empty_state(
-                        icons::message_square(),
-                        "No entries yet",
-                        "Add the first one below.",
-                        None,
-                    ))
+                    (components::empty_note("No entries yet. Add the first one below.", None))
                 }
             } @else {
                 @for card in &cards {
@@ -457,6 +461,7 @@ fn render_default_view(entries: &[db::Record], context_id: &str) -> Result<Marku
 /// A composer's text box and its submit button on one row: the box takes
 /// the width, the button keeps its own and sits at the box's bottom edge. The
 /// box is named by a visually hidden label — a placeholder is not a name.
+/// The button is the page's one primary (Send, or Add on a task).
 /// `submit_on_enter` makes Enter send (Shift+Enter for a new line), for a
 /// chat; a free-form entry keeps Enter as a line break.
 fn composer_row(
@@ -477,7 +482,7 @@ fn composer_row(
                 required
                 data-submit-on-enter[submit_on_enter]
             {}
-            button .btn .btn--primary .composer__submit type="submit" { (submit) }
+            (Action::primary(submit, ActionTarget::Submit { form: None }).render())
         }
     }
 }
@@ -492,9 +497,7 @@ fn render_conversation_thread_list(siblings: &[&db::Record], active_id: &str) ->
             }
             div #conversation-list .thread-pane__scroll {
                 @if siblings.is_empty() {
-                    div .text-center .text-muted .thread-pane__empty {
-                        "No conversations yet."
-                    }
+                    (components::empty_note("No conversations yet.", None))
                 } @else {
                     @for c in siblings {
                         @let id = c.id.as_str();
@@ -541,13 +544,10 @@ fn render_conversation_messages(entries: &[db::Record]) -> Result<Markup, WaferE
     Ok(html! {
         div #entries-list {
             @if cards.is_empty() {
+                // The pane is the chat's framed surface already: one line in
+                // it, as the LLM chat's placeholder is.
                 div #entries-empty {
-                    (components::empty_state(
-                        icons::message_square(),
-                        "No messages yet",
-                        "Send the first one below.",
-                        None,
-                    ))
+                    (components::empty_note("No messages yet. Send the first one below.", None))
                 }
             } @else {
                 @for card in &cards {
@@ -649,15 +649,19 @@ mod tests {
         // The title is the topbar's; the body repeats no heading for it and
         // draws no second way back beside the trail.
         assert!(!html.contains("Do thing"), "{html}");
-        // The body's headings are the empty state's and the "Add entry"
-        // card's, both h2s under the topbar's h1; the entries sit beside that
-        // card, not in it.
+        // The body's one heading is the "Add entry" card's, an h2 under the
+        // topbar's h1; the entries sit beside that card, not in it, and an
+        // empty list is one line, not a framed surface.
         assert_eq!(
             crate::test_support::dom::heading_outline(&html),
-            vec![
-                (2, "No entries yet".to_string()),
-                (2, "Add entry".to_string())
-            ],
+            vec![(2, "Add entry".to_string())],
+            "{html}"
+        );
+        assert!(
+            html.contains(concat!(
+                r#"<div id="entries-empty"><p class="empty-note">"#,
+                "No entries yet. Add the first one below.</p></div>"
+            )),
             "{html}"
         );
         assert!(
@@ -709,20 +713,23 @@ mod tests {
             user.contains(r#"class="message-card message-card--user""#),
             "{user}"
         );
+        // Kind and role in sentence case at the source: no class transforms
+        // their case.
         assert!(
-            user.contains(r#"<span class="badge badge-secondary text-capitalize">message</span>"#),
+            user.contains(r#"<span class="badge badge-secondary">Message</span>"#),
             "{user}"
         );
         assert!(
-            user.contains(r#"<span class="badge badge-secondary text-capitalize">user</span>"#),
+            user.contains(r#"<span class="badge badge-secondary">User</span>"#),
             "{user}"
         );
+        assert!(!user.contains("text-capitalize"), "{user}");
         assert!(user.contains("<time"), "the date is a timestamp: {user}");
         assert!(!user.contains("danger"), "{user}");
 
         let system = entry_card(&entry("system")).expect("decodes").into_string();
         assert!(
-            system.contains(r#"<span class="badge badge-warning text-capitalize">message</span>"#),
+            system.contains(r#"<span class="badge badge-warning">Message</span>"#),
             "{system}"
         );
     }
@@ -737,11 +744,11 @@ mod tests {
             .insert("title".to_string(), serde_json::json!("Rotate keys"));
         let html = context_card(&r).into_string();
         assert!(
-            html.contains(r#"<span class="badge badge-secondary text-capitalize">task</span>"#),
+            html.contains(r#"<span class="badge badge-secondary">Task</span>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<span class="badge badge-success">active</span>"#),
+            html.contains(r#"<span class="badge badge-success">Active</span>"#),
             "{html}"
         );
     }
@@ -787,6 +794,33 @@ mod tests {
         // Active marker on the active context, not the sibling.
         assert!(html.contains(r#"data-context-id="ctx-1""#));
         assert!(html.contains(r#"data-active="true""#));
+    }
+
+    /// An empty conversation is one line in the chat's message pane, the
+    /// LLM chat's placeholder, not a framed empty state inside the chat's
+    /// frame; the composer's Send is the page's one primary.
+    #[test]
+    fn an_empty_conversation_is_a_note_in_the_pane_under_one_primary() {
+        let mut ctx_rec = make_record("ctx-1");
+        ctx_rec
+            .data
+            .insert("type".to_string(), serde_json::json!("conversation"));
+        let html = render_context_detail_body(&ctx_rec, &[], &[], "ctx-1")
+            .expect("the fixture rows decode")
+            .into_string();
+        assert!(
+            html.contains(concat!(
+                r#"<div id="entries-empty"><p class="empty-note">"#,
+                "No messages yet. Send the first one below.</p></div>"
+            )),
+            "{html}"
+        );
+        assert!(!html.contains(r#"class="empty""#), "{html}");
+        assert_eq!(
+            crate::test_support::dom::visible_primaries(&html).0,
+            vec![r#"button.btn.btn--primary "Send""#.to_string()],
+            "{html}"
+        );
     }
 
     #[test]
@@ -990,6 +1024,11 @@ mod form_contract_tests {
         assert!(
             html.contains(r#"<button class="btn btn--primary" type="submit">Create</button>"#),
             "{html}"
+        );
+        assert_eq!(
+            crate::test_support::dom::visible_primaries(&html).0,
+            vec![r#"button.btn.btn--primary "Create""#.to_string()],
+            "the New context form's Create is the page's one primary: {html}"
         );
         // The form is the "New context" card; the list and its empty state
         // sit beside it on the page, not inside it.

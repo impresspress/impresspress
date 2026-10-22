@@ -196,7 +196,7 @@ async fn product_detail_has_one_visible_primary() {
     );
     let actions = topbar_actions(&html);
     assert!(
-        actions.starts_with(r#"<span class="badge badge-warning">draft</span>"#),
+        actions.starts_with(r#"<span class="badge badge-warning">Draft</span>"#),
         "the product's state is the header's status: {actions}"
     );
     // `products-manager.js` reads the status each lifecycle action sets off
@@ -1081,7 +1081,7 @@ async fn the_seller_page_puts_its_state_and_control_in_the_header() {
     let ctx = commerce_ctx().await;
     let active = admin_page(&ctx, "/b/products/admin/sellers/seller_account_1").await;
     assert!(
-        topbar_actions(&active).contains(r#"<span class="badge badge-info">onboarding</span>"#),
+        topbar_actions(&active).contains(r#"<span class="badge badge-info">Onboarding</span>"#),
         "{active}"
     );
     assert!(

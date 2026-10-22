@@ -1,5 +1,6 @@
 import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { WIDTHS, isWrong, layout } from './fixtures/layout';
 import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
@@ -12,6 +13,10 @@ import { PHONE, targetFloor } from './fixtures/targets';
  *   file that could not be deleted — is announced, not wiped by a reload.
  * - Share links: revoking confirms in the same dialog and updates the list in
  *   place.
+ * - Messages with long titles and entries quoting the ids an error names,
+ *   at every width from the phone to 1280: the list, a conversation and a
+ *   task scroll nothing sideways, no card or entry overflows, the
+ *   conversation keeps its room, and each page shows its one primary.
  * - Messages at 390px: a context is created from the list, and its
  *   conversation is one pane with a usable composer, no sideways scroll.
  *
@@ -318,4 +323,52 @@ test.describe('on a phone', () => {
     await expect(page.locator('#entries-list')).toContainText('Ship it on Friday?');
     await expect(input).toHaveValue('');
   });
+});
+
+test('messages with long titles and entries fit their frame at every width', async ({ page, baseURL }) => {
+  test.setTimeout(180_000);
+  const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
+  const headers = { Authorization: await adminBearer(api), 'Content-Type': 'application/json' };
+  const made: string[] = [];
+  try {
+    const context = async (type: string, title: string, entries: [string, string, string][]) => {
+      const res = await api.post('/b/messages/api/contexts', { headers, data: { type, title } });
+      expect(res.ok(), await res.text()).toBe(true);
+      const { id } = (await res.json()) as { id: string };
+      made.push(id);
+      for (const [kind, role, content] of entries) {
+        const entry = await api.post(`/b/messages/api/contexts/${id}/entries`, { headers, data: { kind, role, content } });
+        expect(entry.ok(), await entry.text()).toBe(true);
+      }
+      return id;
+    };
+    const chat = await context('conversation', 'Renewal questions for the Northwind Traders enterprise agreement, order ord_1NvQh2KZp7a9XyTqAbCdEfGh', [
+      ['message', 'user', "Why did invoice in_1NvQh2KZp7a9XyTqAbCdEfGhIjKlMn fail? Stripe said: No such customer: 'cus_1NvQh2KZp7a9XyTqAbCdEfGh'"],
+      ['message', 'assistant', 'See https://dashboard.stripe.com/test/customers/cus_1NvQh2KZp7a9XyTqAbCdEfGh/payment_methods/pm_1NvQh2KZp7a9XyTqAbCdEfGh'],
+    ]);
+    const task = await context('task', 'Rotate the restricted API key key_01HZX9Q2KZp7a9XyTqAbCdEfGhIjKlMnOpQrStUvWxYz for the Northwind Traders account', [
+      ['message', 'user', "The webhook endpoint keeps failing with: No such webhook endpoint: 'we_1NvQh2KZp7a9XyTqAbCdEfGh'"],
+      ['artifact', 'assistant', 'https://northwind-traders-production.example.com/exports/2026-10-22/stripe-restricted-keys-rotation-report-final-v2.csv'],
+      ['notification', 'system', 'Key rotated by ana.lucia.fernandez-gonzalez@northwind-traders-production.example.com'],
+    ]);
+    const pages: Record<string, string[]> = {
+      '/b/messages/': ['Create'],
+      [`/b/messages/contexts/${chat}`]: ['Send'],
+      [`/b/messages/contexts/${task}`]: ['Add'],
+    };
+    await loginAsAdmin(page);
+    const found: Record<string, unknown> = {};
+    for (const width of WIDTHS) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [path, primaries] of Object.entries(pages)) {
+        await page.goto(path, { waitUntil: 'networkidle' });
+        const r = await layout(page);
+        if (isWrong(r, primaries)) found[`${path} at ${width}`] = r;
+      }
+    }
+    expect(found, 'a page scrolled sideways, a card overflowed, the chat was squeezed or the primaries differ').toEqual({});
+  } finally {
+    for (const id of made) await api.delete(`/b/messages/api/contexts/${id}`, { headers });
+    await api.dispose();
+  }
 });

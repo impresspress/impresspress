@@ -198,11 +198,26 @@ pub fn badge(variant: BadgeVariant, label: &str) -> Markup {
     Badge::new(variant).render(html! { (label) })
 }
 
+/// A stored value as a reader names it, for a badge or a label written from
+/// it: `public_form` → `Public form`, `conversation` → `Conversation`. The
+/// underscores become spaces and the first letter a capital; nothing else
+/// changes, so an acronym keeps its case. The case is written at the source
+/// rather than by a CSS `text-transform` (design rule 4).
+pub fn humanize(value: &str) -> String {
+    let spaced = value.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// Render a colored status badge, deriving the color from the status string.
 pub fn status_badge(status: &str) -> Markup {
-    // The variant is derived from the machine value; the label is humanized
-    // so snake_case enums (`partially_refunded`) never leak underscores.
-    badge(BadgeVariant::from_status(status), &status.replace('_', " "))
+    // The variant is derived from the machine value; the label is the one
+    // humanizer's, so snake_case enums (`partially_refunded`) never leak
+    // underscores and the label reads in sentence case.
+    badge(BadgeVariant::from_status(status), &humanize(status))
 }
 
 #[cfg(test)]
@@ -211,6 +226,14 @@ mod tests {
 
     use super::*;
     use crate::ui::test_support::{css_rules, hand_written_class_shorthand, strip_css_comments};
+
+    #[test]
+    fn humanize_writes_a_stored_value_in_sentence_case() {
+        assert_eq!(humanize("public_form"), "Public form");
+        assert_eq!(humanize("conversation"), "Conversation");
+        assert_eq!(humanize("API_key"), "API key");
+        assert_eq!(humanize(""), "");
+    }
 
     /// Every `.badge-…` rule in the stylesheet that paints a `background` — the
     /// convention that separates a colour class from a layout modifier
@@ -372,19 +395,21 @@ mod tests {
         assert!(status_badge("pending")
             .into_string()
             .contains("badge-warning"));
-        // Unknown status falls to the Info variant and keeps the label text.
+        // Unknown status falls to the Info variant and keeps the label text,
+        // in sentence case.
         let unknown = status_badge("public").into_string();
         assert!(unknown.contains("badge-info"), "default variant: {unknown}");
-        assert!(unknown.contains(">public</span>"), "label text: {unknown}");
+        assert!(unknown.contains(">Public</span>"), "label text: {unknown}");
     }
 
     #[test]
     fn status_badge_humanizes_snake_case_labels() {
-        // Machine enum values must never leak underscores into the UI:
-        // `partially_refunded` renders as "partially refunded".
+        // Machine enum values must never leak underscores into the UI, and
+        // read in sentence case: `partially_refunded` renders as "Partially
+        // refunded" (through the one humanizer, `humanize`).
         let partial = status_badge("partially_refunded").into_string();
         assert!(
-            partial.contains(">partially refunded</span>"),
+            partial.contains(">Partially refunded</span>"),
             "humanized label: {partial}"
         );
         assert!(

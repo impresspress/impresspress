@@ -174,10 +174,14 @@ test('message cards use the shared card and badge classes, with no inline style'
   assert.equal(assistant.className, 'message-card message-card--neutral');
   assert.equal(system.className, 'message-card message-card--warning');
 
+  // The role is written in sentence case at the source, as the server's
+  // `entry_card` writes it: no class transforms its case.
   const userBadge = user.querySelector('.badge');
-  assert.equal(userBadge.className, 'badge text-capitalize');
-  assert.equal(userBadge.textContent, 'user');
-  assert.equal(system.querySelector('.badge').className, 'badge text-capitalize badge-warning');
+  assert.equal(userBadge.className, 'badge');
+  assert.equal(userBadge.textContent, 'User');
+  assert.equal(assistant.querySelector('.badge').textContent, 'Assistant');
+  assert.equal(system.querySelector('.badge').className, 'badge badge-warning');
+  assert.equal(user.querySelector('.message-card__date').textContent, '2026-10-06');
 
   // A user turn is text, never markup; an assistant turn is sanitized markdown.
   const userBody = user.querySelector('.message-card__content');
@@ -282,4 +286,31 @@ test('a chat the server answers is shown as the reply', async () => {
   const last = cards[cards.length - 1];
   assert.equal(last.className, 'message-card message-card--neutral');
   assert.equal(last.querySelector('.message-card__content').innerHTML, '<p>hello</p>');
+});
+
+test('New thread adds a thread link, not a card, and drops the empty note', async () => {
+  const h = harness({
+    reply: (url, init) => (url === '/b/messages/api/contexts' && init?.method === 'POST'
+      ? { status: 201, body: { id: 't-9' } }
+      : null),
+  });
+  // The server's "No threads yet" line (`components::empty_note`).
+  const empty = h.list.appendChild(new El('p'));
+  empty.className = 'empty-note';
+  const button = h.page.appendChild(new El('button'));
+  button.setAttribute('data-action', 'llm-new-thread');
+
+  h.click(button);
+  await settled();
+
+  assert.equal(h.list.children.length, 1, 'the note is gone and one link is listed');
+  const [link] = h.list.children;
+  assert.equal(link.tagName, 'A');
+  // A thread is a link in the list (`thread_list_items` in pages.rs), never a
+  // `components::Card`: `card` as a class of its own is the page-level surface.
+  assert.equal(link.className, 'thread-card');
+  assert.ok(!link.className.split(/\s+/).includes('card'), link.className);
+  assert.equal(link.dataset.threadId, 't-9');
+  assert.equal(link.querySelector('.thread-card__title').textContent, 'New chat');
+  assert.equal(link.querySelector('.thread-card__date').className, 'text-muted thread-card__date');
 });

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { WIDTHS as ALL_WIDTHS, isWrong, layout as blockLayout } from './fixtures/layout';
 
 /**
  * The admin core pages between the phone and the 1280px baselines, where
@@ -57,6 +58,22 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   `the_commerce_fixture_is_what_the_pages_render`), mounted into a real
  *   page so they get its stylesheet and its content column (table.css
  *   `.commerce-table`).
+ * - Messages, LLM and Legal (the chat, Providers, Models, Settings, the
+ *   legal editors, settings and endpoints, the messages list), at every
+ *   width from the phone to 1280: no page scrolls sideways, no record table
+ *   scrolls inside its frame (the endpoint references are labelled scroll
+ *   regions by design, `components::endpoint_table`), no card's content is
+ *   wider than the card, and each shows its one primary or none. The chat's
+ *   conversation keeps at least 360px wherever it is shown: the chat lays
+ *   itself out by its own width (`.chat-page` in layouts/page.css), the rail
+ *   a toolbar above the conversation below 60rem and one pane at a time
+ *   below 40rem, and the toolbar is one row. The New context form's type
+ *   picker shows its whole option. The legal editor's Edit / Preview tabs are the top edge of
+ *   the pane they switch, and at 1280 the editor fits the screen. This
+ *   server has no thread, provider or context, so the seeded states (long
+ *   names, ids and messages) are checked in `llm-pages.spec.ts`,
+ *   `files-messages-pages.spec.ts` and `tickets-admin.spec.ts`
+ *   (`e2e:writes`).
  * The widths: 800 (the filter wraps; the database cards stack; the settings
  * rail is a tab row), and 960 and 1024 (the database cards side by side, the
  * Tables column at its narrowest). Writes nothing beyond the page loads'
@@ -347,6 +364,73 @@ test.describe('admin core pages at in-between widths', () => {
       expect(box!.x >= 0 && box!.x + box!.width <= width, JSON.stringify(box)).toBe(true);
       await expect(dialog.locator('.btn--primary')).toHaveText(['Save group']);
       expect((await layout(page)).primaries).toEqual(['New group']);
+    });
+  }
+
+  const BLOCK_PAGES: Record<string, (width: number) => string[]> = {
+    // Below 40rem of chat (up to ~930px here) the root shows the thread
+    // list alone, and Send with the conversation it belongs to.
+    '/b/llm/': (width) => (width >= 960 ? ['Send'] : []),
+    '/b/llm/providers': () => ['Add provider'],
+    '/b/llm/models': () => [],
+    '/b/llm/settings': () => [],
+    '/b/legalpages/admin/privacy': () => ['Publish'],
+    '/b/legalpages/admin/terms': () => ['Publish'],
+    '/b/legalpages/admin/settings': () => ['Save settings'],
+    '/b/legalpages/admin/endpoints': () => [],
+    '/b/messages/': () => ['Create'],
+  };
+  for (const width of ALL_WIDTHS) {
+    test(`messages, llm and legal pages at ${width}px: nothing scrolls sideways and the chat keeps its room`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/llm/');
+      const found: Record<string, unknown> = {};
+      for (const [path, primaries] of Object.entries(BLOCK_PAGES)) {
+        await page.goto(path, { waitUntil: 'networkidle' });
+        const r = await blockLayout(page);
+        if (isWrong(r, primaries(width))) found[path] = r;
+      }
+      expect(found, 'a page scrolled sideways, a card overflowed, the chat was squeezed or the primaries differ').toEqual({});
+
+      // The chat beside its thread list below 60rem: the rail is a one-row
+      // toolbar above the conversation, not a column squeezed beside it.
+      await page.goto('/b/llm/', { waitUntil: 'networkidle' });
+      const chat = await page.evaluate(() => {
+        const rail = document.querySelector<HTMLElement>('.chat-rail')!;
+        const main = document.querySelector<HTMLElement>('.chat-main')!;
+        if (!main.checkVisibility() || !rail.checkVisibility()) return null;
+        const r = rail.getBoundingClientRect();
+        const m = main.getBoundingClientRect();
+        return { beside: r.left >= m.right - 1, above: r.bottom <= m.top + 1, height: Math.round(r.height) };
+      });
+      if (chat && !chat.beside) {
+        expect(chat.above && chat.height < 80, `the rail is a one-row toolbar: ${JSON.stringify(chat)}`).toBe(true);
+      }
+
+      // The New context form's type picker shows its whole option.
+      await page.goto('/b/messages/', { waitUntil: 'networkidle' });
+      const picker = await page.locator('#new-context-type').evaluate((select: HTMLSelectElement) => {
+        const natural = select.cloneNode(true) as HTMLSelectElement;
+        Object.assign(natural.style, { position: 'absolute', visibility: 'hidden', width: 'max-content' });
+        select.parentElement!.appendChild(natural);
+        const need = natural.getBoundingClientRect().width;
+        natural.remove();
+        return { has: select.getBoundingClientRect().width, need };
+      });
+      expect(picker.has, `the type picker cuts its option: ${JSON.stringify(picker)}`).toBeGreaterThanOrEqual(picker.need - 1);
+
+      // The legal editor: the tabs are the pane's top edge, and at 1280 the
+      // editor fills the screen without scrolling it.
+      await page.goto('/b/legalpages/admin/privacy', { waitUntil: 'networkidle' });
+      const editor = await page.evaluate(() => {
+        const tabs = document.querySelector('#legal-editor .tabs')!.getBoundingClientRect();
+        const pane = document.querySelector('#editor-edit-pane')!.getBoundingClientRect();
+        const body = document.querySelector<HTMLElement>('.shell__body')!;
+        return { gap: Math.round(pane.top - tabs.bottom), overflow: body.scrollHeight - body.clientHeight };
+      });
+      expect(editor.gap, 'the pane hangs below its tabs').toBe(0);
+      if (width === 1280) expect(editor.overflow, 'the editor is taller than the screen').toBeLessThanOrEqual(0);
     });
   }
 

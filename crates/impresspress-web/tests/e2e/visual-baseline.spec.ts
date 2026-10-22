@@ -49,6 +49,13 @@ const ADMIN_ROUTES = [
   { path: '/b/products/selling', name: 'portal-products-selling' },
   { path: '/b/products/selling/orders', name: 'portal-products-selling-orders' },
   { path: '/b/llm/', name: 'llm-chat' },
+  // No provider on this server: the empty list under the header's one
+  // primary, whose empty-state copy is a secondary.
+  { path: '/b/llm/providers', name: 'llm-providers' },
+  // The Privacy policy as a fresh server seeds it (published v1): the
+  // editor with its Edit / Preview tabs on the pane, under Publish. Its
+  // "Saved" time is masked; the pane is sized to the screen and fits 1280.
+  { path: '/b/legalpages/admin/privacy', name: 'legal-editor' },
   // Phase 5b PR-2: end-user file browser bucket list + cloudstorage shares.
   // Snapshots are empty-state only (no seeded buckets/shares); seeded
   // baselines deferred to 5d once a fixture-injection pattern exists in

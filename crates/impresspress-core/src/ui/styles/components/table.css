@@ -588,3 +588,66 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.commerce-table--owned > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
 	.commerce-table--owned .commerce-table__meta { display: block; }
 }
+
+/* The LLM tables (`blocks/llm/ui.rs`, `pages.rs`: providers, models and
+   the per-thread overrides) narrow by their own width the same way. A
+   provider's endpoint, key variable and budget field are always lines
+   under its name (`.llm-table__line`); below the width the full grid needs
+   in the CI font, the protocol, models and status (providers), the provider and
+   capabilities (models), or the provider, model and date (overrides) join
+   one more line under the title (`.llm-table__meta`). Without these the
+   tables scrolled sideways at every width on a real deployment's names,
+   Azure endpoints and model ids.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `PROVIDER_COLUMNS`, `MODEL_COLUMNS` or `OVERRIDE_COLUMNS` must
+   move here too. */
+.llm-table { container: llm-table / inline-size; }
+.llm-table__line, .llm-table__meta {
+	display: block; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+.llm-table__meta { display: none; }
+@container llm-table (max-width: 54rem) {
+	.llm-table--providers td:is([data-label="Protocol"], [data-label="Models"], [data-label="Status"]),
+	.llm-table--providers > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.llm-table--providers .llm-table__meta { display: block; }
+}
+@container llm-table (max-width: 46rem) {
+	.llm-table--models td:is([data-label="Provider"], [data-label="Capabilities"]),
+	.llm-table--models > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.llm-table--models .llm-table__meta { display: block; }
+}
+@container llm-table (max-width: 42rem) {
+	.llm-table--overrides td:is([data-label="Provider"], [data-label="Model"], [data-label="Updated"]),
+	.llm-table--overrides > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.llm-table--overrides .llm-table__meta { display: block; }
+}
+
+/* The tickets lists (`blocks/tickets/pages.rs`) narrow by their own width
+   the same way: the inbox moves a ticket's type, source and date, and the
+   types list a type's public form, default priority, escalation and order,
+   into one line under the title (`.ticket-table__meta`). Without these a
+   real type title ("Incorrect business information (opening hours, …)")
+   scrolled the inbox, and the page with it, from 721 to about 960px.
+
+   The headers are hidden by position, the cells by their label: a column
+   moved in `TICKET_COLUMNS` or `TYPE_COLUMNS` must move here too. */
+.ticket-table { container: ticket-table / inline-size; }
+.ticket-table__meta {
+	display: none; margin-top: var(--space-1);
+	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
+}
+/* A subject may be a pasted URL with no space: it breaks anywhere, or it
+   sets the narrowed grid's minimum and the inbox scrolls the page. */
+.ticket-table--inbox .data-table__title { overflow-wrap: anywhere; }
+@container ticket-table (max-width: 46rem) {
+	.ticket-table--inbox td:is([data-label="Type"], [data-label="Source"], [data-label="Created"]),
+	.ticket-table--inbox > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }
+	.ticket-table--inbox .ticket-table__meta { display: block; }
+}
+@container ticket-table (max-width: 40rem) {
+	.ticket-table--types td:is([data-label="Public form"], [data-label="Default priority"], [data-label="Escalation"], [data-label="Order"]),
+	.ticket-table--types > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }
+	.ticket-table--types .ticket-table__meta { display: block; }
+}

@@ -1349,7 +1349,8 @@ mod tests {
     }
 
     /// The shell frames no body: a chat page and a plain page get the same
-    /// bare `main`, and the chat panes are the first thing inside it — the
+    /// bare `main`, and the chat (its size container, then its frame) is the
+    /// first thing inside it — the
     /// chat template draws its own frame (`.page--chat`, pinned by
     /// `assets::tests::the_shell_paints_no_frame_and_the_chat_draws_its_own`).
     #[test]
@@ -1371,7 +1372,7 @@ mod tests {
             .into_string();
         assert!(
             chat.contains(
-                r#"<main class="shell__body" id="content" tabindex="0"><div class="page--chat" data-chat-focus="threads">"#
+                r#"<main class="shell__body" id="content" tabindex="0"><div class="chat-page"><div class="page--chat" data-chat-focus="threads">"#
             ),
             "{chat}"
         );
@@ -3280,8 +3281,6 @@ mod tests {
             "chat-form",
             "checkbox-inline",
             "detail-body__main",
-            "messages-new__title",
-            "messages-new__type",
             "page--detail",
             "page--list",
             "sidebar__brand--text",
