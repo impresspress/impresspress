@@ -1164,13 +1164,16 @@ async fn close_ctx() -> (crate::test_support::TestContext, String, String) {
     use super::super::{contracts, offer_pricing, repo};
 
     let ctx = ctx().await;
-    seed(
+    repo::products::create(
         &ctx,
-        repo::products::TABLE,
-        "gone",
-        record(&[("name", json!("Field guide")), ("status", json!("active"))]),
+        record(&[
+            ("id", json!("gone")),
+            ("name", json!("Field guide")),
+            ("status", json!("active")),
+        ]),
     )
-    .await;
+    .await
+    .expect("seed the product");
     let definition: contracts::OfferDefinitionRequest = serde_json::from_value(json!({
         "name": "Download",
         "mode": "payment",
@@ -1211,9 +1214,9 @@ async fn close_ctx() -> (crate::test_support::TestContext, String, String) {
         .await
         .managed
         .id;
-    wafer_core::clients::database::update(
+    // Deleted on a fixed date, so the page's "Deleted …" line stays the same.
+    repo::products::update_live(
         &ctx,
-        repo::products::TABLE,
         "gone",
         record(&[("deleted_at", json!("2026-09-01T00:00:00Z"))]),
     )
