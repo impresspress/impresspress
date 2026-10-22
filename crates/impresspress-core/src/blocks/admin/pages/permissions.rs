@@ -786,9 +786,7 @@ mod wording_tests {
             "{html}"
         );
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
-        for small in ["text-13", "text-11", "text-10", "text-xs", "text-center"] {
-            assert!(!html.contains(small), "{small}: {html}");
-        }
+        assert!(!html.contains("text-center"), "{html}");
     }
 
     /// A stored grant is a row of the custom card's table, its columns and

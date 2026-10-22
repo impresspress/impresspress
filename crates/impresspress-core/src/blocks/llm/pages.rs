@@ -318,7 +318,9 @@ fn thread_list_items(threads: &[ContextView], active_id: Option<&str>) -> Markup
 /// framed surface, so the note adds none. When a thread
 /// IS selected, renders an empty `#messages-area` that the JS bootstrap
 /// fills from the `<script type="application/json" id="llm-chat-bootstrap">`
-/// carrier emitted by `render_page_body`.
+/// carrier emitted by `render_page_body`. Either way it carries the
+/// `#no-messages-note` template the script clones for a thread with no
+/// messages.
 fn render_messages_pane(_entries: &[serde_json::Value], thread_id: Option<&str>) -> Markup {
     html! {
         // The chat_page template's `.chat-messages` wrapper owns scroll,
@@ -334,6 +336,13 @@ fn render_messages_pane(_entries: &[serde_json::Value], thread_id: Option<&str>)
             }
             // When thread_id is Some, the JS bootstrap fills #messages-area
             // by JSON.parse-ing the #llm-chat-bootstrap carrier on init().
+        }
+        // The note a thread with no messages shows, rendered once here by
+        // `empty_note` and cloned by llm-chat.js, so the script writes no
+        // markup of its own. Outside `#messages-area`, which the script
+        // empties when it opens a thread.
+        template #no-messages-note {
+            (ui::components::empty_note("No messages yet.", None))
         }
     }
 }

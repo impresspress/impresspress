@@ -224,7 +224,7 @@
 	color: var(--text-secondary);
 	padding: 1px var(--space-2);
 	border-radius: 10px;
-	font-size: var(--text-xs);
+	font-size: var(--text-sm);
 	font-weight: 600;
 }
 .public-page__content {
@@ -319,7 +319,7 @@
 .public-page__footer {
 	text-align: center;
 	color: var(--text-muted);
-	font-size: 0.8rem;
+	font-size: var(--text-sm);
 	padding: var(--space-6) var(--space-8) var(--space-8);
 }
 /* Fallback was --primary-color, 3.66:1 on the page's default --surface-2

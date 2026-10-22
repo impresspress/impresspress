@@ -115,13 +115,13 @@
     return el;
   }
 
-  // The "nothing here yet" line in the messages pane, the markup
-  // `components::empty_note` writes; the first message appended replaces it.
-  function emptyLine(text) {
-    var p = document.createElement('p');
-    p.className = 'empty-note';
-    p.textContent = text;
-    return p;
+  // The "No messages yet." line in the messages pane: a clone of the note
+  // the server renders once into `template#no-messages-note`
+  // (`components::empty_note`), so this script writes no note markup of its
+  // own. The first message appended replaces it.
+  function noMessagesNote() {
+    var template = document.getElementById('no-messages-note');
+    return template ? template.content.firstElementChild.cloneNode(true) : null;
   }
 
   function appendMessageCard(role, content, opts) {
@@ -497,7 +497,8 @@
 
         area.textContent = '';
         if (records.length === 0) {
-          area.appendChild(emptyLine('No messages yet.'));
+          var note = noMessagesNote();
+          if (note) area.appendChild(note);
         } else {
           records.forEach(function (m) {
             var d = m.data || m;

@@ -2946,7 +2946,7 @@ mod tests {
     }
 
     /// Utility classes handed to a component builder as a string literal --
-    /// `Badge::new(..).classes("text-11 mr-1")`. They land in the rendered
+    /// `Badge::new(..).classes("mr-1 nowrap")`. They land in the rendered
     /// `class` attribute exactly like a maud shorthand does, so this guard has
     /// to see them; without this pass, moving a pill onto `components::Badge`
     /// would quietly drop its utility classes out of the scan.
@@ -3369,6 +3369,692 @@ mod tests {
         assert!(
             hits.is_empty(),
             "`.{class}` is back; put the phone layout on the button row instead:\n{}",
+            hits.join("\n")
+        );
+    }
+
+    /// The classes one builder alone writes (PLAN §2, "One writer per
+    /// class"), as (the builder's file, whether a class is one of its own).
+    /// Every other production source, Rust or script, writes none of them:
+    /// a hand-written `.card` is a card the one-level rule cannot see the
+    /// shape of, a hand-written `.btn--primary` is a primary the header slot
+    /// and `Action` did not place.
+    const ONE_WRITER: &[(&str, fn(&str) -> bool)] = &[
+        ("ui/components/card.rs", |class| {
+            class == "card" || class.starts_with("card__") || class.starts_with("card--")
+        }),
+        ("ui/components/empty.rs", |class| {
+            class == "empty" || class.starts_with("empty__") || class == "empty-note"
+        }),
+        ("ui/components/action.rs", |class| class == "btn--primary"),
+    ];
+
+    /// Writes of a builder's class that are not a second writer, each with
+    /// its exact count and why. The count is exact, so a new write beside a
+    /// listed one fails, and an entry no source needs any more fails too.
+    const NOT_A_SECOND_WRITER: &[(&str, &str, usize, &str)] = &[
+        (
+            "blocks/products/stripe.rs",
+            "card",
+            1,
+            "Stripe's `payment_method_types[]` value, sent to Stripe, not a class",
+        ),
+        (
+            "blocks/products/assets/storefront.js",
+            "card",
+            1,
+            "the storefront's own card, inside its shadow root and styled by its own \
+             stylesheet; the admin `.card` rule never reaches it",
+        ),
+    ];
+
+    /// Every `mod name;` the crate compiles only for tests (behind a `cfg`
+    /// that names `test`, and not `not(test)`), resolved to the file or
+    /// directory that holds it, so a whole test file is not mistaken for
+    /// production. `strip_test_modules` removes the inline ones.
+    fn test_only_module_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let decl = regex::Regex::new(
+            r"#\[cfg\(([^\]]*)\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([a-z]+\))?\s+)?mod\s+([a-z_0-9]+)\s*;",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+        {
+            let src = std::fs::read_to_string(entry.path()).unwrap();
+            let dir = entry.path().parent().unwrap();
+            let stem = entry.path().file_stem().unwrap().to_string_lossy();
+            let base = if matches!(stem.as_ref(), "mod" | "lib") {
+                dir.to_path_buf()
+            } else {
+                dir.join(stem.as_ref())
+            };
+            for caps in decl.captures_iter(&src) {
+                let cfg = &caps[1];
+                if cfg.contains("test") && !cfg.contains("not(test") {
+                    out.push(base.join(format!("{}.rs", &caps[2])));
+                    out.push(base.join(&caps[2]));
+                }
+            }
+        }
+        out
+    }
+
+    /// The production Rust sources under `src/`: test-only module files
+    /// left out, and every inline test item stripped (`strip_test_modules`),
+    /// as (path relative to `src/`, text).
+    fn production_rust_sources() -> Vec<(String, String)> {
+        use crate::test_support::source_scan::strip_test_modules;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let test_only = test_only_module_paths(&root);
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|e| !test_only.iter().any(|t| e.path() == t))
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+        {
+            let rel = entry.path().strip_prefix(&root).unwrap().display().to_string();
+            let src = std::fs::read_to_string(entry.path()).unwrap();
+            out.push((rel, strip_test_modules(&src)));
+        }
+        assert!(out.len() > 300, "only {} production sources", out.len());
+        out
+    }
+
+    /// The scripts this crate ships: every `.js`/`.mjs` under `src/` outside
+    /// a `test`/`tests` directory, less vendored minified bundles.
+    fn shipped_scripts() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|e| !matches!(e.file_name().to_str(), Some("test" | "tests")))
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "js" || x == "mjs"))
+            .filter(|e| !e.file_name().to_string_lossy().ends_with(".min.js"))
+        {
+            let rel = entry.path().strip_prefix(&root).unwrap().display().to_string();
+            out.push((rel, std::fs::read_to_string(entry.path()).unwrap()));
+        }
+        assert!(out.len() > 10, "only {} scripts", out.len());
+        out
+    }
+
+    /// Every string literal in `src`, in order, with the line it starts on:
+    /// Rust's `"…"`, `r#"…"#` and `b"…"` when `rust`, else a script's
+    /// `'…'`, `"…"` and `` `…` ``. Comments are skipped, so prose is never
+    /// read as a literal. Contents are raw: escapes are left as written.
+    fn string_literals(src: &str, rust: bool) -> Vec<(usize, String)> {
+        let chars: Vec<char> = src.chars().collect();
+        let n = chars.len();
+        let mut out = Vec::new();
+        let mut line = 1;
+        let mut i = 0;
+        while i < n {
+            let c = chars[i];
+            if c == '\n' {
+                line += 1;
+                i += 1;
+                continue;
+            }
+            // Comments: `//` to end of line, `/* .. */` (nested in Rust).
+            if c == '/' && chars.get(i + 1) == Some(&'/') {
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && chars.get(i + 1) == Some(&'*') {
+                let mut depth = 0;
+                while i < n {
+                    if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        i += 2;
+                        depth -= 1;
+                        if depth == 0 || !rust {
+                            break;
+                        }
+                        continue;
+                    }
+                    if chars[i] == '\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if rust {
+                // A raw string: r"…", r#"…"#, br"…".
+                let raw_at = if c == 'r' && !chars[..i].last().is_some_and(|p| p.is_alphanumeric() || *p == '_') {
+                    Some(i + 1)
+                } else if c == 'b'
+                    && chars.get(i + 1) == Some(&'r')
+                    && !chars[..i].last().is_some_and(|p| p.is_alphanumeric() || *p == '_')
+                {
+                    Some(i + 2)
+                } else {
+                    None
+                };
+                if let Some(mut k) = raw_at {
+                    let mut hashes = 0;
+                    while chars.get(k) == Some(&'#') {
+                        hashes += 1;
+                        k += 1;
+                    }
+                    if chars.get(k) == Some(&'"') {
+                        let start_line = line;
+                        let body_start = k + 1;
+                        let mut j = body_start;
+                        loop {
+                            if j >= n {
+                                break;
+                            }
+                            if chars[j] == '"'
+                                && (0..hashes).all(|h| chars.get(j + 1 + h) == Some(&'#'))
+                            {
+                                break;
+                            }
+                            if chars[j] == '\n' {
+                                line += 1;
+                            }
+                            j += 1;
+                        }
+                        out.push((start_line, chars[body_start..j.min(n)].iter().collect()));
+                        i = j + 1 + hashes;
+                        continue;
+                    }
+                }
+                // A char literal or a lifetime: only `'x'` / `'\…'` is a literal.
+                if c == '\'' {
+                    if chars.get(i + 1) == Some(&'\\') {
+                        let mut j = i + 2;
+                        while j < n && chars[j] != '\'' {
+                            j += 1;
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    if chars.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                        continue;
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+            // A script's regex literal (`/"/g`): a `/` where an expression
+            // starts. Its quotes are not string delimiters.
+            if !rust && c == '/' {
+                let before: String = chars[..i].iter().collect();
+                let before = before.trim_end();
+                let starts_expression = before
+                    .chars()
+                    .last()
+                    .is_none_or(|p| "(,=:[!&|?{};+-*%<>~^".contains(p))
+                    || ["return", "typeof", "case"].iter().any(|k| {
+                        before.ends_with(k)
+                            && !before[..before.len() - k.len()]
+                                .ends_with(|p: char| p.is_alphanumeric() || p == '_')
+                    });
+                if starts_expression {
+                    let mut j = i + 1;
+                    let mut class = false;
+                    while j < n && chars[j] != '\n' {
+                        match chars[j] {
+                            '\\' => j += 1,
+                            '[' => class = true,
+                            ']' => class = false,
+                            '/' if !class => break,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            let quote = if rust {
+                (c == '"').then_some('"')
+            } else {
+                matches!(c, '"' | '\'' | '`').then_some(c)
+            };
+            if let Some(q) = quote {
+                let start_line = line;
+                let mut j = i + 1;
+                while j < n && chars[j] != q {
+                    if chars[j] == '\\' {
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '\n' {
+                        line += 1;
+                    }
+                    j += 1;
+                }
+                out.push((start_line, chars[i + 1..j.min(n)].iter().collect()));
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The class names a string literal writes: every token of a `class`
+    /// attribute it holds (`class="card"`, `class=\"card {x}\"`,
+    /// `class='card'`), and every token of a literal that is itself a class
+    /// list (`"card card--flush"`, `" empty-note"`), which is what a maud
+    /// `class="…"`, a `class={ "…" }` fragment, `.classes("…")`, a `const`
+    /// handed to `class=(…)` and a script's `className = '…'`,
+    /// `classList.add('…')` or `setAttribute('class', '…')` all are. A
+    /// literal is a class list when every word in it is a class some
+    /// stylesheet defines (`defined`), so prose ("must not be empty") is not.
+    fn literal_classes(content: &str, defined: &std::collections::HashSet<String>) -> Vec<String> {
+        static ATTR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static LIST: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let attr = ATTR.get_or_init(|| {
+            regex::Regex::new(r#"class\s*=\s*\\?["']([^"'\\]*)"#).unwrap()
+        });
+        let list = LIST.get_or_init(|| {
+            regex::Regex::new(r"^\s*[a-z][a-z0-9_-]*(?:\s+[a-z][a-z0-9_-]*)*\s*$").unwrap()
+        });
+        let mut out: Vec<String> = attr
+            .captures_iter(content)
+            .flat_map(|caps| {
+                caps[1]
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if list.is_match(content) && content.split_whitespace().all(|word| defined.contains(word)) {
+            out.extend(content.split_whitespace().map(str::to_string));
+        }
+        out
+    }
+
+    /// Every class the shared bundle and the block stylesheets define.
+    fn defined_classes() -> std::collections::HashSet<String> {
+        let mut defined = std::collections::HashSet::new();
+        for entry in walkdir::WalkDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "css"))
+        {
+            let css = std::fs::read_to_string(entry.path()).unwrap();
+            collect_css_classes(&strip_css_comments(&css), &mut defined);
+        }
+        assert!(defined.contains("card") && defined.contains("btn--primary"));
+        defined
+    }
+
+    /// The classes a production Rust source writes, with their lines: every
+    /// string literal's ([`literal_classes`]) and every maud `.class`
+    /// shorthand inside an `html!` body.
+    fn rust_class_writes(
+        src: &str,
+        defined: &std::collections::HashSet<String>,
+    ) -> Vec<(usize, String)> {
+        // A literal is read as written, and as the script it may hold
+        // (`const JS: &str = "el.className = 'card';"`).
+        let mut out: Vec<(usize, String)> = string_literals(src, true)
+            .into_iter()
+            .flat_map(|(line, content)| {
+                let embedded = string_literals(&content, false)
+                    .into_iter()
+                    .flat_map(|(_, inner)| literal_classes(&inner, defined));
+                literal_classes(&content, defined)
+                    .into_iter()
+                    .chain(embedded)
+                    .map(move |class| (line, class))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // Comments blanked first, so an `html!` named in prose is not read.
+        let chars: Vec<char> = mask_rust_comments(src).chars().collect();
+        let needle: Vec<char> = "html!".chars().collect();
+        let mut i = 0;
+        while i + needle.len() <= chars.len() {
+            if chars[i..i + needle.len()] != needle[..] {
+                i += 1;
+                continue;
+            }
+            let mut p = i + needle.len();
+            while p < chars.len() && chars[p].is_whitespace() {
+                p += 1;
+            }
+            if chars.get(p) != Some(&'{') {
+                i += 1;
+                continue;
+            }
+            let (end, masked) = scan_delimited_block(&chars, p);
+            let base_line = 1 + chars[..p].iter().filter(|&&c| c == '\n').count();
+            for (idx, class) in find_shorthand_classes(&masked) {
+                let line = base_line + masked[..idx].iter().filter(|&&c| c == '\n').count();
+                out.push((line, class));
+            }
+            i = end;
+        }
+        out
+    }
+
+    /// The classes a script writes, with their lines ([`literal_classes`]
+    /// over every string and template literal).
+    fn script_class_writes(
+        src: &str,
+        defined: &std::collections::HashSet<String>,
+    ) -> Vec<(usize, String)> {
+        string_literals(src, false)
+            .into_iter()
+            .flat_map(|(line, content)| {
+                literal_classes(&content, defined)
+                    .into_iter()
+                    .map(move |class| (line, class))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_writer_scan_reads_every_way_a_class_is_written() {
+        let defined = defined_classes();
+        let rust = |src: &str| -> Vec<String> {
+            rust_class_writes(src, &defined).into_iter().map(|(_, c)| c).collect()
+        };
+        for (src, class) in [
+            (r#"html! { section .card { } }"#, "card"),
+            (r#"html! { div class="card card--flush" {} }"#, "card--flush"),
+            (r#"html! { div class={ "x" @if a { " card__body" } } {} }"#, "card__body"),
+            (r#"Badge::new(v).classes("empty-note")"#, "empty-note"),
+            (r#"const C: &str = "btn btn--primary"; html! { a class=(C) {} }"#, "btn--primary"),
+            (r#"format!("<p class=\"empty {x}\">")"#, "empty"),
+            (r##"PreEscaped(r#"<div class="card">"#)"##, "card"),
+            (r#"const JS: &str = "el.className = 'card__head';";"#, "card__head"),
+            (r#"const JS: &str = "el.classList.add('card');";"#, "card"),
+        ] {
+            assert!(rust(src).iter().any(|c| c == class), "{src}: {:?}", rust(src));
+        }
+        for src in [
+            r#"// html! { section .card {} }"#,
+            r#"/// a `.card` in prose"#,
+            r#"let msg = "the card is empty";"#,
+            r#"Err("must not be empty")"#,
+            r#"html! { p { "No cards" } }"#,
+            r#"html! { div #empty-card .offer-card {} }"#,
+            r#"x.card.render()"#,
+        ] {
+            let found = rust(src);
+            assert!(
+                !found.iter().any(|c| c == "card" || c == "empty"),
+                "{src}: {found:?}"
+            );
+        }
+        let js = |src: &str| -> Vec<String> {
+            script_class_writes(src, &defined).into_iter().map(|(_, c)| c).collect()
+        };
+        for (src, class) in [
+            ("el.className = 'card';", "card"),
+            ("el.classList.add(\"empty-note\");", "empty-note"),
+            ("el.setAttribute('class', 'card card--flush');", "card--flush"),
+            ("host.innerHTML = `<section class=\"card\">${x}</section>`;", "card"),
+            ("b.className = 'btn btn--primary';", "btn--primary"),
+            ("s.replace(/\"/g, '&quot;'); el.className = 'card';", "card"),
+            ("var r = x / 2; el.className = 'card';", "card"),
+        ] {
+            assert!(js(src).iter().any(|c| c == class), "{src}: {:?}", js(src));
+        }
+        for src in [
+            "// el.className = 'card';",
+            "/* class=\"card\" */",
+            "el.querySelector('.card');",
+            "throw new Error('the card is empty');",
+        ] {
+            assert!(js(src).is_empty(), "{src}: {:?}", js(src));
+        }
+    }
+
+    /// Design rules 2, 6 and 9 rest on one writer per class (PLAN §2): the
+    /// builder in [`ONE_WRITER`] is the only production source, Rust or
+    /// script, that writes `.card`/`.card__*`/`.card--*` (`components::Card`),
+    /// `.empty`/`.empty__*`/`.empty-note` (`components::{empty_state,
+    /// empty_note}`) or `.btn--primary` (`components::Action`). Read through
+    /// every spelling: maud shorthand, a class attribute in any string, a
+    /// class-list literal however it reaches the page, and a script's
+    /// `className`, `classList` or markup string ([`literal_classes`]).
+    /// Tests and test-only modules are not production and are not read;
+    /// [`NOT_A_SECOND_WRITER`] names, with exact counts, the two literals
+    /// that spell a class name without writing that class.
+    #[test]
+    fn only_the_builder_writes_its_classes() {
+        let mut found: std::collections::BTreeMap<(String, String), Vec<usize>> =
+            Default::default();
+        let mut owner_writes = 0;
+        let defined = defined_classes();
+        let sources = production_rust_sources()
+            .into_iter()
+            .map(|(rel, src)| (rel, rust_class_writes(&src, &defined)))
+            .chain(
+                shipped_scripts()
+                    .into_iter()
+                    .map(|(rel, src)| (rel, script_class_writes(&src, &defined))),
+            );
+        for (rel, writes) in sources {
+            for (line, class) in writes {
+                let Some((owner, _)) = ONE_WRITER.iter().find(|(_, owns)| owns(&class)) else {
+                    continue;
+                };
+                if rel == *owner {
+                    owner_writes += 1;
+                    continue;
+                }
+                found.entry((rel.clone(), class)).or_default().push(line);
+            }
+        }
+        let mut wrong = Vec::new();
+        for ((rel, class), lines) in &found {
+            let excused = NOT_A_SECOND_WRITER
+                .iter()
+                .find(|(file, c, _, _)| file == rel && c == class);
+            match excused {
+                Some((_, _, count, _)) if *count == lines.len() => {}
+                _ => wrong.push(format!("{rel}:{lines:?}: .{class}")),
+            }
+        }
+        for (file, class, _, _) in NOT_A_SECOND_WRITER {
+            if !found.contains_key(&(file.to_string(), class.to_string())) {
+                wrong.push(format!("NOT_A_SECOND_WRITER ({file}, {class}) is stale"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a class with one writer is written somewhere else; build it with \
+             components::Card, empty_state/empty_note or Action instead:\n{}",
+            wrong.join("\n")
+        );
+        assert!(owner_writes >= 10, "the builders' own writes were not found: {owner_writes}");
+    }
+
+    /// The colour literals outside `ui/styles/tokens.css`, by file, with
+    /// their exact count. A ratchet (PLAN §5.3, N10): every colour is meant
+    /// to come from a token, so a dark theme is a second set of token values
+    /// and nothing else; the files below still spell some colours out. A
+    /// count may only go down (lower it, or delete the entry at zero), and a
+    /// file not listed may spell none.
+    const HEX_LITERALS: &[(&str, usize)] = &[
+        // An email's inline styles: mail clients take no stylesheet.
+        ("blocks/email.rs", 5),
+        // The storefront's own stylesheet, inside its shadow root.
+        ("blocks/products/assets/storefront.js", 10),
+        // `BRAND_ACCENT_HEX`, the accent for places CSS variables cannot
+        // reach (email), pinned equal to `--primary-color`.
+        ("ui/assets.rs", 1),
+        // The black a branded `--primary-color`'s hover is mixed toward.
+        ("ui/layout.rs", 1),
+        ("ui/styles/components/auth.css", 7),
+        ("ui/styles/components/badge.css", 10),
+        ("ui/styles/components/button.css", 2),
+        ("ui/styles/components/card.css", 5),
+        ("ui/styles/components/form.css", 9),
+        ("ui/styles/components/nav.css", 2),
+        ("ui/styles/components/table.css", 2),
+        ("ui/styles/layouts/auth-split.css", 6),
+        ("ui/styles/layouts/shell.css", 6),
+    ];
+
+    /// The `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa` colours in `text`, as whole
+    /// words (`#add-grant`, an id, is not one).
+    fn hex_colours(text: &str) -> usize {
+        let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        text.match_indices('#')
+            .filter(|(at, _)| {
+                // `&#039;` is an entity, and `a#b` an id in a selector.
+                !text[..*at].ends_with(|c: char| is_name(c) || c == '&')
+            })
+            .filter(|(at, _)| {
+                let rest = &text[at + 1..];
+                let digits = rest.chars().take_while(char::is_ascii_hexdigit).count();
+                matches!(digits, 3 | 4 | 6 | 8) && !rest[digits..].starts_with(is_name)
+            })
+            .count()
+    }
+
+    #[test]
+    fn the_colour_count_reads_each_spelling_once() {
+        assert_eq!(hex_colours("color: #fff;"), 1);
+        assert_eq!(hex_colours("border: 1px solid #e5e7eb"), 1);
+        assert_eq!(hex_colours("background: linear-gradient(#000,#fffa)"), 2);
+        assert_eq!(hex_colours("#d92320"), 1);
+        assert_eq!(hex_colours("#fd353480"), 1);
+        assert_eq!(hex_colours("#add-grant #dev-log #content &#039; a#bad"), 0);
+        assert_eq!(hex_colours("#12345"), 0);
+    }
+
+    /// Every colour literal outside the token sheet: in a stylesheet's
+    /// declarations (selectors are ids, not colours), in a shipped script's
+    /// strings, and in a production Rust source's strings. Pinned by file in
+    /// [`HEX_LITERALS`].
+    #[test]
+    fn colour_literals_outside_the_tokens_only_go_down() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: std::collections::BTreeMap<String, usize> = Default::default();
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "css"))
+        {
+            let rel = entry.path().strip_prefix(&root).unwrap().display().to_string();
+            if rel == "ui/styles/tokens.css" {
+                continue;
+            }
+            let css = strip_css_comments(&std::fs::read_to_string(entry.path()).unwrap());
+            let count: usize = super::test_support::css_rules(&css)
+                .iter()
+                .map(|(_, body)| hex_colours(body))
+                .sum();
+            if count > 0 {
+                found.insert(rel, count);
+            }
+        }
+        let literals = production_rust_sources()
+            .into_iter()
+            .map(|(rel, src)| (rel, string_literals(&src, true)))
+            .chain(
+                shipped_scripts()
+                    .into_iter()
+                    .map(|(rel, src)| (rel, string_literals(&src, false))),
+            );
+        for (rel, strings) in literals {
+            let count: usize = strings.iter().map(|(_, s)| hex_colours(s)).sum();
+            if count > 0 {
+                found.insert(rel, count);
+            }
+        }
+        let expected: std::collections::BTreeMap<String, usize> = HEX_LITERALS
+            .iter()
+            .map(|(file, count)| (file.to_string(), *count))
+            .collect();
+        let table: Vec<String> = found
+            .iter()
+            .map(|(file, count)| format!("        (\"{file}\", {count}),"))
+            .collect();
+        assert_eq!(
+            found,
+            expected,
+            "colour literals outside tokens.css moved; use a token, and only lower \
+             HEX_LITERALS. Found:\n{}",
+            table.join("\n")
+        );
+    }
+
+    /// Class names this program retired, which no source may spell again:
+    /// `.btn--ghost`/`.btn--ghost-danger` (renamed `.btn--quiet`/
+    /// `.btn--quiet-danger`, so `Emphasis::Quiet` and its class share a
+    /// name), the sub-14px size utilities `.text-xs`/`.text-13`/`.text-11`/
+    /// `.text-10` (design rule 5) and `.text-capitalize` (rule 4: case is
+    /// written at the source). Read as whole class tokens in the code (not
+    /// the comments) of every Rust, CSS and script source under `src/`,
+    /// tests included, so neither a rule nor a use nor an assertion about
+    /// one comes back; `--text-xs`, the token, is a different name.
+    #[test]
+    fn retired_class_names_stay_retired() {
+        // Spelled in halves so this test is not its own hit.
+        let retired = [
+            concat!("btn--", "ghost"),
+            concat!("btn--", "ghost-danger"),
+            concat!("text-", "xs"),
+            concat!("text-", "13"),
+            concat!("text-", "11"),
+            concat!("text-", "10"),
+            concat!("text-", "capitalize"),
+        ];
+        let is_name = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        let mut hits = Vec::new();
+        let mut read = 0;
+        for entry in walkdir::WalkDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| matches!(x.to_str(), Some("rs" | "css" | "js" | "mjs")))
+            })
+        {
+            read += 1;
+            let src = std::fs::read_to_string(entry.path()).unwrap();
+            // Code only: prose may still tell the history of a name.
+            let code = match entry.path().extension().and_then(|x| x.to_str()) {
+                Some("rs") => mask_rust_comments(&src),
+                Some("css") => strip_css_comments(&src),
+                _ => src
+                    .lines()
+                    .map(|line| match line.trim_start() {
+                        l if l.starts_with("//") || l.starts_with('*') || l.starts_with("/*") => "",
+                        _ => line,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            for (n, line) in code.lines().enumerate() {
+                for name in retired {
+                    let found = line.match_indices(name).any(|(at, _)| {
+                        !line[..at].ends_with(is_name)
+                            && !line[at + name.len()..].starts_with(is_name)
+                    });
+                    if found {
+                        hits.push(format!("{}:{}: .{name}", entry.path().display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(read > 400, "only {read} sources were read");
+        assert!(
+            hits.is_empty(),
+            "a retired class name is back:\n{}",
             hits.join("\n")
         );
     }

@@ -112,7 +112,7 @@ impl BadgeVariant {
 /// A badge that carries more than a colour and a plain text label.
 ///
 /// Call sites reach for this when the pill needs a utility class
-/// (`.text-11`, `.mr-1`), a `title`, or markup content (`"v" (version)`).
+/// (`.mr-1`, `.nowrap`), a `title`, or markup content (`"v" (version)`).
 /// [`badge`] is the plain-text shorthand and delegates here, so within
 /// `blocks/admin/` — the area this type was widened for, and whose 39
 /// hand-written pills it replaced — there is exactly one place that emits
@@ -347,12 +347,12 @@ mod tests {
         // must match what the hand-written maud emitted, attribute order
         // included, or the migration moves a visual baseline.
         let rendered = Badge::new(BadgeVariant::Info)
-            .classes("text-xs")
+            .classes("mr-1")
             .title("Database backend")
             .render(html! { "SQLite" " · " (3) " tables" });
         assert_eq!(
             rendered.into_string(),
-            r#"<span class="badge badge-info text-xs" title="Database backend">SQLite · 3 tables</span>"#
+            r#"<span class="badge badge-info mr-1" title="Database backend">SQLite · 3 tables</span>"#
         );
     }
 

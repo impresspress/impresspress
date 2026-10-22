@@ -135,6 +135,11 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    sentence, no frame. In a flush card it takes the card's inset
    (card.css). */
 .empty-note { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
+/* A link in the sentence ("Go to files") takes the text-safe red a card
+   head's link uses (`.card__link`, 4.99:1 on white, 4.70:1 on the page
+   background), not the browser's default blue, and keeps its underline:
+   inside a muted sentence the colour alone does not mark it as a link. */
+.empty-note a { color: var(--primary-button); }
 
 /* ===== Pagination ===== */
 /* One row at every width: the total on the left, the controls on the right.

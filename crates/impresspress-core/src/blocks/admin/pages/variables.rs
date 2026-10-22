@@ -2491,9 +2491,7 @@ mod tests {
             html.contains(r#"<h2 class="modal__title" id="create-var-title">Add variable</h2>"#),
             "{html}"
         );
-        // The pin badges take their size from `.badge` alone.
         assert!(html.contains(">Pinned at upgrade</span>"), "{html}");
-        assert!(!html.contains("text-11"), "{html}");
     }
 
     /// Each owner's variables are a flush fold card, the shared config drawn
@@ -2535,9 +2533,7 @@ mod tests {
         );
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
         assert!(VAR_FILTER_JS.contains(r#"querySelectorAll('[data-fold="variable"]')"#));
-        for small in ["text-13", "text-11", "text-xs", "var-group"] {
-            assert!(!html.contains(small), "{small}: {html}");
-        }
+        assert!(!html.contains("var-group"), "{html}");
     }
 
     /// The value column has its own share of the row (`VAR_COLUMNS`), and a

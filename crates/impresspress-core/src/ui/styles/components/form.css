@@ -397,21 +397,12 @@
 	display: flex; align-items: center; gap: var(--space-1);
 }
 .text-warning-strong svg { width: 14px; height: 14px; flex-shrink: 0; }
-.text-sm { font-size: 0.875rem; }
-.text-xs { font-size: 0.75rem; }
+.text-sm { font-size: var(--text-sm); }
 .tabular-nums { font-variant-numeric: tabular-nums; }
 .text-lg { font-size: var(--text-lg); }
-/* Off-scale small sizes for dense badges/cells (permissions grants table,
- * database admin panel) that predate the --text-* token scale and don't
- * land on one of its steps. Named by literal px, matching the existing
- * .w-80 fixed-width convention below. */
-.text-13 { font-size: 13px; }
-.text-11 { font-size: 11px; }
-.text-10 { font-size: 10px; }
 .font-medium { font-weight: 500; }
 .font-semibold { font-weight: 600; }
 .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.text-capitalize { text-transform: capitalize; }
 .nowrap { white-space: nowrap; }
 .pre-wrap { white-space: pre-wrap; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

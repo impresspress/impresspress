@@ -132,7 +132,7 @@ pub(crate) fn collect_css_classes(css_no_comments: &str, out: &mut HashSet<Strin
 ///
 /// The counterpart of `scan_delimited_block`'s mask, which blanks string
 /// literals too. The scans that use this one read a class list *out of* a
-/// string literal (`.classes("text-11 mr-1")`) or count markup that a string
+/// string literal (`.classes("mr-1 nowrap")`) or count markup that a string
 /// can legitimately contain, so they need the literals kept and only the prose
 /// removed: a comment that spells a class or a `.badge` shorthand out in
 /// running text renders nothing, and must not register as if it did.

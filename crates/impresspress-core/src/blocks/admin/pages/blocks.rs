@@ -993,10 +993,6 @@ mod card_tests {
             "{html}"
         );
         assert!(html.contains(r#"href="/b/aaa/admin/""#), "{html}");
-        assert!(
-            !html.contains("text-11") && !html.contains("text-xs"),
-            "{html}"
-        );
         assert!(html.contains("<code>\u{2014}</code>"), "{html}");
     }
 
