@@ -1155,8 +1155,8 @@ async fn the_commerce_fixture_is_what_the_pages_render() {
 }
 
 /// The deleted product `gone`, with one published offer and one active
-/// Payment Link that never reached Stripe, deleted on a fixed date: the close
-/// page's two actions, Archive offer and Deactivate. Returns the context and
+/// Payment Link that never reached Stripe: the close page's two actions,
+/// Archive offer and Deactivate. Returns the context and
 /// the offer and link ids, which are generated.
 async fn close_ctx() -> (crate::test_support::TestContext, String, String) {
     use serde_json::json;
@@ -1214,14 +1214,11 @@ async fn close_ctx() -> (crate::test_support::TestContext, String, String) {
         .await
         .managed
         .id;
-    // Deleted on a fixed date, so the page's "Deleted …" line stays the same.
-    repo::products::update_live(
-        &ctx,
-        "gone",
-        record(&[("deleted_at", json!("2026-09-01T00:00:00Z"))]),
-    )
-    .await
-    .expect("soft delete");
+    // Through the door a delete takes. It stamps the time now, which the
+    // fixture writes as `DELETED_AT`.
+    repo::products::soft_delete(&ctx, "gone")
+        .await
+        .expect("soft delete");
     (ctx, offer_id, link_id)
 }
 
@@ -1246,12 +1243,26 @@ fn main_without_script_files(name: &str, html: &str) -> String {
     body
 }
 
+/// How the fixture writes the close page's "Deleted …" time, which
+/// `soft_delete` stamps with the time of the run.
+const DELETED_AT: &str = r#"Deleted <time class="datetime" datetime="2026-09-01T00:00:00.000Z" title="2026-09-01T00:00:00.000Z">2026-09-01 00:00 UTC</time>"#;
+
+/// `page` with its one `Deleted <time …>…</time>` written as [`DELETED_AT`].
+fn with_fixed_deletion_time(page: &str) -> String {
+    let start = page
+        .find("Deleted <time")
+        .unwrap_or_else(|| panic!("the close page states when it was deleted: {page}"));
+    let end = page[start..].find("</time>").expect("a closed time") + start + "</time>".len();
+    format!("{}{DELETED_AT}{}", &page[..start], &page[end..])
+}
+
 /// The three products actions that confirm in the shared dialog, as
 /// `products-confirms.spec.ts` mounts them with their own scripts: the admin
 /// order page of a partly refunded order (Create refund, whose question
 /// states the amount, or the remaining balance for a blank one), and a
 /// deleted product's close page (Archive offer and Deactivate). The close
-/// page's generated ids are written `offer_1` and `link_1`.
+/// page's generated ids are written `offer_1` and `link_1`, and its deletion
+/// time [`DELETED_AT`].
 pub(super) async fn product_confirms_fixture() -> String {
     let commerce = commerce_ctx().await;
     let order = page_as(
@@ -1262,9 +1273,11 @@ pub(super) async fn product_confirms_fixture() -> String {
     .await;
     let (close, offer_id, link_id) = close_ctx().await;
     let close_page = admin_page(&close, "/b/products/admin/products/gone/close").await;
-    let close_page = close_page
-        .replace(&offer_id, "offer_1")
-        .replace(&link_id, "link_1");
+    let close_page = with_fixed_deletion_time(
+        &close_page
+            .replace(&offer_id, "offer_1")
+            .replace(&link_id, "link_1"),
+    );
     let mut out = String::new();
     for (name, html) in [("refund", order), ("close", close_page)] {
         out.push_str(&format!(

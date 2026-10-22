@@ -568,9 +568,9 @@ document.addEventListener("input", function (e) {
 // The same two also hold the danger button to this dialog: outside it, a
 // button drawn in danger carries its own `hx-confirm`
 // (`dom::unconfirmed_danger_buttons`, on every crawled page), and no script
-// draws one or composes a button class (`dom::danger_class_references`, on
-// every script file and inline script, which is why this comment never spells
-// the class). A control whose script asks through `impresspressConfirm` is a
+// draws one or builds a button class from a prefix in the ordinary ways
+// (`dom::danger_class_references` lists what it reads, on every script file
+// and inline script, which is why this comment never spells the class). A control whose script asks through `impresspressConfirm` is a
 // secondary.
 //
 // ## The delegated-action rule

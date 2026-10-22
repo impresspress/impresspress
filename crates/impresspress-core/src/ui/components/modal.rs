@@ -435,8 +435,8 @@ mod tests {
         );
     }
 
-    /// No shipped script draws a danger button
-    /// (`test_support::dom::danger_class_references`): `.btn--danger` is the
+    /// No shipped script builds a danger button in any of the ordinary ways
+    /// `test_support::dom::danger_class_references` reads: `.btn--danger` is the
     /// shared dialog's confirm button, written here as an `Action`, so a
     /// script that asks first leaves its own button a secondary. The crawled
     /// pages' markup and inline scripts are `htmx_guard`'s

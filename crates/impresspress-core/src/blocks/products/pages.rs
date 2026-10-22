@@ -1056,13 +1056,14 @@ pub async fn deleted_product_close(
                     // Danger: an archived offer cannot be published again
                     // (`repo::offers::publish` refuses it, and an active or
                     // archived offer is immutable), and archiving takes its
-                    // Prices down in Stripe.
+                    // Prices down in Stripe and retires its Payment Links
+                    // (`stripe::archive_offer_catalog`).
                     @if offer.status != OfferStatus::Archived {
                         div .products-actions {
                             button .btn .btn--secondary .btn--sm type="button"
                                 hx-delete=(offer_url)
                                 hx-swap="none"
-                                hx-confirm=(format!("Archive the offer “{}”? Its prices stop selling in Stripe, and an archived offer can't be published again.", offer.offer.name))
+                                hx-confirm=(format!("Archive the offer “{}”? Its prices stop selling in Stripe, its payment links stop taking payments, and an archived offer can't be published again.", offer.offer.name))
                                 data-confirm-label="Archive offer"
                                 data-confirm-tone="danger"
                                 data-error-label="Could not archive this offer"

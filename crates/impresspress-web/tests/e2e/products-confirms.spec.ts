@@ -15,7 +15,8 @@ import { confirmChrome } from "./fixtures/confirm";
  *   close page's htmx controls).
  *
  * Cancel, by Esc and by Enter on the focused Cancel, sends no request at all;
- * the confirm button sends exactly one.
+ * the confirm button sends exactly one, counted once the success reload has
+ * loaded. A blank refund sends the figure it stated, so a stale page is refused.
  *
  * The markup is what the pages render: `fixtures/product-confirms.html`, kept
  * equal to the Rust pages by
@@ -57,9 +58,14 @@ ${script ? `<script>${script}</script>` : ""}
 
 /**
  * Serve `html` for every page under the admin origin and answer every other
- * request with `{}`, recording it as `METHOD path` with its JSON body.
+ * request with `answer` (by default 200 `{}`), recording it as `METHOD path`
+ * with its JSON body.
  */
-async function serve(page: Page, html: string): Promise<Array<{ call: string; body: unknown }>> {
+async function serve(
+  page: Page,
+  html: string,
+  answer: { status: number; body: unknown } = { status: 200, body: {} },
+): Promise<Array<{ call: string; body: unknown }>> {
   const requests: Array<{ call: string; body: unknown }> = [];
   await page.route(`${adminOrigin}/**`, async (route: Route) => {
     const request = route.request();
@@ -71,7 +77,11 @@ async function serve(page: Page, html: string): Promise<Array<{ call: string; bo
       call: `${request.method()} ${url.pathname}`,
       body: request.postData() ? request.postDataJSON() : undefined,
     });
-    return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    return route.fulfill({
+      status: answer.status,
+      contentType: "application/json",
+      body: JSON.stringify(answer.body),
+    });
   });
   return requests;
 }
@@ -102,7 +112,13 @@ async function asking(page: Page, label: string, question: string): Promise<Loca
 /**
  * From `control`, which has focus: Esc answers no, Enter on the focused
  * Cancel answers no, and neither sends anything; then the confirm button
- * answers yes.
+ * answers yes, and the request list is exactly `sent`.
+ *
+ * Every success here ends in a reload (the refund's `location.reload()`, the
+ * close page's `data-reload-on-success`), so the list is read once, after
+ * that reload has loaded: anything the page sent before it went away — a
+ * late duplicate included — is in it. A poll would pass the first moment one
+ * request had landed.
  */
 async function cancelTwiceThenConfirm(
   page: Page,
@@ -110,6 +126,7 @@ async function cancelTwiceThenConfirm(
   label: string,
   question: string,
   requests: Array<{ call: string }>,
+  sent: string[],
 ): Promise<void> {
   await page.keyboard.press("Enter");
   let dialog = await asking(page, label, question);
@@ -129,8 +146,10 @@ async function cancelTwiceThenConfirm(
   dialog = await asking(page, label, question);
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: label, exact: true })).toBeFocused();
+  const reloaded = page.waitForEvent("load");
   await page.keyboard.press("Enter");
-  await expect(dialog).toBeHidden();
+  await reloaded;
+  expect(requests.map((r) => r.call)).toEqual(sent);
 }
 
 test.describe("products actions that cannot be undone confirm first, keyboard only", () => {
@@ -153,10 +172,46 @@ test.describe("products actions that cannot be undone confirm first, keyboard on
       // 123,456,789 minor units ordered, 200,000 refunded already.
       "Refund the full remaining balance, 1232567.89 NZD, on this order? This can't be undone.",
       requests,
+      [REFUND],
     );
-    await expect.poll(() => requests.map((r) => r.call)).toEqual([REFUND]);
-    // A blank amount sends none: the server refunds what remains.
-    expect(requests[0].body).toEqual({ note: "", idempotency_key: "ui_200000_full" });
+    // A blank amount sends the figure it stated, so a stale page is refused
+    // rather than refunding a different amount.
+    expect(requests[0].body).toEqual({
+      note: "",
+      idempotency_key: "ui_200000_full",
+      amount_minor: 123256789,
+    });
+  });
+
+  test("a blank refund on a stale page is refused, not refunded at another figure", async ({ page }) => {
+    // Another refund landed after the page loaded: the stated figure is now
+    // more than remains, and the server says so.
+    const requests = await serve(page, servedPage(fixturePage("refund"), orderDetailJs), {
+      status: 400,
+      body: { message: "Refund amount exceeds the remaining refundable amount" },
+    });
+    await page.goto(`${adminOrigin}/b/products/admin/purchases/${ORDER}`);
+    const refund = page.getByRole("button", { name: "Create refund", exact: true });
+    await tabTo(page, refund);
+    await page.keyboard.press("Enter");
+    const dialog = await asking(
+      page,
+      "Create refund",
+      "Refund the full remaining balance, 1232567.89 NZD, on this order? This can't be undone.",
+    );
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#order-detail-error")).toHaveText(
+      "Refund amount exceeds the remaining refundable amount",
+    );
+    await expect(refund).toBeEnabled();
+    expect(requests).toEqual([
+      {
+        call: REFUND,
+        body: { note: "", idempotency_key: "ui_200000_full", amount_minor: 123256789 },
+      },
+    ]);
   });
 
   test("Create refund with an amount states that amount", async ({ page }) => {
@@ -186,8 +241,8 @@ test.describe("products actions that cannot be undone confirm first, keyboard on
       "Create refund",
       "Refund 12.50 NZD on this order? This can't be undone.",
       requests,
+      [REFUND],
     );
-    await expect.poll(() => requests.map((r) => r.call)).toEqual([REFUND]);
     expect(requests[0].body).toEqual({
       note: "",
       idempotency_key: "ui_200000_1250",
@@ -204,12 +259,10 @@ test.describe("products actions that cannot be undone confirm first, keyboard on
       page,
       archive,
       "Archive offer",
-      "Archive the offer “Download”? Its prices stop selling in Stripe, and an archived offer can't be published again.",
+      "Archive the offer “Download”? Its prices stop selling in Stripe, its payment links stop taking payments, and an archived offer can't be published again.",
       requests,
+      ["DELETE /b/products/api/admin/products/gone/offers/offer_1"],
     );
-    await expect
-      .poll(() => requests.map((r) => r.call))
-      .toEqual(["DELETE /b/products/api/admin/products/gone/offers/offer_1"]);
   });
 
   test("Deactivate a payment link on a deleted product's close page", async ({ page }) => {
@@ -223,9 +276,7 @@ test.describe("products actions that cannot be undone confirm first, keyboard on
       "Deactivate link",
       "Deactivate this payment link? It stops taking payments, and a deactivated link can't be turned back on.",
       requests,
+      ["DELETE /b/products/api/admin/products/gone/offers/offer_1/payment-links/link_1"],
     );
-    await expect
-      .poll(() => requests.map((r) => r.call))
-      .toEqual(["DELETE /b/products/api/admin/products/gone/offers/offer_1/payment-links/link_1"]);
   });
 });
