@@ -1007,12 +1007,6 @@ mod shared_vars_tests {
         shared_config_vars, CORS_ALLOWED_ORIGINS_KEY, CSP_DIRECTIVES_KEY, DEFAULT_CSP_DIRECTIVES,
     };
 
-    /// Every shared var must be declared exactly once. A duplicate key means
-    /// two competing defaults for the same setting — which one the seeder
-    /// writes and which one `shared_var()` (first-match `.find()`) shows in
-    /// the settings UI silently diverge. This happened for real:
-    /// `WAFER_RUN_SHARED__PRIMARY_COLOR` was declared twice, once with the
-    /// pre-rebrand indigo `#6366f1` and once blank, leaking blue accents.
     /// Every declared config var — the shared ones, each block's
     /// `config_keys` and the auth-identity vars, the set
     /// [`super::collect_all_config_vars`] gathers — carries a display name
@@ -1039,6 +1033,12 @@ mod shared_vars_tests {
         );
     }
 
+    /// Every shared var must be declared exactly once. A duplicate key means
+    /// two competing defaults for the same setting — which one the seeder
+    /// writes and which one `shared_var()` (first-match `.find()`) shows in
+    /// the settings UI silently diverge. This happened for real:
+    /// `WAFER_RUN_SHARED__PRIMARY_COLOR` was declared twice, once with the
+    /// pre-rebrand indigo `#6366f1` and once blank, leaking blue accents.
     #[test]
     fn shared_config_vars_have_unique_keys() {
         let vars = shared_config_vars();

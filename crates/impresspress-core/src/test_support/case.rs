@@ -1,21 +1,15 @@
 //! The one sentence-case rule the label guards share: the tab guard
 //! (`htmx_guard::every_tab_is_a_sentence_case_text_label`) and the config
-//! label guard (`config_vars::tests::every_declared_config_var_is_named_in_sentence_case`).
+//! label guard (`config_vars::shared_vars_tests::every_declared_config_var_is_named_in_sentence_case`).
 //! A later case ratchet adds its surfaces here rather than writing the rule
 //! again.
 
-/// The proper nouns a label may capitalise after its first word. Each is a
-/// product or company a declared label names ("Enable OAuth", "GitHub client
-/// ID", "Stripe secret key"), and is spelled as its owner spells it.
-const PROPER_NOUNS: &[&str] = &[
-    "GitHub",
-    "Google",
-    "Mailgun",
-    "Microsoft",
-    "OAuth",
-    "Stripe",
-    "Turnstile",
-];
+/// The proper nouns a label may capitalise after its first word, spelled as
+/// their owners spell them: "Enable OAuth". The first word is capitalised
+/// anyway, so a label that opens with a name ("GitHub client ID", "Stripe
+/// secret key") needs no entry. A noun is added here when a label needs it
+/// after its first word, and not before.
+const PROPER_NOUNS: &[&str] = &["OAuth"];
 
 /// Whether `label` capitalises its first word and only that, plus any
 /// acronym and any of [`PROPER_NOUNS`]: "API keys", "SQL editor", "STUN

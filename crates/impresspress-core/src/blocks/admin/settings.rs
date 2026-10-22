@@ -951,6 +951,53 @@ mod tests {
         );
     }
 
+    /// This release's upgrade, for a shared var: a row stored under the old
+    /// Title Case name, with an admin-edited value pinned by `updated_by`,
+    /// takes the declared name and description and keeps its value and its
+    /// pin, so the admin's edit still outranks the environment after the
+    /// rename.
+    #[tokio::test]
+    async fn a_renamed_shared_var_keeps_its_edited_value_and_pin() {
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        let key = crate::config_vars::APP_NAME_KEY;
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: key.to_string(),
+                value: "Acme Admin Edit".to_string(),
+                name: "App Name".to_string(),
+                description: "an older description".to_string(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: crate::features::USER_EDITED_SENTINEL.to_string(),
+                block: variables::block_for_key(key),
+            },
+        )
+        .await
+        .expect("store the pre-upgrade row");
+
+        seed_defaults(&ctx).await;
+
+        let declared = crate::config_vars::shared_var(key);
+        let row = variables::get_by_key(&ctx, key)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            row.name, declared.name,
+            "the stored name follows the declaration"
+        );
+        assert_eq!(row.description, declared.description);
+        assert_eq!(row.value, "Acme Admin Edit", "the value is the admin's");
+        assert_eq!(row.updated_by, crate::features::USER_EDITED_SENTINEL);
+        assert_eq!(variables::pin_of(&row), Some(variables::Pin::AdminEdit));
+    }
+
     /// SEC-060 regression: the single-key getter must mask a `*_SECRET` value
     /// even when its `sensitive` flag is 0 (the prior code masked on the flag
     /// alone, leaking the secret here).

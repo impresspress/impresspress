@@ -1055,7 +1055,7 @@ mod tests {
     // ---- From header ------------------------------------------------------------
 
     /// With no `MAILGUN_FROM` set, the display name on a sent mail is the
-    /// deployment's configured App Name — not the product's name spelled in
+    /// deployment's configured App name — not the product's name spelled in
     /// this block.
     #[tokio::test]
     async fn the_default_from_carries_the_configured_app_name() {
@@ -1073,7 +1073,7 @@ mod tests {
         );
     }
 
-    /// A blank App Name falls back to the declared default rather than
+    /// A blank App name falls back to the declared default rather than
     /// sending an empty display name.
     #[tokio::test]
     async fn a_blank_app_name_sends_under_the_declared_default() {
@@ -1093,7 +1093,7 @@ mod tests {
         );
     }
 
-    /// An App Name carrying CR/LF, a comma and a quote still produces ONE
+    /// An App name carrying CR/LF, a comma and a quote still produces ONE
     /// mailbox on ONE header line: the line break cannot start a `Bcc:`
     /// header, and the comma cannot start a second address.
     #[tokio::test]
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     /// An explicitly configured `MAILGUN_FROM` is sent as the operator wrote
-    /// it; the App Name only fills the default.
+    /// it; the App name only fills the default.
     #[tokio::test]
     async fn a_configured_from_address_wins() {
         let (ctx, requests) = ConfigCtx::with_mailgun();
