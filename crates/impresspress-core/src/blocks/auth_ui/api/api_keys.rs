@@ -301,11 +301,13 @@ mod tests {
 
     /// `msg` as the pipeline leaves it for an access token of `owner`'s: the
     /// token's login family, which `handle_create` checks again after its
-    /// insert, is signed in.
+    /// insert, is signed in, and its version is the account's (`0`, never
+    /// bumped here).
     async fn signed_in(ctx: &TestContext, owner: &str, mut msg: Message) -> Message {
         let family = uuid::Uuid::new_v4().to_string();
         crate::test_support::seed_login_family(ctx, owner, &family).await;
         msg.set_meta(crate::crypto::META_AUTH_FAMILY, &family);
+        msg.set_meta(crate::crypto::META_AUTH_VERSION, "0");
         msg
     }
 

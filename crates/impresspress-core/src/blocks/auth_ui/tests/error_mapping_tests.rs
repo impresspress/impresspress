@@ -349,6 +349,7 @@ async fn api_key_revoke_denial_is_403_not_500() {
     crate::test_support::seed_login_family(&ctx, &user_id, "keys-session").await;
     let mut create = auth_msg("create", "/b/auth/api/api-keys", &user_id);
     create.set_meta(crate::crypto::META_AUTH_FAMILY, "keys-session");
+    create.set_meta(crate::crypto::META_AUTH_VERSION, "0");
     let created = output_json(
         AuthUiBlock::default()
             .handle(

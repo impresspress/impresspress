@@ -1341,6 +1341,193 @@ mod tests {
             .id
     }
 
+    /// `POST /b/auth/api/api-keys` on the access token a sign-in answered
+    /// with, as the pipeline leaves the request after that token verified:
+    /// its identity, login family and `auth_version` claim, read back from
+    /// the token by the crypto block that signed it. The per-request check
+    /// itself is not run: on Cloudflare another isolate's cached version can
+    /// still pass a token for seconds after a bump, so the handler must not
+    /// depend on it.
+    async fn create_key_on(ctx: &TestContext, signed_in: &serde_json::Value) -> OutputStream {
+        let access = signed_in["access_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the sign-in answered with tokens: {signed_in}"));
+        let claims = wafer_core::clients::crypto::verify(ctx, access)
+            .await
+            .expect("the token the sign-in handed out verifies");
+        let user_id = claims["sub"].as_str().expect("sub").to_string();
+        let mut msg = crate::test_support::auth_msg("create", "/b/auth/api/api-keys", &user_id);
+        msg.set_meta(
+            crate::crypto::META_AUTH_FAMILY,
+            claims["family"].as_str().expect("family"),
+        );
+        msg.set_meta(
+            crate::crypto::META_AUTH_VERSION,
+            claims[users::AUTH_VERSION_FIELD]
+                .as_i64()
+                .unwrap_or(0)
+                .to_string(),
+        );
+        crate::blocks::auth_ui::api::api_keys::handle_create(
+            ctx,
+            &msg,
+            InputStream::from_bytes(br#"{"name":"late"}"#.to_vec()),
+        )
+        .await
+    }
+
+    /// Whether every API key `user_id` holds is revoked.
+    async fn every_key_revoked(ctx: &TestContext, user_id: &str) -> bool {
+        crate::blocks::auth::repo::api_keys::list_for_user(ctx, user_id)
+            .await
+            .expect("list the keys")
+            .iter()
+            .all(|key| key.is_revoked())
+    }
+
+    /// E2-review F3. A sign-in with the OLD password whose credential read
+    /// precedes a password change, and whose family batch lands after the
+    /// change deleted the account's session rows, keeps a live session row.
+    /// A key created on that session's token after the change must not
+    /// survive it: the create's re-check compares the token's version with
+    /// the account's, which the change bumped.
+    #[tokio::test]
+    async fn a_key_created_on_an_old_password_sign_in_racing_a_change_is_withdrawn() {
+        use crate::blocks::auth::repo::{local_credentials, sessions};
+
+        let ctx = TestContext::with_auth_and_crypto().await;
+        fresh_refresh_token(&ctx).await;
+        let uid = race_user_id(&ctx).await;
+        let racing = change_after(
+            &ctx,
+            "database.list",
+            local_credentials::TABLE,
+            change_password_now(ctx.clone(), uid.clone(), OLD_PASSWORD, NEW_PASSWORD),
+        );
+        let signed_in = output_json(
+            login::handle(
+                &racing,
+                &crate::test_support::json_post_msg("/b/auth/api/login"),
+                credentials(OLD_PASSWORD),
+            )
+            .await,
+        )
+        .await;
+        assert!(racing.fired(), "the change landed inside the sign-in");
+        let family = tokens::find_by_token(
+            &ctx,
+            signed_in["refresh_token"].as_str().expect("signed in"),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .family;
+        assert!(
+            sessions::is_live(&ctx, &uid, &family).await.unwrap(),
+            "precondition: the racing family's row was written after the change deleted the rows"
+        );
+
+        assert!(
+            output_is_error(create_key_on(&ctx, &signed_in).await, "Unauthenticated").await,
+            "a key created on the racing sign-in is refused"
+        );
+        assert!(
+            every_key_revoked(&ctx, &uid).await,
+            "and the key it wrote is withdrawn"
+        );
+    }
+
+    /// The same racing sign-in, with its key created at the one point the
+    /// order of the change decides: right after the change revoked the
+    /// account's keys. The sign-in's batch lands after the change deleted the
+    /// rows and before that point, so its family row is live there.
+    ///
+    /// The change bumps the version BEFORE it revokes the keys, so at that
+    /// point the token's version is already behind and the create is refused.
+    /// Revoking the keys first would leave the bump still to come: the
+    /// create's re-check would find a live row and a current version, and the
+    /// key, written after the revocation, would survive the change.
+    #[tokio::test]
+    async fn the_change_bumps_the_version_before_it_revokes_the_keys() {
+        use crate::blocks::auth::repo::{api_keys, local_credentials};
+
+        let ctx = TestContext::with_auth_and_crypto().await;
+        fresh_refresh_token(&ctx).await;
+        let uid = race_user_id(&ctx).await;
+
+        let (credential_read, credential_read_seen) = tokio::sync::oneshot::channel::<()>();
+        let (write_batch, write_batch_seen) = tokio::sync::oneshot::channel::<()>();
+        let (signed_in_tx, signed_in_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let (created_tx, created_rx) = tokio::sync::oneshot::channel::<bool>();
+
+        // The sign-in pauses once it holds the old hash, until the change has
+        // deleted the rows and revoked the keys.
+        let sign_in_ctx = crate::test_support::AfterDbOpContext::new(
+            ctx.clone(),
+            "database.list",
+            local_credentials::TABLE,
+            async move {
+                let _ = credential_read.send(());
+                let _ = write_batch_seen.await;
+            },
+        );
+        // Right after the change's key revocation: the sign-in finishes, and a
+        // key is created on its token.
+        let key_ctx = ctx.clone();
+        let change_ctx = crate::test_support::AfterDbOpContext::new(
+            ctx.clone(),
+            "database.update_where",
+            api_keys::TABLE,
+            async move {
+                let _ = write_batch.send(());
+                let signed_in = signed_in_rx.await.expect("the sign-in answers");
+                let refused =
+                    output_is_error(create_key_on(&key_ctx, &signed_in).await, "Unauthenticated")
+                        .await;
+                let _ = created_tx.send(refused);
+            },
+        );
+
+        let sign_in = async {
+            let signed_in = output_json(
+                login::handle(
+                    &sign_in_ctx,
+                    &crate::test_support::json_post_msg("/b/auth/api/login"),
+                    credentials(OLD_PASSWORD),
+                )
+                .await,
+            )
+            .await;
+            let _ = signed_in_tx.send(signed_in);
+        };
+        let change = async {
+            credential_read_seen
+                .await
+                .expect("the sign-in read the credential");
+            use crate::{blocks::auth_ui::api::change_password, test_support::output_status};
+            let msg = crate::test_support::auth_msg("update", "/b/auth/api/change-password", &uid);
+            let body =
+                serde_json::json!({"current_password": OLD_PASSWORD, "new_password": NEW_PASSWORD});
+            assert_eq!(
+                output_status(change_password::handle(&change_ctx, &msg, json_input(body)).await)
+                    .await,
+                200,
+                "the change succeeds"
+            );
+        };
+        futures::join!(sign_in, change);
+
+        assert!(change_ctx.fired(), "the key was created inside the change");
+        assert!(
+            created_rx.await.expect("the create answered"),
+            "a key created on the racing sign-in after the key revocation is refused"
+        );
+        assert!(
+            every_key_revoked(&ctx, &uid).await,
+            "no key of the account survives the change"
+        );
+    }
+
     /// Sign in with the OLD password while a password change lands between
     /// the sign-in's credential read and its refresh-row insert.
     ///

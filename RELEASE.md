@@ -39,8 +39,12 @@ what it did happens on every native boot.
   revoked this way keeps its row, marked revoked (`revoked_at`) exactly as a
   key revoked by hand is; create new keys after the change. A key-creation
   request that was already under way when the password changed is refused,
-  and the key it wrote is revoked: creating a key checks the session or key
-  that asked for it again once the key exists. An admin changing a user's
+  and the key it wrote is revoked, as is one made on a session someone signed
+  in with the old password while the change ran: creating a key checks the
+  session (its device and its sign-in version) or key that asked for it again
+  once the key exists. The change ends the devices, then retires every token
+  issued before it, then revokes the keys, which is the order that makes
+  that check sufficient. An admin changing a user's
   roles still leaves that user's keys alone.
 - **A change or reset that could not sign the devices out or revoke the keys
   answers an error,** not success. A reset gives the link back, so retrying it

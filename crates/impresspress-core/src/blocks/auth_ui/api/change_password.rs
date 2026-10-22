@@ -1060,7 +1060,7 @@ mod tests {
                 verified_create(&ctx, &format!("Bearer {}", attacker.access_token)).await;
             let on_key = verified_create(&ctx, &format!("ApiKey {attacker_key}")).await;
 
-            // C: the owner changes the password: rows, tokens, keys, bump.
+            // C: the owner changes the password: rows, tokens, bump, keys.
             let changed = ctx
                 .request_json(
                     here.bearer(anon_msg("create", "/b/auth/api/change-password")),

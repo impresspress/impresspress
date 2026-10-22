@@ -78,10 +78,12 @@ pub(crate) fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fi
 }
 
 /// The site admin's request, as the pipeline leaves it after verifying their
-/// access token: identity, roles and the token's login family.
+/// access token: identity, roles, the token's login family and its version.
 fn admin_caller(action: &str, path: &str) -> Message {
     let mut msg = admin_msg(action, path);
     msg.set_meta(crate::crypto::META_AUTH_FAMILY, ADMIN_FAMILY);
+    // Minted at the account's version, which these pages never bump.
+    msg.set_meta(crate::crypto::META_AUTH_VERSION, "0");
     msg
 }
 

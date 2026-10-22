@@ -696,10 +696,10 @@ pub(crate) async fn bump_auth_version(
 }
 
 /// End everything durable `user_id` holds after its password changed
-/// (`auth_ui::api::{change_password,reset_password}`): every device, every API
-/// key, and every access token already issued.
+/// (`auth_ui::api::{change_password,reset_password}`): every device, every
+/// access token already issued, and every API key.
 ///
-/// Three steps, and all three always run:
+/// Three steps, in this order, and all three always run:
 ///
 /// 1. [`helpers::end_all_families`]: delete the account's session rows, then
 ///    revoke its refresh rows. Deleting the rows is what signs the devices
@@ -708,13 +708,26 @@ pub(crate) async fn bump_auth_version(
 ///    refresh is refused — and it empties the device list. The refresh rows
 ///    are revoked rather than deleted, as reuse-detection tombstones
 ///    (SEC-032/039).
-/// 2. [`repo::api_keys::revoke_all_for_user`]. A key does not check
-///    `auth_version`, deliberately (every role change bumps it too), so
-///    nothing else would end a key the old password's holder minted.
-/// 3. [`bump_auth_version`]. It retires every access JWT and refresh family
+/// 2. [`bump_auth_version`]. It retires every access JWT and refresh family
 ///    issued before it, including one whose rows a racing sign-in with the
 ///    old password writes after step 1 has run: that sign-in read the version
 ///    before it checked the password.
+/// 3. [`repo::api_keys::revoke_all_for_user`]. A key does not check
+///    `auth_version`, deliberately (every role change bumps it too), so
+///    nothing else would end a key the old password's holder minted.
+///
+/// **Why the bump comes before the keys.** A request creating a key checks
+/// its credential again after it writes the key
+/// ([`presented_credential_is_live`]): an access token's family row AND its
+/// version against the account's, read uncached. Every credential the old
+/// password could reach is dead to that check once steps 1 and 2 have run —
+/// a family that predates the change has no row, and one a racing old-password
+/// sign-in wrote after step 1 carries the version step 2 passed. So a key
+/// whose re-check runs after step 3 began was created on a dead credential
+/// and is withdrawn, and a key whose re-check ran before it was already
+/// written when step 3 revoked the account's keys. With the keys revoked
+/// before the bump, a key created on the racing sign-in's family between the
+/// two would pass its re-check and survive.
 ///
 /// **Failure policy.** The password has already changed when this runs, and
 /// there is no cross-op transaction primitive available to block code, so the
@@ -725,8 +738,8 @@ pub(crate) async fn bump_auth_version(
 ///   the caller does not answer success):
 ///   - session-row deletion: the devices would stay signed in, and listed,
 ///     until the bump is read, which logout already treats as a failure;
-///   - API-key revocation: it leaves a credential nothing else reaches;
-///   - the bump: an account whose version did not move.
+///   - the bump: an account whose version did not move;
+///   - API-key revocation: it leaves a credential nothing else reaches.
 /// - **Logged only:** refresh-row revocation after the rows were deleted.
 ///   Nothing it covers is left alive — the families have no rows, and the
 ///   bump refuses their tokens as well — so a failure there is housekeeping.
@@ -757,14 +770,6 @@ pub(crate) async fn end_credentials_after_password_change(
             Err(e)
         }
     };
-    let keys = repo::api_keys::revoke_all_for_user(ctx, user_id).await;
-    if let Err(e) = &keys {
-        tracing::error!(
-            user_id = %user_id,
-            error = %e,
-            "password changed but its API keys could not be revoked"
-        );
-    }
     let version = bump_auth_version(ctx, user_id).await;
     if let Err(e) = &version {
         tracing::error!(
@@ -773,7 +778,15 @@ pub(crate) async fn end_credentials_after_password_change(
             "password changed but auth_version bump failed"
         );
     }
-    devices.and(keys).and(version)
+    let keys = repo::api_keys::revoke_all_for_user(ctx, user_id).await;
+    if let Err(e) = &keys {
+        tracing::error!(
+            user_id = %user_id,
+            error = %e,
+            "password changed but its API keys could not be revoked"
+        );
+    }
+    devices.and(version).and(keys)
 }
 
 #[cfg(test)]
@@ -1629,8 +1642,10 @@ pub(crate) mod helpers {
     /// would only move the window, onto a sign-in landing between the two.
     /// After a password change it is harmless: a sign-in with the old
     /// password read the account's version before the bump that follows, so
-    /// that bump refuses its tokens, and a sign-in with the new one is the
-    /// account's owner.
+    /// that bump refuses its tokens, and a key created on them is withdrawn
+    /// ([`super::presented_credential_is_live`] compares that version, and the
+    /// change bumps before it revokes the keys). A sign-in with the new
+    /// password is the account's owner.
     pub(crate) async fn end_all_families(
         ctx: &dyn wafer_run::context::Context,
         user_id: &str,
@@ -2005,15 +2020,23 @@ pub const META_AUTH_API_KEY_ID: &str = "auth.api_key_id";
 /// mints a new credential from it must check again after that write, or a
 /// revocation landing between the two misses the new credential. The order
 /// closes the race without a transaction, as `helpers::end_family` does for a
-/// rotation: every revocation ends the presenting credential first and the
-/// account's API keys after (a password change: session rows, then keys,
-/// [`end_credentials_after_password_change`]). So a re-check that runs after
-/// the revocation reached the presenting credential sees it dead, and one that
-/// runs before it means the new credential was written before the keys were
+/// rotation. A password change ([`end_credentials_after_password_change`])
+/// makes every credential the old password could reach fail this check —
+/// session rows deleted, then the version bumped — before it revokes the
+/// account's API keys. So a re-check that runs after the key revocation began
+/// sees the presenting credential dead and withdraws the new key, and one that
+/// ran before it means the new key was already written when the keys were
 /// revoked, so their revocation covered it.
 ///
 /// - An access token (`auth.family`, set by `crate::crypto::extract_auth_meta`):
-///   its login family's session row ([`repo::sessions::is_live`]).
+///   its login family's session row is live ([`repo::sessions::is_live`]) AND
+///   its `auth_version` claim (`auth.version`) is not behind the account's,
+///   read from the row ([`repo::users::auth_version`]), not through the
+///   short-lived cache the per-request check uses. The version catches a
+///   family a sign-in with the old password wrote after the change deleted
+///   the rows: its row is live, but its token predates the bump. Uncached,
+///   because another instance's cache may still hold the old version for a
+///   few seconds after the bump.
 /// - An API key ([`META_AUTH_API_KEY_ID`], set by [`authenticate_api_key`]):
 ///   the key's own row — present, the caller's, not revoked, not expired.
 /// - Neither: `false`. Every request the pipeline authenticated carries one,
@@ -2028,7 +2051,17 @@ pub(crate) async fn presented_credential_is_live(
     }
     let family = msg.get_meta(crate::crypto::META_AUTH_FAMILY);
     if !family.is_empty() {
-        return repo::sessions::is_live(ctx, user_id, family).await;
+        let Ok(claim_version) = msg
+            .get_meta(crate::crypto::META_AUTH_VERSION)
+            .parse::<i64>()
+        else {
+            return Ok(false);
+        };
+        let (live, current) = futures::join!(
+            repo::sessions::is_live(ctx, user_id, family),
+            repo::users::auth_version(ctx, user_id),
+        );
+        return Ok(live? && claim_version >= current?);
     }
     let key_id = msg.get_meta(META_AUTH_API_KEY_ID);
     if !key_id.is_empty() {

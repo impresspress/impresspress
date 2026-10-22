@@ -36,6 +36,13 @@ pub const META_AUTH_EXP: &str = "auth.exp";
 /// putting a family on the request itself.
 pub const META_AUTH_FAMILY: &str = "auth.family";
 
+/// Meta key holding the access JWT's `auth_version` claim, as a decimal
+/// string (`"0"` when the token carries none). Read by
+/// `blocks::auth::presented_credential_is_live`, which compares it with the
+/// account's version again after a write that mints a credential. Set only
+/// from a token [`verify_access_token`] accepted, like [`META_AUTH_FAMILY`].
+pub const META_AUTH_VERSION: &str = "auth.version";
+
 /// [SEC-038] The canonical JWT `iss` value for this deployment: the issuer
 /// every token it mints carries, and the one [`verify_access_token`] is
 /// handed to reject any other.
@@ -82,6 +89,12 @@ pub struct AccessClaims {
     /// `family` — the login family this token belongs to, whose session row
     /// was live when it was checked. Never empty.
     pub family: String,
+    /// The token's `auth_version` claim (`0` when it carries none), already
+    /// found not behind the account's version — through the short-lived
+    /// cache — when it was checked. Stamped on the request as
+    /// [`META_AUTH_VERSION`] so a write that mints a new credential can
+    /// compare it again, uncached (`blocks::auth::presented_credential_is_live`).
+    pub auth_version: i64,
     /// `auth_method` — how the session was established (`"password"`,
     /// `"oauth.github"`, …), or `""` on a token that does not carry it.
     pub auth_method: String,
@@ -245,6 +258,7 @@ pub async fn verify_access_token(
         jti: jti.to_string(),
         exp: claims.get("exp").and_then(|v| v.as_i64()),
         family: family.to_string(),
+        auth_version: claim_version,
         auth_method: claims
             .get("auth_method")
             .and_then(|v| v.as_str())
@@ -256,8 +270,8 @@ pub async fn verify_access_token(
 /// Extract JWT claims from an `Authorization: Bearer <token>` header and
 /// set auth meta fields on the message.
 ///
-/// Sets: `auth.user_id`, `auth.user_roles`, `auth.family`, and (when present
-/// in the JWT) `auth.user_email`, `auth.jti` and `auth.exp`.
+/// Sets: `auth.user_id`, `auth.user_roles`, `auth.family`, `auth.version`,
+/// and (when present in the JWT) `auth.user_email`, `auth.jti` and `auth.exp`.
 ///
 /// Sets nothing when [`verify_access_token`] refuses the token — the request
 /// continues as unauthenticated. Returns its `Err` when the check could not
@@ -298,6 +312,7 @@ pub async fn extract_auth_meta(
         msg.set_meta(META_AUTH_EXP, exp.to_string());
     }
     msg.set_meta(META_AUTH_FAMILY, &claims.family);
+    msg.set_meta(META_AUTH_VERSION, claims.auth_version.to_string());
     Ok(())
 }
 
