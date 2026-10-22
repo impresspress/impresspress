@@ -15,7 +15,7 @@ use std::sync::Arc;
 use impresspress_browser::boot::AppSeed;
 use impresspress_core::{
     blocks::auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
-    config_vars::HAS_LANDING_PAGE_KEY,
+    config_vars::{shared_var, HAS_LANDING_PAGE_KEY},
     sandbox_mode::SandboxMode,
 };
 use wafer_core::interfaces::database::service::DatabaseService;
@@ -103,6 +103,10 @@ impl AppSeed for WebSeeds {
         // unlike their native counterparts), so without it there is nothing at `/`
         // to serve. `variables::set` writes nothing when the value already matches,
         // so the common case is a read.
+        //
+        // The row's name and description are the declaration's, read from it
+        // rather than written out again here.
+        let declared = shared_var(HAS_LANDING_PAGE_KEY);
         impresspress_core::platform_state::variables::set(
             db,
             HAS_LANDING_PAGE_KEY,
@@ -111,9 +115,8 @@ impl AppSeed for WebSeeds {
             } else {
                 "false"
             },
-            "Has Landing Page",
-            "Serve a static landing page (wafer-run/web) at `/` instead of \
-         redirecting anonymous visitors to the login page",
+            &declared.name,
+            &declared.description,
             // `Some(false)`, not `None`: this caller knows the key — a declared
             // boolean naming whether `/` serves a page — so it speaks for it
             // rather than taking the create default meant for a key nothing

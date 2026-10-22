@@ -1740,7 +1740,7 @@ list always won and still does. Offers that do not collect a shipping address
 are unaffected. Seller onboarding is unaffected: it already treated blank as
 "no country" and let Stripe infer it.
 
-**What to set.** In Admin → Settings → Products, set **Platform Country** to
+**What to set.** In Admin → Settings → Products, set **Platform country** to
 your platform's two-letter country code (for example `NZ`), or list the
 countries you ship to on each offer. A value that is not two ASCII letters is
 now an error rather than a silent `US`, so fix any typo there at the same time.

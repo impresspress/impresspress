@@ -796,13 +796,13 @@ impl Block for LlmBlock {
                 "Default LLM provider block (impresspress/provider-llm or impresspress/local-llm)",
                 DEFAULT_PROVIDER,
             )
-            .name("Default Provider"),
+            .name("Default provider"),
             ConfigVar::new(
                 DEFAULT_MODEL_VAR,
                 "Default model to use (empty = provider default)",
                 "",
             )
-            .name("Default Model")
+            .name("Default model")
             .optional(),
             ConfigVar::new(
                 DEFAULT_MAX_TOKENS_VAR,
@@ -816,7 +816,7 @@ impl Block for LlmBlock {
                  400), so raise it against the model you actually run.",
                 &DEFAULT_MAX_TOKENS.to_string(),
             )
-            .name("Default Max Tokens")
+            .name("Default max tokens")
             .input_type(InputType::Number),
         ])
         .can_disable(true)

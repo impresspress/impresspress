@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn select_field_renders_options_with_current_value_selected() {
-        let v = var("X__CCY", "Default Currency", InputType::Select)
+        let v = var("X__CCY", "Default currency", InputType::Select)
             .options(&[("USD", "USD — US Dollar"), ("NZD", "NZD — NZ Dollar")]);
         let s = render_field(&v, "NZD", None).into_string();
         assert!(s.contains("<select"), "renders a select: {s}");
@@ -812,12 +812,12 @@ mod tests {
 
     #[test]
     fn text_field_renders_text_input_with_label_and_help() {
-        let v = var(APP_NAME_KEY, "App Name", InputType::Text);
+        let v = var(APP_NAME_KEY, "App name", InputType::Text);
         let s = render_field(&v, "MyApp", None).into_string();
         assert!(s.contains(&format!(r#"name="{APP_NAME_KEY}""#)));
         assert!(s.contains(r#"type="text""#));
         assert!(s.contains(r#"value="MyApp""#));
-        assert!(s.contains(">App Name<"));
+        assert!(s.contains(">App name<"));
         assert!(s.contains("desc text"));
     }
 
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn textarea_field_renders_multiline_with_value_as_content() {
-        let v = var("X__FOOTER", "Footer Text", InputType::Textarea);
+        let v = var("X__FOOTER", "Footer text", InputType::Textarea);
         let s = render_field(&v, "© 2026 Me", None).into_string();
         assert!(s.contains("<textarea"), "should render a textarea: {s}");
         assert!(s.contains(r#"name="X__FOOTER""#));
@@ -1072,7 +1072,7 @@ mod tests {
             !s.contains(r#"type="text""#),
             "textarea must not be a text input: {s}"
         );
-        assert!(s.contains(">Footer Text<"));
+        assert!(s.contains(">Footer text<"));
     }
 
     #[test]
@@ -1174,7 +1174,7 @@ mod tests {
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.set_config(MAILGUN_API_KEY, "key-abcdef0123456789");
-        let v = var(MAILGUN_API_KEY, "Mailgun API Key", InputType::Password);
+        let v = var(MAILGUN_API_KEY, "Mailgun API key", InputType::Password);
         let sections = [SettingsSection::new("Email", std::slice::from_ref(&v))];
         let out = render_sections(&ctx, &sections)
             .await
@@ -1334,7 +1334,7 @@ mod tests {
         // App name first, so it would already be written by the time the mask
         // is reached if the check lived in the write loop.
         let allowed = [
-            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var(APP_NAME_KEY, "App name", InputType::Text),
             var("X__API_SECRET", "API Secret", InputType::Password),
         ];
 
@@ -1420,7 +1420,7 @@ mod tests {
         .expect("seed the flagged note");
 
         let allowed = [
-            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var(APP_NAME_KEY, "App name", InputType::Text),
             var("X__PLAIN_NOTE", "Note", InputType::Text),
         ];
         let out = run_save(
@@ -1502,7 +1502,7 @@ mod tests {
         .expect("seed the flagged note");
 
         let allowed = [
-            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var(APP_NAME_KEY, "App name", InputType::Text),
             var("X__PLAIN_NOTE", "Note", InputType::Text),
         ];
         let out = run_save(
@@ -1591,7 +1591,7 @@ mod tests {
         );
 
         let allowed = [
-            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var(APP_NAME_KEY, "App name", InputType::Text),
             var(BOOT_ONLY, "Thing Secret", InputType::Password),
         ];
         let out = run_save(
@@ -1729,7 +1729,7 @@ mod tests {
         }
 
         let allowed = [
-            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var(APP_NAME_KEY, "App name", InputType::Text),
             var("X__TEST__NOTE", "Note", InputType::Text),
         ];
         // The page really does hand the mask back to the browser: this is what
@@ -1797,7 +1797,7 @@ mod tests {
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.set_config(APP_NAME_KEY, "MyApp");
-        let allowed = [var(APP_NAME_KEY, "App Name", InputType::Text)];
+        let allowed = [var(APP_NAME_KEY, "App name", InputType::Text)];
 
         let out = run_save(
             &ctx,
@@ -1822,7 +1822,7 @@ mod tests {
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.set_config(APP_NAME_KEY, "MyApp");
-        let allowed = [var(APP_NAME_KEY, "App Name", InputType::Text)];
+        let allowed = [var(APP_NAME_KEY, "App name", InputType::Text)];
 
         let out = run_save(&ctx, &allowed, serde_json::json!({APP_NAME_KEY: ""})).await;
         let body = output_json(out).await;

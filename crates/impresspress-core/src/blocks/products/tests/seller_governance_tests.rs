@@ -787,8 +787,8 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
 
     let (msg, _) = admin_get_msg("/b/products/admin/settings");
     let html = output_to_html(super::super::pages::settings(&test_ctx, &msg).await).await;
-    assert!(html.contains("Seller Allowed Templates"));
-    assert!(html.contains("Seller Allowed Currencies"));
-    assert!(html.contains("Seller Allowed Categories"));
-    assert!(html.contains("Seller Product Limit"));
+    assert!(html.contains("Seller allowed templates"));
+    assert!(html.contains("Seller allowed currencies"));
+    assert!(html.contains("Seller allowed categories"));
+    assert!(html.contains("Seller product limit"));
 }
