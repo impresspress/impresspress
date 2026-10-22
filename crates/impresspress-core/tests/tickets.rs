@@ -533,7 +533,7 @@ async fn admin_inbox_renders_all_filters_and_filter_preserving_pagination() {
         "assignee filter missing: {html}"
     );
     assert!(
-        html.contains("<th>Created</th>"),
+        html.contains(r#"<th data-label="Created">Created</th>"#),
         "created column missing: {html}"
     );
     assert!(
