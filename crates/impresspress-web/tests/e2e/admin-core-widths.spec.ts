@@ -74,6 +74,13 @@ import { WIDTHS as ALL_WIDTHS, isWrong, layout as blockLayout } from './fixtures
  *   names, ids and messages) are checked in `llm-pages.spec.ts`,
  *   `files-messages-pages.spec.ts` and `tickets-admin.spec.ts`
  *   (`e2e:writes`).
+ * - The dev workspace (`/b/dev`), at every width from the phone to 1280:
+ *   its panes are cards on the page background, spaced by the grid's gap
+ *   alone (dev.css `.dev-workspace > .card`), none scrolls sideways or
+ *   overflows, and Save is its one primary. This server is not a sandbox,
+ *   so the page is laid out from `fixtures/dev-page.html` (kept equal to
+ *   what it renders by `the_dev_fixture_is_what_the_page_renders`) with
+ *   `dev.css` beside it.
  * The widths: 800 (the filter wraps; the database cards stack; the settings
  * rail is a tab row), and 960 and 1024 (the database cards side by side, the
  * Tables column at its narrowest). Writes nothing beyond the page loads'
@@ -529,6 +536,38 @@ test.describe('admin core pages at in-between widths', () => {
       }
       expect(Object.keys(COMMERCE_FIXTURE).length).toBe(10);
       expect(found, 'a page or a table scrolled sideways').toEqual({});
+    });
+  }
+
+  const DEV_PAGE = readFileSync(new URL('./fixtures/dev-page.html', import.meta.url), 'utf8')
+    // The preview frame would load this server's `/`, a request the read-only
+    // run must not make.
+    .replace('src="/"', 'src="about:blank"');
+  const DEV_CSS = readFileSync(
+    new URL('../../../impresspress-core/src/blocks/dev/assets/dev.css', import.meta.url),
+    'utf8',
+  );
+  for (const width of ALL_WIDTHS) {
+    test(`the dev workspace at ${width}px: cards spaced by the grid alone, Save the one primary`, async ({
+      page,
+    }) => {
+      await open(page, width, '/b/admin/blocks');
+      await page.addStyleTag({ content: DEV_CSS });
+      await page.locator('main#content').evaluate((main, body) => {
+        main.innerHTML = body;
+        main.querySelectorAll('details').forEach((d) => (d.open = true));
+      }, DEV_PAGE);
+      const r = await blockLayout(page);
+      expect(isWrong(r, ['Save']), JSON.stringify(r)).toBe(false);
+      const gaps = await page.evaluate(() => {
+        const grid = document.querySelector<HTMLElement>('.dev-workspace')!;
+        const top = (id: string) => document.getElementById(id)!.getBoundingClientRect();
+        return {
+          gap: parseFloat(getComputedStyle(grid).rowGap),
+          between: Math.round(top('dev-console').top - top('dev-guide').bottom),
+        };
+      });
+      expect(gaps.between, 'a card adds its own margin to the grid gap').toBe(gaps.gap);
     });
   }
 });

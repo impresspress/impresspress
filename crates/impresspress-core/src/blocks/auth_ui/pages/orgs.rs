@@ -5,16 +5,20 @@ use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
-    blocks::{auth::repo::orgs, crud},
+    blocks::{auth::repo::orgs, auth_ui::oauth, crud},
     http::redirect,
     ui::{
         self,
-        components::{timestamp, DataTable, TableCol, TableRow},
+        components::{breakable_id, timestamp, DataTable, TableCol, TableRow},
         Shell,
     },
 };
 
 /// The orgs table: the org's name is the row (the card title on a phone).
+/// A name is a GitHub login or a domain, so it breaks after its separators
+/// (`components::breakable_id`). Narrow, the provider and the date move into
+/// one line under the name (table.css `.org-table`, which hides the headers
+/// by position: a column moved here must move there).
 const COLUMNS: [TableCol<'static>; 3] = [
     TableCol::new("Name").primary(),
     TableCol::new("Verified via"),
@@ -45,25 +49,41 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
+/// How an org's claim was proved, as people read it: the provider whose
+/// sign-in proved it ("GitHub"), or "Manual" for an org with no provider
+/// proof on record.
+fn verified_via(provider: Option<&str>) -> &str {
+    provider.map_or("Manual", oauth::spec::label)
+}
+
 fn render_orgs_body(orgs: &[orgs::OrgRow]) -> Markup {
     let rows = orgs
         .iter()
         .map(|o| {
             TableRow::new(vec![
-                html! { (o.name) },
-                html! { (o.verified_via.as_deref().unwrap_or("manual")) },
+                html! {
+                    span .data-table__title { (breakable_id(&o.name)) }
+                    // The other two columns, when the table is too narrow
+                    // for them.
+                    span .org-table__meta {
+                        span { (verified_via(o.verified_via.as_deref())) " ·" } " "
+                        span { "claimed " (timestamp(&o.created_at)) }
+                    }
+                },
+                html! { (verified_via(o.verified_via.as_deref())) },
                 timestamp(&o.created_at),
             ])
         })
         .collect();
-    DataTable::new(&COLUMNS)
+    let table = DataTable::new(&COLUMNS)
         .rows(rows)
         .empty_state(
             "No claimed organizations",
             "Sign in with GitHub, Google, or Microsoft to claim one.",
             None,
         )
-        .render()
+        .render();
+    html! { div .org-table { (table) } }
 }
 
 #[cfg(test)]
@@ -159,8 +179,15 @@ mod tests {
         let html = output_html(resp).await;
         assert!(html.contains("alpha"));
         assert!(html.contains("beta"));
-        assert!(html.contains("github"));
-        assert!(html.contains("google"));
+        // The provider as people read it, not its stored key.
+        assert!(
+            html.contains("<td data-label=\"Verified via\">GitHub</td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td data-label=\"Verified via\">Google</td>"),
+            "{html}"
+        );
     }
 
     #[tokio::test]

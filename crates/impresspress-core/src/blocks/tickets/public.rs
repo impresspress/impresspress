@@ -16,7 +16,10 @@ use super::{
 use crate::{
     blocks::{crud, rate_limit::UserRateLimiter},
     http::ResponseBuilder,
-    ui::{templates, SiteConfig},
+    ui::{
+        components::{Action, ActionTarget},
+        templates, SiteConfig,
+    },
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1_024;
@@ -399,7 +402,7 @@ fn form_markup(
                 }
                 div .cf-turnstile data-sitekey=(site_key) data-action="ticket_submit" {}
                 noscript { p { "JavaScript is required only for the anti-spam challenge." } }
-                button .btn .btn--primary type="submit" { "Submit report" }
+                (Action::primary("Submit report", ActionTarget::Submit { form: None }).render())
             }
             @if !support_email.is_empty() {
                 p .text-muted { "You can also email " (support_email_link(support_email)) "." }

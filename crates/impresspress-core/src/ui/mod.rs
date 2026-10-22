@@ -3229,7 +3229,7 @@ mod tests {
         // than merged into `defined`.
         //
         // `blocks/dev/assets/dev.css` is served from `/b/dev/static/` and
-        // reaches the sandbox page and nothing else, so `.dev-pane` used from
+        // reaches the sandbox page and nothing else, so `.dev-workspace` used from
         // an admin page is still an offender. Merging every block's
         // stylesheet into one vocabulary would hide exactly that mistake,
         // which is the failure this guard exists to catch — a class in markup

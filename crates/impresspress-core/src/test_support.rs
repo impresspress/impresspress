@@ -607,6 +607,36 @@ impl TestContext {
         .expect("seed auth user fixture");
     }
 
+    /// A signed-in device (an auth `sessions` row) for `user_id`, started
+    /// and last used at `at`. `sessions::insert` stamps the current time, at
+    /// seconds resolution, so rows a test inserts in a row tie or straddle a
+    /// second and list in an order that depends on when the test ran; a page
+    /// fixture taken from them needs the dates fixed.
+    pub async fn seed_auth_session(
+        &self,
+        family: &str,
+        user_id: &str,
+        auth_method: &str,
+        at: &str,
+    ) {
+        wafer_core::clients::database::exec_raw(
+            &self.fixture(),
+            "INSERT INTO wafer_run__auth__sessions \
+             (family, user_id, auth_method, created_at, last_used_at, expires_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            &[
+                serde_json::json!(family),
+                serde_json::json!(user_id),
+                serde_json::json!(auth_method),
+                serde_json::json!(at),
+                serde_json::json!(at),
+                serde_json::json!("2099-01-01T00:00:00Z"),
+            ],
+        )
+        .await
+        .expect("seed auth session fixture");
+    }
+
     /// Build a `TestContext` with admin migrations applied (only).
     ///
     /// Use this for tests that exercise a block's own `init()` / migration

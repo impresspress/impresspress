@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { test, expect, request as apiRequest, type APIRequestContext, type Page } from '@playwright/test';
+import { WIDTHS, isWrong, layout } from './fixtures/layout';
 
 /**
  * The signed-in account pages in a browser: which frame each renders in, the
@@ -13,9 +15,13 @@ import { test, expect, request as apiRequest, type APIRequestContext, type Page 
 
 const PASSWORD = 'account-pages-horse-1';
 
-/** A fresh account, signed in in `page`'s browser context. */
-async function signUpAndSignIn(page: Page, request: APIRequestContext): Promise<string> {
-  const email = `account-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+/** A fresh account, signed in in `page`'s browser context. `email` defaults
+ * to a unique short address. */
+async function signUpAndSignIn(
+  page: Page,
+  request: APIRequestContext,
+  email = `account-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`,
+): Promise<string> {
   const signup = await request.post('/b/auth/api/signup', {
     data: { email, password: PASSWORD },
     headers: { 'Content-Type': 'application/json' },
@@ -47,6 +53,16 @@ test.describe('account pages', () => {
       await expect(page.locator('.auth-split'), path).toHaveCount(0);
       await expect(page.locator('.account-card'), path).toHaveCount(0);
     }
+    // Profile is one card and Security one per section, each a
+    // `components::Card` on the page background.
+    await page.goto('/b/userportal/profile', { waitUntil: 'networkidle' });
+    await expect(page.locator('.account-sections > .card')).toHaveCount(1);
+    await page.goto('/b/userportal/security', { waitUntil: 'networkidle' });
+    await expect(page.locator('.account-sections > .card .card__title')).toHaveText([
+      'Password',
+      'Email verification',
+      'Linked accounts',
+    ]);
   });
 
   test('the old change-password address lands on Security', async ({ page, request }) => {
@@ -171,5 +187,100 @@ test.describe('account pages', () => {
     // And it stays that way: the account pages send this browser to sign in.
     await page.goto('/b/userportal/sessions', { waitUntil: 'networkidle' });
     await expect(page).toHaveURL(/\/b\/auth\/login/);
+  });
+
+  /** The seeded Security, Sessions and Organizations pages' bodies, by name
+   * (`<!-- page: name -->` lines): linked accounts, OAuth sessions and
+   * claimed orgs, which this server cannot make. Kept equal to what the pages
+   * render by `the_account_fixture_is_what_the_pages_render`. */
+  const ACCOUNT_FIXTURE = Object.fromEntries(
+    readFileSync(new URL('./fixtures/account-pages.html', import.meta.url), 'utf8')
+      .split(/^<!-- page: ([a-z-]+) -->$/m)
+      .slice(1)
+      .reduce<string[][]>((pairs, part, i, all) => (i % 2 === 0 ? [...pairs, [part, all[i + 1]]] : pairs), []),
+  );
+
+  /** A session's date pairs ("Last used …") that wrap inside themselves:
+   * the line under the method may break between them, never within one. */
+  const brokenDates = (page: Page) =>
+    page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('.session-table__meta > span')]
+        .filter((s) => {
+          // One box per line the span sits on (and one per atomic child on
+          // the same line): a box lower than the first is a second line.
+          const lines = [...s.getClientRects()];
+          return s.checkVisibility() && lines.some((r) => r.top > lines[0].top + 2);
+        })
+        .map((s) => s.textContent),
+    );
+
+  const PRIMARIES: Record<string, string[]> = {
+    '/b/userportal/': [],
+    '/b/userportal/profile': ['Save'],
+    '/b/userportal/security': ['Change password'],
+    '/b/userportal/sessions': [],
+    '/b/auth/orgs': [],
+  };
+  // One account for every width: each sign-up and sign-in counts against
+  // the server's rate limit, which the rest of `e2e:writes` shares.
+  test("the account pages fit their frame from the phone to 1280px with a real account's values", async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    // A mailbox with no break opportunity, wider than a phone's card, and
+    // a URL pasted in as the display name.
+    const email = `accountspayable.northwindtraders.wellington${Date.now()}${Math.floor(Math.random() * 1e6)}@example.com`;
+    await signUpAndSignIn(page, request, email);
+    for (let i = 0; i < 2; i++) {
+      const device = await apiRequest.newContext({ baseURL });
+      const other = await device.post('/b/auth/api/login', {
+        data: { email, password: PASSWORD },
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(other.status(), await other.text()).toBe(200);
+      await device.dispose();
+    }
+    await page.goto('/b/userportal/profile', { waitUntil: 'networkidle' });
+    await page.getByLabel('Display name').fill(
+      'https://northwind-traders-production.example.com/team/margaret-vandenberg-oyelaran',
+    );
+    await Promise.all([
+      page.waitForResponse((r) => r.url().endsWith('/b/userportal/update-profile') && r.status() === 303),
+      page.getByRole('button', { name: 'Save' }).click(),
+    ]);
+    await page.waitForLoadState('networkidle');
+
+    const found: Record<string, unknown> = {};
+    for (const width of WIDTHS) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [path, primaries] of Object.entries(PRIMARIES)) {
+        await page.goto(path, { waitUntil: 'networkidle' });
+        const r = await layout(page);
+        const dates = await brokenDates(page);
+        if (isWrong(r, primaries) || dates.length) found[`${path} at ${width}`] = { ...r, dates };
+      }
+
+      // The seeded pages, each mounted alone in this page's content column.
+      for (const [name, html] of Object.entries(ACCOUNT_FIXTURE)) {
+        await page.locator('main#content').evaluate((main, body) => {
+          main.innerHTML = body;
+        }, html);
+        const r = await layout(page);
+        const dates = await brokenDates(page);
+        // A linked account's row lines up with its card's title: the list
+        // sits at the card's inset, with none of its own.
+        const indent = await page.evaluate(() =>
+          [...document.querySelectorAll<HTMLElement>('.linked-provider__name')].map((name) =>
+            Math.round(name.getBoundingClientRect().left - name.closest('.card')!.querySelector('.card__title')!.getBoundingClientRect().left),
+          ),
+        );
+        if (r.page > 0 || r.tables.length || r.past.length || r.cards.length || dates.length || indent.some((d) => d !== 0)) {
+          found[`${name} at ${width}`] = { ...r, dates, indent };
+        }
+      }
+    }
+    expect(Object.keys(ACCOUNT_FIXTURE)).toEqual(['security', 'sessions', 'orgs']);
+    expect(found, 'a page scrolled sideways, a card overflowed or the primaries differ').toEqual({});
   });
 });

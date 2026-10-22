@@ -22,11 +22,11 @@
 	align-items: start;
 }
 
-.dev-pane {
-	background: var(--surface-1);
-	border: 1px solid var(--border-color);
-	border-radius: var(--radius-md);
-	padding: var(--space-6);
+/* Each pane is a `components::Card` (page.rs): the card draws the surface,
+   the border and the padding. The grid's gap spaces them, so a card's own
+   bottom margin goes. */
+.dev-workspace > .card {
+	margin-bottom: 0;
 	min-width: 0; /* a grid item defaults to min-content: without this the
 	                 <pre> log and long file paths widen the whole column. */
 }
@@ -39,7 +39,7 @@
 	grid-column: 1 / -1;
 }
 
-.dev-pane p {
+.dev-workspace p {
 	color: var(--text-secondary);
 	font-size: var(--text-sm);
 	line-height: 1.6;
@@ -47,7 +47,7 @@
 	max-width: 75ch;
 }
 
-.dev-pane code {
+.dev-workspace code {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: var(--text-xs);
 	background: var(--bg-secondary);
@@ -58,7 +58,7 @@
 
 /* Text the page writes later (`dev.js`) ships empty; an empty paragraph
    would still hold its margin open. */
-.dev-pane p:empty {
+.dev-workspace p:empty {
 	display: none;
 }
 
@@ -202,7 +202,7 @@
 	border-radius: var(--radius-sm);
 	background: transparent;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: var(--text-xs);
+	font-size: var(--text-sm);
 	line-height: 1.4;
 	text-align: left;
 	color: var(--text-primary);
@@ -277,7 +277,7 @@
 }
 
 /* Delete stands apart from Save, at the far end of the row. */
-.dev-editor-actions #dev-delete {
+.dev-editor-actions [data-action='dev-delete'] {
 	margin-left: auto;
 }
 
@@ -304,7 +304,7 @@
 }
 
 .dev-step {
-	font-size: var(--text-xs);
+	font-size: var(--text-sm);
 	padding: var(--space-1) var(--space-3);
 	border-radius: var(--radius-full);
 	border: 1px solid var(--border-color);
@@ -346,7 +346,7 @@
 
 /* ---- actions ----------------------------------------------------------- */
 
-#dev-actions {
+.dev-actions {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
@@ -369,7 +369,7 @@
    would otherwise leave a hole after the buttons. */
 #dev-compiler-version {
 	color: var(--text-secondary);
-	font-size: var(--text-xs);
+	font-size: var(--text-sm);
 }
 
 #dev-compiler-version:empty {
@@ -390,10 +390,6 @@
 	.dev-workspace {
 		grid-template-columns: 1fr;
 		gap: var(--space-4);
-	}
-
-	.dev-pane {
-		padding: var(--space-4);
 	}
 
 	#dev-file-list {
