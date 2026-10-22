@@ -49,7 +49,7 @@ async fn row_count(ctx: &TestContext, table: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn fresh_apply_keys_sessions_on_family_and_drops_the_token_hash_column() {
+async fn fresh_apply_keys_sessions_on_family_with_no_token_hash_column() {
     let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("apply migrations");
 

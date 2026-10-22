@@ -58,9 +58,16 @@ longer drops it, so device rows survive, as refresh tokens already do.
 - **One exception:** a device whose row an earlier auth upgrade emptied (016
   is the latest) and that has not refreshed since. Its row was never
   re-created, so it is signed out at its next refresh and signs in again.
-- **A database last migrated before 012** still has the old
-  `sha256(access_token)`-keyed table, which is no longer converted. Sign-in
-  fails on it. Recreate that database (pre-1.0 upgrades may require wiping
+- **A database last migrated before 012** (last booted before September
+  2026) still has the old `sha256(access_token)`-keyed table, which is no
+  longer converted. What happens next depends on the backend:
+  - **PostgreSQL, or any backend with `WAFER_RUN__DATABASE__STRICT_SCHEMA`
+    on:** every sign-in fails with a `500`.
+  - **SQLite, D1 or the browser on the default settings:** sign-in keeps
+    working, because the missing columns are added on first write. The
+    sessions table then has no key on `family`.
+
+  Either way, recreate that database (pre-1.0 upgrades may require wiping
   local data).
 - **Cloudflare: this deploy needs a D1 budget of 1000,** for the same reason
   as the 016 upgrade below. Re-running the auth list is 60 statements for
