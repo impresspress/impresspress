@@ -541,7 +541,8 @@ mod tests {
 
     #[test]
     fn ui_labels_reads_a_label_whole_across_its_inline_elements() {
-        let html = "<button>Create <span>New</span> Bucket</button><label>Name <strong>*</strong></label>";
+        let html =
+            "<button>Create <span>New</span> Bucket</button><label>Name <strong>*</strong></label>";
         assert_eq!(
             ui_labels(html),
             vec![
@@ -549,7 +550,9 @@ mod tests {
                 ("label", "Name *".to_string()),
             ]
         );
-        assert!(!crate::test_support::case::is_sentence_case("Create New Bucket"));
+        assert!(!crate::test_support::case::is_sentence_case(
+            "Create New Bucket"
+        ));
     }
 
     fn btn(label: &str) -> String {
