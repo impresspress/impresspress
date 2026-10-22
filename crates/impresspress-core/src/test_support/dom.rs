@@ -32,8 +32,26 @@ use scraper::{ElementRef, Html, Node, Selector};
 const PRIMARY: &str = "btn--primary";
 
 /// The classes that draw a card-level surface on the page background. Rule 2
-/// of the layout: none of them sits inside a `.card`.
-const CARD_LEVEL: [&str; 5] = ["card", "stat", "empty", "chat-panes", "data-table"];
+/// of the layout: none of them sits inside a `.card`. Kept complete against
+/// the stylesheets by `ui::tests::card_level_covers_every_framed_surface`:
+/// every class a stylesheet draws as a framed white surface is here or is
+/// named there as not card-level.
+pub const CARD_LEVEL: [&str; 14] = [
+    "card",
+    "stat",
+    "empty",
+    "chat-panes",
+    "data-table",
+    "page--chat",
+    "block-card",
+    "thread-card",
+    "messages-list__item",
+    "editor-pane",
+    "model-progress",
+    "form-tabs",
+    "account-nav",
+    "login-container",
+];
 
 /// The `.btn--primary` elements a reader can see, in document order.
 ///
@@ -73,8 +91,8 @@ pub fn visible_primaries(html: &str) -> (Vec<String>, Vec<Vec<String>>) {
     (page, per_dialog)
 }
 
-/// Every card-level surface (`.card`, `.stat`, `.empty`, `.chat-panes`,
-/// `.data-table`) that sits inside a `.card`, in document order.
+/// Every card-level surface ([`CARD_LEVEL`]) that sits inside a `.card`, in
+/// document order.
 ///
 /// The one exception is a `.data-table` whose closest `.card` is
 /// `.card--flush`: a flush card's body is the table, and the card absorbs the
@@ -170,10 +188,9 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
 /// (`summary`), stat labels (`.stat__label`), badges (`.badge`) and tabs
 /// (`.tab`).
 ///
-/// Each text node is its own phrase, whitespace collapsed: a checkbox card's
-/// `label` holds its name and the sentence under it (`strong` "Automatic
-/// tax", `small` "Ask Stripe to calculate tax…"), and a wizard step badge
-/// its number and its name, and each reads on its own. Concealed labels are
+/// Each is the element's whole text, whitespace collapsed, so a label split
+/// across inline elements (`Create <span>New</span> Bucket`) reads as the
+/// reader hears it. Concealed labels are
 /// included: a region revealed later shows the labels it has. An element
 /// with no text (an icon button) has no phrase. The sidebar (`.sidebar`) is
 /// left out: it is outside the redesign. So are select options, which are
@@ -207,13 +224,9 @@ pub fn ui_labels(html: &str) -> Vec<(&'static str, String)> {
         if self_or_ancestor(el, |el| has_class(el, "sidebar")) {
             continue;
         }
-        for node in el.descendants() {
-            if let Node::Text(text) = node.value() {
-                let phrase = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if !phrase.is_empty() {
-                    out.push((*kind, phrase));
-                }
-            }
+        let text = text_of(el);
+        if !text.is_empty() {
+            out.push((*kind, text));
         }
     }
     out
@@ -525,6 +538,19 @@ fn selector(css: &str) -> Selector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_labels_reads_a_label_whole_across_its_inline_elements() {
+        let html = "<button>Create <span>New</span> Bucket</button><label>Name <strong>*</strong></label>";
+        assert_eq!(
+            ui_labels(html),
+            vec![
+                ("button", "Create New Bucket".to_string()),
+                ("label", "Name *".to_string()),
+            ]
+        );
+        assert!(!crate::test_support::case::is_sentence_case("Create New Bucket"));
+    }
 
     fn btn(label: &str) -> String {
         format!(r#"<button class="btn btn--primary">{label}</button>"#)

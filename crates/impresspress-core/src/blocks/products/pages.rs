@@ -1634,10 +1634,16 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         legend .sr-only { "Product template" }
                         div .product-template-grid {
                             @for (value, title, description) in &template_definitions {
-                                label .product-template-card {
-                                    input type="radio" name="product_template" value=(value) checked[*value == initial_template] data-action="pw-template-changed";
-                                    strong { (title) }
-                                    span .text-muted .text-sm { (description) }
+                                // The card's name is its title alone; the
+                                // sentence under it describes the choice. The
+                                // label stretches over the card (card.css), so
+                                // the whole card still picks it.
+                                @let id = format!("wizard-template-{value}");
+                                @let described = format!("{id}-help");
+                                div .product-template-card {
+                                    input #(id) type="radio" name="product_template" value=(value) checked[*value == initial_template] aria-describedby=(described) data-action="pw-template-changed";
+                                    label for=(id) { (title) }
+                                    span #(described) .text-muted .text-sm { (description) }
                                 }
                             }
                         }
@@ -1762,9 +1768,13 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         ("wizard-create-customer", "Create a Stripe customer for one-time payments", "Useful when customers may buy again or need billing support.", false),
                         ("wizard-terms", "Terms consent", "Require customers to accept your terms before paying.", false),
                     ] {
-                        label .products-choice {
-                            input id=(id) type="checkbox" checked[checked] data-action="pw-shipping-changed";
-                            span { strong { (label) } small .text-muted { (help) } }
+                        // Named by its label alone, described by the
+                        // sentence under it; the label stretches over the
+                        // tile (form.css), so the whole tile toggles it.
+                        @let described = format!("{id}-help");
+                        div .products-choice {
+                            input id=(id) type="checkbox" checked[checked] aria-describedby=(described) data-action="pw-shipping-changed";
+                            span { label for=(id) { (label) } small #(described) .text-muted { (help) } }
                         }
                     }
                     div .form-group data-subscription-field hidden {
@@ -2374,7 +2384,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     h4 .products-subheading .mb-1 { "Saved presets" }
                     div data-checkout-presets aria-live="polite" { p .text-muted .text-sm { "Loading presets…" } }
                 }
-                div data-payment-links .mt-4 { p .text-muted .text-sm { "Loading Payment Links…" } }
+                div data-payment-links .mt-4 { p .text-muted .text-sm { "Loading payment links…" } }
             }
             details .details-block--divider {
                 summary .summary-strong { "Hosted, embedded, and static-site integration" }

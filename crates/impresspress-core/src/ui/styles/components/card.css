@@ -867,12 +867,17 @@
 /* Match the 14px label rather than the icon set's 18px default. */
 .products-guide__link svg { width: 14px; height: 14px; }
 .product-template-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
-.product-template-card { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); align-items: start; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: 14px; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+.product-template-card { position: relative; display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); align-items: start; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: 14px; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
 .product-template-card:hover { border-color: var(--primary-color); box-shadow: 0 8px 22px rgba(15, 23, 42, .08); transform: translateY(-1px); }
 .product-template-card:has(input:checked) { border-color: var(--primary-color); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 14%, transparent); }
 .product-template-card input { margin-top: var(--space-1); }
-.product-template-card strong, .product-template-card span { grid-column: 2; }
-.product-template-card strong { margin: 0 !important; }
+.product-template-card label, .product-template-card span { grid-column: 2; }
+.product-template-card label { font-weight: 600; cursor: pointer; }
+/* The label is the card's name alone (the sentence under it describes the
+   choice, `aria-describedby`), and it stretches over the card, so a click
+   anywhere on the card picks it, as the whole card did when it was the
+   label. */
+.product-template-card label::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
 /* The commerce pages (orders, sellers, Stripe, the seller dashboard) lay
    their sections out in flow on the page background. A currency's
    analytics (`analytics_currency`) are its heading, the stat row, the card

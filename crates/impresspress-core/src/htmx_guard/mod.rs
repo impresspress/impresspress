@@ -824,20 +824,9 @@ async fn headings_descend_without_skipping() {
     assert!(checked > 50, "only {checked} pages were checked");
 }
 
-/// Whether a phrase is a value written as itself rather than words: one
-/// token, lowercase first, with a mark no word has (`impresspress/probe`,
-/// `user.disable`, `open_ai`, `v1`, `http-handler@v1`, `wafer-run`). A
-/// block name, an audit action, a provider kind or a version is shown as it
-/// is stored, so it keeps its own case.
-fn is_identifier(phrase: &str) -> bool {
-    !phrase.contains(char::is_whitespace)
-        && phrase.starts_with(|c: char| c.is_lowercase())
-        && phrase.contains(|c: char| !c.is_alphabetic())
-}
-
 /// Labels the crawl shows that are a value, written as it is stored, not
-/// words the page writes: `(kind, phrase, what it is)`. Each must still be
-/// seen, so an entry does not outlive its page.
+/// words the page writes: `(kind, text with each number written N, what it
+/// is)`. Each must still be seen, so an entry does not outlive its page.
 const DATA_LABELS: &[(&str, &str, &str)] = &[
     #[cfg(feature = "block-files")]
     (
@@ -853,27 +842,23 @@ const DATA_LABELS: &[(&str, &str, &str)] = &[
     ),
     (
         "summary",
-        "admin",
-        "a block's name, heading its tables in the database list",
+        "admin impresspress N",
+        "a table group in the database list: the block's name, its org and its table count",
     ),
     (
         "summary",
-        "auth",
-        "a block's name, heading its tables in the database list",
-    ),
-    (
-        "summary",
-        "impresspress",
-        "the org a block belongs to, in the database list",
+        "auth wafer-run N",
+        "a table group in the database list: the block's name, its org and its table count",
     ),
 ];
 
 /// Design rule 4: every label a page writes is in sentence case
 /// (`test_support::case::is_sentence_case`): headings, table headers, form
-/// labels, buttons, summaries, stat labels, badges and tabs, phrase by
-/// phrase (`test_support::dom::ui_labels`). Over every page and fragment the
-/// crawl renders. A value shown as itself keeps its own case: an identifier
-/// ([`is_identifier`]) or one of [`DATA_LABELS`].
+/// labels, buttons, summaries, stat labels, badges and tabs, each by its
+/// whole text (`test_support::dom::ui_labels`). Over every page and fragment the
+/// crawl renders. A value shown as itself keeps its own case: one with a
+/// mark no word has (`test_support::case::is_value`), or one of
+/// [`DATA_LABELS`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_label_is_in_sentence_case() {
     let mut wrong: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -882,14 +867,17 @@ async fn every_label_is_in_sentence_case() {
     for (url, html) in rendered_pages().await {
         for (kind, text) in crate::test_support::dom::ui_labels(&html) {
             checked += 1;
+            // Counts follow the schema, so a data label is matched with
+            // each number written `N` ("admin impresspress N").
+            let counted = stable_status(&format!("status {text}"))["status ".len()..].to_string();
             if let Some((k, p, _)) = DATA_LABELS
                 .iter()
-                .find(|(k, p, _)| *k == kind && *p == text)
+                .find(|(k, p, _)| *k == kind && *p == counted)
             {
                 seen_data.insert((k, p));
                 continue;
             }
-            if !crate::test_support::case::is_sentence_case(&text) && !is_identifier(&text) {
+            if !crate::test_support::case::is_sentence_case(&text) {
                 wrong
                     .entry(format!("{kind} {text:?}"))
                     .or_default()

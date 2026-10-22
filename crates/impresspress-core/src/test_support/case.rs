@@ -18,6 +18,9 @@ const PROPER_NOUNS: &[&str] = &["OAuth", "Stripe"];
 /// server URLs" and "Enable OAuth" are; "Audit Logs", "Post-Login redirect",
 /// "Max Age (Seconds)" and "api keys" are not.
 ///
+/// A leading number ("1 Type", a wizard step) is not the first word, and the
+/// first word may be a value written as itself ([`is_value`]).
+///
 /// Words are split at whitespace and hyphens, so the second half of a
 /// hyphenated word is a word of its own, and are read from their first
 /// letter, so a parenthesised word is checked like any other. A word after
@@ -26,7 +29,17 @@ const PROPER_NOUNS: &[&str] = &["OAuth", "Stripe"];
 /// a word with no lowercase letter, or one whose only lowercase letter is a
 /// plural `s` ("URLs").
 pub fn is_sentence_case(label: &str) -> bool {
-    let first_is_capital = label.chars().next().is_some_and(|c| !c.is_lowercase());
+    // A step or count before the label ("1 Type") is not its first word.
+    let label = label
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .trim_start();
+    if label.is_empty() {
+        // A number alone ("200").
+        return true;
+    }
+    let first = label.split_whitespace().next().unwrap_or("");
+    let first_is_capital =
+        label.chars().next().is_some_and(|c| !c.is_lowercase()) || is_value(first);
     let words: Vec<&str> = label
         .split(|c: char| c.is_whitespace() || c == '-')
         .collect();
@@ -39,6 +52,15 @@ pub fn is_sentence_case(label: &str) -> bool {
             let new_sentence = before.ends_with(['.', '!', '?']);
             !starts_upper || new_sentence || is_acronym(word) || PROPER_NOUNS.contains(&word)
         })
+}
+
+/// A value written as itself rather than a word: lowercase first, with a
+/// mark no word has (`impresspress/admin`, `user.disable`, `open_ai`, `v1`).
+/// A label may open with one ("impresspress/admin can read and write"); the
+/// words after it are held to sentence case like any others.
+pub fn is_value(word: &str) -> bool {
+    word.starts_with(|c: char| c.is_lowercase())
+        && word.contains(|c: char| !c.is_alphabetic() && c != '\'')
 }
 
 /// A word with no lowercase letter, or with a plural `s` as its only one.
@@ -67,6 +89,10 @@ fn sentence_case_allows_acronyms_and_proper_nouns_and_refuses_a_capitalised_word
         "Seller application fee (bps)",
         "A single price paid once. Best for most products.",
         "Connect Stripe",
+        "1 Type",
+        "200",
+        "impresspress/admin can read and write",
+        "open_ai",
     ] {
         assert!(is_sentence_case(ok), "{ok}");
     }
@@ -84,6 +110,9 @@ fn sentence_case_allows_acronyms_and_proper_nouns_and_refuses_a_capitalised_word
         "Allow Signup",
         "A single price. Best For most products.",
         "Create a Stripe Customer",
+        "1 type",
+        "impresspress/admin Can read",
+        "admin can read",
     ] {
         assert!(!is_sentence_case(bad), "{bad}");
     }

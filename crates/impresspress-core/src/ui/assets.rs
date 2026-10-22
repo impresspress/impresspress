@@ -2199,13 +2199,22 @@ mod tests {
     }
 
     /// The declarations that change how a letter's case is drawn: any
-    /// `text-transform`, and the `font-variant` capitals (`small-caps`,
+    /// `text-transform`; the `font-variant` capitals (`small-caps`,
     /// `all-small-caps`, `petite-caps`, `all-petite-caps`, `unicase`,
     /// `titling-caps`), whether spelled through `font-variant-caps`,
-    /// `font-variant` or the `font` shorthand. Each `(property, value)` is
-    /// read with any `!important` stripped and case folded.
+    /// `font-variant` or the `font` shorthand; and the OpenType features
+    /// that draw them (`font-feature-settings: "smcp"`, `"c2sc"`, `"pcap"`,
+    /// `"c2pc"`, `"unic"`, `"titl"`). Each `(property, value)` is read with
+    /// any `!important` stripped, case folded and its tokens resolved
+    /// (`font-variant: var(--caps)`). A value that names a token nobody
+    /// defines cannot be read, so it counts.
     #[cfg(feature = "embed-assets")]
-    fn transforms_case(property: &str, value: &str) -> bool {
+    fn transforms_case(
+        property: &str,
+        value: &str,
+        tokens: &std::collections::HashMap<String, String>,
+    ) -> bool {
+        const FEATURES: [&str; 6] = ["smcp", "c2sc", "pcap", "c2pc", "unic", "titl"];
         const CAPS: [&str; 6] = [
             "small-caps",
             "all-small-caps",
@@ -2221,25 +2230,38 @@ mod tests {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        match property.as_str() {
-            "text-transform" => true,
-            "font-variant" | "font-variant-caps" | "font" => value
-                .split_whitespace()
-                .any(|word| CAPS.contains(&word.trim_matches(','))),
-            _ => false,
+        let reads_case = matches!(
+            property.as_str(),
+            "font-variant" | "font-variant-caps" | "font" | "font-feature-settings"
+        );
+        if property == "text-transform" {
+            return true;
         }
+        if !reads_case {
+            return false;
+        }
+        let Some(value) = substitute_tokens(&value, tokens, 0) else {
+            return true;
+        };
+        if property == "font-feature-settings" {
+            return FEATURES.iter().any(|feature| value.contains(feature));
+        }
+        value
+            .split_whitespace()
+            .any(|word| CAPS.contains(&word.trim_matches(',')))
     }
 
     /// Every rule in `sheets` that draws case (see [`transforms_case`]),
     /// outside the sidebar.
     #[cfg(feature = "embed-assets")]
     fn case_transforms(sheets: &[(String, String)]) -> Vec<String> {
+        let tokens = parse_root_tokens(super::css());
         let mut wrong = Vec::new();
         for (sheet, css) in sheets {
             for (selector, body) in css_leaf_blocks(css) {
                 let transforms = body.split(';').any(|decl| {
                     decl.split_once(':')
-                        .is_some_and(|(prop, value)| transforms_case(prop, value))
+                        .is_some_and(|(prop, value)| transforms_case(prop, value, &tokens))
                 });
                 let sidebar = selector
                     .split(',')
@@ -2266,6 +2288,10 @@ mod tests {
             ".a { font-variant-caps: all-small-caps; }",
             ".a { font-variant: common-ligatures petite-caps; }",
             ".a { font: small-caps 600 1rem/1.2 sans-serif; }",
+            r#".a { font-feature-settings: "smcp"; }"#,
+            r#".a { font-feature-settings: "liga" 1, "c2sc" 1; }"#,
+            ".a { font-variant: var(--nope); }",
+            ".a { font-variant-caps: var(--nope, all-small-caps); }",
             "@media (min-width: 1px) { .a { text-transform: uppercase; } }",
             ".sidebar__x, .a { text-transform: uppercase; }",
         ] {
@@ -2273,6 +2299,8 @@ mod tests {
         }
         for css in [
             ".a { font-variant-numeric: tabular-nums; }",
+            r#".a { font-feature-settings: "tnum"; }"#,
+            ".a { font-variant: var(--text-sm); }",
             ".a { font: 600 1rem/1.2 sans-serif; }",
             ".sidebar__group-label { text-transform: uppercase; }",
         ] {
@@ -2308,62 +2336,76 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     #[test]
     fn nothing_outside_a_stylesheet_draws_case() {
-        use crate::test_support::source_scan::{strip_test_modules, SourceWalk};
-        const SPELLINGS: [&str; 5] = [
+        use crate::test_support::source_scan as scan;
+        const SPELLINGS: [&str; 8] = [
             "text-transform",
             "textTransform",
             "small-caps",
             "fontVariant",
             "font-variant-caps",
+            "font-feature-settings",
+            "fontFeatureSettings",
+            "smcp",
         ];
         let mut wrong = Vec::new();
-        for file in SourceWalk::crate_src().least(400).collect() {
-            let text = crate::ui::test_support::mask_rust_comments(&strip_test_modules(&file.text));
+        for file in scan::production_rust_sources() {
+            let text = crate::ui::test_support::mask_rust_comments(&file.text);
             for (n, line) in text.lines().enumerate() {
                 if SPELLINGS.iter().any(|s| line.contains(s)) {
                     wrong.push(format!("{}:{}: {}", file.rel, n + 1, line.trim()));
                 }
             }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut scripts = 0;
-        for entry in walkdir::WalkDir::new(&root)
+        let scripts: Vec<_> = scan::shipped_scripts()
             .into_iter()
-            .filter_entry(|e| !matches!(e.file_name().to_str(), Some("test" | "tests" | "vendor")))
-            .filter_map(Result::ok)
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|x| x == "js" || x == "mjs")
-            })
-        {
-            let name = entry.file_name().to_string_lossy();
-            // Vendored third-party bundles, not this codebase's markup.
-            if name.ends_with(".min.js") {
-                continue;
-            }
-            scripts += 1;
-            let text = std::fs::read_to_string(entry.path()).unwrap();
-            for (n, line) in text.lines().enumerate() {
+            .filter(|file| !scan::is_vendored_bundle(file))
+            .collect();
+        for file in &scripts {
+            for (n, line) in file.text.lines().enumerate() {
                 let code = line.trim_start();
                 if code.starts_with("//") || code.starts_with('*') || code.starts_with("/*") {
                     continue;
                 }
                 if SPELLINGS.iter().any(|s| line.contains(s)) {
-                    wrong.push(format!(
-                        "{}:{}: {}",
-                        entry.path().strip_prefix(&root).unwrap().display(),
-                        n + 1,
-                        line.trim()
-                    ));
+                    wrong.push(format!("{}:{}: {}", file.rel, n + 1, line.trim()));
                 }
             }
         }
-        assert!(scripts > 10, "only {scripts} scripts were read");
+        assert!(
+            scripts.len() > 30,
+            "only {} scripts were read",
+            scripts.len()
+        );
         assert!(
             wrong.is_empty(),
             "case drawn outside a stylesheet; write the label in sentence case at its \
              source instead:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// A token (`--text-sm`, `--caps`) is defined once, in `tokens.css`'s
+    /// `:root`, which is where the case and size guards resolve it from. A
+    /// custom property declared in any other rule (`.x { --text-sm: 11px }`)
+    /// would change what `var(--text-sm)` draws under that rule while the
+    /// guards still read the `:root` value.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn tokens_are_defined_only_in_the_token_sheet() {
+        let mut wrong = Vec::new();
+        for (sheet, css) in all_stylesheets() {
+            for (selector, body) in css_leaf_blocks(&css) {
+                let declares = body
+                    .split(';')
+                    .any(|decl| decl.trim_start().starts_with("--"));
+                if declares && selector.trim() != ":root" {
+                    wrong.push(format!("{sheet}: {selector}"));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "custom properties declared outside tokens.css's :root:\n{}",
             wrong.join("\n")
         );
     }
@@ -2575,8 +2617,36 @@ mod tests {
                     let Some((prop, value)) = decl.split_once(':') else {
                         continue;
                     };
+                    const SYSTEM_FONTS: [&str; 6] = [
+                        "caption",
+                        "icon",
+                        "menu",
+                        "message-box",
+                        "small-caption",
+                        "status-bar",
+                    ];
                     let value = match prop.trim().to_ascii_lowercase().as_str() {
                         "font-size" => value.trim().to_string(),
+                        // A system font takes the platform's size, often
+                        // under 14px, which nothing here can read.
+                        "font"
+                            if SYSTEM_FONTS.contains(
+                                &value
+                                    .split('!')
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_ascii_lowercase()
+                                    .as_str(),
+                            ) =>
+                        {
+                            sizes += 1;
+                            wrong.push(format!(
+                                "{sheet}: {selector}: font {} takes the platform's size",
+                                value.trim()
+                            ));
+                            continue;
+                        }
                         "font" => match shorthand_size(value) {
                             Some(size) => size,
                             None => continue,
@@ -2645,6 +2715,8 @@ mod tests {
             ".a { font: 600 12px/1.4 sans-serif; }",
             ".a { font: italic var(--text-xs) sans-serif; }",
             ".a { font-size: calc(1em - 2px); }",
+            ".a { font: caption; }",
+            ".a { font: small-caption; }",
             "@media (min-width: 1px) { .a { font-size: 12px; } }",
             // A running-text selector sharing an exempt rule.
             ".badge, .chart__table td { font-size: 12px; }",

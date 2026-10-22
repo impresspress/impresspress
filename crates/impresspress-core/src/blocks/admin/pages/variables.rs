@@ -725,6 +725,19 @@ struct VarGroup {
     pinned: usize,
 }
 
+/// Another block's grant on a block's variables, in words: "impresspress/admin
+/// can read and write". The grantee is a block name, written as it is.
+fn grant_badge(grantee: &str, write: wafer_block::GrantWrite) -> Markup {
+    Badge::new(BadgeVariant::Secondary).render(html! {
+        (grantee)
+        (match write {
+            wafer_block::GrantWrite::Full => " can read and write",
+            wafer_block::GrantWrite::Append => " can append",
+            wafer_block::GrantWrite::None => " can read",
+        })
+    })
+}
+
 /// Every variable on one page, grouped by who owns it.
 ///
 /// Collapsible groups rather than one flat table, because the owner is what
@@ -834,14 +847,7 @@ fn variable_groups(
                             @for (grantee, write) in matches {
                                 @if *grantee != block.name {
                                     " "
-                                    (Badge::new(BadgeVariant::Secondary).render(html! {
-                                        (grantee)
-                                        (match write {
-                                            wafer_block::GrantWrite::Full => " can read and write",
-                                            wafer_block::GrantWrite::Append => " can append",
-                                            wafer_block::GrantWrite::None => " can read",
-                                        })
-                                    }))
+                                    (grant_badge(grantee, *write))
                                 }
                             }
                         }
@@ -1356,6 +1362,28 @@ pub async fn handle_delete_variable(ctx: &dyn Context, msg: &Message) -> OutputS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grant reads as a sentence that opens with the grantee's block name,
+    /// which the label guard reads as a value, not a lowercase first word.
+    #[test]
+    fn a_grant_badge_is_a_sentence_after_the_block_name() {
+        for (write, text) in [
+            (
+                wafer_block::GrantWrite::Full,
+                "impresspress/admin can read and write",
+            ),
+            (
+                wafer_block::GrantWrite::Append,
+                "impresspress/admin can append",
+            ),
+            (wafer_block::GrantWrite::None, "impresspress/admin can read"),
+        ] {
+            let html = grant_badge("impresspress/admin", write).into_string();
+            let labels = crate::test_support::dom::ui_labels(&html);
+            assert_eq!(labels, vec![("badge", text.to_string())], "{html}");
+            assert!(crate::test_support::case::is_sentence_case(text), "{text}");
+        }
+    }
     use crate::{
         config_vars::{APP_NAME_KEY, AUTH_HEADLINE_KEY},
         test_support::{admin_msg, output_html, TestContext},
