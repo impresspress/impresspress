@@ -34,21 +34,37 @@ signed in.
   for every device at once.
 - **A device that has lost its row is signed out at its next refresh**
   instead of being silently listed again. Rows go when a device is revoked,
-  when the user logs out, and when they expire, which all end the device
-  anyway, and when the auth migrations re-run (below).
+  when the user logs out, when reuse of a stolen refresh token is detected,
+  and when they expire, all of which end the device anyway. An auth schema
+  change no longer removes them (below).
 - **A sign-in writes its refresh token and its device row in one write.** If
   either cannot be written, the sign-in fails with a `500` and leaves nothing
   behind. Before, a failed device row was logged and the sign-in succeeded
   with a device missing from the list. On Cloudflare this also takes one D1
   round trip off every sign-in (four, from five).
 
-**Any future change to the auth migrations signs everyone out once.**
-Migration 012 recreates `wafer_run__auth__sessions`, and the auth migrations
-re-run as a set whenever any of them changes. Until now that only emptied
-the device list, which refilled as devices refreshed. From this release, the
-emptied list means every device is signed out at its next refresh, within
-one access-token lifetime (30 minutes by default). This release adds no auth
-migration, so deploying it signs nobody out.
+**An auth schema change no longer empties the device list.** The auth
+migrations re-run as a set whenever any of them changes, and migration 012
+opened by dropping and recreating `wafer_run__auth__sessions`, so every such
+change emptied the list. Until now the list refilled as devices refreshed;
+with the row now keeping the device signed in, it would have signed every
+device out. The table's layout is now declared by migration 001, and 012 no
+longer drops it, so device rows survive, as refresh tokens already do.
+
+**Deploying this release re-runs the auth migrations once,** because 001 and
+012 changed. On a deployment already on this layout (every one that applied
+012, from September 2026) the re-run changes no data and signs nobody out.
+
+- **One exception:** a device whose row an earlier auth upgrade emptied (016
+  is the latest) and that has not refreshed since. Its row was never
+  re-created, so it is signed out at its next refresh and signs in again.
+- **A database last migrated before 012** still has the old
+  `sha256(access_token)`-keyed table, which is no longer converted. Sign-in
+  fails on it. Recreate that database (pre-1.0 upgrades may require wiping
+  local data).
+- **Cloudflare: this deploy needs a D1 budget of 1000,** for the same reason
+  as the 016 upgrade below. Re-running the auth list is 60 statements for
+  001–016, more than a budget of 50.
 
 Access tokens already issued still work until they expire, as before; ending
 them at revocation is a separate change.
@@ -124,6 +140,22 @@ authenticating, with the roles it was minted with, until it expires: 30
 minutes after it was issued by default
 (`WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS`, at most 24 hours). Nothing
 else is lost.
+
+**Correction: the paragraph above is wrong about the mechanism and the
+outcome.**
+
+- **Refresh tokens survive the re-run.** Migration 004 has not dropped
+  `wafer_run__auth__tokens` since the 015 release.
+- **The re-run emptied the device list.** At this release, migration 012
+  still dropped and recreated `wafer_run__auth__sessions`. Issuance re-created
+  a device's row at its next refresh, so applying 016 signed nobody out.
+- **What happens now.** The release "a revoked device stays revoked, even
+  mid-refresh" (above) makes that row what keeps a device signed in. It also
+  moves the table's layout into 001, so 012 no longer drops it.
+  - Applying 016 with that release or later keeps every device row and signs
+    nobody out.
+  - A deployment that applied 016 earlier keeps one effect: a device that has
+    not refreshed since is signed out at its next refresh after upgrading.
 
 **Cloudflare: this deploy needs a D1 budget of 1000.** `/_deploy/prepare`
 applies a block's pending migrations in one Worker invocation, and every D1
@@ -509,7 +541,11 @@ first file. To roll back instead, start the previous binary; it re-runs its
 own list.
 
 **Auth caveat.** Any change to auth's migration list re-runs it on the first
-boot that applies it, which signs every user out.
+boot that applies it. When this was written, that was said to sign every user
+out. It did not: refresh tokens had survived a re-run since the 015 release,
+and the device list that migration 012 emptied refilled as devices refreshed.
+Since the release "a revoked device stays revoked, even mid-refresh", 012 no
+longer empties it either, so a re-run signs nobody out.
 
 ### Browser builds: request log defaults to errors only
 

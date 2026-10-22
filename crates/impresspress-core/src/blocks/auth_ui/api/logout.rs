@@ -21,10 +21,17 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         // The row is the family's liveness (`auth::repo::sessions`), so this
         // is what signs the devices out: a rotation racing it finds no row to
         // touch and refuses. It runs before the refresh rows are revoked, for
-        // the reason `userportal::pages::sessions::handle_revoke` gives for a
-        // single device. Leaving the rows behind is also what made
-        // `/b/userportal/sessions` list devices as signed in for weeks after
-        // logout. A failure is not reported as a successful logout.
+        // the reason `auth::helpers::end_family` gives for a single family.
+        // Leaving the rows behind is also what made `/b/userportal/sessions`
+        // list devices as signed in for weeks after logout. A failure is not
+        // reported as a successful logout.
+        //
+        // One race is left, and it is cosmetic: a sign-in of this account
+        // whose batch lands between this delete and the revocation below
+        // keeps its session row while its refresh row is revoked. Logout
+        // wins — that device cannot refresh — but it stays listed until the
+        // row expires or is revoked. A second delete after the revocation
+        // would only move the window, onto a sign-in landing between the two.
         if let Err(e) = sessions::delete_all_for_user(ctx, user_id).await {
             tracing::error!(
                 user_id = %user_id,

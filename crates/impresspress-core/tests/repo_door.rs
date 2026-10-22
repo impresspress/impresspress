@@ -928,6 +928,9 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // `AfterDbOpContext` points on the session row's touch and
             // delete — a device revoke racing that device's refresh.
             "blocks/userportal/pages/sessions.rs",
+            // `("database.update_where_count", sessions::TABLE)` — a
+            // rotation whose session-row touch fails ends its family.
+            "blocks/auth_ui/api/refresh.rs",
         ],
     ),
     (

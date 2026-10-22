@@ -15,8 +15,8 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            helpers::{clear_auth_cookie, end_presented_access_token},
-            repo::{sessions, tokens},
+            helpers::{clear_auth_cookie, end_family, end_presented_access_token},
+            repo::sessions,
         },
         crud,
     },
@@ -157,14 +157,16 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
 /// 4. When that was the session the request itself belongs to, end the access
 ///    token it presented and clear the cookie, and send the page to sign in.
 ///
-/// Steps 2 and 3 must run in this order. A refresh rotates by claiming its
-/// token, inserting the successor's refresh row and then touching the session
-/// row (`auth::helpers::establish_family`). With the row deleted first, every
-/// interleaving ends the family: a touch after the delete finds nothing and
-/// the rotation revokes and refuses; a touch before it means the successor
-/// row already existed when step 3 revoked the family. The other order lets a
-/// rotation claim before step 2, insert after it and touch before step 3,
-/// leaving a live successor row behind. No transaction spans the two.
+/// Steps 2 and 3 are `auth::helpers::end_family`, which every revocation of a
+/// family shares, and they must run in that order. A refresh rotates by
+/// claiming its token, inserting the successor's refresh row and then
+/// touching the session row (`auth::helpers::establish_family`). With the row
+/// deleted first, every interleaving ends the family: a touch after the delete
+/// finds nothing and the rotation revokes and refuses; a touch before it
+/// means the successor row already existed when step 3 revoked the family.
+/// The other order lets a rotation claim before step 2, insert after it and
+/// touch before step 3, leaving a live successor row behind. No transaction
+/// spans the two.
 ///
 /// Steps 2 to 4 propagate their errors (a WRAP denial as 403, a quota as
 /// 429, anything else as 500). "Revoked" that silently did
@@ -199,10 +201,7 @@ pub async fn handle_revoke(ctx: &dyn Context, msg: &Message) -> OutputStream {
     }
 
     // Row first, refresh rows second: see the order note in the doc above.
-    if let Err(e) = sessions::delete(ctx, &family).await {
-        return crud::db_error_internal(e, "Could not remove the session");
-    }
-    if let Err(e) = tokens::revoke_family(ctx, &family).await {
+    if let Err(e) = end_family(ctx, &family).await {
         return crud::db_error_internal(e, "Could not revoke the session");
     }
 
@@ -238,7 +237,10 @@ mod tests {
     use super::*;
     use crate::{
         blocks::{
-            auth::repo::sessions::{insert, NewSession},
+            auth::repo::{
+                sessions::{insert, NewSession},
+                tokens,
+            },
             userportal::test_support::routed,
         },
         crypto::META_AUTH_FAMILY,

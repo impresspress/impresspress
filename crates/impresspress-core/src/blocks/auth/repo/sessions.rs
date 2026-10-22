@@ -10,15 +10,17 @@
 //!
 //! ## The row is the family's liveness
 //!
-//! A family is signed in exactly while its row exists. Its first refresh row
+//! A family whose row is gone is signed out: its next refresh is refused, and
+//! every revocation deletes the row before it revokes the refresh rows
+//! (`helpers::end_family`). Its first refresh row
 //! and this row are written in one batch ([`create_op`] beside
 //! `tokens::create_op`), so a family never has one without the other. A
 //! rotation refreshes this row ([`touch`]) after writing its successor token,
 //! and when the touch finds no row the family was revoked while the rotation
 //! ran: the rotation revokes the family's refresh rows and refuses. Nothing
-//! re-creates a missing row. Revoking a device therefore deletes its row FIRST
-//! and revokes its refresh rows second; `userportal::pages::sessions` says why
-//! that order closes the race with a concurrent rotation.
+//! re-creates a missing row. Revoking a family therefore deletes its row FIRST
+//! and revokes its refresh rows second; `helpers::end_family` says why that
+//! order closes the race with a concurrent rotation.
 //!
 //! The refresh rows (`super::tokens`) answer a different question — is the
 //! presented token the family's current generation, or a replayed copy — and
@@ -29,19 +31,20 @@
 //! minutes, each lived 30 days, logout deleted none, and each showed on the
 //! device list as its own device.
 //!
-//! Migration 012 still opens with `DROP TABLE IF EXISTS` of this table, and
-//! the auth migrations re-run as a set whenever any of them changes. Because
-//! the row is the family's liveness, such a re-run signs every device out at
-//! its next token refresh (RELEASE.md says so).
+//! Because the row is the family's liveness, no migration may drop this
+//! table: the auth migrations re-run as a set whenever any of them changes,
+//! and a drop there would sign every device out on every such change. That is
+//! why the family-keyed layout is declared in `001_auth_schema` and 012 no
+//! longer drops and recreates it.
 //!
 //! ## Schema convention
 //!
 //! Rows are written through `db::create`, which synthesizes a TEXT `id` and
 //! stamps `created_at`/`updated_at`, on top of the `family` primary key. Both
-//! bookkeeping columns are declared by `012_sessions_family.{sqlite,postgres}
-//! .sql` alongside the table itself. Every read and write below addresses rows
-//! by `family` or `user_id` through filter-based operations, so the
-//! synthesized `id` is never needed.
+//! bookkeeping columns are added by `010_strict_schema_columns` to the table
+//! `001_auth_schema` declares. Every read and write below addresses rows by
+//! `family` or `user_id` through filter-based operations, so the synthesized
+//! `id` is never needed.
 
 use std::collections::HashMap;
 
@@ -212,9 +215,10 @@ pub async fn list_for_user(
 /// Delete the row for `family`. Returns the number deleted (0 if absent).
 /// This is what ends the family: see the module doc.
 ///
-/// Unscoped on purpose: its one caller, the userportal revoke, has already
-/// established whose family it is through [`find_for_user`].
-/// [`delete_all_for_user`] is what logout uses.
+/// Unscoped on purpose: its one caller, `helpers::end_family`, is reached
+/// only by code that already knows whose family it is — the userportal
+/// revoke through [`find_for_user`], and refresh from the refresh row it
+/// read. [`delete_all_for_user`] is what logout uses.
 pub async fn delete(ctx: &dyn Context, family: &str) -> Result<u64, WaferError> {
     let n = db::delete_by_filters_count(ctx, TABLE, vec![family_filter(family)])
         .await
@@ -227,7 +231,7 @@ pub async fn delete(ctx: &dyn Context, family: &str) -> Result<u64, WaferError> 
 /// Logout's counterpart to `tokens::revoke_all_for_user`: the two run
 /// together so the device list and the refresh tokens agree about which
 /// devices are still signed in. This one runs first, for the reason
-/// [`delete`]'s caller gives.
+/// `helpers::end_family` gives.
 pub async fn delete_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<u64, WaferError> {
     let n = db::delete_by_filters_count(ctx, TABLE, vec![user_filter(user_id)])
         .await

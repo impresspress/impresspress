@@ -1063,8 +1063,8 @@ pub(crate) mod helpers {
 
     /// Returns (access_token, refresh_token, family).
     ///
-    /// Private to the issuance path: [`issue_tokens_and_cookie`] is its one
-    /// caller, so no token is minted without the
+    /// Private to `helpers`, where [`issue_tokens_and_cookie`] is its one
+    /// caller, so no session token is minted without the
     /// [`crate::csrf::SessionIssuance`] that function demands and the family
     /// rows it writes.
     ///
@@ -1258,8 +1258,8 @@ pub(crate) mod helpers {
 
     /// The `auth_token` cookie carrying `token`.
     ///
-    /// Private to the issuance path, like [`generate_tokens`]: a cookie that
-    /// signs a browser in is built only by [`issue_tokens_and_cookie`].
+    /// Private to `helpers`, like [`generate_tokens`]: a cookie that signs a
+    /// browser in is built only by [`issue_tokens_and_cookie`].
     /// [`clear_auth_cookie`] is the one other cookie of this name, and it
     /// carries nothing.
     async fn auth_cookie(
@@ -1429,17 +1429,19 @@ pub(crate) mod helpers {
     /// successor's among them, are revoked and the rotation refuses
     /// ([`FamilyNotEstablished::Ended`]). A missing row is never re-created —
     /// that is what let a refresh racing a device revocation bring the device
-    /// back. A touch that fails refuses too, since the row could not be
-    /// confirmed; the successor row it leaves is unreachable, because its JWT
-    /// is never handed out.
+    /// back.
+    ///
+    /// A touch that fails refuses too, since the row could not be confirmed,
+    /// and the family is ended ([`end_family`], best-effort: the request is
+    /// already failing). Its predecessor is claimed and its successor's JWT is
+    /// never handed out, so the device cannot continue anyway; ending it keeps
+    /// the rows saying so. Left live, the successor's row would make the
+    /// client's retry with its old token read as a replay of a stolen one,
+    /// and the device would stay listed as signed in.
     ///
     /// The order — successor row, then touch — is half of the invariant that
-    /// lets a revocation race a rotation without a transaction: the revoke
-    /// deletes the session row before it revokes the refresh rows
-    /// (`userportal::pages::sessions::handle_revoke`). If the delete lands
-    /// before the touch, the touch sees nothing and the rotation revokes; if
-    /// the touch lands first, the successor row already exists when the
-    /// revoke burns the family.
+    /// lets a revocation race a rotation without a transaction; the other half
+    /// is [`end_family`]'s order.
     async fn establish_family(
         ctx: &dyn wafer_run::context::Context,
         lifetime: &SessionLifetime,
@@ -1501,10 +1503,20 @@ pub(crate) mod helpers {
                         Err(FamilyNotEstablished::Ended)
                     }
                     Ok(_) => Ok(()),
-                    Err(e) => Err(FamilyNotEstablished::Failed(
-                        e,
-                        "Refresh could not confirm the login family",
-                    )),
+                    Err(e) => {
+                        if let Err(end) = end_family(ctx, family).await {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                family = %family,
+                                error = %end,
+                                "refresh: could not end a family whose session row was unreadable"
+                            );
+                        }
+                        Err(FamilyNotEstablished::Failed(
+                            e,
+                            "Refresh could not confirm the login family",
+                        ))
+                    }
                 }
             }
         }
@@ -1527,6 +1539,31 @@ pub(crate) mod helpers {
                 tracing::warn!(user_id = %user_id, "failed to update last_login_at: {e}");
             }
         });
+    }
+
+    /// End one login family: delete its session row, then revoke its refresh
+    /// rows. Every revocation of a family goes through here — a device revoke,
+    /// reuse detection, a stale family, a rotation that could not confirm its
+    /// row — so the order lives in one place.
+    ///
+    /// The order is what lets a revocation race a rotation without a
+    /// transaction. A rotation claims its token, inserts the successor's
+    /// refresh row, then touches the session row ([`establish_family`]). With
+    /// the row deleted first, a touch after the delete finds nothing and the
+    /// rotation revokes and refuses, and a touch before it means the
+    /// successor's row already existed when the refresh rows were revoked.
+    /// The other order lets a rotation claim before the revoke, insert after
+    /// it and touch before the delete, leaving a live successor behind.
+    /// Logout keeps the same order over all of a user's families.
+    ///
+    /// Stops at the first error, so a failed delete leaves the refresh rows
+    /// as they were for a retry to find.
+    pub(crate) async fn end_family(
+        ctx: &dyn wafer_run::context::Context,
+        family: &str,
+    ) -> Result<(), WaferError> {
+        super::repo::sessions::delete(ctx, family).await?;
+        super::repo::tokens::revoke_family(ctx, family).await
     }
 
     /// The answer to a refresh token that can no longer refresh: rotated away,
@@ -1555,8 +1592,8 @@ pub(crate) mod helpers {
     /// bootstrap redemption, OAuth callback, and refresh rotation): mints the
     /// access + refresh JWTs, writes the family's rows ([`establish_family`]),
     /// and builds the `auth_token` cookie. It is the only path that does any
-    /// of the three: [`generate_tokens`] and [`auth_cookie`] are private to
-    /// it.
+    /// of the three within the crate: [`generate_tokens`] and [`auth_cookie`]
+    /// are private to `helpers`, and this is their one caller there.
     ///
     /// `rotation` says which family the tokens belong to: see [`Rotation`].
     ///

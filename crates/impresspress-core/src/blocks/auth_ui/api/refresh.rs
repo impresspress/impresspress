@@ -31,8 +31,8 @@ use crate::{
         auth::{
             credential_check_failed,
             helpers::{
-                issue_tokens_and_cookie, refresh_token_revoked, Rotation, SessionLifetime,
-                TokenGrant,
+                end_family, issue_tokens_and_cookie, refresh_token_revoked, Rotation,
+                SessionLifetime, TokenGrant,
             },
             repo::{tokens, users},
         },
@@ -274,20 +274,20 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
 }
 
 /// Refuse a refresh token whose family was issued before the account's
-/// current `auth_version`, and revoke the family.
+/// current `auth_version`, and end the family ([`end_family`]).
 ///
-/// The revoke is housekeeping, not the refusal: every token the family could
+/// Ending it is housekeeping, not the refusal: every token the family could
 /// still mint from carries the same stale version and meets the same check,
-/// so a revoke that fails is logged and the answer stays the same. Revoking
-/// makes the rows say what the check decided, so a later presentation takes
-/// the row-level refusal without reading the account.
+/// so a failure is logged and the answer stays the same. It makes the rows
+/// say what the check decided: the device leaves the list, and a later
+/// presentation takes the row-level refusal without reading the account.
 async fn refuse_stale_family(ctx: &dyn Context, row: &tokens::TokenRow) -> OutputStream {
     tracing::info!(
         user_id = %row.user_id,
         family = %row.family,
-        "refresh: family issued before the account's current auth_version; revoking it"
+        "refresh: family issued before the account's current auth_version; ending it"
     );
-    if let Err(e) = tokens::revoke_family(ctx, &row.family).await {
+    if let Err(e) = end_family(ctx, &row.family).await {
         tracing::warn!(
             user_id = %row.user_id,
             family = %row.family,
@@ -370,7 +370,11 @@ async fn refuse_not_live(
                     cause = "revoked_at_read",
                     "refresh: token reuse detected; revoking entire family"
                 );
-                if let Err(e) = tokens::revoke_family(ctx, &row.family).await {
+                // Row first, like every revocation (`end_family`): a rotation
+                // of the stolen token that claimed before this burn and
+                // touches after it then finds no row and is refused, instead
+                // of carrying the family on.
+                if let Err(e) = end_family(ctx, &row.family).await {
                     return crud::db_error_internal(e, "Refresh could not revoke the token family");
                 }
             }
@@ -1552,6 +1556,151 @@ mod tests {
             .await,
             "a successor minted from the account as it was before the password \
              change must not outlive it"
+        );
+    }
+
+    /// Reuse detection racing a rotation of the stolen token. The thief holds
+    /// the family's live token and the victim replays the one it rotated
+    /// away. The replay reads the family as live; the thief's refresh claims
+    /// its token; the replay burns the family; the thief's refresh writes its
+    /// successor and touches the session row.
+    ///
+    /// The burn deletes the session row before it revokes the refresh rows,
+    /// like every revocation, so the thief's touch finds nothing and its
+    /// refresh is refused. Revoking the refresh rows alone, as the burn used
+    /// to, found nothing live to revoke (the thief had just claimed), and the
+    /// thief's touch found the row: it answered 200 and the family went on
+    /// after the theft was detected.
+    #[tokio::test]
+    async fn a_rotation_racing_a_reuse_burn_is_refused() {
+        use crate::blocks::auth::repo::sessions;
+
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let (replayed, stolen) = rotated_pair(&ctx).await;
+        let family = tokens::find_by_token(&ctx, &stolen)
+            .await
+            .expect("token lookup")
+            .expect("the live row")
+            .family;
+
+        let (claimed, claimed_seen) = tokio::sync::oneshot::channel::<()>();
+        let (release, release_seen) = tokio::sync::oneshot::channel::<()>();
+        // The thief's refresh, paused right after it claims its token.
+        let thief_ctx = crate::test_support::AfterDbOpContext::new(
+            ctx.clone(),
+            "database.update_where_count",
+            tokens::TABLE,
+            async move {
+                claimed.send(()).expect("the test is waiting");
+                release_seen.await.expect("the test releases the thief");
+            },
+        );
+        let thief = Arc::new(Mutex::new(None));
+        let started = thief.clone();
+        let thief_in_task = thief_ctx.clone();
+        let stolen_in_task = stolen.clone();
+        // The replay, which starts the thief once it has read the family as
+        // live: its second `database.list` on the tokens table, after the
+        // token lookup.
+        let replay_ctx = crate::test_support::AfterDbOpContext::new(
+            ctx.clone(),
+            "database.list",
+            tokens::TABLE,
+            async move {
+                let task = tokio::spawn(async move {
+                    output_http_json(
+                        handle(
+                            &thief_in_task,
+                            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+                            refresh_with(&stolen_in_task),
+                        )
+                        .await,
+                    )
+                    .await
+                });
+                *started.lock().unwrap() = Some(task);
+                claimed_seen.await.expect("the thief claimed its token");
+            },
+        )
+        .skipping(1);
+
+        let replay = handle(
+            &replay_ctx,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&replayed),
+        )
+        .await;
+        assert!(replay_ctx.fired() && thief_ctx.fired());
+        assert!(
+            output_is_error(replay, "Unauthenticated").await,
+            "the replay is refused"
+        );
+        release.send(()).expect("the thief is paused");
+        let task = thief.lock().unwrap().take().expect("the thief was started");
+        let thief_answer = task.await.expect("the thief's refresh ran");
+
+        assert!(
+            thief_answer.get("refresh_token").is_none(),
+            "a rotation racing the burn must not carry the family on: {thief_answer}"
+        );
+        assert!(
+            !tokens::family_has_live_row(&ctx, &family)
+                .await
+                .expect("live-row check"),
+            "the burned family has no live refresh row"
+        );
+        assert!(
+            sessions::find_for_user(&ctx, &race_user_id(&ctx).await, &family)
+                .await
+                .expect("read the device row")
+                .is_none(),
+            "the burned device is not listed as signed in"
+        );
+    }
+
+    /// A rotation whose session-row touch fails answers 500 and ends the
+    /// family rather than leaving its successor's row live. That row's JWT is
+    /// never handed out, and left live it would make the client's retry with
+    /// its old token read as a replay of a stolen one. The retry is refused
+    /// like any dead token, not burned as theft.
+    #[tokio::test]
+    async fn a_rotation_whose_touch_fails_ends_the_family() {
+        use crate::blocks::auth::repo::sessions;
+
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let token = fresh_refresh_token(&ctx).await;
+        let family = tokens::find_by_token(&ctx, &token)
+            .await
+            .expect("token lookup")
+            .expect("the login's row")
+            .family;
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.update_where_count", sessions::TABLE)],
+        );
+
+        let out = handle(
+            &failing,
+            &crate::test_support::json_post_msg("/b/auth/api/refresh"),
+            refresh_with(&token),
+        )
+        .await;
+        assert!(
+            output_is_error(out, "Internal").await,
+            "an unconfirmed family is this deployment failing"
+        );
+        assert!(
+            !tokens::family_has_live_row(&ctx, &family)
+                .await
+                .expect("live-row check"),
+            "no live successor is left behind"
+        );
+        assert!(
+            sessions::find_for_user(&ctx, &race_user_id(&ctx).await, &family)
+                .await
+                .expect("read the device row")
+                .is_none(),
+            "the ended device is not listed"
         );
     }
 }

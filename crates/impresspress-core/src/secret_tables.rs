@@ -67,9 +67,9 @@
 //! digests), `orgs`, `rate_limits`.
 //!
 //! `wafer_run__auth__sessions` is the one worth spelling out, because its name
-//! argues for inclusion and its schema does not. Migration
-//! `012_sessions_family` DROPPED the table and recreated it keyed on the
-//! refresh-rotation `family`: the columns are `family`, `user_id`,
+//! argues for inclusion and its schema does not. It is keyed on the
+//! refresh-rotation `family` (B12; migration 012 first re-keyed it, and 001
+//! now declares that layout): the columns are `family`, `user_id`,
 //! `auth_method` and timestamps, and the `token_hash` that made it look like
 //! bearer storage is gone. A row says THAT a device is signed in — a refresh
 //! is refused once its family's row is gone (`blocks::auth::repo::sessions`)

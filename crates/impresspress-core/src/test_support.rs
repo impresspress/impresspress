@@ -3199,6 +3199,9 @@ impl Context for RendezvousDbOpContext {
 pub struct AfterDbOpContext {
     inner: TestContext,
     points: Vec<(&'static str, &'static str)>,
+    /// Matching calls still to pass before the hook runs (see
+    /// [`Self::skipping`]). Shared across clones.
+    skips_left: Arc<std::sync::atomic::AtomicUsize>,
     /// Taken by the first matching call; shared across clones, so a
     /// handler's `clone_arc` sees the same one-shot.
     hook: Arc<Mutex<Option<futures::future::BoxFuture<'static, ()>>>>,
@@ -3216,8 +3219,19 @@ impl AfterDbOpContext {
         Self {
             inner,
             points: vec![(op, collection)],
+            skips_left: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             hook: Arc::new(Mutex::new(Some(Box::pin(hook)))),
         }
+    }
+
+    /// Let the first `n` matching calls through and run the hook after the
+    /// next one: for a sequence that makes the matched call more than once
+    /// (a lookup, then a check, on the same table) when the point is a later
+    /// one.
+    pub fn skipping(self, n: usize) -> Self {
+        self.skips_left
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 
     /// Also run the hook after an `(op, collection)` call, if that one comes
@@ -3279,7 +3293,16 @@ impl Context for AfterDbOpContext {
             .inner
             .call_block(name, msg, InputStream::from_bytes(bytes))
             .await;
-        if matches {
+        let skipped = matches
+            && self
+                .skips_left
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+        if matches && !skipped {
             let hook = self.hook.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(hook) = hook {
                 hook.await;
