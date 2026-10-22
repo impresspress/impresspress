@@ -1154,6 +1154,142 @@ async fn the_commerce_fixture_is_what_the_pages_render() {
     );
 }
 
+/// The deleted product `gone`, with one published offer and one active
+/// Payment Link that never reached Stripe, deleted on a fixed date: the close
+/// page's two actions, Archive offer and Deactivate. Returns the context and
+/// the offer and link ids, which are generated.
+async fn close_ctx() -> (crate::test_support::TestContext, String, String) {
+    use serde_json::json;
+
+    use super::super::{contracts, offer_pricing, repo};
+
+    let ctx = ctx().await;
+    seed(
+        &ctx,
+        repo::products::TABLE,
+        "gone",
+        record(&[("name", json!("Field guide")), ("status", json!("active"))]),
+    )
+    .await;
+    let definition: contracts::OfferDefinitionRequest = serde_json::from_value(json!({
+        "name": "Download",
+        "mode": "payment",
+        "currency": "nzd",
+        "pricing_model": "fixed",
+        "usage_type": "licensed",
+        "billing_scheme": "per_unit",
+        "tax_behavior": "exclusive",
+        "components": [{
+            "key": "price",
+            "label": "Download",
+            "required": true,
+            "amount": {"type": "fixed", "unit_amount_minor": 4900}
+        }]
+    }))
+    .expect("offer definition");
+    let offer = repo::offers::create(&ctx, "gone", "admin_1", &definition)
+        .await
+        .expect("create offer");
+    let offer_id = offer.offer.id;
+    repo::offers::publish(&ctx, "gone", &offer_id)
+        .await
+        .expect("publish offer");
+    let managed = repo::offers::get_managed(&ctx, &offer_id)
+        .await
+        .expect("the offer is readable");
+    let preview = offer_pricing::evaluate_offer(
+        &managed.offer,
+        &contracts::PricingPreviewRequest {
+            offer_id: offer_id.clone(),
+            quantity: 1,
+            inputs: Default::default(),
+        },
+        offer_pricing::InputScope::Management,
+    )
+    .expect("price the offer");
+    let link_id = seed_pending_payment_link(&ctx, &offer_id, "close-me", &preview)
+        .await
+        .managed
+        .id;
+    wafer_core::clients::database::update(
+        &ctx,
+        repo::products::TABLE,
+        "gone",
+        record(&[("deleted_at", json!("2026-09-01T00:00:00Z"))]),
+    )
+    .await
+    .expect("soft delete");
+    (ctx, offer_id, link_id)
+}
+
+/// `main#content`'s contents, with every `<script src>` dropped (their URLs
+/// carry a content hash, and the spec loads the file itself) and every
+/// inline script kept (the page's own config).
+fn main_without_script_files(name: &str, html: &str) -> String {
+    let main = html
+        .split_once(r#"<main class="shell__body" id="content" tabindex="0">"#)
+        .and_then(|(_, rest)| rest.split_once("</main>"))
+        .map(|(main, _)| main)
+        .unwrap_or_else(|| panic!("{name}: no main#content\n{html}"));
+    let mut body = String::new();
+    let mut rest = main;
+    while let Some(start) = rest.find("<script src=") {
+        body.push_str(&rest[..start]);
+        let end =
+            rest[start..].find("</script>").expect("closed script") + start + "</script>".len();
+        rest = &rest[end..];
+    }
+    body.push_str(rest);
+    body
+}
+
+/// The three products actions that confirm in the shared dialog, as
+/// `products-confirms.spec.ts` mounts them with their own scripts: the admin
+/// order page of a partly refunded order (Create refund, whose question
+/// states the amount, or the remaining balance for a blank one), and a
+/// deleted product's close page (Archive offer and Deactivate). The close
+/// page's generated ids are written `offer_1` and `link_1`.
+pub(super) async fn product_confirms_fixture() -> String {
+    let commerce = commerce_ctx().await;
+    let order = page_as(
+        &commerce,
+        "/b/products/admin/purchases/ord_1_8f2a6c1e9b7d4e0f",
+        None,
+    )
+    .await;
+    let (close, offer_id, link_id) = close_ctx().await;
+    let close_page = admin_page(&close, "/b/products/admin/products/gone/close").await;
+    let close_page = close_page
+        .replace(&offer_id, "offer_1")
+        .replace(&link_id, "link_1");
+    let mut out = String::new();
+    for (name, html) in [("refund", order), ("close", close_page)] {
+        out.push_str(&format!(
+            "<!-- page: {name} -->\n{}\n",
+            main_without_script_files(name, &html)
+        ));
+    }
+    out
+}
+
+/// `products-confirms.spec.ts` reads the two pages from a fixture file (the
+/// e2e server has no orders and no Stripe to publish an offer through); this
+/// keeps that file what the pages render. To refresh it after a deliberate
+/// markup change, write `product_confirms_fixture()` to the path below.
+#[tokio::test]
+async fn the_product_confirms_fixture_is_what_the_pages_render() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../impresspress-web/tests/e2e/fixtures/product-confirms.html"
+    );
+    let expected = product_confirms_fixture().await;
+    let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+    assert_eq!(
+        on_disk, expected,
+        "{path} is out of date; write the expected text to it"
+    );
+}
+
 /// An order page's header marks the payment mode as a neutral badge in
 /// words ("Test mode"), not the raw `test` as a status badge; a dispute's
 /// reason reads as a phrase; and Commerce's callout no longer repeats the

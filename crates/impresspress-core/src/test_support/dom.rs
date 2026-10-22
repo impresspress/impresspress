@@ -180,9 +180,14 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
 ///   to the rule the shipped script files are;
 /// - an element with `hx-confirm` that does not name its action
 ///   (`data-confirm-label`, not empty) and its tone (`data-confirm-tone`,
-///   `danger` or `primary`), without which chrome.js refuses to ask.
+///   `danger` or `primary`), without which chrome.js refuses to ask;
+/// - a `.btn--danger` outside every `<dialog>` that does not open a confirm
+///   itself ([`unconfirmed_danger_buttons`]) and is not listed, with its
+///   reason, in [`DANGER_WITHOUT_A_CONFIRM`];
+/// - an inline `<script>` that draws a danger button
+///   ([`danger_class_references`]).
 ///
-/// A fragment (an htmx answer) is held to the last two only: the document it
+/// A fragment (an htmx answer) is held to all but the first: the document it
 /// lands in carries the dialog.
 pub fn confirm_problems(html: &str) -> Vec<String> {
     use crate::ui::components::CONFIRM_DIALOG_ID;
@@ -231,6 +236,28 @@ pub fn confirm_problems(html: &str) -> Vec<String> {
             ));
         }
     }
+    for danger in unconfirmed_danger_buttons(html) {
+        if DANGER_WITHOUT_A_CONFIRM
+            .iter()
+            .any(|(allowed, _reason)| *allowed == danger)
+        {
+            continue;
+        }
+        problems.push(format!(
+            "{danger} is drawn as a destructive confirm but opens none: give it hx-confirm \
+             (with its data-confirm-label and data-confirm-tone), or make it a secondary \
+             that asks window.impresspressConfirm"
+        ));
+    }
+    for script in doc.select(&selector("script:not([src])")) {
+        let text: String = script.text().collect();
+        for at in danger_class_references(&text) {
+            problems.push(format!(
+                "an inline <script> draws a danger button, at its line {at} (only the shared \
+                 confirm dialog's own button is drawn in danger)"
+            ));
+        }
+    }
     for asker in doc.select(&selector("[hx-confirm]")) {
         let label = asker.value().attr("data-confirm-label").unwrap_or_default();
         let tone = asker.value().attr("data-confirm-tone").unwrap_or_default();
@@ -244,6 +271,71 @@ pub fn confirm_problems(html: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// The `.btn--danger` elements a page may draw although they open no confirm
+/// themselves, each as [`describe`] names it, with the reason it may. Empty:
+/// `.btn--danger` is the class of the button that *confirms* a destructive
+/// step (`Action::danger`, design rule 6), so outside the shared dialog it
+/// belongs only on a control that asks first. An entry here must say why a
+/// page needs one that does not; `htmx_guard` fails on an entry no crawled
+/// page draws any more.
+pub const DANGER_WITHOUT_A_CONFIRM: &[(&str, &str)] = &[];
+
+/// Every `.btn--danger` outside every `<dialog>` that does not open a confirm
+/// itself, by [`describe`], in document order.
+///
+/// Opening one itself means carrying `hx-confirm` beside the htmx request it
+/// confirms (`hx-get`, `hx-post`, `hx-put`, `hx-patch` or `hx-delete`): an
+/// `hx-confirm` inherited from an ancestor, or one on an element that issues
+/// no request, asks nothing when this button is pressed. A button whose
+/// script asks `window.impresspressConfirm` cannot be told from one whose
+/// script asks nothing, so a scripted destructive control is a secondary and
+/// the dialog's own button is the danger one.
+///
+/// The class is read off the parsed page, so every spelling that renders it
+/// counts the same: `Action::danger`, a hand-written `.btn--danger`, a class
+/// string assembled with `format!`. Concealed buttons are checked too: a
+/// `<template>` row or a `[hidden]` button is drawn once a script reveals it.
+/// A `<dialog>`'s buttons are [`confirm_problems`]' other rules': the shared
+/// dialog's is the one place a danger confirm belongs, and any other dialog
+/// holding one is a second confirm mechanism.
+pub fn unconfirmed_danger_buttons(html: &str) -> Vec<String> {
+    const REQUESTS: [&str; 5] = ["hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete"];
+    let doc = Html::parse_document(html);
+    doc.select(&selector(".btn--danger"))
+        .filter(|button| !self_or_ancestor(*button, |el| el.value().name() == "dialog"))
+        .filter(|button| {
+            let attr = |name: &str| button.value().attr(name).is_some();
+            !(attr("hx-confirm") && REQUESTS.iter().any(|request| attr(request)))
+        })
+        .map(describe)
+        .collect()
+}
+
+/// Every place script `src` draws a danger button, as `line: text`: the
+/// class `btn--danger` spelled out, or a `btn-` / `btn--` prefix joined to
+/// something (`'btn--' + tone`, `` `btn--${tone}` ``), which spells it
+/// without writing it. A script never draws one: the shared confirm dialog's
+/// button is the danger one, and it is the markup's (`components::Action`).
+/// A script that composes any button class is held to it too, because a
+/// composed class is one no guard can read.
+pub fn danger_class_references(src: &str) -> Vec<String> {
+    static DANGER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?x)
+            btn--danger(?:[^\w-]|$)
+            | btn--?["'`]\s*\+
+            | btn--?\$\{
+            "#,
+        )
+        .expect("a valid pattern")
+    });
+    src.lines()
+        .enumerate()
+        .filter(|(_, line)| DANGER.is_match(line))
+        .map(|(n, line)| format!("{}: {}", n + 1, line.trim()))
+        .collect()
 }
 
 /// Every place script `src` reaches the browser's own `confirm`, as
@@ -702,6 +794,124 @@ mod tests {
                 r#"<button hx-delete="/x" hx-confirm="X?" data-confirm-label="Delete x" data-confirm-tone="danger">X</button>"#
             )),
             vec!["the document carries 0 dialog#confirm-dialog, not one"]
+        );
+    }
+
+    // ── unconfirmed_danger_buttons ───────────────────────────────────
+
+    #[test]
+    fn a_danger_button_must_open_a_confirm_itself() {
+        let html = concat!(
+            r#"<main>"#,
+            r#"<button class="btn btn--danger" hx-delete="/a" hx-confirm="Delete a?" data-confirm-label="Delete a" data-confirm-tone="danger">A</button>"#,
+            r#"<button class="btn btn--danger" type="button" data-action="po-submit-refund">Refund</button>"#,
+            r#"<a class="btn btn--danger" href="/x">Link</a>"#,
+            r#"<button class="btn btn--danger" hx-confirm="No request?">Asks nothing</button>"#,
+            r#"<div hx-delete="/b" hx-confirm="B?"><button class="btn btn--danger">Inherited</button></div>"#,
+            r#"<template><button class="btn btn--danger">Templated</button></template>"#,
+            r#"<button class="btn btn--danger" hidden>Hidden</button>"#,
+            r#"<button class="btn btn--ghost-danger">Quiet</button>"#,
+            r#"<button class="btn btn--danger-ish">Lookalike</button>"#,
+            r#"</main>"#,
+            r#"<dialog id="other"><button class="btn btn--danger">In a dialog</button></dialog>"#,
+        );
+        assert_eq!(
+            unconfirmed_danger_buttons(html),
+            vec![
+                r#"button.btn.btn--danger "Refund""#,
+                r#"a.btn.btn--danger "Link""#,
+                r#"button.btn.btn--danger "Asks nothing""#,
+                r#"button.btn.btn--danger "Inherited""#,
+                r#"button.btn.btn--danger "Templated""#,
+                r#"button.btn.btn--danger "Hidden""#,
+            ]
+        );
+    }
+
+    /// Every spelling that renders the class is the same element to the
+    /// guard, because it reads the rendered page.
+    #[test]
+    fn a_danger_button_is_found_however_the_page_spelled_it() {
+        use crate::ui::components::{Action, ActionTarget};
+        let tone = "danger";
+        let class = format!("btn btn--{tone}");
+        let html = maud::html! {
+            (Action::danger("Typed", ActionTarget::Delegated("x")).render())
+            button class=(class) { "Formatted" }
+            button .btn .btn--danger { "Hand-written" }
+        }
+        .into_string();
+        assert_eq!(
+            unconfirmed_danger_buttons(&html),
+            vec![
+                r#"button.btn.btn--danger "Typed""#,
+                r#"button.btn.btn--danger "Formatted""#,
+                r#"button.btn.btn--danger "Hand-written""#,
+            ]
+        );
+        assert_eq!(
+            confirm_problems(&html).len(),
+            3,
+            "{:#?}",
+            confirm_problems(&html)
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_danger_button_is_a_confirm_problem() {
+        assert_eq!(
+            confirm_problems(r#"<button class="btn btn--danger" data-action="x">Refund</button>"#),
+            vec![
+                r#"button.btn.btn--danger "Refund" is drawn as a destructive confirm but opens none: give it hx-confirm (with its data-confirm-label and data-confirm-tone), or make it a secondary that asks window.impresspressConfirm"#
+            ]
+        );
+    }
+
+    // ── danger_class_references ──────────────────────────────────────
+
+    #[test]
+    fn every_spelling_of_a_scripted_danger_button_is_a_reference() {
+        for spelling in [
+            "b.className = 'btn btn--danger';",
+            r#"b.classList.add("btn--danger")"#,
+            "b.className = `btn btn--danger btn--sm`;",
+            "b.className = 'btn btn--' + tone;",
+            r#"b.className = "btn btn-" + "-danger";"#,
+            "b.className = `btn btn--${tone}`;",
+            "b.className = 'btn btn--' +tone",
+            "el.innerHTML = '<button class=\"btn btn--danger\">x</button>'",
+        ] {
+            assert_eq!(
+                danger_class_references(spelling),
+                vec![format!("1: {spelling}")],
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_class_that_only_names_danger_is_not_a_danger_button() {
+        for text in [
+            "b.className = 'btn btn--secondary btn--sm';",
+            "p.className = 'text-danger';",
+            "badge.className = 'badge ' + (failed ? 'badge-danger' : 'badge-success');",
+            "item.className = 'row-menu__item' + (danger ? ' row-menu__item--danger' : '');",
+            "tone: 'danger',",
+            r#"b.getAttribute("data-confirm-tone") === "danger""#,
+            "b.className = 'btn btn--danger-ish';",
+            "// the dialog's own danger button",
+        ] {
+            assert!(danger_class_references(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_inline_script_that_draws_a_danger_button_is_a_problem() {
+        assert_eq!(
+            confirm_problems("<script>b.className = 'btn btn--' + tone;</script>"),
+            vec![
+                "an inline <script> draws a danger button, at its line 1: b.className = 'btn btn--' + tone; (only the shared confirm dialog's own button is drawn in danger)"
+            ]
         );
     }
 

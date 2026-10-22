@@ -435,6 +435,37 @@ mod tests {
         );
     }
 
+    /// No shipped script draws a danger button
+    /// (`test_support::dom::danger_class_references`): `.btn--danger` is the
+    /// shared dialog's confirm button, written here as an `Action`, so a
+    /// script that asks first leaves its own button a secondary. The crawled
+    /// pages' markup and inline scripts are `htmx_guard`'s
+    /// `every_page_confirms_through_the_one_shared_dialog`.
+    #[test]
+    fn no_shipped_script_draws_a_danger_button() {
+        let scripts = shipped_scripts();
+        assert!(
+            scripts.len() > 40,
+            "the walk reached {} scripts; it must reach every shipped one",
+            scripts.len()
+        );
+        let found: Vec<String> = scripts
+            .iter()
+            .flat_map(|(rel, src)| {
+                crate::test_support::dom::danger_class_references(src)
+                    .into_iter()
+                    .map(move |at| format!("{rel}:{at}"))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "a script draws no danger button: ask in the shared confirm dialog \
+             (window.impresspressConfirm) from a secondary, and spell every button class \
+             in full:\n{}",
+            found.join("\n")
+        );
+    }
+
     /// The e2e suites that build a page by hand (the products scripts' specs)
     /// put this file and chrome.js on it, so their scripts confirm through
     /// the real dialog. Kept equal to what every page renders.
