@@ -806,6 +806,40 @@ mod auth_version_cache_tests {
             .id
     }
 
+    /// The key-create re-check (`presented_credential_is_live`) reads the
+    /// account's version from the row, not through this cache. On Cloudflare
+    /// a bump invalidates only its own isolate's entry, so another isolate
+    /// can hold the old version for up to the TTL; a re-check through the
+    /// cache would pass a token the bump retired, and a key created on a
+    /// session signed in with the old password would survive the change
+    /// (E2-review F3). Here the cache holds that other isolate's stale view.
+    #[tokio::test]
+    async fn the_key_create_recheck_ignores_a_stale_version_cache() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let uid = seed(&ctx).await;
+        crate::test_support::seed_login_family(&ctx, &uid, "fam-stale").await;
+        repo::users::bump_auth_version(&ctx.fixture(), &uid)
+            .await
+            .unwrap();
+        // Another isolate's view: version 0, cached just now.
+        auth_version_cache().lock().unwrap().insert(
+            uid.clone(),
+            AuthVersionCacheEntry {
+                version: 0,
+                cached_at_ms: crate::util::now_millis() as i64,
+            },
+        );
+        let mut msg = crate::test_support::auth_msg("create", "/b/auth/api/api-keys", &uid);
+        msg.set_meta(crate::crypto::META_AUTH_FAMILY, "fam-stale");
+        msg.set_meta(crate::crypto::META_AUTH_VERSION, "0");
+        assert!(
+            !presented_credential_is_live(&ctx, &msg).await.unwrap(),
+            "a token behind the account's stored version is dead, whatever the cache holds"
+        );
+    }
+
     #[tokio::test]
     async fn fresh_read_matches_the_stored_column() {
         let ctx = TestContext::with_auth()
