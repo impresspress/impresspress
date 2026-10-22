@@ -22,7 +22,7 @@ use crate::{
     http::{err_bad_request, err_not_found},
     ui::{
         self,
-        components::{self, Card},
+        components::{self, Action, ActionTarget, Card},
         icons,
         sidebar::nav_icon,
     },
@@ -37,7 +37,7 @@ use crate::{
 /// of rendering a `?` glyph at runtime.
 pub(crate) const ICON_OPTIONS: &[(&str, &str)] = &[
     ("package", "Package"),
-    ("shopping-cart", "Shopping Cart"),
+    ("shopping-cart", "Shopping cart"),
     ("folder", "Folder"),
     ("key", "Key"),
     ("server", "Server"),
@@ -51,6 +51,15 @@ pub(crate) const ICON_OPTIONS: &[(&str, &str)] = &[
     ("dollar-sign", "Dollar"),
     ("dashboard", "Dashboard"),
 ];
+
+/// An icon name as the picker shows it ("Shopping cart"), or the stored name
+/// for one the picker no longer offers.
+fn icon_label(name: &str) -> &str {
+    ICON_OPTIONS
+        .iter()
+        .find(|(value, _)| *value == name)
+        .map_or(name, |(_, label)| label)
+}
 
 pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // "No buttons configured" is what an empty table renders; an unreadable
@@ -105,9 +114,9 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
                     input .form-input #sort_order type="number" name="sort_order" value="0";
                 }
                 div .admin-buttons-form-grid__submit {
-                    button .btn .btn--primary type="submit" {
-                        (icons::plus()) " Add button"
-                    }
+                    (Action::primary("Add button", ActionTarget::Submit { form: None })
+                        .icon(icons::plus())
+                        .render())
                 }
             }
         }).render())
@@ -124,14 +133,17 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
         ctx,
         msg,
         ui::Shell::admin("Portal buttons", "Portal buttons")
-            .subtitle("Configure navigation buttons shown on the user profile page"),
+            .subtitle("The app links on the portal's Overview page."),
         content,
     )
     .await
 }
 
 /// The buttons list's columns: the label is each card's title on a phone,
-/// the row's two icon actions sit beside it.
+/// the row's two icon actions sit beside it. A path may be a pasted URL, so
+/// it breaks anywhere. Narrow, the icon and the order move into one line
+/// under the label (table.css `.portal-button-table`, which hides the
+/// headers by position: a column moved here must move there).
 const BUTTON_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Label").primary(),
     components::TableCol::new("Icon"),
@@ -146,7 +158,14 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
         .map(|btn| {
             let label = btn.str_field("label");
             components::TableRow::new(vec![
-                html! { (label) },
+                html! {
+                    span .data-table__title { (label) }
+                    // The icon and order columns, when the table is too
+                    // narrow for them.
+                    span .portal-button-table__meta {
+                        (icon_label(btn.str_field("icon"))) " icon · order " (btn.i64_field("sort_order"))
+                    }
+                },
                 html! {
                     // Glyph and name centred on one line, not the icon on
                     // the text's baseline.
@@ -187,13 +206,13 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
         })
         .collect();
     html! {
-        div #buttons-table {
+        div #buttons-table .portal-button-table {
             (components::DataTable::new(&BUTTON_COLUMNS)
                 .rows(rows)
                 .empty(components::empty_state(
                     icons::package(),
                     "No buttons configured",
-                    "Add a button above to show navigation links on the user profile page.",
+                    "Add a button above to link an app from the portal's Overview page.",
                     None,
                 ))
                 .render())
@@ -354,7 +373,7 @@ pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStrea
     let modal_id = edit_modal_id(id);
 
     let markup = html! {
-        (components::modal(&modal_id, "Edit Button", html! {
+        (components::modal(&modal_id, "Edit button", html! {
             form
                 hx-put=(format!("/b/userportal/admin/buttons/{id}"))
                 hx-target="#buttons-table"
@@ -386,7 +405,7 @@ pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStrea
                 }
                 (components::modal_footer(html! {
                     (components::modal_cancel())
-                    button .btn .btn--primary type="submit" { "Save" }
+                    (Action::primary("Save", ActionTarget::Submit { form: None }).render())
                 }))
             }
         }))
@@ -528,11 +547,17 @@ mod tests {
         );
         assert!(!html.contains(r#"class="table""#), "{html}");
         assert!(
-            html.contains(r#"<div id="buttons-table"><div class="data-table"><table>"#),
+            html.contains(
+                r#"<div class="portal-button-table" id="buttons-table"><div class="data-table"><table>"#
+            ),
             "{html}"
         );
+        // The label names the row; narrow, the icon and order join it on a
+        // line under it (table.css `.portal-button-table`).
         assert!(
-            html.contains(r#"<td class="data-table__cell--primary" data-label="Label">Files</td>"#),
+            html.contains(
+                r#"<td class="data-table__cell--primary" data-label="Label"><span class="data-table__title">Files</span><span class="portal-button-table__meta">Folder icon · order 0</span></td>"#
+            ),
             "{html}"
         );
         assert!(

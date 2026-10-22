@@ -39,7 +39,11 @@ use super::{
     assets, no_store,
     repo::seed_info::{self, SeedInfo},
 };
-use crate::{http::ResponseBuilder, ui, ui::components::section_header};
+use crate::{
+    http::ResponseBuilder,
+    ui,
+    ui::components::{Action, ActionTarget, Card},
+};
 
 /// Serve the workspace document.
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -79,11 +83,15 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         )
 }
 
-/// The page body: seven panes with stable ids, then the assets that drive them.
+/// The page body: seven panes with stable ids, each a [`Card`] on the page
+/// background, then the assets that drive them.
 ///
 /// The ids are the contract between this markup, `dev.js` and the end-to-end
-/// test — `dev.js` looks every element up by id and does nothing else with
-/// the document's shape, so the layout can change without touching it.
+/// test — `dev.js` looks every element it reads or writes up by id and does
+/// nothing else with the document's shape, so the layout can change without
+/// touching it. Its buttons are [`Action`]s with a `dev-*` verb
+/// ([`ActionTarget::Delegated`]), which one delegated listener in `dev.js`
+/// runs. Save is the page's one primary.
 ///
 /// `seed` is what the seed bundle said about this sandbox — the template
 /// and the prompt to suggest. `None` renders no prompt disclosure at all.
@@ -94,8 +102,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
     html! {
         div .dev-workspace {
-            section #dev-guide .dev-pane {
-                (section_header("How this workspace works", None))
+            (Card::titled("How this workspace works", html! {
                 p {
                     "This page is a WebMCP workspace. An agent in your browser uses the tools \
                      published here to edit the site under " code { "site/" } ", write Rust \
@@ -142,8 +149,8 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                         pre #dev-suggested-prompt { (seed.suggested_prompt) }
                     }
                 }
-            }
-            section #dev-console .dev-pane {
+            }).id("dev-guide").render())
+            (Card::titled("Tool console", html! {
                 // The same tools, for an agent whose browser has no WebMCP
                 // and can only drive the page: pick one, edit its arguments,
                 // press Run, read the result. Every control is filled in by
@@ -151,7 +158,6 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // calls the same function an agent's tool call would — so
                 // this pane cannot offer a tool the page does not have, or
                 // run one differently.
-                (section_header("Tool console", None))
                 p {
                     "Every tool this page publishes, runnable by hand. Choose a tool, edit its \
                      arguments as JSON, and press Run; the result appears below. A tool that \
@@ -179,8 +185,12 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                         }
                         div .dev-editor-actions {
                             // Ships `disabled`: there is nothing to run until
-                            // `dev.js` has fetched the tools.
-                            button #dev-console-run .btn .btn--primary type="button" disabled { "Run" }
+                            // `dev.js` has fetched the tools. A secondary:
+                            // the page's one primary is the editor's Save.
+                            (Action::secondary("Run", ActionTarget::Delegated("dev-console-run"))
+                                .id("dev-console-run")
+                                .disabled(true)
+                                .render())
                         }
                         // What a screen reader hears when a run ends: one
                         // short sentence ("Run finished: ok" / "…: error"),
@@ -202,28 +212,26 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                         }
                     }
                 }
-            }
-            section #dev-files .dev-pane {
-                (section_header("Files", Some(html! {
-                    button #dev-new-file .btn .btn--secondary type="button" { "New file" }
-                })))
+            }).id("dev-console").render())
+            (Card::titled("Files", html! {
                 // Each entry is a `button` (`dev.js`'s `loadFiles`): opening
                 // a file is an action on this page, not a navigation.
                 ul #dev-file-list aria-label="Workspace files" {}
-            }
-            section #dev-editor .dev-pane {
-                (section_header("Editor", None))
+            })
+            .action(Action::secondary("New file", ActionTarget::Delegated("dev-new-file")))
+            .id("dev-files")
+            .render())
+            (Card::titled("Editor", html! {
                 // The open file's path, which `dev.js` writes here, is the
                 // textarea's label: "site/index.html" is what the box holds.
                 label #dev-editor-title .dev-editor__path for="dev-editor-text" { "No file open" }
                 textarea #dev-editor-text spellcheck="false" {}
                 div .dev-editor-actions {
-                    button #dev-save .btn .btn--primary type="button" { "Save" }
-                    button #dev-delete .btn .btn--ghost-danger type="button" { "Delete" }
+                    (Action::primary("Save", ActionTarget::Delegated("dev-save")).id("dev-save").render())
+                    (Action::quiet_danger("Delete", ActionTarget::Delegated("dev-delete")).render())
                 }
-            }
-            section #dev-preview .dev-pane {
-                (section_header("Live site", None))
+            }).id("dev-editor").render())
+            (Card::titled("Live site", html! {
                 // `sandbox` is NOT a prompt-injection boundary, and cannot
                 // be one while this frame carries `allow-same-origin` on
                 // same-origin content: the framed page can read and write
@@ -255,16 +263,15 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                     src="/"
                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                     title="Live site" {}
-            }
-            section #dev-progress .dev-pane {
-                (section_header("Progress", None))
+            }).id("dev-preview").render())
+            (Card::titled("Progress", html! {
                 ol #dev-progress-steps {}
                 // Focusable so its scroll can be driven from the keyboard;
                 // `role="log"` because new lines are appended at the end and
                 // only those are news.
                 pre #dev-log role="log" aria-label="Activity log" tabindex="0" {}
-            }
-            section #dev-actions .dev-pane {
+            }).id("dev-progress").render())
+            (Card::titled("Build and export", html! {
                 // Both ship `disabled`, and that is the honest default: this
                 // markup is the same in every build, and whether a build
                 // carries the browser toolchain is a property of the BUNDLE
@@ -291,16 +298,24 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // pane is a row of buttons with no space for one, and a
                 // select whose only clue is its first option is
                 // unreachable by anything that is not looking at it.
-                select #dev-compile-block .form-select aria-label="Block to compile" {}
-                button #dev-compile .btn .btn--secondary type="button" disabled { "Compile block" }
-                button #dev-export .btn .btn--secondary type="button" disabled { "Export" }
-                button #dev-refresh-tools .btn .btn--secondary type="button" { "Refresh tools" }
-                // Filled in by `dev.js` from the compiler manifest, and left
-                // empty when there is none — the version is the pinned rubrc
-                // sha every compiler URL carries, so it is what a bug report
-                // about a build needs to quote.
-                span #dev-compiler-version {}
-            }
+                div .dev-actions {
+                    select #dev-compile-block .form-select aria-label="Block to compile" {}
+                    (Action::secondary("Compile block", ActionTarget::Delegated("dev-compile"))
+                        .id("dev-compile")
+                        .disabled(true)
+                        .render())
+                    (Action::secondary("Export", ActionTarget::Delegated("dev-export"))
+                        .id("dev-export")
+                        .disabled(true)
+                        .render())
+                    (Action::secondary("Refresh tools", ActionTarget::Delegated("dev-refresh-tools")).render())
+                    // Filled in by `dev.js` from the compiler manifest, and
+                    // left empty when there is none — the version is the
+                    // pinned rubrc sha every compiler URL carries, so it is
+                    // what a bug report about a build needs to quote.
+                    span #dev-compiler-version {}
+                }
+            }).id("dev-actions").render())
         }
         link rel="stylesheet" href="/b/dev/static/dev.css";
         // `type="module"`, not `defer`: the script imports
@@ -394,9 +409,6 @@ mod tests {
             "dev-editor-text",
             "dev-editor-title",
             "dev-save",
-            "dev-delete",
-            "dev-new-file",
-            "dev-refresh-tools",
             "dev-compile",
             "dev-compile-block",
             "dev-compiler-version",
@@ -494,27 +506,40 @@ mod tests {
         assert!(assets::dev_js().contains("title.textContent = file.path;"));
     }
 
-    /// The panes title themselves with the shared `section_header`, so every
-    /// in-body heading is one h2 style (PLAN D1), and the selects are the
-    /// shared `.form-select`, which carries the target floor.
+    /// Each pane is a titled `components::Card` with the id `dev.js` and the
+    /// specs find it by, so every in-body heading is the card's h2; no pane
+    /// holds another card-level surface; Save is the page's one primary
+    /// (Run, the console's, is a secondary); and the selects are the shared
+    /// `.form-select`, which carries the target floor.
     #[test]
-    fn panes_use_the_shared_heading_and_form_controls() {
+    fn panes_are_cards_under_one_primary_and_use_the_shared_form_controls() {
         let html = body(None, None).into_string();
-        for title in [
-            "How this workspace works",
-            "Tool console",
-            "Files",
-            "Editor",
-            "Live site",
-            "Progress",
+        for (id, title) in [
+            ("dev-guide", "How this workspace works"),
+            ("dev-console", "Tool console"),
+            ("dev-files", "Files"),
+            ("dev-editor", "Editor"),
+            ("dev-preview", "Live site"),
+            ("dev-progress", "Progress"),
+            ("dev-actions", "Build and export"),
         ] {
             assert!(
                 html.contains(&format!(
-                    r#"<h2 class="section-header__title">{title}</h2>"#
+                    r#"<section class="card" id="{id}"><header class="card__head"><div><h2 class="card__title">{title}</h2>"#
                 )),
-                "{title} is not a section_header; {html}"
+                "{title} is not a titled card with id {id}; {html}"
             );
         }
+        assert!(!html.contains("dev-pane"), "{html}");
+        assert_eq!(
+            crate::test_support::dom::visible_primaries(&html).0,
+            vec![r#"button.btn.btn--primary "Save""#.to_string()],
+            "{html}"
+        );
+        assert!(
+            crate::test_support::dom::card_level_inside_card(&html).is_empty(),
+            "{html}"
+        );
         assert!(!html.contains("<h2>"), "a bare h2 is left; {html}");
         assert!(
             html.contains(r#"<select class="form-select" id="dev-console-tool">"#),
@@ -566,16 +591,16 @@ mod tests {
     fn the_tool_console_runs_the_tools_webmcp_is_handed() {
         let html = body(None, None).into_string();
         assert!(
-            html.contains(r#"<section class="dev-pane" id="dev-console">"#),
+            html.contains(r#"<section class="card" id="dev-console">"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<h2 class="section-header__title">Tool console</h2>"#),
+            html.contains(r#"<h2 class="card__title">Tool console</h2>"#),
             "{html}"
         );
         assert!(
             html.contains(
-                r#"<button class="btn btn--primary" id="dev-console-run" type="button" disabled>"#
+                r#"<button class="btn btn--secondary" id="dev-console-run" type="button" data-action="dev-console-run" disabled>"#
             ),
             "Run must ship disabled until the tools are loaded; {html}"
         );
@@ -679,7 +704,7 @@ mod tests {
         let html = body(None, None).into_string();
         assert!(
             html.contains(
-                r#"<button class="btn btn--secondary" id="dev-compile" type="button" disabled>"#
+                r#"<button class="btn btn--secondary" id="dev-compile" type="button" data-action="dev-compile" disabled>"#
             ),
             "the Compile button must ship disabled; {html}"
         );
@@ -718,6 +743,84 @@ mod tests {
             js.matches("compileButton.disabled =").count(),
             4,
             "`disabled` must be set only by updateCompileButton's four arms"
+        );
+    }
+
+    /// Every button on the page declares a `dev-*` verb, and the verbs the
+    /// markup writes are exactly the ones `dev.js`'s one delegated listener
+    /// runs (`DEV_ACTIONS`): a verb with no runner is a dead button, and a
+    /// runner with no button is a control the page lost.
+    #[test]
+    fn every_button_verb_is_one_dev_js_runs() {
+        let html = body(None, None).into_string();
+        let verb = regex::Regex::new(r#"data-action="(dev-[a-z-]+)""#).unwrap();
+        let mut in_markup: Vec<String> = verb
+            .captures_iter(&html)
+            .map(|c| c[1].to_string())
+            .collect();
+        in_markup.sort();
+        let js = assets::dev_js();
+        let table = &js[js
+            .find("var DEV_ACTIONS = {")
+            .expect("dev.js has DEV_ACTIONS")..];
+        let table = &table[..table.find("\n};").expect("DEV_ACTIONS is closed")];
+        let key = regex::Regex::new(r#"(?m)^  '(dev-[a-z-]+)': function"#).unwrap();
+        let mut in_js: Vec<String> = key.captures_iter(table).map(|c| c[1].to_string()).collect();
+        in_js.sort();
+        assert_eq!(in_markup, in_js);
+        assert_eq!(in_markup.len(), 7, "{in_markup:?}");
+        // Every button the markup ships carries one.
+        assert_eq!(
+            html.matches("<button").count() - html.matches(r#"data-action="dev-"#).count(),
+            0,
+            "a button with no verb; {html}"
+        );
+    }
+
+    /// The page body as a sandbox seeded with long values renders it, less
+    /// the stylesheet link and the script: what `admin-core-widths.spec.ts`
+    /// lays out in a real content column with `dev.css` beside it (the
+    /// e2e:visual server is not a sandbox, so it serves neither).
+    fn dev_fixture() -> String {
+        let seed = SeedInfo {
+            template: "northwind-traders-production-storefront".into(),
+            suggested_prompt: "Build a storefront for Northwind Traders' Wellington CBD store at \
+                               https://northwind-traders-production.example.com/activities/\
+                               wellington-cbd-store-lambton-quay/opening-hours?listing=\
+                               listing_01HZX9Q2KZp7a9XyTqAbCdEfGh, with the opening hours, a \
+                               product list and a contact form."
+                .into(),
+            guide_markdown: String::new(),
+            llms_text: None,
+        };
+        let html = body(
+            Some(&seed),
+            Some((
+                "accountspayable.northwindtraders.wellington@example.com",
+                "correct-horse-battery-staple-northwind-2026",
+            )),
+        )
+        .into_string();
+        let html = &html[..html
+            .find(r#"<link rel="stylesheet""#)
+            .expect("the stylesheet link")];
+        format!("{html}\n")
+    }
+
+    /// `admin-core-widths.spec.ts` lays the workspace out from a fixture
+    /// file; this keeps that file what the page renders. To refresh it after
+    /// a deliberate markup change, write `dev_fixture()` to the path below.
+    #[test]
+    fn the_dev_fixture_is_what_the_page_renders() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-web/tests/e2e/fixtures/dev-page.html"
+        );
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            on_disk,
+            dev_fixture(),
+            "{path} is out of date; write the expected text to it"
         );
     }
 

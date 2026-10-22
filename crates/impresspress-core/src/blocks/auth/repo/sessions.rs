@@ -155,7 +155,8 @@ pub async fn find_for_user(
 }
 
 /// Return all of `user_id`'s families, ordered by `last_used_at` DESC so the
-/// most recently active device sorts first.
+/// most recently active device sorts first, and by family among devices last
+/// used in the same second.
 pub async fn list_for_user(
     ctx: &dyn Context,
     user_id: &str,
@@ -164,10 +165,19 @@ pub async fn list_for_user(
         ctx,
         TABLE,
         vec![user_filter(user_id)],
-        vec![SortField {
-            field: "last_used_at".into(),
-            desc: true,
-        }],
+        // `last_used_at` has seconds resolution, so two devices used in the
+        // same second tie; the family breaks the tie, or their order would
+        // flip between loads of the list.
+        vec![
+            SortField {
+                field: "last_used_at".into(),
+                desc: true,
+            },
+            SortField {
+                field: "family".into(),
+                desc: false,
+            },
+        ],
         Bound::OnePer("device family one user has signed in from"),
     )
     .await
@@ -261,6 +271,35 @@ mod tests {
         let b = list_for_user(&ctx, "user-b").await.unwrap();
         assert_eq!(a.len(), 2);
         assert_eq!(b.len(), 1);
+    }
+
+    /// Devices last used in the same second (the column's resolution) keep
+    /// one order, by family, rather than whatever the store returns.
+    #[tokio::test]
+    async fn list_for_user_breaks_a_last_used_tie_by_family() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        seed_user(&ctx, "user-a").await;
+        for family in ["fam-c", "fam-a", "fam-d", "fam-b"] {
+            insert(&ctx, fake_session("user-a", family)).await.unwrap();
+        }
+        let rows = list_for_user(&ctx, "user-a").await.unwrap();
+        assert_eq!(rows.len(), 4);
+        // The four inserts land in one second or straddle a boundary; either
+        // way each pair is newest first, and a tie is in family order.
+        for pair in rows.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert!(
+                a.last_used_at > b.last_used_at
+                    || (a.last_used_at == b.last_used_at && a.family < b.family),
+                "{} {} before {} {}",
+                a.last_used_at,
+                a.family,
+                b.last_used_at,
+                b.family
+            );
+        }
     }
 
     /// `find_for_user` is the ownership gate the revoke path depends on: it

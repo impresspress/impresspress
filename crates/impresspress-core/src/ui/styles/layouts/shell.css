@@ -37,11 +37,13 @@
 .user-avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 
 /* Profile header row (blocks/userportal/pages/profile.rs): avatar + name/
-   email/roles. `.profile-header__roles`' 0.375rem top margin sits between
-   the .mt-1/.mt-2 utility steps -- kept as its own rule rather than forcing
-   an off-scale value onto the shared scale. */
+   email/roles, at the top of the profile card. The name and the address are
+   the user's own text (a pasted URL, a long mailbox), so each breaks
+   anywhere rather than running out of the card. */
 .profile-header { display: flex; align-items: center; gap: var(--space-4); margin-bottom: var(--space-4); }
 .profile-header__meta { flex: 1; min-width: 0; }
+.profile-header__name { font-size: var(--text-lg); font-weight: 600; overflow-wrap: anywhere; }
+.profile-header__email { font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
 .profile-header__roles { margin-top: var(--space-2); display: flex; gap: var(--space-1); flex-wrap: wrap; }
 
 /* Profile Menu */

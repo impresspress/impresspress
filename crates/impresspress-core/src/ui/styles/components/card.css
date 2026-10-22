@@ -94,14 +94,17 @@
 /* Draws attention to a card needing action (e.g. a Stripe restriction). */
 .card--warning { border-color: var(--accent-warning); }
 
-/* ===== Security page (Phase 4 PR-2) ===== */
-.security-section { margin-bottom: var(--space-6); }
+/* ===== Security page: linked accounts =====
+   A divided list inside the "Linked accounts" card: the rows sit at the
+   card's inset, with no padding of their own beside it. The login is the
+   provider's account name, an email or handle the user did not choose here,
+   so it breaks anywhere rather than running out of the card. */
 .linked-providers-list { list-style: none; padding: 0; margin: 0; }
 .linked-provider {
 	display: flex;
 	gap: var(--space-4);
 	align-items: center;
-	padding: var(--space-2) var(--space-4);
+	padding: var(--space-2) 0;
 	border-top: 1px solid var(--border-light);
 }
 .linked-provider:first-child { border-top: none; }
@@ -112,7 +115,7 @@
 	border-radius: var(--radius-sm);
 	color: var(--text-muted);
 }
-.linked-provider__login { flex: 1; font-weight: 500; }
+.linked-provider__login { flex: 1; min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
 .linked-provider__date { font-size: var(--text-sm); color: var(--text-muted); }
 
 /* ===== Phase 4 PR-3: Per-surface mobile rules ===== */
@@ -497,11 +500,15 @@
 	.messages-list__status { grid-area: status; justify-self: end; }
 }
 
-/* ===== Account pages (userportal + /b/auth/orgs, in the portal shell) =====
-   The body of an account page is a readable column of sections, each headed
-   by the shared `.section-header` (h2) and divided by a rule -- the same
-   measure and rhythm as `.settings-form`. */
+/* ===== Account pages (userportal, in the portal shell) =====
+   The body of an account page is a readable column. Profile and Security
+   stack one `components::Card` per section in it (the cards' own margin
+   spaces them); the Overview's link lists are sections headed by the shared
+   `.section-header` (h2) and divided by a rule. */
 .account-sections { max-width: 40rem; }
+/* The signed-in address, inside a sentence: one word as wide as the user's
+   mailbox, so it breaks anywhere rather than running out of a phone's card. */
+.account-email { overflow-wrap: anywhere; }
 .account-section + .account-section {
 	margin-top: var(--space-8); padding-top: var(--space-6);
 	border-top: 1px solid var(--border-color);
@@ -737,10 +744,12 @@
 .ticket-type-options legend { margin-bottom: 0; }
 
 /* ===== API key reveal card (blocks/auth_ui/api/api_keys.rs) ===== */
-.api-key-copy-hint { margin: 0 0 var(--space-2); color: var(--text-secondary); }
+.api-key-copy-hint { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
 .api-key-reveal-row { display: flex; gap: var(--space-2); align-items: stretch; }
 .api-key-value { flex: 1 1 auto; padding: var(--space-2); background: var(--bg-secondary); border-radius: var(--radius-md); font-family: ui-monospace, Menlo, monospace; word-break: break-all; user-select: all; }
-.api-key-name-hint { margin: var(--space-2) 0 0; font-size: var(--text-sm); color: var(--text-muted); }
+/* The name is the operator's own text: it breaks anywhere rather than
+   running out of the card. */
+.api-key-name-hint { margin: var(--space-2) 0 0; font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
 
 /* ===== Portal buttons admin (blocks/userportal/pages/admin_buttons.rs) =====
  * The add form: one row on a wide screen (the submit button aligned with the

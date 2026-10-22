@@ -150,11 +150,11 @@ pub async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream)
                 let markup = Card::titled(
                     "Key created — save it now",
                     maud::html! {
-                        p .api-key-copy-hint .text-13 {
+                        p .api-key-copy-hint {
                             "This is the only time the full key will be shown. Copy it now."
                         }
                         div .api-key-reveal-row {
-                            code #new-api-key .api-key-value .text-13 {
+                            code #new-api-key .api-key-value {
                                 (key_for_display)
                             }
                             // Chrome's `copy-text` verb reads the key

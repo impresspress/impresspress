@@ -2238,18 +2238,34 @@ mod tests {
         (".ticket-ref", None),
         (".palette__hint", None),
         (".modal-tech", None),
+        // The account pages and the API-key card.
+        (".profile-header__email", None),
+        (".session-table__meta", None),
+        (".org-table__meta", None),
+        (".portal-button-table__meta", None),
+        (".api-key-copy-hint", None),
+        // The dev workspace (`blocks/dev/assets/dev.css`): its file list,
+        // its progress steps and the compiler's version.
+        (".dev-file", None),
+        (".dev-step", None),
+        ("#dev-compiler-version", None),
     ];
 
     /// Design rule 5 for every rule in [`RUNNING_TEXT_RULES`]: wherever the
-    /// bundle sets its `font-size` (in any rule naming exactly that selector,
-    /// `@media` included), it resolves to 14px or more, and the rule it
+    /// bundle or a block stylesheet sets its `font-size` (in any rule naming
+    /// exactly that selector, `@media` included), it resolves to 14px or more, and the rule it
     /// inherits from, if any, states 14px or more. A rule that states its own
     /// size must state one, so a deleted declaration is not a silent pass.
     #[cfg(feature = "embed-assets")]
     #[test]
     fn running_text_is_at_least_14px() {
         let tokens = parse_root_tokens(super::css());
-        let blocks = css_leaf_blocks(super::css());
+        let sheets = all_stylesheets()
+            .into_iter()
+            .map(|(_, css)| css)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let blocks = css_leaf_blocks(&sheets);
         let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let px = |value: &str| -> Option<f64> {
             let value = value.trim();

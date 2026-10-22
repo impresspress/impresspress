@@ -85,6 +85,7 @@ pub struct Action<'a> {
     id: Option<&'a str>,
     hidden: bool,
     disabled: bool,
+    autofocus: bool,
     title: Option<&'a str>,
     keyshortcuts: Option<&'a str>,
     data: Vec<(&'static str, &'a str)>,
@@ -101,6 +102,7 @@ impl<'a> Action<'a> {
             id: None,
             hidden: false,
             disabled: false,
+            autofocus: false,
             title: None,
             keyshortcuts: None,
             data: Vec::new(),
@@ -170,6 +172,14 @@ impl<'a> Action<'a> {
         self
     }
 
+    /// Render with `autofocus`, for the one action a swapped-in fragment
+    /// hands focus to (htmx focuses it once the swap lands), so focus is not
+    /// left on a control the swap removed.
+    pub fn autofocus(mut self) -> Self {
+        self.autofocus = true;
+        self
+    }
+
     /// The `title` tooltip (`"Save draft (Ctrl+S)"`). It is a hint only:
     /// the label stays the accessible name.
     pub fn title(mut self, title: &'a str) -> Self {
@@ -221,35 +231,35 @@ impl<'a> Action<'a> {
             @if new_tab { span .sr-only { " (opens in a new tab)" } }
         };
         let (id, hidden, title, keys) = (self.id, self.hidden, self.title, self.keyshortcuts);
-        let disabled = self.disabled;
+        let (disabled, autofocus) = (self.disabled, self.autofocus);
         let element = match self.target {
             ActionTarget::Link(href) => html! {
-                a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys] autofocus[autofocus]
                     href=(href)
                 { (content) }
             },
             ActionTarget::NewTab(href) => html! {
-                a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                a class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys] autofocus[autofocus]
                     href=(href) target="_blank" rel="noopener"
                 { (content) }
             },
             ActionTarget::Modal(modal) => html! {
-                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys] autofocus[autofocus]
                     type="button" data-action="modal-open" data-modal-target=(modal) disabled[disabled]
                 { (content) }
             },
             ActionTarget::Delegated(verb) => html! {
-                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys] autofocus[autofocus]
                     type="button" data-action=(verb) disabled[disabled]
                 { (content) }
             },
             ActionTarget::Submit { form } => html! {
-                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys] autofocus[autofocus]
                     type="submit" form=[form] disabled[disabled]
                 { (content) }
             },
             ActionTarget::HxGet { url, target } => html! {
-                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys]
+                button class=(class) id=[id] hidden[hidden] title=[title] aria-keyshortcuts=[keys] autofocus[autofocus]
                     type="button" hx-get=(url) hx-target=(target) disabled[disabled]
                 { (content) }
             },
@@ -421,6 +431,23 @@ mod tests {
         );
         assert!(s.ends_with("</svg>Remove</button>"), "{s}");
         assert!(!render(Action::secondary("x", ActionTarget::Link("/"))).contains("hidden"));
+    }
+
+    /// `autofocus` lands on the element whatever it is: a swapped-in link
+    /// ("Sign in again") or a button.
+    #[test]
+    fn autofocus_marks_the_element_htmx_focuses() {
+        assert_eq!(
+            render(
+                Action::primary("Sign in again", ActionTarget::Link("/b/auth/login")).autofocus()
+            ),
+            r#"<a class="btn btn--primary" autofocus href="/b/auth/login">Sign in again</a>"#
+        );
+        assert_eq!(
+            render(Action::secondary("Go", ActionTarget::Submit { form: None }).autofocus()),
+            r#"<button class="btn btn--secondary" autofocus type="submit">Go</button>"#
+        );
+        assert!(!render(Action::secondary("x", ActionTarget::Link("/"))).contains("autofocus"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { WIDTHS, isWrong, layout } from './fixtures/layout';
 
 /**
  * The core admin pages' own controls, in a real browser: the network page's
@@ -205,5 +206,71 @@ test.describe('core admin pages', () => {
     await page.getByRole('button', { name: 'Client errors' }).click();
     await expect(page).not.toHaveURL(/client_errors/);
     await expect(page.getByRole('button', { name: 'Client errors' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  /**
+   * Portal buttons with what an admin really types: a long label and a
+   * pasted URL as the path. At every width from the phone to 1280 the list
+   * fits its frame, because the path breaks anywhere (table.css
+   * `.portal-button-table`), and Add button is the page's one primary. Adds
+   * two buttons and deletes them again.
+   */
+  test('the portal buttons list fits its frame from the phone to 1280px', async ({ page }) => {
+    await loginAsAdmin(page);
+    const stamp = Date.now();
+    const labels = [`Northwind Traders production analytics dashboard ${stamp}`, `Lambton Quay opening hours ${stamp}`];
+    await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
+    for (const [label, path] of [
+      [labels[0], '/b/storage/northwind-traders-production/activities/wellington-cbd-store-lambton-quay/opening-hours'],
+      [labels[1], 'https://northwind-traders-production.example.com/activities/wellington-cbd-store-lambton-quay/opening-hours?listing=listing_01HZX9Q2KZp7a9XyTqAbCdEfGhIjKlMnOpQrStUvWx'],
+    ]) {
+      await page.locator('#label').fill(label);
+      await page.locator('#path').fill(path);
+      await page.getByRole('button', { name: 'Add button' }).click();
+      await expect(page.locator('#buttons-table tr', { hasText: label })).toHaveCount(1);
+    }
+    try {
+      const found: Record<number, unknown> = {};
+      for (const width of WIDTHS) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
+        const r = await layout(page);
+        if (isWrong(r, ['Add button'])) found[width] = r;
+      }
+      expect(found, 'the buttons page scrolled sideways or overflowed its frame').toEqual({});
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
+      for (const label of labels) {
+        page.once('dialog', (d) => void d.accept());
+        await page.getByRole('button', { name: `Delete ${label}` }).click();
+        await expect(page.locator('#buttons-table tr', { hasText: label })).toHaveCount(0);
+      }
+    }
+  });
+
+  /**
+   * The card a new API key is shown in, named by what an operator pastes
+   * into the name: it fits its frame at every width from the phone to 1280,
+   * the key breaking anywhere and the name too (card.css `.api-key-value`,
+   * `.api-key-name-hint`).
+   */
+  test('the new API key card fits its frame from the phone to 1280px', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/users?tab=api-keys', { waitUntil: 'networkidle' });
+    await page.locator('[data-action="modal-open"][data-modal-target="create-api-key"]').first().click();
+    const dialog = page.locator('dialog#create-api-key');
+    // Named the way a deploy variable is: one word with no break opportunity.
+    await dialog.locator('#key-name').fill(`NORTHWIND_TRADERS_PRODUCTION_DEPLOY_KEY_WELLINGTON_CBD_LAMBTON_QUAY_${Date.now()}`);
+    await dialog.getByRole('button', { name: 'Create' }).click();
+    const card = page.locator('#users-tab-content .card', { hasText: 'Key created' });
+    await expect(card).toBeVisible();
+    const found: Record<number, unknown> = {};
+    for (const width of WIDTHS) {
+      await page.setViewportSize({ width, height: 900 });
+      const r = await layout(page);
+      if (r.page > 0 || r.past.length || r.cards.length) found[width] = r;
+    }
+    expect(found, 'the key card overflowed its frame').toEqual({});
   });
 });

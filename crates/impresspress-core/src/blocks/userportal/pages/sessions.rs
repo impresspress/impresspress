@@ -16,6 +16,7 @@ use crate::{
             helpers::{build_auth_cookie, end_presented_access_token},
             repo::{sessions, tokens},
         },
+        auth_ui::oauth,
         crud,
     },
     crypto::META_AUTH_FAMILY,
@@ -29,7 +30,9 @@ use crate::{
 
 /// The sessions table: the sign-in method names the row (the card title on
 /// a phone), the three dates follow, and Revoke sits under a screen-reader-only
-/// "Actions" header.
+/// "Actions" header. Narrow, the dates move into one line under the method
+/// (table.css `.session-table`, which hides the headers by position: a column
+/// moved here must move there).
 const COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Signed in with").primary(),
     TableCol::new("Started"),
@@ -84,7 +87,7 @@ fn sign_in_method(auth_method: &str) -> String {
         "password" => "Password".to_string(),
         "bootstrap" => "Setup link".to_string(),
         other => match other.strip_prefix("oauth.") {
-            Some(provider) => super::provider_label(provider).to_string(),
+            Some(provider) => oauth::spec::label(provider).to_string(),
             None => other.to_string(),
         },
     }
@@ -109,6 +112,15 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
                         " "
                         (badge(BadgeVariant::Success, "Current session"))
                     }
+                    // The three date columns, when the table is too narrow
+                    // for them.
+                    span .session-table__meta {
+                        span { "Last used " (components::timestamp(&r.last_used_at)) }
+                        " · "
+                        span { "Started " (components::timestamp(&r.created_at)) }
+                        " · "
+                        span { "Expires " (components::timestamp(&r.expires_at)) }
+                    }
                 },
                 // Timestamps render as `components::timestamp`'s `<time>`,
                 // which the visual-baseline suite masks, so per-run session
@@ -116,8 +128,10 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
                 components::timestamp(&r.created_at),
                 components::timestamp(&r.last_used_at),
                 components::timestamp(&r.expires_at),
+                // Quiet in the row: the confirmation is the guard, and a
+                // filled danger button on every row shouted over the list.
                 html! {
-                    button .btn .btn--sm .btn--danger
+                    button .btn .btn--ghost-danger .btn--sm
                         type="button"
                         hx-delete=(format!("/b/userportal/sessions/{}", r.family))
                         hx-target="closest tr"
@@ -128,14 +142,15 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
             ])
         })
         .collect();
-    DataTable::new(&COLUMNS)
+    let table = DataTable::new(&COLUMNS)
         .rows(table_rows)
         .empty_state(
             "No active sessions",
             "Every device you sign in on is listed here.",
             None,
         )
-        .render()
+        .render();
+    html! { div .session-table { (table) } }
 }
 
 /// DELETE `/b/userportal/sessions/{family}` — sign one device out.
@@ -323,10 +338,10 @@ mod tests {
     /// The list is the shared table: an `.data-table` wrapper, a
     /// screen-reader-only header over the Revoke column (axe
     /// `empty-table-header`), dates through `components::timestamp`, and
-    /// Revoke as a danger action behind a confirmation — worded for the
-    /// session the page itself is using, which revoking signs out.
+    /// Revoke as a quiet danger action behind a confirmation — worded for
+    /// the session the page itself is using, which revoking signs out.
     #[tokio::test]
-    async fn the_list_is_the_shared_table_with_a_confirmed_danger_revoke() {
+    async fn the_list_is_the_shared_table_with_a_confirmed_quiet_danger_revoke() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
@@ -355,7 +370,22 @@ mod tests {
             html.contains(">Password<"),
             "the sign-in method names the row: {html}"
         );
-        assert_eq!(html.matches("btn--danger").count(), 2, "{html}");
+        // Quiet in the row: the confirmation is the guard.
+        assert_eq!(
+            html.matches(r#"class="btn btn--ghost-danger btn--sm""#)
+                .count(),
+            2,
+            "{html}"
+        );
+        assert!(!html.contains("btn--danger"), "{html}");
+        // Narrow, the three dates are one line under the method, each
+        // beside its label.
+        assert!(
+            html.contains(
+                r#"<span class="session-table__meta"><span>Last used <time class="datetime""#
+            ),
+            "{html}"
+        );
         assert_eq!(
             html.matches(r#"hx-confirm="Revoke your current session?"#)
                 .count(),

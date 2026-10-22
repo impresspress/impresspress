@@ -8,7 +8,11 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{auth::repo::users, crud},
     http::redirect,
-    ui::{self, components, Shell, UserInfo},
+    ui::{
+        self,
+        components::{self, Action, ActionTarget, Card},
+        Shell, UserInfo,
+    },
 };
 
 pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -40,45 +44,51 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let avatar_url = row.avatar_url.unwrap_or_default();
     let email = user.as_ref().map(|u| u.email.as_str()).unwrap_or("");
 
+    // One card: who the account is, then the one field it can change. The
+    // name and the address are the user's own text, so either may be a word
+    // wider than the card (a pasted URL, a long mailbox): both break anywhere
+    // (`.profile-header__name`, `__email`).
     let body = html! {
-        section .account-sections {
-            div .profile-header {
-                div .user-avatar .user-avatar--lg {
-                    @if !avatar_url.is_empty() {
-                        img src=(avatar_url) alt="Avatar";
-                    } @else if let Some(u) = &user {
-                        (u.avatar_initial())
+        div .account-sections {
+            (Card::plain(html! {
+                div .profile-header {
+                    div .user-avatar .user-avatar--lg {
+                        @if !avatar_url.is_empty() {
+                            img src=(avatar_url) alt="Avatar";
+                        } @else if let Some(u) = &user {
+                            (u.avatar_initial())
+                        }
                     }
-                }
-                div .profile-header__meta {
-                    div .font-semibold .text-16 {
-                        @if display_name.is_empty() { (email) } @else { (display_name) }
-                    }
-                    div .text-muted .text-sm { (email) }
-                    @if let Some(u) = &user {
-                        div .profile-header__roles {
-                            @for role in &u.roles {
-                                (components::status_badge(role))
+                    div .profile-header__meta {
+                        div .profile-header__name {
+                            @if display_name.is_empty() { (email) } @else { (display_name) }
+                        }
+                        div .profile-header__email { (email) }
+                        @if let Some(u) = &user {
+                            div .profile-header__roles {
+                                @for role in &u.roles {
+                                    (components::status_badge(role))
+                                }
                             }
                         }
                     }
                 }
-            }
-            form action="/b/userportal/update-profile" method="post" {
-                (crate::csrf::hidden_field(ctx, msg))
+                form action="/b/userportal/update-profile" method="post" {
+                    (crate::csrf::hidden_field(ctx, msg))
 
-                div .form-group {
-                    label .form-label for="display-name" { "Display name" }
-                    // `required` + `pattern`: the update handler refuses an
-                    // empty or whitespace-only name, so the browser does too.
-                    input .form-input #display-name type="text" name="name"
-                        value=(display_name) placeholder="Enter your name" required
-                        pattern=".*\\S.*" title="Enter a name that is not just spaces";
+                    div .form-group {
+                        label .form-label for="display-name" { "Display name" }
+                        // `required` + `pattern`: the update handler refuses an
+                        // empty or whitespace-only name, so the browser does too.
+                        input .form-input #display-name type="text" name="name"
+                            value=(display_name) placeholder="Enter your name" required
+                            pattern=".*\\S.*" title="Enter a name that is not just spaces";
+                    }
+                    div .account-form__actions {
+                        (Action::primary("Save", ActionTarget::Submit { form: None }).render())
+                    }
                 }
-                div .account-form__actions {
-                    button .btn .btn--primary type="submit" { "Save" }
-                }
-            }
+            }).render())
         }
     };
 
