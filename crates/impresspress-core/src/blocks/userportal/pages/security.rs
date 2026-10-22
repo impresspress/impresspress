@@ -11,14 +11,19 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::repo::{local_credentials, provider_links, users},
-        auth_ui::api::change_password::{FORM_ID, RESULT_ID},
+        auth_ui::{
+            api::change_password::{FORM_ID, RESULT_ID},
+            oauth,
+        },
         crud,
     },
     http::{redirect, ResponseBuilder},
     ui::{
         self,
-        components::{empty_state, password_field, section_header, timestamp, PasswordPurpose},
-        icons, Shell,
+        components::{
+            empty_note, password_field, timestamp, Action, ActionTarget, Card, PasswordPurpose,
+        },
+        Shell,
     },
 };
 
@@ -89,24 +94,20 @@ pub async fn security_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
+    // Three cards, one per thing the page lets a user check or change. The
+    // address is the user's own text and may be one unbroken word wider than
+    // a phone's card, so it breaks anywhere (`.account-email`).
+    let email = html! {
+        @if !user_email.is_empty() { " — " span .account-email { (user_email) } }
+    };
     let body = html! {
         div .account-sections {
-            section .account-section {
-                (section_header("Password", None))
-                (change_password_form(min_length))
-            }
-            section .account-section {
-                (section_header("Email verification", None))
+            (Card::titled("Password", change_password_form(min_length)).render())
+            (Card::titled("Email verification", html! {
                 @if email_verified {
-                    p .text-muted .m-0 {
-                        "Email verified"
-                        @if !user_email.is_empty() { " — " (user_email) }
-                    }
+                    p .text-muted .m-0 { "Email verified" (email) }
                 } @else {
-                    p .text-muted .m-0 .mb-3 {
-                        "Email not verified"
-                        @if !user_email.is_empty() { " — " (user_email) }
-                    }
+                    p .text-muted .m-0 .mb-3 { "Email not verified" (email) }
                     div #resend-verification-result {}
                     // The address travels as an attribute the script reads back
                     // with `getAttribute`, not as a `serde_json`-escaped literal
@@ -119,14 +120,13 @@ pub async fn security_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     { "Resend verification email" }
                     script { (maud::PreEscaped(RESEND_VERIFICATION_JS)) }
                 }
-            }
-            section .account-section {
-                (section_header("Linked accounts", None))
+            }).render())
+            // Inside a card an empty list is a sentence, not a framed empty
+            // state (layout rule 2).
+            (Card::titled("Linked accounts", html! {
                 @if links.is_empty() {
-                    (empty_state(
-                        icons::link(),
-                        "No linked accounts",
-                        "Sign in with GitHub, Google, or Microsoft to link one.",
+                    (empty_note(
+                        "No linked accounts. Sign in with GitHub, Google, or Microsoft to link one.",
                         None,
                     ))
                 } @else {
@@ -140,7 +140,7 @@ pub async fn security_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         }
                     }
                 }
-            }
+            }).render())
         }
     };
 
@@ -193,7 +193,7 @@ fn change_password_form(min_length: usize) -> Markup {
             }
             div #(RESULT_ID) .account-form__result {}
             div .account-form__actions {
-                button .btn .btn--primary type="submit" { "Change password" }
+                (Action::primary("Change password", ActionTarget::Submit { form: None }).render())
             }
         }
     }
@@ -206,7 +206,7 @@ fn change_password_form(min_length: usize) -> Markup {
 /// in place of itself: htmx does not swap a non-2xx response, so a refusal has
 /// to come back as the row it declined to remove, carrying the reason.
 fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>) -> Markup {
-    let provider = super::provider_label(&link.provider);
+    let provider = oauth::spec::label(&link.provider);
     html! {
         li .linked-provider {
             span .linked-provider__name { (provider) }
@@ -565,11 +565,15 @@ mod tests {
         let msg = auth_msg("retrieve", "/b/userportal/security", "user-a");
         let resp = security_page(&ctx, &msg).await;
         let html = output_html(resp).await;
-        assert!(html.contains("No linked accounts"));
+        // Inside its card the empty list is a sentence, not a framed empty
+        // state (layout rule 2).
         assert!(
-            html.contains(r#"class="empty__title""#),
-            "the empty list is the shared empty state: {html}"
+            html.contains(
+                r#"<p class="empty-note">No linked accounts. Sign in with GitHub, Google, or Microsoft to link one.</p>"#
+            ),
+            "{html}"
         );
+        assert!(!html.contains(r#"class="empty""#), "{html}");
     }
 
     #[tokio::test]

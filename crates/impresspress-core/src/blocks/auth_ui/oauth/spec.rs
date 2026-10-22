@@ -220,6 +220,14 @@ pub fn lookup(name: &str) -> Option<&'static OAuthProviderSpec> {
     OAUTH_PROVIDERS.iter().find(|p| p.name == name)
 }
 
+/// A stored provider key (a linked account's `provider`, a session's
+/// `oauth.<provider>`, an org's `verified_via`) as people read it: the
+/// provider's [`label`](OAuthProviderSpec::label), or the key itself for a
+/// provider this build no longer supports (a stored row can outlive one).
+pub fn label(name: &str) -> &str {
+    lookup(name).map_or(name, |p| p.label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +242,14 @@ mod tests {
     fn providers_are_listed_in_sign_in_button_order() {
         let names: Vec<&str> = OAUTH_PROVIDERS.iter().map(|p| p.name).collect();
         assert_eq!(names, ["github", "google", "microsoft"]);
+    }
+
+    #[test]
+    fn label_names_a_known_provider_and_passes_an_unknown_one_through() {
+        assert_eq!(label("github"), "GitHub");
+        assert_eq!(label("google"), "Google");
+        assert_eq!(label("microsoft"), "Microsoft");
+        assert_eq!(label("twitter"), "twitter");
     }
 
     #[test]

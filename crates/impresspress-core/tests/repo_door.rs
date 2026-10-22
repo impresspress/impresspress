@@ -449,6 +449,11 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
             "blocks/auth/repo/sessions.rs",
             "blocks/auth/service.rs",
             "blocks/auth/migrations/mod.rs",
+            // `seed_auth_session` — the one raw-SQL fixture for a sessions
+            // row with caller-chosen dates (`sessions::insert` stamps the
+            // current time, which a page fixture cannot hold still), the
+            // same category as `seed_auth_user` under the users door
+            "test_support.rs",
         ],
     ),
     (

@@ -16,7 +16,7 @@ use crate::{
     },
     http::{err_bad_request, err_internal, err_not_found, ok_json, ResponseBuilder},
     ui::{
-        components::{alert_message, AlertVariant},
+        components::{alert_message, Action, ActionTarget, AlertVariant},
         is_htmx,
     },
     util::parse_body_value,
@@ -60,10 +60,14 @@ fn changed_response(msg: &Message) -> OutputStream {
                     "Password changed. You have been signed out everywhere and your API keys have been revoked — sign in again with your new password.",
                 ))
                 // `autofocus`: htmx focuses it once swapped in, so focus is
-                // not left on the submit button the swap just removed.
-                a .btn .btn--primary autofocus href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity" {
-                    "Sign in again"
-                }
+                // not left on the submit button the swap just removed. The
+                // primary: it replaces the form's own.
+                (Action::primary(
+                    "Sign in again",
+                    ActionTarget::Link("/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity"),
+                )
+                .autofocus()
+                .render())
             }
         };
         return ResponseBuilder::new()
@@ -430,8 +434,10 @@ mod tests {
             "the session is gone, so it offers the way back in, got {html:?}"
         );
         assert!(
-            html.contains(" autofocus "),
-            "focus moves to the way back in, not onto nothing, got {html:?}"
+            html.contains(
+                r#"<a class="btn btn--primary" autofocus href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity">Sign in again</a>"#
+            ),
+            "focus moves to the way back in, the one primary, got {html:?}"
         );
         assert!(
             serde_json::from_str::<serde_json::Value>(&html).is_err(),

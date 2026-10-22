@@ -55,7 +55,11 @@ use wafer_run::{context::Context, OutputStream, WaferError};
 use super::{no_store, no_store_db_error_internal, ROUTE_PREFIX};
 use crate::{
     blocks::auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
-    ui::{self, components::auth_panel, templates::auth_split},
+    ui::{
+        self,
+        components::{auth_panel, Action, ActionTarget},
+        templates::auth_split,
+    },
 };
 
 /// The auth block's login endpoint — the one the login form posts to.
@@ -139,7 +143,7 @@ fn body(credentials: Option<(&str, &str)>) -> Markup {
                     data-workspace=(ROUTE_PREFIX) {
                     p #dev-enter-status .auth-form__subtitle { "Signing in as this sandbox's admin…" }
                     p #dev-enter-fallback hidden {
-                        a #dev-enter-login .btn .btn--primary href=(login_page) { "Sign in" }
+                        (Action::primary("Sign in", ActionTarget::Link(&login_page)).id("dev-enter-login").render())
                     }
                 }
                 noscript {
@@ -156,7 +160,7 @@ fn body(credentials: Option<(&str, &str)>) -> Markup {
                          password configured. Sign in with your own account instead."
                     }
                     p #dev-enter-fallback {
-                        a #dev-enter-login .btn .btn--primary href=(login_page) { "Sign in" }
+                        (Action::primary("Sign in", ActionTarget::Link(&login_page)).id("dev-enter-login").render())
                     }
                 }
             }

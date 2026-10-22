@@ -923,9 +923,6 @@ async function runConsoleTool() {
 }
 
 consoleSelect.addEventListener('change', showConsoleTool);
-consoleRun.addEventListener('click', function () {
-  runConsoleTool().catch(logError);
-});
 
 // Whether this page's own tools are in: set once both of its registrars —
 // `tools.json`'s and the page-local one — have run, and the guide's sentence
@@ -1358,19 +1355,6 @@ var createFile = withProgress(async function (path) {
   return created;
 });
 
-document.getElementById('dev-save').addEventListener('click', function () {
-  save().catch(logError);
-});
-document.getElementById('dev-delete').addEventListener('click', function () {
-  remove().catch(logError);
-});
-document.getElementById('dev-new-file').addEventListener('click', function () {
-  create().catch(logError);
-});
-document.getElementById('dev-refresh-tools').addEventListener('click', function () {
-  log('refreshing site tools');
-  refreshSiteTools();
-});
 
 // ---- the packaged compiler -------------------------------------------------
 
@@ -2442,9 +2426,6 @@ dev_export_manifest to see that without downloading.',
   });
 }
 
-exportButton.addEventListener('click', function () {
-  exportSite().catch(logError);
-});
 
 // The button runs the same function on the same block, and reports the same
 // way: the panel is the human's copy of what the agent would have been told.
@@ -2461,8 +2442,48 @@ async function compileSelected() {
   await compileBlock(name);
 }
 
-compileButton.addEventListener('click', function () {
-  compileSelected().catch(logError);
+// ---- the page's buttons ---------------------------------------------------
+
+// Every button on the page declares its verb (`data-action="dev-…"`, written
+// by `page.rs` through `components::Action`), and this one listener runs it —
+// the delegated-action rule in `ui/assets/chrome.js`. A verb that is not this
+// page's falls through: chrome's own listener sees the same clicks. A
+// disabled button fires no click, so Run, Save, Compile and Export do nothing
+// until the code above enables them.
+var DEV_ACTIONS = {
+  'dev-console-run': function () {
+    return runConsoleTool();
+  },
+  'dev-new-file': function () {
+    return create();
+  },
+  'dev-save': function () {
+    return save();
+  },
+  'dev-delete': function () {
+    return remove();
+  },
+  'dev-compile': function () {
+    return compileSelected();
+  },
+  'dev-export': function () {
+    return exportSite();
+  },
+  'dev-refresh-tools': function () {
+    log('refreshing site tools');
+    refreshSiteTools();
+  }
+};
+
+document.addEventListener('click', function (event) {
+  if (!(event.target instanceof Element)) return;
+  var control = event.target.closest('[data-action]');
+  if (!control) return;
+  var verb = control.getAttribute('data-action');
+  if (!Object.prototype.hasOwnProperty.call(DEV_ACTIONS, verb)) return;
+  Promise.resolve()
+    .then(DEV_ACTIONS[verb])
+    .catch(logError);
 });
 
 // ---- first paint ----------------------------------------------------------
