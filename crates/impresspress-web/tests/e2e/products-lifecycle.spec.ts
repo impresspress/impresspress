@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { answerConfirm, confirmChrome } from "./fixtures/confirm";
 
 const bundlesUrl = new URL(
   "../../../impresspress-core/src/blocks/products/assets/",
@@ -111,7 +112,7 @@ function orderHtml(options: {
   const access = options.buyer ? "Your order" : "Order order_1";
   const refund =
     !options.buyer && !options.refunded
-      ? `<section class="card"><h2>Create refund</h2><div class="form-group"><label for="order-refund-amount">Amount (NZD)</label><input id="order-refund-amount"></div><div class="form-group"><label for="order-refund-note">Private note</label><textarea id="order-refund-note"></textarea></div><button class="danger" type="button" data-action="po-submit-refund">Create refund</button></section>`
+      ? `<section class="card"><h2>Create refund</h2><div class="form-group"><label for="order-refund-amount">Amount (NZD)</label><input id="order-refund-amount"></div><div class="form-group"><label for="order-refund-note">Private note</label><textarea id="order-refund-note"></textarea></div><button class="secondary" type="button" data-action="po-submit-refund">Create refund</button></section>${confirmChrome}`
       : options.refunded
         ? `<section class="card"><h2>Refunds</h2><table><thead><tr><th>Status</th><th>Amount</th></tr></thead><tbody><tr><td>successful</td><td>NZD 49.00</td></tr></tbody></table></section>`
         : "";
@@ -120,7 +121,7 @@ function orderHtml(options: {
     : "";
   return shell(
     access,
-    `<p id="order-detail-error" role="alert" aria-live="assertive" hidden></p><section class="card"><div class="grid"><div class="metric">Payment<strong>${options.status}</strong></div><div class="metric">Total<strong>NZD 49.00</strong></div><div class="metric">Reconciliation<strong>reconciled</strong></div></div><h2>Items</h2><table><thead><tr><th>Item</th><th>Total</th></tr></thead><tbody><tr><td>${options.subscriptionStatus ? "Studio membership" : "Field guide PDF"}</td><td>NZD 49.00</td></tr></tbody></table></section>${portal}${refund}<script>window.__orderDetailConfig={order_id:"order_1",refund_url:"/b/products/api/admin/purchases/order_1/refund",currency_exponent:2,refunded_total:${options.refunded ? 4900 : 0}};${commercePortalScript};${orderDetailScript}</script>`,
+    `<p id="order-detail-error" role="alert" aria-live="assertive" hidden></p><section class="card"><div class="grid"><div class="metric">Payment<strong>${options.status}</strong></div><div class="metric">Total<strong>NZD 49.00</strong></div><div class="metric">Reconciliation<strong>reconciled</strong></div></div><h2>Items</h2><table><thead><tr><th>Item</th><th>Total</th></tr></thead><tbody><tr><td>${options.subscriptionStatus ? "Studio membership" : "Field guide PDF"}</td><td>NZD 49.00</td></tr></tbody></table></section>${portal}${refund}<script>window.__orderDetailConfig={order_id:"order_1",refund_url:"/b/products/api/admin/purchases/order_1/refund",currency:"NZD",currency_exponent:2,refunded_total:${options.refunded ? 4900 : 0},remaining_minor:${options.refunded ? 0 : 4900}};${commercePortalScript};${orderDetailScript}</script>`,
     options.buyer
       ? `<a href="/b/products/">Commerce</a><a href="/b/products/my-purchases">Purchases</a>`
       : `<a href="/b/products/admin/purchases">Orders</a><a href="/b/products/admin/manage">Products</a>`,
@@ -316,6 +317,7 @@ test.describe("products complete browser lifecycles", () => {
     await page.getByLabel("Amount (NZD)").fill("49.00");
     await page.getByLabel("Private note").fill("Customer requested cancellation");
     await page.getByRole("button", { name: "Create refund" }).click();
+    await answerConfirm(page, "Create refund", "confirm", "Refund 49.00 NZD on this order? This can't be undone.");
     await expect(page.getByText("refunded", { exact: true })).toBeVisible();
     const refundCall = calls.find((call) => call.path.endsWith("/refund"));
     expect(refundCall?.body).toEqual({ amount_minor: 4900, note: "Customer requested cancellation", idempotency_key: "ui_0_4900" });

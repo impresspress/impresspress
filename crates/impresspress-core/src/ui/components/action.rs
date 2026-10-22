@@ -130,7 +130,12 @@ impl<'a> Action<'a> {
         Self::new(Emphasis::QuietDanger, label, target)
     }
 
-    /// The button that confirms a destructive step.
+    /// The button that confirms a destructive step: the shared confirm
+    /// dialog's (`components::confirm_dialog`). Outside that dialog a
+    /// `.btn--danger` must open it itself, with `hx-confirm` beside its htmx
+    /// request, and an `Action` carries neither; `htmx_guard` checks every
+    /// crawled page (`test_support::dom::unconfirmed_danger_buttons`). A
+    /// control whose script asks first is a [`secondary`](Self::secondary).
     pub fn danger(label: &'a str, target: ActionTarget<'a>) -> Self {
         Self::new(Emphasis::Danger, label, target)
     }

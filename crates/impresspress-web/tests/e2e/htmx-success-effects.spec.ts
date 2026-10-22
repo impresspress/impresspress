@@ -406,12 +406,14 @@ test.describe('htmx after-success effects under the served CSP', () => {
     });
     expect(deleteRes.status(), await deleteRes.text()).toBe(200);
 
-    // The close-only manager: archiving the offer reloads it without the button.
+    // The close-only manager: archiving the offer, once confirmed, reloads it
+    // without the button.
     await gotoUnderCsp(page, `/b/products/admin/products/${encodeURIComponent(productId)}/close`);
     const archive = page.getByRole('button', { name: 'Archive offer' });
     await expect(archive).toHaveCount(1);
     const archived = page.waitForEvent('load');
     await archive.click();
+    await answerConfirm(page, 'Archive offer', 'confirm', `Archive the offer “${SHOP_OFFER.name}”?`);
     await archived;
     await expect(page.getByRole('button', { name: 'Archive offer' })).toHaveCount(0);
 
