@@ -565,6 +565,13 @@ document.addEventListener("input", function (e) {
 // - `htmx_guard::every_page_confirms_through_the_one_shared_dialog` reads every
 //   crawled page: its inline scripts, every `hx-confirm` (labelled and toned),
 //   and every dialog (none but the shared one holds a danger confirm).
+// The same two also hold the danger button to this dialog: outside it, a
+// button drawn in danger carries its own `hx-confirm`
+// (`dom::unconfirmed_danger_buttons`, on every crawled page), and no script
+// draws one or builds a button class from a prefix in the ordinary ways
+// (`dom::danger_class_references` lists what it reads, on every script file
+// and inline script, which is why this comment never spells the class). A control whose script asks through `impresspressConfirm` is a
+// secondary.
 //
 // ## The delegated-action rule
 //
