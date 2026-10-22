@@ -9,8 +9,8 @@
 //!
 //! What remains here is genuinely impresspress-specific policy: verifying an
 //! access token and extracting auth meta from a `Bearer` token in the HTTP
-//! pipeline — issuer check (SEC-038),
-//! JWT blocklist (SEC-042), role mapping, and derived-key-only verification
+//! pipeline — issuer check (SEC-038), login-family liveness (SEC-02),
+//! `auth_version` (P2c), role mapping, and derived-key-only verification
 //! (per-block HKDF from the auth-ui block id; the master-secret fallback was
 //! removed — F40).
 
@@ -19,15 +19,6 @@ use wafer_block_crypto::primitives::{self, JwtExpPolicy};
 // ---------------------------------------------------------------------------
 // Auth meta extraction
 // ---------------------------------------------------------------------------
-
-/// Meta key holding the access JWT's `jti` (SEC-042) when present. Read by
-/// the logout handler to blocklist the in-flight token.
-pub const META_AUTH_JTI: &str = "auth.jti";
-
-/// Meta key holding the access JWT's `exp` (UNIX seconds, as a string) when
-/// present. Read by the logout handler to set the blocklist row's
-/// `expires_at` (only needs to live as long as the original JWT).
-pub const META_AUTH_EXP: &str = "auth.exp";
 
 /// Meta key holding the access JWT's `family` — the refresh-rotation family
 /// this login belongs to — when present. Read by the userportal sessions page
@@ -65,8 +56,8 @@ pub async fn expected_issuer(
 /// The claims of a verified access token, in the shape both consumers need.
 ///
 /// Produced by [`verify_access_token`] and nowhere else: a value of this type
-/// means the token's signature, `type`, issuer, blocklist status, login
-/// family and `auth_version` have all been checked. `roles` is already joined
+/// means the token's signature, `type`, issuer, login family and
+/// `auth_version` have all been checked. `roles` is already joined
 /// the way the meta wants it, and the optional string fields are empty (not
 /// absent) when the claim was missing, because every reader treats the two
 /// the same.
@@ -80,12 +71,6 @@ pub struct AccessClaims {
     /// The `roles` array joined with `,`, falling back to the legacy `role`
     /// scalar, or `""` when neither is present.
     pub roles: String,
-    /// `jti` (SEC-042), or `""`.
-    pub jti: String,
-    /// `exp` in UNIX seconds. Always present in practice — verification uses
-    /// [`JwtExpPolicy::Required`] — but typed as an `Option` because the claim
-    /// is read back out of the decoded map rather than out of the policy.
-    pub exp: Option<i64>,
     /// `family` — the login family this token belongs to, whose session row
     /// was live when it was checked. Never empty.
     pub family: String,
@@ -122,9 +107,7 @@ pub struct AccessClaims {
 ///    secret cannot authenticate against production. An empty `expected_iss`
 ///    disables the check — defensive, for a misconfigured deployment that
 ///    would otherwise silently 401 every request.
-/// 4. [SEC-042] `jti` is not blocklisted. A blocklisted token was logged out
-///    before its natural `exp`; it is treated exactly as if it had expired.
-/// 5. [SEC-02] The token's login family is live: its `family` claim names a
+/// 4. [SEC-02] The token's login family is live: its `family` claim names a
 ///    session row of the `sub` account that has not expired
 ///    (`blocks::auth::repo::sessions::is_live`). That row is the family's
 ///    liveness, and every revocation deletes it first (`auth::helpers::end_family`,
@@ -133,7 +116,7 @@ pub struct AccessClaims {
 ///    `sub` or a `family` names no family and is refused: every issuance
 ///    stamps both (`auth::helpers::generate_tokens`). The read is not cached,
 ///    because a revocation must bite at once.
-/// 6. [P2c] The embedded `auth_version` is not behind the user's stored
+/// 5. [P2c] The embedded `auth_version` is not behind the user's stored
 ///    value — a password change, disable, soft-delete or role change (all of
 ///    which call `blocks::auth::bump_auth_version`) invalidates every
 ///    already-issued access JWT here instead of waiting out its expiry. A
@@ -142,9 +125,10 @@ pub struct AccessClaims {
 ///    read goes through `current_auth_version`'s short-lived cache, so this
 ///    costs no DB round trip per request.
 ///
-/// Rules 4 to 6 read the database, and they read it together
-/// (`futures::join!`): one round trip of up to three statements, not three
-/// round trips one after another. A read that fails is neither answer:
+/// Rules 4 and 5 read the database, and they read it together
+/// (`futures::join!`): one round trip of up to two statements (the session
+/// row, and `auth_version` on a cache miss), not two round trips one after
+/// another. A read that fails is neither answer:
 /// accepting the token could honour a revoked credential, and rejecting it
 /// tells a signed-in caller they are signed out — the router redirects their
 /// pages to the login form, so a database blip would sign every user out of
@@ -198,24 +182,10 @@ pub async fn verify_access_token(
         return Ok(None);
     }
 
-    let jti = claims.get("jti").and_then(|v| v.as_str()).unwrap_or("");
-    let blocklisted = async {
-        if jti.is_empty() {
-            return Ok(false);
-        }
-        crate::blocks::auth::repo::jwt_blocklist::contains(ctx, jti).await
-    };
-    let (blocklisted, live, current_version) = futures::join!(
-        blocklisted,
+    let (live, current_version) = futures::join!(
         crate::blocks::auth::repo::sessions::is_live(ctx, sub, family),
         crate::blocks::auth::current_auth_version(ctx, sub),
     );
-
-    if blocklisted.map_err(|e| {
-        crate::blocks::auth::credential_check_failed(e, "auth: jwt blocklist lookup")
-    })? {
-        return Ok(None);
-    }
 
     if !live
         .map_err(|e| crate::blocks::auth::credential_check_failed(e, "auth: login family lookup"))?
@@ -255,8 +225,6 @@ pub async fn verify_access_token(
             .and_then(|v| v.as_str())
             .map(str::to_owned),
         roles,
-        jti: jti.to_string(),
-        exp: claims.get("exp").and_then(|v| v.as_i64()),
         family: family.to_string(),
         auth_version: claim_version,
         auth_method: claims
@@ -271,7 +239,7 @@ pub async fn verify_access_token(
 /// set auth meta fields on the message.
 ///
 /// Sets: `auth.user_id`, `auth.user_roles`, `auth.family`, `auth.version`,
-/// and (when present in the JWT) `auth.user_email`, `auth.jti` and `auth.exp`.
+/// and (when present in the JWT) `auth.user_email`.
 ///
 /// Sets nothing when [`verify_access_token`] refuses the token — the request
 /// continues as unauthenticated. Returns its `Err` when the check could not
@@ -303,14 +271,7 @@ pub async fn extract_auth_meta(
     // read this key, and an absent key and an empty one must not differ.
     msg.set_meta(META_AUTH_USER_ROLES, &claims.roles);
 
-    // Stash jti + exp so logout can read them without re-verifying the JWT,
-    // and the family so the userportal can mark the calling device.
-    if !claims.jti.is_empty() {
-        msg.set_meta(META_AUTH_JTI, &claims.jti);
-    }
-    if let Some(exp) = claims.exp {
-        msg.set_meta(META_AUTH_EXP, exp.to_string());
-    }
+    // The family, so the userportal can mark the calling device.
     msg.set_meta(META_AUTH_FAMILY, &claims.family);
     msg.set_meta(META_AUTH_VERSION, claims.auth_version.to_string());
     Ok(())
@@ -381,11 +342,10 @@ mod tests {
 
     // -- extract_auth_meta -------------------------------------------------
     //
-    // SEC-042 blocklist tests (and the other extract_auth_meta_* tests below)
-    // sign via `sign_access_jwt`, which derives the auth-ui key from the
-    // master secret before signing — the same derivation
-    // `extract_auth_meta` verifies against, since the master-secret fallback
-    // no longer exists.
+    // The extract_auth_meta_* tests below sign via `sign_access_jwt`, which
+    // derives the auth-ui key from the master secret before signing — the
+    // same derivation `extract_auth_meta` verifies against, since the
+    // master-secret fallback no longer exists.
 
     //
     // Every signer here also gives its token a login family with its session
@@ -408,7 +368,6 @@ mod tests {
         ctx: &crate::test_support::TestContext,
         secret: &str,
         sub: &str,
-        jti: Option<&str>,
         ttl_secs: u64,
     ) -> String {
         let family = uuid::Uuid::now_v7().to_string();
@@ -417,9 +376,6 @@ mod tests {
         claims.insert("sub".to_string(), serde_json::json!(sub));
         claims.insert("type".to_string(), serde_json::json!("access"));
         claims.insert("family".to_string(), serde_json::json!(family));
-        if let Some(j) = jti {
-            claims.insert("jti".to_string(), serde_json::json!(j));
-        }
         // Sign with the auth-ui-derived key — the only key `extract_auth_meta`
         // accepts now. `secret` is the master; derive the same key the verifier
         // will use.
@@ -441,13 +397,12 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-1"), 3600).await;
+        let token = sign_access_jwt(&ctx, secret, "user-a", 3600).await;
         let claims = verify_access_token(&ctx, &token, secret, "")
             .await
             .expect("the check completes")
             .expect("a freshly minted access token must verify");
         assert_eq!(claims.sub, "user-a");
-        assert_eq!(claims.jti, "jti-1");
     }
 
     /// The session's `auth_method` claim reaches the caller: a consumer that
@@ -470,7 +425,7 @@ mod tests {
             .expect("the token verifies");
         assert_eq!(claims.auth_method, "oauth.github");
 
-        let without = sign_access_jwt(&ctx, secret, "user-a", None, 3600).await;
+        let without = sign_access_jwt(&ctx, secret, "user-a", 3600).await;
         let claims = verify_access_token(&ctx, &without, secret, "")
             .await
             .expect("the check completes")
@@ -511,29 +466,6 @@ mod tests {
         })
         .await;
         assert!(verify_access_token(&ctx, &token, secret, "https://here")
-            .await
-            .expect("the check completes")
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn verify_access_token_rejects_a_blocklisted_jti() {
-        let ctx = crate::test_support::TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
-        let secret = "test-secret";
-        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-gone"), 3600).await;
-        crate::blocks::auth::repo::jwt_blocklist::insert(
-            &ctx.fixture(),
-            crate::blocks::auth::repo::jwt_blocklist::NewBlocklistEntry {
-                jti: "jti-gone",
-                user_id: "user-a",
-                expires_at: "2099-01-01T00:00:00Z",
-            },
-        )
-        .await
-        .expect("insert blocklist row");
-        assert!(verify_access_token(&ctx, &token, secret, "")
             .await
             .expect("the check completes")
             .is_none());
@@ -624,8 +556,7 @@ mod tests {
 
     /// A family that was signed in and then ended — a device revoke, logout,
     /// a password change — no longer authenticates its access token, which
-    /// still carries a good signature, no blocklisted `jti` and a current
-    /// `auth_version`.
+    /// still carries a good signature and a current `auth_version`.
     #[tokio::test]
     async fn verify_access_token_rejects_a_token_whose_family_has_ended() {
         let ctx = crate::test_support::TestContext::with_auth()
@@ -791,14 +722,12 @@ mod tests {
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let secret = "test-secret";
-        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-1"), 3600).await;
+        let token = sign_access_jwt(&ctx, secret, "user-a", 3600).await;
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await
             .expect("the check completes");
         assert_eq!(msg.get_meta(wafer_run::META_AUTH_USER_ID), "user-a");
-        assert_eq!(msg.get_meta(META_AUTH_JTI), "jti-1");
-        assert!(!msg.get_meta(META_AUTH_EXP).is_empty());
     }
 
     /// Regression test for the bcf96ce → d7107c4 regression: production user
@@ -825,7 +754,6 @@ mod tests {
         let mut claims = BTreeMap::new();
         claims.insert("sub".to_string(), serde_json::json!("user-prod"));
         claims.insert("type".to_string(), serde_json::json!("access"));
-        claims.insert("jti".to_string(), serde_json::json!("jti-prod"));
         claims.insert("family".to_string(), serde_json::json!("fam-prod"));
         let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
             .expect("sign with derived");
@@ -841,73 +769,6 @@ mod tests {
             "extract_auth_meta must verify JWTs signed with the auth-ui-derived key — \
              the production sign path goes through sign_for(AUTH_UI_BLOCK_ID, ...)"
         );
-        assert_eq!(msg.get_meta(META_AUTH_JTI), "jti-prod");
-    }
-
-    #[tokio::test]
-    async fn extract_auth_meta_rejects_blocklisted_jti() {
-        use wafer_run::Message;
-        let ctx = crate::test_support::TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
-        let secret = "test-secret";
-        let token = sign_access_jwt(&ctx, secret, "user-a", Some("jti-blocked"), 3600).await;
-
-        // Pre-populate the blocklist with the jti.
-        crate::blocks::auth::repo::jwt_blocklist::insert(
-            &ctx.fixture(),
-            crate::blocks::auth::repo::jwt_blocklist::NewBlocklistEntry {
-                jti: "jti-blocked",
-                user_id: "user-a",
-                expires_at: "2099-01-01T00:00:00Z",
-            },
-        )
-        .await
-        .expect("insert blocklist row");
-
-        let mut msg = Message::new("http.request");
-        extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
-            .await
-            .expect("the check completes");
-        // Blocklisted: no auth meta should be set — request continues as
-        // anonymous, same as if the JWT had expired or been tampered with.
-        assert_eq!(msg.get_meta(wafer_run::META_AUTH_USER_ID), "");
-        assert_eq!(msg.get_meta(META_AUTH_JTI), "");
-    }
-
-    #[tokio::test]
-    async fn extract_auth_meta_only_blocks_target_jti_for_user() {
-        // Same user, two jti's — only the blocklisted one is rejected.
-        use wafer_run::Message;
-        let ctx = crate::test_support::TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
-        let secret = "test-secret";
-        crate::blocks::auth::repo::jwt_blocklist::insert(
-            &ctx.fixture(),
-            crate::blocks::auth::repo::jwt_blocklist::NewBlocklistEntry {
-                jti: "session-1",
-                user_id: "user-a",
-                expires_at: "2099-01-01T00:00:00Z",
-            },
-        )
-        .await
-        .unwrap();
-
-        let blocked = sign_access_jwt(&ctx, secret, "user-a", Some("session-1"), 3600).await;
-        let live = sign_access_jwt(&ctx, secret, "user-a", Some("session-2"), 3600).await;
-
-        let mut m1 = Message::new("http.request");
-        extract_auth_meta(&ctx, &format!("Bearer {blocked}"), secret, "", &mut m1)
-            .await
-            .expect("the check completes");
-        assert_eq!(m1.get_meta(wafer_run::META_AUTH_USER_ID), "");
-
-        let mut m2 = Message::new("http.request");
-        extract_auth_meta(&ctx, &format!("Bearer {live}"), secret, "", &mut m2)
-            .await
-            .expect("the check completes");
-        assert_eq!(m2.get_meta(wafer_run::META_AUTH_USER_ID), "user-a");
     }
 
     // -- auth_version (P2c: "Access JWTs outlive account and role changes") --
@@ -1026,7 +887,7 @@ mod tests {
         let uid = seed_user(&ctx).await;
         let secret = "test-secret";
 
-        let token = sign_access_jwt(&ctx, secret, &uid, None, 3600).await;
+        let token = sign_access_jwt(&ctx, secret, &uid, 3600).await;
         let mut msg = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg)
             .await

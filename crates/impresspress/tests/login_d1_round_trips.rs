@@ -650,16 +650,33 @@ async fn the_bookkeeping_a_sign_in_defers_still_runs() {
 }
 
 /// An authenticated request checks its access token's database facts in ONE
-/// round trip: `crypto::verify_access_token` reads the `jti` blocklist, the
-/// login family's session row and (on a cache miss) the account's
-/// `auth_version` with `futures::join!`. The family read is the statement
-/// SEC-02 adds to every JWT-authenticated request: it costs D1 one more
-/// query, not one more round trip. Revocation must bite at once, so it is
-/// not cached, and it is read on every request, the warm one included.
+/// round trip, and that round trip carries only them:
+/// `crypto::verify_access_token` reads the login family's session row and
+/// (on a cache miss) the account's `auth_version` with `futures::join!`, and
+/// nothing else. The family read is what SEC-02 added to every
+/// JWT-authenticated request; revocation must bite at once, so it is not
+/// cached, and it is read on every request, the warm one included.
 ///
-/// "Warm" is the second request with the token, as for the sign-in above: the
-/// first fills the isolate's schema cache (whose probes would otherwise sit
-/// between a read and the next) and the `auth_version` cache.
+/// Both halves of the join are measured. On the first request with the token
+/// the `auth_version` cache is cold (the sign-in does not fill it), so the
+/// family read and the version read share the first wave and nothing joins
+/// them. On the second, the version is a cache hit and the family read rides
+/// alone.
+///
+/// The whole request is pinned as well, as the sign-in's is: the check, then
+/// `/me`'s own reads of the account (`users`) and its roles (`user_roles`).
+/// Cold, that is 3 round trips and 4 statements; warm, 3 and 3. The per-wave
+/// assertions say which statements share the check's round trip; the totals
+/// are what catch a statement added to the check after the join, which costs
+/// a round trip of its own and would otherwise hide among the handler's reads.
+///
+/// The first request is measured on a warm schema cache. The family read
+/// lists the sessions table, which needs its primary key, and on a cold cache
+/// that probe runs before the read and lands in the first wave or opens the
+/// next one depending on how fast the version read returns. On D1 the cache
+/// is the isolate's, warmed by whichever earlier request first listed the
+/// table; here one list of the table, outside the measured request, stands
+/// in for it.
 #[tokio::test]
 async fn an_access_token_is_checked_in_one_round_trip() {
     let site = start().await;
@@ -677,28 +694,84 @@ async fn an_access_token_is_checked_in_one_round_trip() {
         ("authorization", bearer.as_str()),
     ];
     let me = || run_request(&site, "GET", "/b/auth/api/me", &headers, Vec::new());
-    let cold = me().await;
-    assert_eq!(cold.status, 200, "{}", Cost::describe(&cold.response));
-
-    let warm = me().await;
-    let trace = Cost::describe(&warm.response);
-    assert_eq!(warm.status, 200, "the token authenticates\n{trace}");
-    let reads_of = |table: &str| {
-        warm.response
+    let reads_of = |trips: &[RoundTrip], table: &str| {
+        trips
             .iter()
             .filter(|t| t.sql.contains(&format!("FROM \"{table}\"")))
             .map(|t| t.wave)
             .collect::<Vec<_>>()
     };
-    let family = reads_of("wafer_run__auth__sessions");
+    let wave = |trips: &[RoundTrip], wave: usize| {
+        trips
+            .iter()
+            .filter(|t| t.wave == wave)
+            .map(|t| t.sql.clone())
+            .collect::<Vec<_>>()
+    };
+
+    site.database
+        .list(
+            "wafer_run__auth__sessions",
+            &wafer_block::db::ListOptions {
+                limit: Some(1),
+                skip_count: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("warm the sessions table's schema");
+
+    let cold = me().await;
+    let trace = Cost::describe(&cold.response);
+    assert_eq!(cold.status, 200, "the token authenticates\n{trace}");
+    let family = reads_of(&cold.response, "wafer_run__auth__sessions");
+    assert_eq!(family, vec![1], "the family is read once, first\n{trace}");
+    let check = wave(&cold.response, 1);
     assert_eq!(
-        family.len(),
-        1,
+        check.len(),
+        2,
+        "the check's round trip is the family read and the auth_version read, \
+         nothing else\n{trace}"
+    );
+    assert!(
+        check
+            .iter()
+            .any(|sql| sql.contains("FROM \"wafer_run__auth__users\"")),
+        "the auth_version read shares the family read's round trip\n{trace}"
+    );
+    assert_eq!(
+        Cost::waves(&cold.response),
+        3,
+        "sequential D1 round trips before the response\n{trace}"
+    );
+    assert_eq!(
+        Cost::statements(&cold.response),
+        4,
+        "D1 statements before the response\n{trace}"
+    );
+
+    let warm = me().await;
+    let trace = Cost::describe(&warm.response);
+    assert_eq!(warm.status, 200, "the token authenticates\n{trace}");
+    let family = reads_of(&warm.response, "wafer_run__auth__sessions");
+    assert_eq!(
+        family,
+        vec![1],
         "the login family is read once per request, uncached\n{trace}"
     );
     assert_eq!(
-        reads_of("wafer_run__auth__jwt_blocklist"),
-        family,
-        "the family read shares the blocklist read's round trip\n{trace}"
+        wave(&warm.response, 1).len(),
+        1,
+        "with auth_version cached, the family read rides alone\n{trace}"
+    );
+    assert_eq!(
+        Cost::waves(&warm.response),
+        3,
+        "sequential D1 round trips before the response\n{trace}"
+    );
+    assert_eq!(
+        Cost::statements(&warm.response),
+        3,
+        "D1 statements before the response\n{trace}"
     );
 }

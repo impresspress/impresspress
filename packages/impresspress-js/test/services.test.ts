@@ -142,7 +142,7 @@ describe("AuthService", () => {
   });
 
   // The server answers a request whose credential it could not check (a
-  // failed blocklist or auth_version read) with 503, or with the 403 a WRAP
+  // failed login-family or auth_version read) with 503, or with the 403 a WRAP
   // refusal keeps. Neither means "signed out": getUser must propagate it and
   // leave the session in place, so the next call after the outage succeeds.
   for (const [status, error] of [

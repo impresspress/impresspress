@@ -12,8 +12,8 @@
 //!
 //! Every type in this module is serialized straight to an HTTP response. The
 //! password hash (`local_credentials.password_hash`), the refresh-token row's
-//! `token_hash`, the verification-token digest and the JWT blocklist `jti` all
-//! live on rows these handlers read — and none of them appears on any type
+//! `token_hash` and the verification-token digest all live on rows these
+//! handlers read — and none of them appears on any type
 //! below. That is why the user-facing shapes are hand-written view types
 //! ([`AuthenticatedUser`], [`PendingSignupUser`], [`MeUser`]) rather than
 //! `repo::users::UserRow` re-exported: a view type cannot silently grow a

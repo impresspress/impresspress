@@ -68,8 +68,8 @@ use crate::{
     blocks::{
         admin::{AUDIT_LOGS_TABLE, STORAGE_ACCESS_LOGS_TABLE},
         auth::repo::{
-            api_keys, bootstrap_tokens, jwt_blocklist, maintenance, oauth_pkce, orgs, pats,
-            provider_links, rate_limits, sessions, tokens,
+            api_keys, bootstrap_tokens, maintenance, oauth_pkce, orgs, pats, provider_links,
+            rate_limits, sessions, tokens,
         },
         products::{
             DISPUTES_TABLE, ENTITLEMENTS_TABLE, LINE_ITEMS_TABLE, PAYMENT_LINKS_TABLE,
@@ -312,7 +312,11 @@ pub const TABLE_EXCLUDED: &[&str] = &[
     tokens::TABLE,
     api_keys::TABLE,
     bootstrap_tokens::TABLE,
-    jwt_blocklist::TABLE,
+    // The retired JWT blocklist. Migration 005 creates it, but nothing reads
+    // or writes it — an access token is refused once its login family's row
+    // is gone (`crypto::verify_access_token`) — so no repo module names it.
+    // Its rows are instance state like the rest here.
+    "wafer_run__auth__jwt_blocklist",
     oauth_pkce::TABLE,
     pats::TABLE,
     provider_links::TABLE,

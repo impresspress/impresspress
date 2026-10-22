@@ -15,7 +15,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            helpers::{clear_auth_cookie, end_family, end_presented_access_token},
+            helpers::{clear_auth_cookie, end_family},
             repo::sessions,
         },
         auth_ui::oauth,
@@ -180,8 +180,10 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
 ///    family finds no row to touch, revokes the family and refuses.
 /// 3. Revoke every refresh row in the family, so the rows agree with the
 ///    liveness: a token the device still holds reads as revoked.
-/// 4. When that was the session the request itself belongs to, end the access
-///    token it presented and clear the cookie, and send the page to sign in.
+/// 4. When that was the session the request itself belongs to, clear the
+///    cookie and send the page to sign in. Step 2 has already ended the access
+///    token it presented: an access token needs a live family
+///    (`crypto::verify_access_token`).
 ///
 /// Steps 2 and 3 are `auth::helpers::end_family`, which every revocation of a
 /// family shares, and they must run in that order. A refresh rotates by
@@ -234,14 +236,9 @@ pub async fn handle_revoke(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // Revoking the session this request belongs to signs the reader out
     // here and now, as the confirmation said. Deleting the family's row
     // already ended the access token in the cookie (an access token needs a
-    // live family, `crypto::verify_access_token`); its `jti` is blocklisted
-    // as well, the per-token record logout also writes. The cookie is
-    // cleared and the page sent to sign in (`HX-Redirect`, a full
-    // navigation).
+    // live family, `crypto::verify_access_token`). The cookie is cleared and
+    // the page sent to sign in (`HX-Redirect`, a full navigation).
     if current_session_family(msg) == Some(family.as_str()) {
-        if let Err(e) = end_presented_access_token(ctx, msg).await {
-            return crud::db_error_internal(e, "Could not end the current session");
-        }
         let cookie = match clear_auth_cookie(ctx).await {
             Ok(cookie) => cookie,
             Err(e) => return crud::db_error_internal(e, "Could not clear the session cookie"),
@@ -510,17 +507,12 @@ mod tests {
     }
 
     /// Revoking the session the request belongs to signs the reader out at
-    /// once, as the confirmation says: the presented access token is
-    /// blocklisted (so the next request with it is refused), the cookie is
-    /// cleared, and the page is sent to sign in. Run as the userportal, so
-    /// the blocklist write is proved to be within its grants.
+    /// once, as the confirmation says: the family's row is gone (so the
+    /// presented access token is refused from the next request on), the
+    /// cookie is cleared, and the page is sent to sign in. Run as the
+    /// userportal, so every write is proved to be within its grants.
     #[tokio::test]
     async fn revoking_the_current_session_ends_the_presented_token() {
-        use crate::{
-            blocks::auth::repo::jwt_blocklist,
-            crypto::{META_AUTH_EXP, META_AUTH_JTI},
-        };
-
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
@@ -530,7 +522,7 @@ mod tests {
             .unwrap();
         seed_refresh_row(&ctx, "user-a", "fam-here").await;
 
-        let mut msg = with_family(
+        let msg = with_family(
             routed(auth_msg(
                 "delete",
                 "/b/userportal/sessions/fam-here",
@@ -538,8 +530,6 @@ mod tests {
             )),
             "fam-here",
         );
-        msg.set_meta(META_AUTH_JTI, "jti-here");
-        msg.set_meta(META_AUTH_EXP, "4102444800");
         let parts =
             wafer_block::http_codec::collect_http_response(handle_revoke(&ctx, &msg).await).await;
 
@@ -558,7 +548,7 @@ mod tests {
             "{cookie}"
         );
         assert!(
-            jwt_blocklist::contains(&ctx.fixture(), "jti-here")
+            !sessions::is_live(&ctx.fixture(), "user-a", "fam-here")
                 .await
                 .unwrap(),
             "the presented access token must stop working now, not at its expiry"
@@ -566,24 +556,22 @@ mod tests {
         assert!(!tokens::family_has_live_row(&ctx, "fam-here").await.unwrap());
     }
 
-    /// Revoking ANOTHER device leaves the reader signed in: no blocklist
-    /// row for their token, no cookie, no redirect.
+    /// Revoking ANOTHER device leaves the reader signed in: their own
+    /// family's row stays, and there is no cookie and no redirect.
     #[tokio::test]
     async fn revoking_another_session_leaves_the_reader_signed_in() {
-        use crate::{
-            blocks::auth::repo::jwt_blocklist,
-            crypto::{META_AUTH_EXP, META_AUTH_JTI},
-        };
-
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
         seed_user(&ctx, "user-a").await;
+        insert(&ctx, fake_session("user-a", "fam-here"))
+            .await
+            .unwrap();
         insert(&ctx, fake_session("user-a", "fam-other"))
             .await
             .unwrap();
 
-        let mut msg = with_family(
+        let msg = with_family(
             routed(auth_msg(
                 "delete",
                 "/b/userportal/sessions/fam-other",
@@ -591,8 +579,6 @@ mod tests {
             )),
             "fam-here",
         );
-        msg.set_meta(META_AUTH_JTI, "jti-here");
-        msg.set_meta(META_AUTH_EXP, "4102444800");
         let parts =
             wafer_block::http_codec::collect_http_response(handle_revoke(&ctx, &msg).await).await;
 
@@ -604,7 +590,7 @@ mod tests {
             "{:?}",
             parts.headers
         );
-        assert!(!jwt_blocklist::contains(&ctx.fixture(), "jti-here")
+        assert!(sessions::is_live(&ctx.fixture(), "user-a", "fam-here")
             .await
             .unwrap());
     }
@@ -1184,7 +1170,7 @@ mod tests {
     /// A revoked device's access token, presented the way a client presents
     /// it, through the production request path (`TestContext::request`: the
     /// router block and `pipeline::handle_request`). The token still has a
-    /// good signature, no blocklisted `jti` and a current `auth_version`;
+    /// good signature and a current `auth_version`;
     /// only its family is gone.
     mod revoked_device_access {
         use std::sync::Arc;

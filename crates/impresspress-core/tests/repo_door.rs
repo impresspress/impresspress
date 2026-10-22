@@ -902,8 +902,8 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // Fault injectors: each user-portal route's WRAP-denial test
             // refuses the table its database site reads or writes.
             "blocks/userportal/error_mapping_tests.rs",
-            // Fault injectors: a request-time credential check reads the JWT
-            // blocklist and the users table (`auth_version`), and
+            // Fault injectors: a request-time credential check reads the login
+            // family's session row and the users table (`auth_version`), and
             // `pipeline::credential_check_tests` and `AuthServiceImpl`'s
             // require_user test fail one of those reads per case to prove a
             // failed check refuses the request instead of signing the caller
