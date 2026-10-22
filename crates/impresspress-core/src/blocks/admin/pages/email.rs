@@ -200,7 +200,7 @@ mod tests {
             "the API key field must render as a masked password input: {html}"
         );
         assert!(
-            html.contains(r#"aria-label="Show Mailgun API Key""#)
+            html.contains(r#"aria-label="Show Mailgun API key""#)
                 && html.contains(r#"aria-pressed="false""#)
                 && html.contains(r#"data-action="reveal-toggle""#),
             "the reveal/edit eye toggle must be present, with an accessible name: {html}"

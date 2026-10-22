@@ -51,8 +51,8 @@ test.describe('settings form', () => {
     await loginAsAdmin(page);
     await page.goto(AUTHENTICATION, { waitUntil: 'networkidle' });
     const oauth = page.getByRole('switch', { name: 'Enable OAuth' });
-    const uri = page.getByLabel('OAuth Redirect URI');
-    const redirect = page.getByLabel('Post-Login Redirect');
+    const uri = page.getByLabel('OAuth redirect URI');
+    const redirect = page.getByLabel('Post-login redirect');
     const original = await redirect.inputValue();
 
     // Switched on, the field is posted with what it holds — and a private
@@ -93,7 +93,7 @@ test.describe('settings form', () => {
     await page.goto('/b/userportal/admin/settings', { waitUntil: 'networkidle' });
     await expect(page).toHaveURL(BRANDING);
 
-    const name = page.getByLabel('App Name');
+    const name = page.getByLabel('App name');
     const original = await name.inputValue();
     await name.fill('Acme Settings E2E');
     let saved = await save(page, BRANDING);
@@ -113,7 +113,7 @@ test.describe('settings form', () => {
   test('Legal settings save through the admin block', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/legalpages/admin/settings', { waitUntil: 'networkidle' });
-    const back = page.getByLabel('Back Button URL');
+    const back = page.getByLabel('Back button URL');
     const original = await back.inputValue();
     await back.fill('/b/userportal/');
     let saved = await save(page, '/b/admin/settings/legal');

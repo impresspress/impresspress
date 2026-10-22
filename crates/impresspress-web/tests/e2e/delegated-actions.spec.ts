@@ -110,7 +110,7 @@ test.describe('delegated actions', () => {
     await page.goto('/b/admin/email', { waitUntil: 'networkidle' });
 
     const field = page.locator('#IMPRESSPRESS__EMAIL__MAILGUN_API_KEY');
-    const toggle = page.getByRole('button', { name: 'Show Mailgun API Key' });
+    const toggle = page.getByRole('button', { name: 'Show Mailgun API key' });
 
     // A sensitive field renders blank: nothing to show, so no eye.
     await expect(field).toHaveAttribute('type', 'password');
@@ -142,7 +142,7 @@ test.describe('delegated actions', () => {
     await page.goto('/b/admin/settings/authentication', { waitUntil: 'networkidle' });
 
     const oauth = page.getByRole('switch', { name: 'Enable OAuth' });
-    const clientId = page.getByLabel('GitHub Client ID');
+    const clientId = page.getByLabel('GitHub client ID');
 
     // Off on a fresh server: the provider fields are out of the way.
     await expect(oauth).not.toBeChecked();
@@ -167,8 +167,8 @@ test.describe('delegated actions', () => {
     await loginAsAdmin(page);
     await page.goto('/b/legalpages/admin/settings', { waitUntil: 'networkidle' });
 
-    const box = page.getByRole('textbox', { name: 'Background Color', exact: true });
-    const swatch = page.getByLabel('Background Color picker', { exact: true });
+    const box = page.getByRole('textbox', { name: 'Background color', exact: true });
+    const swatch = page.getByLabel('Background color picker', { exact: true });
 
     // Nothing set: the swatch says so instead of showing black.
     await expect(box).toHaveValue('');

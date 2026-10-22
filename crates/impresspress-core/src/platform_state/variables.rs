@@ -2440,7 +2440,7 @@ mod boot_tests {
 
         // What the admin block's `Init` does with the declared default.
         assert!(
-            seed_if_absent(&db, key, "false", "Has Landing Page", "declared", false)
+            seed_if_absent(&db, key, "false", "Has landing page", "declared", false)
                 .await
                 .expect("seed the declared default"),
             "the declared default is the first writer"
@@ -2449,7 +2449,7 @@ mod boot_tests {
         // What `seed_if_absent` would do from the platform hook — nothing.
         // This is the assertion that makes the fix load-bearing.
         assert!(
-            !seed_if_absent(&db, key, "true", "Has Landing Page", "declared", false)
+            !seed_if_absent(&db, key, "true", "Has landing page", "declared", false)
                 .await
                 .expect("second seed"),
             "seeding cannot beat a row that is already there"
@@ -2461,7 +2461,7 @@ mod boot_tests {
                 &db,
                 key,
                 "true",
-                "Has Landing Page",
+                "Has landing page",
                 "declared",
                 Some(false)
             )
@@ -2568,7 +2568,7 @@ mod boot_tests {
             &db,
             key,
             "false",
-            "Has Landing Page",
+            "Has landing page",
             "operator wording",
             false,
         )
@@ -2592,7 +2592,7 @@ mod boot_tests {
             row.description, "operator wording",
             "metadata describes the variable, not the deployment"
         );
-        assert_eq!(row.name, "Has Landing Page");
+        assert_eq!(row.name, "Has landing page");
     }
 
     /// The audit finding, stated as a test: an operator exports
@@ -2832,7 +2832,7 @@ mod boot_tests {
     async fn re_saving_the_value_the_environment_supplies_does_not_pin_the_key() {
         let db = migrated_db().await;
         let key = APP_NAME_KEY;
-        seed_if_absent(&db, key, "Same", "App Name", "declared", false)
+        seed_if_absent(&db, key, "Same", "App name", "declared", false)
             .await
             .expect("the row a previous boot stored");
 
@@ -3666,7 +3666,7 @@ mod boot_tests {
     async fn an_empty_env_value_does_not_blank_out_a_stored_value() {
         let db = migrated_db().await;
         let key = APP_NAME_KEY;
-        seed_if_absent(&db, key, "Impresspress", "App Name", "declared", false)
+        seed_if_absent(&db, key, "Impresspress", "App name", "declared", false)
             .await
             .expect("seed");
 

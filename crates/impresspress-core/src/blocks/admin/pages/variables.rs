@@ -540,13 +540,7 @@ fn delete_button(key: &str, declared: bool) -> Markup {
 /// Whether a block or the shared set declares `key` — the keys whose row
 /// outlives a delete of its stored value.
 fn is_declared(ctx: &dyn Context, key: &str) -> bool {
-    crate::config_vars::shared_config_vars()
-        .iter()
-        .any(|var| var.key == key)
-        || ctx
-            .registered_blocks()
-            .iter()
-            .any(|block| block.config_keys.iter().any(|var| var.key == key))
+    ops::declared_vars(ctx).contains_key(key)
 }
 
 /// The control that hands one key back to the process environment, shared by

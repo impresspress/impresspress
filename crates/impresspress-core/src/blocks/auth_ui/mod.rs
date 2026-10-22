@@ -428,25 +428,25 @@ pub(crate) const OAUTH_REDIRECT_URI_KEY: &str = "IMPRESSPRESS__AUTH_UI__OAUTH_RE
 pub(crate) fn config_vars() -> Vec<ConfigVar> {
     vec![
         ConfigVar::new(OAUTH_GOOGLE_CLIENT_ID_KEY, "Google OAuth client ID", "")
-            .name("Google Client ID")
+            .name("Google client ID")
             .optional(),
         ConfigVar::new(
             OAUTH_GOOGLE_CLIENT_SECRET_KEY,
             "Google OAuth client secret",
             "",
         )
-        .name("Google Client Secret")
+        .name("Google client secret")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(OAUTH_GITHUB_CLIENT_ID_KEY, "GitHub OAuth client ID", "")
-            .name("GitHub Client ID")
+            .name("GitHub client ID")
             .optional(),
         ConfigVar::new(
             OAUTH_GITHUB_CLIENT_SECRET_KEY,
             "GitHub OAuth client secret",
             "",
         )
-        .name("GitHub Client Secret")
+        .name("GitHub client secret")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
@@ -454,18 +454,18 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "Microsoft OAuth client ID",
             "",
         )
-        .name("Microsoft Client ID")
+        .name("Microsoft client ID")
         .optional(),
         ConfigVar::new(
             OAUTH_MICROSOFT_CLIENT_SECRET_KEY,
             "Microsoft OAuth client secret",
             "",
         )
-        .name("Microsoft Client Secret")
+        .name("Microsoft client secret")
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(OAUTH_REDIRECT_URI_KEY, "OAuth callback URL", "")
-            .name("OAuth Redirect URI")
+            .name("OAuth redirect URI")
             .input_type(InputType::Url)
             .optional(),
     ]

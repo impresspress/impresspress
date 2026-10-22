@@ -27,6 +27,9 @@
 //! page as the element tree a browser builds, for the guards whose rules are
 //! about ancestry and visibility.
 
+// Test-only: the sentence-case rule the label guards share.
+#[cfg(test)]
+pub mod case;
 mod dispatch;
 // Test-only: `dom` parses with `scraper`, a dev-dependency, which the
 // `test-support` feature build of the lib cannot reach.
