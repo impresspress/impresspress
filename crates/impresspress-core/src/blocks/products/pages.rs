@@ -1051,11 +1051,19 @@ pub async fn deleted_product_close(
                     div .products-status-stack {
                         (components::status_badge(&commerce_wire(&offer.status)))
                     }
+                    // Danger: an archived offer cannot be published again
+                    // (`repo::offers::publish` refuses it, and an active or
+                    // archived offer is immutable), and archiving takes its
+                    // Prices down in Stripe and retires its Payment Links
+                    // (`stripe::archive_offer_catalog`).
                     @if offer.status != OfferStatus::Archived {
                         div .products-actions {
                             button .btn .btn--secondary .btn--sm type="button"
                                 hx-delete=(offer_url)
                                 hx-swap="none"
+                                hx-confirm=(format!("Archive the offer “{}”? Its prices stop selling in Stripe, its payment links stop taking payments, and an archived offer can't be published again.", offer.offer.name))
+                                data-confirm-label="Archive offer"
+                                data-confirm-tone="danger"
                                 data-error-label="Could not archive this offer"
                                 data-reload-on-success
                             { "Archive offer" }
@@ -1074,10 +1082,17 @@ pub async fn deleted_product_close(
                                 }
                                 div .flex .gap-2 .items-center {
                                     (components::status_badge(if link.active { "active" } else { "inactive" }))
+                                    // Danger: nothing turns a deactivated
+                                    // link back on. No route reactivates
+                                    // one, and a new link for the same
+                                    // configuration is a new URL.
                                     @if link.active {
                                         button .btn .btn--secondary .btn--sm type="button"
                                             hx-delete=(link_url)
                                             hx-swap="none"
+                                            hx-confirm="Deactivate this payment link? It stops taking payments, and a deactivated link can't be turned back on."
+                                            data-confirm-label="Deactivate link"
+                                            data-confirm-tone="danger"
                                             data-error-label="Could not deactivate this payment link"
                                             data-reload-on-success
                                         { "Deactivate" }
@@ -3997,10 +4012,14 @@ async fn order_detail(
         OrderPageAccess::Buyer => None,
     };
     let currency_exponent = money::currency_exponent(currency).unwrap_or(2);
+    // What a blank amount refunds, which the refund's confirm states.
+    let remaining_minor = purchase.i64_field("total_cents") - refunded_total;
     let page_config = ui::script_json(&serde_json::json!({
         "order_id": purchase_id,
         "refund_url": refund_url.clone(),
         "refunded_total": refunded_total,
+        "remaining_minor": remaining_minor,
+        "currency": currency,
         "currency_exponent": currency_exponent,
     }));
     let (back_url, back_label, sections) = match access {
@@ -4230,7 +4249,10 @@ async fn order_detail(
                     div .form-group { label .form-label for="order-refund-amount" { "Amount (" (currency) ")" } input #order-refund-amount .form-input type="text" inputmode="decimal" placeholder="Full remaining amount" {} }
                     div .form-group { label .form-label for="order-refund-note" { "Private note" } textarea #order-refund-note .form-textarea maxlength="500" {} }
                 }
-                (Action::danger("Create refund", ActionTarget::Delegated("po-submit-refund")).render())
+                // A secondary that asks first: the refund cannot be undone,
+                // so the shared confirm dialog's button is the danger one,
+                // and its question states the amount.
+                (Action::secondary("Create refund", ActionTarget::Delegated("po-submit-refund")).render())
             }).render())
         }
         script { (maud::PreEscaped(format!("window.__orderDetailConfig={page_config};"))) }

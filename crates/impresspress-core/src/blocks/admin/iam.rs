@@ -1281,6 +1281,64 @@ mod tests {
         );
     }
 
+    /// An API key does not check `auth_version`, and that is deliberate:
+    /// every role change bumps the version, so a key that did would die
+    /// whenever an admin edited its owner's roles. A key is revoked when its
+    /// owner's password changes or is reset
+    /// (`auth::end_credentials_after_password_change`), not on a role change.
+    /// Driven through the production request path, so the key is checked the
+    /// way a deployment checks it.
+    #[tokio::test]
+    async fn a_role_change_leaves_the_users_api_keys_working() {
+        use crate::{
+            blocks::auth::repo::users,
+            test_support::{anon_msg, api_key_header},
+        };
+
+        let ctx = TestContext::with_auth().await.with_sign_in_added();
+        let email = "keyholder@example.com";
+        let password = "correct-horse-battery";
+        let uid = ctx.seed_account(email, password, InitialRole::User).await;
+        let key = ctx
+            .sign_in(email, password)
+            .await
+            .create_api_key(&ctx, "ci")
+            .await;
+        let me_with_key = || async {
+            wafer_block::http_codec::collect_http_response(
+                ctx.request(api_key_header(anon_msg("retrieve", "/b/auth/api/me"), &key))
+                    .await,
+            )
+            .await
+            .status
+        };
+        assert_eq!(me_with_key().await, 200, "the key works");
+
+        let admin = ctx.clone().running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        define_role(&admin, "editor").await;
+        let out = handle_assign_role(
+            &admin,
+            &admin_msg("create", "/b/admin/api/iam/user-roles"),
+            body_input(serde_json::json!({"user_id": uid, "role": "editor"})),
+        )
+        .await;
+        assert!(
+            !output_is_error(out, "Internal").await,
+            "assign must succeed"
+        );
+        assert_eq!(
+            users::auth_version(&ctx.fixture(), &uid).await.unwrap(),
+            1,
+            "precondition: the role change bumped the version"
+        );
+
+        assert_eq!(
+            me_with_key().await,
+            200,
+            "the key outlives a role change of its owner"
+        );
+    }
+
     /// P2c: removing a role (demotion) is exactly the change auth_version
     /// exists to invalidate — an already-issued JWT minted with the removed
     /// role must stop working immediately, not at its natural expiry.

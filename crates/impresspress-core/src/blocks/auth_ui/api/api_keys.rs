@@ -10,7 +10,11 @@ use wafer_core::clients::crypto;
 use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use crate::{
-    blocks::{auth::repo::api_keys, auth_ui::contracts, crud},
+    blocks::{
+        auth::{credential_check_failed, presented_credential_is_live, repo::api_keys},
+        auth_ui::contracts,
+        crud,
+    },
     http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json},
     ui::components::Card,
     util::{hex_encode, sha256_hex},
@@ -138,57 +142,88 @@ pub async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream)
         },
     )
     .await;
+    let record = match insert_result {
+        Ok(record) => record,
+        Err(e) => return crud::db_error_internal(e, "Could not create the API key"),
+    };
 
-    match insert_result {
-        Ok(record) => {
-            // htmx form callers want HTML back so the swap renders cleanly.
-            // Programmatic JSON callers (no HX-Request header) get the JSON
-            // payload as before so existing API consumers don't break.
-            if !msg.get_meta("http.header.hx-request").is_empty() {
-                let key_for_display = key_string.clone();
-                let name = record.name;
-                let markup = Card::titled(
-                    "Key created — save it now",
-                    maud::html! {
-                        p .api-key-copy-hint {
-                            "This is the only time the full key will be shown. Copy it now."
-                        }
-                        div .api-key-reveal-row {
-                            code #new-api-key .api-key-value {
-                                (key_for_display)
-                            }
-                            // Chrome's `copy-text` verb reads the key
-                            // out of `#new-api-key`, so the key itself is
-                            // never written into an attribute — which is
-                            // also what the inline handler this replaced
-                            // was careful to avoid.
-                            button type="button" .btn .btn--secondary .btn--sm .flex-none
-                                data-action="copy-text" data-copy-source="new-api-key"
-                            { "Copy" }
-                        }
-                        p .api-key-name-hint {
-                            "Name: " (name)
-                        }
-                    },
-                )
-                .render();
-                crate::ui::html_response_closing_modal(
-                    markup,
-                    "create-api-key",
-                    "API key created",
-                    "success",
-                )
-            } else {
-                ok_json(&serde_json::json!({
-                    "id": record.id,
-                    "key": key_string,
-                    "name": record.name,
-                    "key_prefix": record.key_prefix,
-                    "message": "Save this key — it won't be shown again"
-                }))
+    // The credential this request presented was checked when the request
+    // started; check it again now that the key exists. A password change
+    // racing this request ends that credential before it revokes the
+    // account's keys, so a re-check after the change reached it sees it
+    // dead, and one before it means this key was already written when the
+    // keys were revoked (`auth::presented_credential_is_live` gives the
+    // whole argument). Without it a key minted by a request authenticated
+    // before the change, and written after it, would outlive the change it
+    // was meant to be locked out by.
+    match presented_credential_is_live(ctx, msg).await {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(e) = api_keys::revoke(ctx, &record.id).await {
+                return crud::db_error_internal(e, "Could not withdraw the API key");
             }
+            return crate::http::err_unauthenticated("Authentication required");
         }
-        Err(e) => crud::db_error_internal(e, "Could not create the API key"),
+        Err(e) => {
+            if let Err(revoke) = api_keys::revoke(ctx, &record.id).await {
+                tracing::error!(
+                    key_id = %record.id,
+                    error = %revoke,
+                    "API key created but neither confirmed nor withdrawn"
+                );
+            }
+            return OutputStream::error(credential_check_failed(
+                e,
+                "auth: re-check the credential that created an API key",
+            ));
+        }
+    }
+
+    // htmx form callers want HTML back so the swap renders cleanly.
+    // Programmatic JSON callers (no HX-Request header) get the JSON
+    // payload as before so existing API consumers don't break.
+    if !msg.get_meta("http.header.hx-request").is_empty() {
+        let key_for_display = key_string.clone();
+        let name = record.name;
+        let markup = Card::titled(
+            "Key created — save it now",
+            maud::html! {
+                p .api-key-copy-hint {
+                    "This is the only time the full key will be shown. Copy it now."
+                }
+                div .api-key-reveal-row {
+                    code #new-api-key .api-key-value {
+                        (key_for_display)
+                    }
+                    // Chrome's `copy-text` verb reads the key
+                    // out of `#new-api-key`, so the key itself is
+                    // never written into an attribute — which is
+                    // also what the inline handler this replaced
+                    // was careful to avoid.
+                    button type="button" .btn .btn--secondary .btn--sm .flex-none
+                        data-action="copy-text" data-copy-source="new-api-key"
+                    { "Copy" }
+                }
+                p .api-key-name-hint {
+                    "Name: " (name)
+                }
+            },
+        )
+        .render();
+        crate::ui::html_response_closing_modal(
+            markup,
+            "create-api-key",
+            "API key created",
+            "success",
+        )
+    } else {
+        ok_json(&serde_json::json!({
+            "id": record.id,
+            "key": key_string,
+            "name": record.name,
+            "key_prefix": record.key_prefix,
+            "message": "Save this key — it won't be shown again"
+        }))
     }
 }
 
@@ -264,11 +299,23 @@ mod tests {
             .id
     }
 
+    /// `msg` as the pipeline leaves it for an access token of `owner`'s: the
+    /// token's login family, which `handle_create` checks again after its
+    /// insert, is signed in, and its version is the account's (`0`, never
+    /// bumped here).
+    async fn signed_in(ctx: &TestContext, owner: &str, mut msg: Message) -> Message {
+        let family = uuid::Uuid::new_v4().to_string();
+        crate::test_support::seed_login_family(ctx, owner, &family).await;
+        msg.set_meta(crate::crypto::META_AUTH_FAMILY, &family);
+        msg.set_meta(crate::crypto::META_AUTH_VERSION, "0");
+        msg
+    }
+
     /// `POST /b/auth/api/api-keys` with a JSON body, through the route table.
     async fn create(ctx: &TestContext, owner: &str, body: serde_json::Value) -> OutputStream {
         handle_create(
             ctx,
-            &routed(auth_msg("create", KEYS_PATH, owner)),
+            &signed_in(ctx, owner, routed(auth_msg("create", KEYS_PATH, owner))).await,
             InputStream::from_bytes(body.to_string().into_bytes()),
         )
         .await
@@ -497,7 +544,7 @@ mod tests {
     async fn an_htmx_create_reveals_the_key_in_a_titled_card() {
         let ctx = TestContext::with_auth_and_crypto().await;
         let owner = seed_user(&ctx).await;
-        let mut msg = routed(auth_msg("create", KEYS_PATH, &owner));
+        let mut msg = signed_in(&ctx, &owner, routed(auth_msg("create", KEYS_PATH, &owner))).await;
         msg.set_meta("http.header.hx-request", "true");
         let out = handle_create(
             &ctx,

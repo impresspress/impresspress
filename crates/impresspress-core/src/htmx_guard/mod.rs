@@ -672,12 +672,18 @@ async fn every_tab_is_a_text_label() {
 /// Every page confirms through the one shared dialog, and nothing else
 /// (`test_support::dom::confirm_problems`): each document carries
 /// `components::confirm_dialog` once, no other dialog is a destructive
-/// confirm of its own, and every `hx-confirm` names its action and tone, so
-/// chrome.js can ask it. The other half — no script calls `window.confirm` —
-/// is a source guard beside the dialog (`ui/components/modal.rs`).
+/// confirm of its own, every `hx-confirm` names its action and tone, so
+/// chrome.js can ask it, and every `.btn--danger` outside a dialog opens a
+/// confirm itself or is listed in `dom::DANGER_WITHOUT_A_CONFIRM`. An entry
+/// there that no crawled page draws is stale, and fails here too. The other
+/// half — no script refers to the browser's confirm or draws a danger button
+/// — is a source guard beside the dialog (`ui/components/modal.rs`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_page_confirms_through_the_one_shared_dialog() {
+    use crate::test_support::dom::{unconfirmed_danger_buttons, DANGER_WITHOUT_A_CONFIRM};
+
     let mut wrong: Vec<String> = Vec::new();
+    let mut allowed_seen: Vec<String> = Vec::new();
     let (mut documents, mut asked) = (0, 0);
     for entry in entries() {
         let Some(make) = entry.fixture else {
@@ -694,6 +700,15 @@ async fn every_page_confirms_through_the_one_shared_dialog() {
             for problem in crate::test_support::dom::confirm_problems(&html) {
                 wrong.push(format!("{}: {problem}", page.url()));
             }
+            allowed_seen.extend(unconfirmed_danger_buttons(&html));
+        }
+    }
+    for (allowed, reason) in DANGER_WITHOUT_A_CONFIRM {
+        if !allowed_seen.iter().any(|seen| seen == allowed) {
+            wrong.push(format!(
+                "DANGER_WITHOUT_A_CONFIRM lists {allowed} ({reason}), which no crawled page \
+                 draws any more: remove the entry"
+            ));
         }
     }
     wrong.sort();

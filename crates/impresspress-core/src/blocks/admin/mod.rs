@@ -2395,6 +2395,11 @@ pub(crate) mod page_link_tests {
     /// user (disable/delete) and a disabled one (enable), a custom role (delete), an active API key
     /// (revoke), a variable (edit, delete), a WRAP grant (delete), a request-log
     /// row (network detail) and a Feature block (detail, toggle).
+    /// The login family of the admin's session (`admin_msg`'s user):
+    /// [`seeded_ctx`] signs it in, and the htmx fixture's requests carry it as
+    /// the pipeline stamps it.
+    pub(crate) const ADMIN_FAMILY: &str = "admin_1-session";
+
     pub(crate) async fn seeded_ctx() -> (TestContext, Seeds) {
         // Crypto as well: the API-keys tab's Create form mints a key, and
         // `htmx_contract_tests` submits it. The fixture's own frame: every
@@ -2405,6 +2410,10 @@ pub(crate) mod page_link_tests {
         // account a signed-in admin is: a key the Create form mints is theirs,
         // and `api_keys.user_id` references the users table.
         ctx.seed_auth_user("admin_1").await;
+        // ... signed in on a device, as the pipeline leaves a request it
+        // authenticated: the API-keys Create form's handler checks the
+        // presenting session again after it mints the key.
+        crate::test_support::seed_login_family(&ctx, "admin_1", ADMIN_FAMILY).await;
         let user = crate::test_support::seed_user("member@example.com")
             .display_name("Member")
             .insert(&ctx)

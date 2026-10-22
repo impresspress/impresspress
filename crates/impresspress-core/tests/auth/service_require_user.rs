@@ -426,3 +426,65 @@ async fn a_minted_access_token_has_its_familys_session_row() {
         assert!(row.is_some(), "family {family} has its session row");
     }
 }
+
+/// SEC-02: an access JWT authenticates only while its login family is
+/// signed in. A token with no `family` claim names no family, so it is
+/// refused even though everything else about it checks out. No sign-in mints
+/// one, so it is signed here by hand, through the same crypto service and
+/// caller as [`MintAccessToken::mint_access_token`].
+#[tokio::test]
+async fn require_user_rejects_an_access_jwt_without_a_family() {
+    let (raw, ctx) = fixture().await;
+    let uid = seed_user_id(ctx.as_ref(), "familyless@example.com").await;
+
+    let claims = std::collections::BTreeMap::from([
+        ("sub".to_string(), serde_json::json!(uid)),
+        ("type".to_string(), serde_json::json!("access")),
+        ("iss".to_string(), serde_json::json!(TEST_ISSUER)),
+    ]);
+    let as_auth_ui = raw
+        .fixture()
+        .running_as(impresspress_core::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+    let token = wafer_core::clients::crypto::sign(&as_auth_ui, &claims, Duration::from_secs(3600))
+        .await
+        .expect("sign the family-less token");
+
+    let err = AuthServiceImpl
+        .require_user(&*ctx, &msg_with_bearer(&token))
+        .await
+        .expect_err("a token with no family must not authenticate");
+    assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
+}
+
+/// SEC-02: the `auth@v1` surface honours a revocation as the pipeline does.
+/// Deleting the family's session row — what every revocation does first —
+/// ends a token that authenticated a moment before.
+#[tokio::test]
+async fn require_user_rejects_a_token_whose_family_has_ended() {
+    let (raw, ctx) = fixture().await;
+    let uid = seed_user_id(ctx.as_ref(), "ended@example.com").await;
+    let token = raw
+        .mint_access_token(
+            &uid,
+            &[("family", serde_json::json!("fam-ended"))],
+            Duration::from_secs(3600),
+        )
+        .await;
+    assert_eq!(
+        AuthServiceImpl
+            .require_user(&*ctx, &msg_with_bearer(&token))
+            .await
+            .expect("the family is signed in")
+            .0,
+        uid
+    );
+
+    sessions::delete(ctx.as_ref(), "fam-ended")
+        .await
+        .expect("end the family");
+    let err = AuthServiceImpl
+        .require_user(&*ctx, &msg_with_bearer(&token))
+        .await
+        .expect_err("a token whose family has ended must not authenticate");
+    assert!(matches!(err, AuthError::Unauthorized), "got {err:?}");
+}

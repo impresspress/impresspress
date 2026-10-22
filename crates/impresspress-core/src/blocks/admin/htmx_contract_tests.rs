@@ -7,7 +7,7 @@ use std::sync::Arc;
 use wafer_run::{Block, Message};
 
 use super::{
-    page_link_tests::{seeded_ctx, PAGES, PROBE_VARIABLE},
+    page_link_tests::{seeded_ctx, ADMIN_FAMILY, PAGES, PROBE_VARIABLE},
     AdminBlock,
 };
 use crate::{
@@ -77,8 +77,14 @@ pub(crate) fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fi
     })
 }
 
+/// The site admin's request, as the pipeline leaves it after verifying their
+/// access token: identity, roles, the token's login family and its version.
 fn admin_caller(action: &str, path: &str) -> Message {
-    admin_msg(action, path)
+    let mut msg = admin_msg(action, path);
+    msg.set_meta(crate::crypto::META_AUTH_FAMILY, ADMIN_FAMILY);
+    // Minted at the account's version, which these pages never bump.
+    msg.set_meta(crate::crypto::META_AUTH_VERSION, "0");
+    msg
 }
 
 /// The rows the admin pages must keep reaching: each carries a request body

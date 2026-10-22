@@ -4,10 +4,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
     blocks::{
-        auth::{
-            helpers::{clear_auth_cookie, end_presented_access_token},
-            repo::{sessions, tokens},
-        },
+        auth::helpers::{clear_auth_cookie, end_all_families, end_presented_access_token},
         auth_ui::contracts::MessageResponse,
         crud,
     },
@@ -17,47 +14,31 @@ use crate::{
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id();
     if !user_id.is_empty() {
-        // [B12] Logout is an all-devices operation, so every session row goes.
-        // The row is the family's liveness (`auth::repo::sessions`), so this
-        // is what signs the devices out: a rotation racing it finds no row to
-        // touch and refuses. It runs before the refresh rows are revoked, for
-        // the reason `auth::helpers::end_family` gives for a single family.
-        // Leaving the rows behind is also what made `/b/userportal/sessions`
-        // list devices as signed in for weeks after logout. A failure is not
-        // reported as a successful logout.
-        //
-        // One race is left, and it is cosmetic: a sign-in of this account
-        // whose batch lands between this delete and the revocation below
-        // keeps its session row while its refresh row is revoked. Logout
-        // wins — that device cannot refresh — but it stays listed until the
-        // row expires or is revoked. A second delete after the revocation
-        // would only move the window, onto a sign-in landing between the two.
-        if let Err(e) = sessions::delete_all_for_user(ctx, user_id).await {
+        // [B12] Logout is an all-devices operation: every session row goes,
+        // then every refresh row is revoked (`end_all_families`, which owns
+        // that order and the race it leaves). The row is the family's
+        // liveness (`auth::repo::sessions`), so deleting it is what signs the
+        // devices out: their access tokens stop authenticating and a rotation
+        // racing it finds no row to touch and refuses. The refresh rows are
+        // revoked, not deleted, so the tombstones remain for reuse detection
+        // (SEC-032/039). A failure of either is not reported as a successful
+        // logout.
+        if let Err(e) = end_all_families(ctx, user_id)
+            .await
+            .map_err(|e| e.into_error())
+        {
             tracing::error!(
                 user_id = %user_id,
                 error = %e,
-                "logout: session-row deletion failed"
+                "logout: ending the account's devices failed"
             );
             return crud::db_error_internal(e, "Logout could not fully revoke the session");
         }
 
-        // SEC-032/039: revoke (don't delete) the user's refresh-token rows
-        // so the tombstones remain available for reuse detection. A
-        // revocation failure must NOT be reported as a successful logout —
-        // silently discarding the failure here (the old `.ok()`) told the
-        // caller everything worked while the rows still read as live.
-        if let Err(e) = tokens::revoke_all_for_user(ctx, user_id).await {
-            tracing::error!(
-                user_id = %user_id,
-                error = %e,
-                "logout: refresh-token revocation failed"
-            );
-            return crud::db_error_internal(e, "Logout could not fully revoke the session");
-        }
-
-        // SEC-042: the currently-presented access JWT stays structurally
-        // valid until its natural exp; blocklist its `jti`. Same fail-closed
-        // treatment as the refresh-token revocation above.
+        // SEC-042: blocklist the presented access JWT's `jti` as well. The
+        // row deletion above already ended it (an access token needs a live
+        // family, `crypto::verify_access_token`); this is the per-token
+        // record of the same end. Same fail-closed treatment.
         if let Err(e) = end_presented_access_token(ctx, msg).await {
             tracing::error!(
                 user_id = %user_id,
@@ -85,7 +66,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 mod tests {
     use super::*;
     use crate::{
-        blocks::auth::repo::jwt_blocklist,
+        blocks::auth::repo::{jwt_blocklist, sessions, tokens},
         crypto::{META_AUTH_EXP, META_AUTH_JTI},
         test_support::{auth_msg, output_is_error, output_status, FailingDbOpContext, TestContext},
     };
