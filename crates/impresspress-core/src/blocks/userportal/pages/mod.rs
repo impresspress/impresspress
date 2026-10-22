@@ -13,7 +13,6 @@ mod page_chrome_tests {
         blocks::auth::repo::{
             orgs::fixtures::seed_claimed_org,
             provider_links::{upsert, NewLink},
-            sessions::{insert, NewSession},
         },
         crypto::META_AUTH_FAMILY,
         test_support::{auth_msg, dom, output_html, TestContext},
@@ -63,23 +62,15 @@ mod page_chrome_tests {
             .await
             .unwrap();
         }
-        for (family, method) in [
-            ("fam-current", "password"),
-            ("fam-ms", "oauth.microsoft"),
-            ("fam-gh", "oauth.github"),
-            ("fam-setup", "bootstrap"),
+        // Fixed, distinct dates: the list's order, and the fixture taken
+        // from it, cannot depend on when the test ran.
+        for (family, method, at) in [
+            ("fam-current", "password", "2026-10-01T10:04:00Z"),
+            ("fam-ms", "oauth.microsoft", "2026-10-01T10:03:00Z"),
+            ("fam-gh", "oauth.github", "2026-10-01T10:02:00Z"),
+            ("fam-setup", "bootstrap", "2026-10-01T10:01:00Z"),
         ] {
-            insert(
-                &ctx,
-                NewSession {
-                    family: family.into(),
-                    user_id: USER.into(),
-                    auth_method: method.into(),
-                    expires_at: "2099-01-01T00:00:00Z".into(),
-                },
-            )
-            .await
-            .unwrap();
+            ctx.seed_auth_session(family, USER, method, at).await;
         }
         ctx
     }
@@ -263,8 +254,9 @@ mod page_chrome_tests {
 
     /// The pages' bodies, by name (`<!-- page: name -->` lines), each the
     /// inside of `main#content` less its scripts, with every timestamp
-    /// pinned to one date: the seeded rows are stamped with the time the
-    /// test ran.
+    /// pinned to one date: a linked account is stamped with the time the
+    /// test ran. (The sessions' order comes from their fixed dates, so
+    /// pinning their text changes nothing else.)
     async fn account_fixture() -> String {
         let ctx = seeded().await;
         let time = regex::Regex::new(

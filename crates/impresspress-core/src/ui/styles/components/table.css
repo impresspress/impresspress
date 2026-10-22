@@ -657,23 +657,29 @@ a.pagination__link:hover { background: var(--bg-hover); }
    and date (`auth_ui/pages/orgs.rs`), and a portal button's icon and order
    (`userportal/pages/admin_buttons.rs`) move into one line under the row's
    title (`.session-table__meta`, `.org-table__meta`,
-   `.portal-button-table__meta`). Without these the sessions list scrolled
-   sideways from 721 to about 960px, an org named by a long domain at 721,
-   and the buttons list at 721.
+   `.portal-button-table__meta`). So do an API key's prefix, user, date and
+   status (`admin/pages/users.rs`, `.api-key-table__meta`). Without these the
+   sessions list scrolled sideways from 721 to about 960px, an org named by a
+   long domain at 721, the buttons list at 721, and the API keys list from
+   721 to 960.
 
    The headers are hidden by position, the cells by their label: a column
-   moved in `sessions::COLUMNS`, `orgs::COLUMNS` or `BUTTON_COLUMNS` must
-   move here too. */
-.session-table, .org-table, .portal-button-table { container-type: inline-size; }
+   moved in `sessions::COLUMNS`, `orgs::COLUMNS`, `BUTTON_COLUMNS` or
+   `API_KEY_COLUMNS` must move here too. */
+.session-table, .org-table, .portal-button-table, .api-key-table { container-type: inline-size; }
 .session-table { container-name: session-table; }
 .org-table { container-name: org-table; }
 .portal-button-table { container-name: portal-button-table; }
-.session-table__meta, .org-table__meta, .portal-button-table__meta {
+.api-key-table { container-name: api-key-table; }
+.session-table__meta, .org-table__meta, .portal-button-table__meta, .api-key-table__meta {
 	display: none; margin-top: var(--space-1);
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
 /* Each date stays beside its label: the line breaks between the three. */
 .session-table__meta > span { white-space: nowrap; }
+/* An API key's name is the operator's own text, often one word joined by
+   underscores: it breaks anywhere rather than set the table's minimum. */
+.api-key-table .data-table__title { overflow-wrap: anywhere; }
 /* A portal button's path (`userportal/pages/admin_buttons.rs`) may be a
    pasted URL whose query is one long token: it breaks anywhere, or it sets
    the table's minimum and the list scrolled sideways at 721 and 800px. */
@@ -687,6 +693,11 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	.org-table td:is([data-label="Verified via"], [data-label="Claimed"]),
 	.org-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
 	.org-table .org-table__meta { display: block; }
+}
+@container api-key-table (max-width: 48rem) {
+	.api-key-table td:is([data-label="Prefix"], [data-label="User"], [data-label="Created"], [data-label="Status"]),
+	.api-key-table > .data-table > table > thead > tr > th:is(:nth-child(1), :nth-child(3), :nth-child(4), :nth-child(5)) { display: none; }
+	.api-key-table .api-key-table__meta { display: block; }
 }
 @container portal-button-table (max-width: 30rem) {
 	.portal-button-table td:is([data-label="Icon"], [data-label="Order"]),

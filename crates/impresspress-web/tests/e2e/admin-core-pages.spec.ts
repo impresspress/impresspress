@@ -218,11 +218,17 @@ test.describe('core admin pages', () => {
   test('the portal buttons list fits its frame from the phone to 1280px', async ({ page }) => {
     await loginAsAdmin(page);
     const stamp = Date.now();
-    const labels = [`Northwind Traders production analytics dashboard ${stamp}`, `Lambton Quay opening hours ${stamp}`];
+    const labels = [
+      `Northwind Traders production analytics dashboard ${stamp}`,
+      `Lambton Quay opening hours ${stamp}`,
+      // A host name as the label: no space to break at.
+      `northwind-traders-production.example.com/reports/${stamp}`,
+    ];
     await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
     for (const [label, path] of [
       [labels[0], '/b/storage/northwind-traders-production/activities/wellington-cbd-store-lambton-quay/opening-hours'],
       [labels[1], 'https://northwind-traders-production.example.com/activities/wellington-cbd-store-lambton-quay/opening-hours?listing=listing_01HZX9Q2KZp7a9XyTqAbCdEfGhIjKlMnOpQrStUvWx'],
+      [labels[2], '/b/products/'],
     ]) {
       await page.locator('#label').fill(label);
       await page.locator('#path').fill(path);
@@ -253,9 +259,12 @@ test.describe('core admin pages', () => {
    * The card a new API key is shown in, named by what an operator pastes
    * into the name: it fits its frame at every width from the phone to 1280,
    * the key breaking anywhere and the name too (card.css `.api-key-value`,
-   * `.api-key-name-hint`).
+   * `.api-key-name-hint`). Then the list the key joins, after a reload: it
+   * fits too, because the name breaks anywhere and the list moves the
+   * prefix, user, date and status under the name when it is narrow
+   * (table.css `.api-key-table`).
    */
-  test('the new API key card fits its frame from the phone to 1280px', async ({ page }) => {
+  test('the new API key card and the keys list fit their frame from the phone to 1280px', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/users?tab=api-keys', { waitUntil: 'networkidle' });
     await page.locator('[data-action="modal-open"][data-modal-target="create-api-key"]').first().click();
@@ -265,12 +274,19 @@ test.describe('core admin pages', () => {
     await dialog.getByRole('button', { name: 'Create' }).click();
     const card = page.locator('#users-tab-content .card', { hasText: 'Key created' });
     await expect(card).toBeVisible();
-    const found: Record<number, unknown> = {};
+    const found: Record<string, unknown> = {};
     for (const width of WIDTHS) {
       await page.setViewportSize({ width, height: 900 });
       const r = await layout(page);
-      if (r.page > 0 || r.past.length || r.cards.length) found[width] = r;
+      if (r.page > 0 || r.past.length || r.cards.length) found[`card at ${width}`] = r;
     }
-    expect(found, 'the key card overflowed its frame').toEqual({});
+    for (const width of WIDTHS) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/b/admin/users?tab=api-keys', { waitUntil: 'networkidle' });
+      await expect(page.locator('.api-key-table tbody tr', { hasText: 'NORTHWIND_TRADERS' }).first()).toBeVisible();
+      const r = await layout(page);
+      if (isWrong(r, ['Create API key'])) found[`list at ${width}`] = r;
+    }
+    expect(found, 'the key card or the keys list overflowed its frame').toEqual({});
   });
 });

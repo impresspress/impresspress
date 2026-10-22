@@ -2243,6 +2243,7 @@ mod tests {
         (".session-table__meta", None),
         (".org-table__meta", None),
         (".portal-button-table__meta", None),
+        (".api-key-table__meta", None),
         (".api-key-copy-hint", None),
         // The dev workspace (`blocks/dev/assets/dev.css`): its file list,
         // its progress steps and the compiler's version.

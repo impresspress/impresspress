@@ -587,17 +587,30 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             } else {
                 None
             };
+            let status = html! {
+                @if let Some(reason) = retired {
+                    (badge(BadgeVariant::Danger, reason))
+                } @else {
+                    (badge(BadgeVariant::Success, "Active"))
+                }
+            };
             components::TableRow::new(vec![
                 html! { code { (record.key_prefix) "..." } },
-                html! { (record.name) },
+                html! {
+                    span .data-table__title { (record.name) }
+                    // The prefix, user, date and status columns, when the
+                    // table is too narrow for them.
+                    span .api-key-table__meta {
+                        span { code { (record.key_prefix) "..." } " ·" } " "
+                        span { (super::user_cell(&record.user_id, &emails)) " ·" } " "
+                        span { "Created " (components::timestamp(created)) " ·" } " "
+                        span { (status) }
+                    }
+                },
                 super::user_cell(&record.user_id, &emails),
                 html! { span .text-muted { (components::timestamp(created)) } },
                 html! {
-                    @if let Some(reason) = retired {
-                        (badge(BadgeVariant::Danger, reason))
-                    } @else {
-                        (badge(BadgeVariant::Success, "Active"))
-                    }
+                    (status)
                 },
                 html! {
                     // Only a live key has anything left to revoke: an expiry
@@ -617,14 +630,16 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             ])
         }).collect();
 
-        (components::DataTable::new(&API_KEY_COLUMNS)
-            .rows(rows)
-            .empty_state(
-                "No API keys",
-                "A key lets a script call the API as the account that created it.",
-                Some(create_api_key_action(Action::secondary)),
-            )
-            .render())
+        div .api-key-table {
+            (components::DataTable::new(&API_KEY_COLUMNS)
+                .rows(rows)
+                .empty_state(
+                    "No API keys",
+                    "A key lets a script call the API as the account that created it.",
+                    Some(create_api_key_action(Action::secondary)),
+                )
+                .render())
+        }
 
         // Create API key modal
         (components::modal("create-api-key", "Create API key", html! {
@@ -672,6 +687,10 @@ const ROLE_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Actions").actions(),
 ];
 
+/// The API keys list's columns. The name is the operator's own text and
+/// breaks anywhere; narrow, the prefix, user, date and status move into one
+/// line under it (table.css `.api-key-table`, which hides the headers by
+/// position: a column moved here must move there).
 const API_KEY_COLUMNS: [components::TableCol<'static>; 6] = [
     components::TableCol::new("Prefix"),
     components::TableCol::new("Name").primary(),

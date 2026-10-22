@@ -66,7 +66,8 @@ fn render_orgs_body(orgs: &[orgs::OrgRow]) -> Markup {
                     // The other two columns, when the table is too narrow
                     // for them.
                     span .org-table__meta {
-                        (verified_via(o.verified_via.as_deref())) " · claimed " (timestamp(&o.created_at))
+                        span { (verified_via(o.verified_via.as_deref())) " ·" } " "
+                        span { "claimed " (timestamp(&o.created_at)) }
                     }
                 },
                 html! { (verified_via(o.verified_via.as_deref())) },

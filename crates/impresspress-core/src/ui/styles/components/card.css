@@ -115,7 +115,7 @@
 	border-radius: var(--radius-sm);
 	color: var(--text-muted);
 }
-.linked-provider__login { flex: 1; min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+.linked-provider__login { flex: 1; font-weight: 500; overflow-wrap: anywhere; }
 .linked-provider__date { font-size: var(--text-sm); color: var(--text-muted); }
 
 /* ===== Phase 4 PR-3: Per-surface mobile rules ===== */

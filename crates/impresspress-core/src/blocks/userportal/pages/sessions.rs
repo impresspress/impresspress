@@ -109,18 +109,17 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
             };
             TableRow::new(vec![
                 html! {
-                    span .data-table__title { (sign_in_method(&r.auth_method)) }
+                    span .data-table__title id=(format!("session-{}", r.family)) { (sign_in_method(&r.auth_method)) }
                     @if is_current {
                         " "
                         (badge(BadgeVariant::Success, "Current session"))
                     }
                     // The three date columns, when the table is too narrow
-                    // for them.
+                    // for them. Each separator ends the pair before it, so a
+                    // line never starts with one.
                     span .session-table__meta {
-                        span { "Last used " (components::timestamp(&r.last_used_at)) }
-                        " · "
-                        span { "Started " (components::timestamp(&r.created_at)) }
-                        " · "
+                        span { "Last used " (components::timestamp(&r.last_used_at)) " ·" } " "
+                        span { "Started " (components::timestamp(&r.created_at)) " ·" } " "
                         span { "Expires " (components::timestamp(&r.expires_at)) }
                     }
                 },
@@ -128,13 +127,17 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
                 // which the visual-baseline suite masks, so per-run session
                 // times don't make the screenshots unreproducible.
                 components::timestamp(&r.created_at),
-                components::timestamp(&r.last_used_at),
+                html! { span id=(format!("last-used-{}", r.family)) { (components::timestamp(&r.last_used_at)) } },
                 components::timestamp(&r.expires_at),
                 // Quiet in the row: the confirmation is the guard, and a
                 // filled danger button on every row shouted over the list.
+                // Named by its session ("Revoke Password 2026-10-22 09:14
+                // UTC"), so a list of them is not six bare "Revoke"s.
                 html! {
                     button .btn .btn--ghost-danger .btn--sm
                         type="button"
+                        id=(format!("revoke-{}", r.family))
+                        aria-labelledby=(format!("revoke-{0} session-{0} last-used-{0}", r.family))
                         hx-delete=(format!("/b/userportal/sessions/{}", r.family))
                         hx-target="closest tr"
                         hx-swap="outerHTML"
@@ -392,12 +395,30 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("btn--danger"), "{html}");
+        // Each Revoke is named by its session: its own label, the method
+        // and when the device was last used.
+        assert!(
+            html.contains(
+                r#"id="revoke-fam-here" aria-labelledby="revoke-fam-here session-fam-here last-used-fam-here""#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<span class="data-table__title" id="session-fam-here">Password</span>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span id="last-used-fam-here"><time"#),
+            "{html}"
+        );
         // Narrow, the three dates are one line under the method, each
         // beside its label.
         assert!(
             html.contains(
                 r#"<span class="session-table__meta"><span>Last used <time class="datetime""#
-            ),
+            ) && html.contains(r#" UTC</time> ·</span> <span>Started <time"#),
             "{html}"
         );
         assert_eq!(

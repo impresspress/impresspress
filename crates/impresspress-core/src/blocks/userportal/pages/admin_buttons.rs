@@ -159,7 +159,9 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
             let label = btn.str_field("label");
             components::TableRow::new(vec![
                 html! {
-                    span .data-table__title { (label) }
+                    // A label may be a host name ("northwind….example.com/
+                    // reports"): it breaks after its separators.
+                    span .data-table__title { (components::breakable_id(label)) }
                     // The icon and order columns, when the table is too
                     // narrow for them.
                     span .portal-button-table__meta {
