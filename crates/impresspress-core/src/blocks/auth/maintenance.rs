@@ -7,6 +7,11 @@
 //! fastest — rotation revokes rather than deletes, so every 30-minute refresh
 //! left a tombstone forever.
 //!
+//! Deleting an expired `sessions` row ends nothing that was still alive. The
+//! row is the login family's liveness, which access tokens are checked
+//! against (`repo::sessions::is_live`), but that check already refuses a row
+//! past its `expires_at`, and the family's refresh token expired with it.
+//!
 //! Two entry points, both of which exist on every platform today:
 //!
 //! 1. [`sweep_if_due`], deferred by `helpers::issue_tokens_and_cookie` to run

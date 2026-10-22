@@ -11,9 +11,10 @@
 //! Before the drop, the runtime answers `require_user` for a caller block
 //! through the real dispatch: the service verifies an access JWT in the
 //! auth block's frame for that call, reading the JWT secret through that
-//! frame's `config_get` (the caller's per-call config over the runtime's) and
-//! the user's `auth_version` through its `call_block`. A token signed with
-//! another secret is refused, so the secret it read is the deployment's.
+//! frame's `config_get` (the caller's per-call config over the runtime's), and
+//! the user's `auth_version` and the token's login-family row through its
+//! `call_block`. A token signed with another secret is refused, so the secret
+//! it read is the deployment's.
 //!
 //! The runtime is the one the server binary builds and boots
 //! (`build_native_runtime` + `boot_native`), carrying every block
@@ -84,8 +85,39 @@ impl wafer_run::Block for WhoAmI {
     }
 }
 
-/// An access JWT for `sub`, signed the way auth-ui signs one: with the key
-/// derived from `master_secret` for `impresspress/auth-ui`.
+/// The login family the tokens below belong to. [`sign_in_family`] gives it
+/// the session row a sign-in writes, without which no access token of it
+/// authenticates.
+const FAMILY: &str = "fam-runtime-drop";
+
+/// Write [`FAMILY`]'s session row for `user_id`, as a sign-in does — test
+/// fixture setup, straight into the platform database.
+async fn sign_in_family(
+    database: &Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+    user_id: &str,
+) {
+    let signed_in_at = "2026-01-01T00:00:00Z";
+    database
+        .create(
+            "wafer_run__auth__sessions",
+            HashMap::from([
+                ("family".to_string(), serde_json::json!(FAMILY)),
+                ("user_id".to_string(), serde_json::json!(user_id)),
+                ("auth_method".to_string(), serde_json::json!("password")),
+                ("created_at".to_string(), serde_json::json!(signed_in_at)),
+                ("last_used_at".to_string(), serde_json::json!(signed_in_at)),
+                (
+                    "expires_at".to_string(),
+                    serde_json::json!("2099-01-01T00:00:00Z"),
+                ),
+            ]),
+        )
+        .await
+        .expect("write the login family's session row");
+}
+
+/// An access JWT for `sub` in [`FAMILY`], signed the way auth-ui signs one:
+/// with the key derived from `master_secret` for `impresspress/auth-ui`.
 fn access_token(master_secret: &str, sub: &str) -> String {
     use wafer_block_crypto::primitives;
 
@@ -99,6 +131,7 @@ fn access_token(master_secret: &str, sub: &str) -> String {
             serde_json::json!("http://localhost:5173"),
         ),
         ("roles".to_string(), serde_json::json!(["admin"])),
+        ("family".to_string(), serde_json::json!(FAMILY)),
     ]);
     primitives::jwt_sign(claims, Duration::from_secs(3600), key.as_bytes()).expect("sign")
 }
@@ -201,6 +234,7 @@ async fn a_runtime_that_served_auth_checks_is_freed_when_dropped() {
         .iter()
         .find(|r| r.data.get("email") == Some(&serde_json::json!(ADMIN_EMAIL)))
         .expect("the bootstrap admin exists");
+    sign_in_family(&database, &admin.id).await;
 
     assert_eq!(
         whoami(&wafer, &access_token(&secret, &admin.id)).await,

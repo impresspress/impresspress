@@ -414,6 +414,7 @@ async fn last_login_at(database: &Arc<dyn DatabaseService>) -> Option<String> {
 /// ones it left to run after it.
 struct Cost {
     status: u16,
+    body: serde_json::Value,
     response: Vec<RoundTrip>,
     after: Vec<RoundTrip>,
 }
@@ -436,37 +437,31 @@ impl Cost {
     }
 }
 
-/// POST a password sign-in as the Cloudflare entry runs a request: dispatch
-/// inside a fresh [`after_response::scope`], then the audit row, then the
-/// deferred tasks.
-async fn sign_in(site: &Site, email: &str, password: &str) -> Cost {
+/// Send `method path` with `headers` and `body` as the Cloudflare entry runs
+/// a request: dispatch inside a fresh [`after_response::scope`], then the
+/// audit row, then the deferred tasks.
+async fn run_request(
+    site: &Site,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> Cost {
     deferred::set_mode(DeferMode::Queued);
     site.ledger.take();
 
-    let body = serde_json::json!({ "email": email, "password": password }).to_string();
-    let msg = http_codec::build_http_message(
-        "POST",
-        "/b/auth/api/login",
-        "",
-        "127.0.0.1",
-        [
-            ("host", "localhost"),
-            ("origin", "http://localhost"),
-            ("sec-fetch-site", "same-origin"),
-            ("content-type", "application/json"),
-            ("accept", "application/json"),
-        ],
-    );
+    let msg =
+        http_codec::build_http_message(method, path, "", "127.0.0.1", headers.iter().copied());
     let after = AfterResponse::new();
     let wafer = Arc::clone(&site.wafer);
-    let status = after_response::scope(std::rc::Rc::clone(&after), async move {
-        http_codec::collect_http_response(
+    let (status, body) = after_response::scope(std::rc::Rc::clone(&after), async move {
+        let parts = http_codec::collect_http_response(
             wafer
-                .run("site-main", msg, InputStream::from_bytes(body.into_bytes()))
+                .run("site-main", msg, InputStream::from_bytes(body))
                 .await,
         )
-        .await
-        .status
+        .await;
+        (parts.status, parts.body)
     })
     .await;
     let response = site.ledger.take();
@@ -482,9 +477,29 @@ async fn sign_in(site: &Site, email: &str, password: &str) -> Cost {
     let after = site.ledger.take();
     Cost {
         status,
+        body: serde_json::from_slice(&body).unwrap_or_default(),
         response,
         after,
     }
+}
+
+/// POST a password sign-in.
+async fn sign_in(site: &Site, email: &str, password: &str) -> Cost {
+    let body = serde_json::json!({ "email": email, "password": password }).to_string();
+    run_request(
+        site,
+        "POST",
+        "/b/auth/api/login",
+        &[
+            ("host", "localhost"),
+            ("origin", "http://localhost"),
+            ("sec-fetch-site", "same-origin"),
+            ("content-type", "application/json"),
+            ("accept", "application/json"),
+        ],
+        body.into_bytes(),
+    )
+    .await
 }
 
 /// A warm sign-in's response waits on four sequential D1 round trips, five
@@ -631,5 +646,59 @@ async fn the_bookkeeping_a_sign_in_defers_still_runs() {
             .await
             .is_some_and(|at| at >= first_stamp),
         "the deferred stamp must land"
+    );
+}
+
+/// An authenticated request checks its access token's database facts in ONE
+/// round trip: `crypto::verify_access_token` reads the `jti` blocklist, the
+/// login family's session row and (on a cache miss) the account's
+/// `auth_version` with `futures::join!`. The family read is the statement
+/// SEC-02 adds to every JWT-authenticated request: it costs D1 one more
+/// query, not one more round trip. Revocation must bite at once, so it is
+/// not cached, and it is read on every request, the warm one included.
+///
+/// "Warm" is the second request with the token, as for the sign-in above: the
+/// first fills the isolate's schema cache (whose probes would otherwise sit
+/// between a read and the next) and the `auth_version` cache.
+#[tokio::test]
+async fn an_access_token_is_checked_in_one_round_trip() {
+    let site = start().await;
+    let signed_in = sign_in(&site, ADMIN_EMAIL, ADMIN_PASSWORD).await;
+    assert_eq!(signed_in.status, 200);
+    let bearer = format!(
+        "Bearer {}",
+        signed_in.body["access_token"]
+            .as_str()
+            .expect("the sign-in hands out an access token")
+    );
+    let headers = [
+        ("host", "localhost"),
+        ("accept", "application/json"),
+        ("authorization", bearer.as_str()),
+    ];
+    let me = || run_request(&site, "GET", "/b/auth/api/me", &headers, Vec::new());
+    let cold = me().await;
+    assert_eq!(cold.status, 200, "{}", Cost::describe(&cold.response));
+
+    let warm = me().await;
+    let trace = Cost::describe(&warm.response);
+    assert_eq!(warm.status, 200, "the token authenticates\n{trace}");
+    let reads_of = |table: &str| {
+        warm.response
+            .iter()
+            .filter(|t| t.sql.contains(&format!("FROM \"{table}\"")))
+            .map(|t| t.wave)
+            .collect::<Vec<_>>()
+    };
+    let family = reads_of("wafer_run__auth__sessions");
+    assert_eq!(
+        family.len(),
+        1,
+        "the login family is read once per request, uncached\n{trace}"
+    );
+    assert_eq!(
+        reads_of("wafer_run__auth__jwt_blocklist"),
+        family,
+        "the family read shares the blocklist read's round trip\n{trace}"
     );
 }

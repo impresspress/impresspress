@@ -11,8 +11,10 @@
 //! `require_role(Admin)` additionally honours an unexpired bootstrap token
 //! presented as a Bearer, which is how the first admin is created.
 //!
-//! The session table is not a credential store: a row there is a login family
-//! for the userportal device list (B12), never something a request presents.
+//! The session table holds no credential a request presents. A row there is a
+//! login family (B12): a device on the userportal list, and the liveness every
+//! access token is checked against — a token whose family has no live row is
+//! refused ([`crate::crypto::verify_access_token`], SEC-02).
 //!
 //! No document states the cross-block contract; code does.
 //! [`crate::blocks::register_auth`] installs this impl behind wafer-core's
@@ -139,8 +141,8 @@ fn is_expired(expires_at: &str) -> bool {
 /// Internal credential classification used by all three require_* methods.
 enum Creds {
     /// A verified access JWT; the payload is its `sub`, already checked
-    /// against the signature, `type`, issuer, blocklist and `auth_version`
-    /// rules by [`crate::crypto::verify_access_token`].
+    /// against the signature, `type`, issuer, blocklist, login-family and
+    /// `auth_version` rules by [`crate::crypto::verify_access_token`].
     Jwt(String),
     /// A presented token that is not an access JWT, as the sha256 of the raw
     /// token — the lookup key in `wafer_run__auth__personal_access_tokens`.
@@ -151,7 +153,7 @@ enum Creds {
 ///
 /// A token that verifies as an access JWT is that; any other token is a
 /// candidate PAT; no token at all is unauthenticated. A token whose
-/// verification could not be completed (a failed blocklist or
+/// verification could not be completed (a failed blocklist, login-family or
 /// `auth_version` read) is neither: it is `AuthError::Backend` with the
 /// error [`crate::crypto::verify_access_token`] classified. The token is whichever
 /// of the `Authorization: Bearer` header and the `auth_token` cookie the
@@ -183,9 +185,8 @@ async fn extract_creds(ctx: &dyn Context, msg: &Message) -> Result<Creds, AuthEr
     if let Some(claims) = crate::crypto::verify_access_token(ctx, &bearer, &secret, &expected_iss)
         .await
         .map_err(AuthError::Backend)?
-        .filter(|c| c.sub.as_deref().is_some_and(|s| !s.is_empty()))
     {
-        return Ok(Creds::Jwt(claims.sub.unwrap_or_default()));
+        return Ok(Creds::Jwt(claims.sub));
     }
     Ok(Creds::Pat(hash_token(&bearer)))
 }
@@ -236,6 +237,12 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // denies the users-table read and every such request is refused
         // with 403 "Access denied", the same as the blocklist read above.
         wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__users"),
+        // [SEC-02] The same step asks whether the token's login family is
+        // still signed in (`repo::sessions::is_live`), reading its session
+        // row in the router's context on every request bearing an access
+        // JWT. Without this grant WRAP denies the read and every such request
+        // is refused with 403 "Access denied", the same as the reads above.
+        wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__sessions"),
         // The API-key half of the same step: `blocks::auth::authenticate_api_key`
         // looks the key up in the router's context on every request bearing
         // `Authorization: ApiKey …`. Without this grant WRAP denies the read
@@ -262,11 +269,11 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // ownership check that precedes it reads the session row, not this
         // table.
         wafer_run::ResourceGrant::read_write("impresspress/userportal", "wafer_run__auth__tokens"),
-        // Revoking the session the request itself belongs to also ends the
-        // access token it presented (`auth::helpers::end_presented_access_token`),
-        // or the page would say "signed out on this device" while that token
-        // kept working until its expiry. Append-only: the helper only ever
-        // adds a blocklist row.
+        // Revoking the session the request itself belongs to also blocklists
+        // the access token it presented (`auth::helpers::end_presented_access_token`),
+        // the per-token record logout writes too; deleting the family's row
+        // is what ends that token. Append-only: the helper only ever adds a
+        // blocklist row.
         wafer_run::ResourceGrant::append(
             "impresspress/userportal",
             "wafer_run__auth__jwt_blocklist",

@@ -19,6 +19,48 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: revoking a device ends its access token; a password change ends every device and API key
+
+**What changes.**
+
+- **Revoking a device ends its access token at once.** An access token now
+  authenticates only while its device, the row on **Account → Sessions**, is
+  signed in. Before, revoking a device stopped its refresh token, but the
+  access token it already held kept working until it expired: 30 minutes by
+  default (`WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS`, at most 24 hours).
+  The same holds for every other way a device ends: logout, detected reuse of
+  a stolen refresh token, a password change, and expiry.
+- **Changing or resetting a password signs out every device and revokes the
+  account's API keys.** Before, the devices' refresh tokens were revoked and
+  their access tokens retired, but the devices stayed listed as signed in,
+  and API keys kept working. A key is checked against its own row and its
+  owner's status, not the account's devices or sign-in version, so a key
+  minted by whoever held the old password survived a password reset. A key
+  revoked this way keeps its row, marked revoked (`revoked_at`) exactly as a
+  key revoked by hand is; create new keys after the change. A key-creation
+  request that was already under way when the password changed is refused,
+  and the key it wrote is revoked, as is one made on a session someone signed
+  in with the old password while the change ran: creating a key checks the
+  session (its device and its sign-in version) or key that asked for it again
+  once the key exists. The change ends the devices, then retires every token
+  issued before it, then revokes the keys, which is the order that makes
+  that check sufficient. An admin changing a user's
+  roles still leaves that user's keys alone.
+- **A change or reset that could not sign the devices out or revoke the keys
+  answers an error,** not success. A reset gives the link back, so retrying it
+  finishes the job. A change is retried by signing in with the new password
+  and changing it again.
+
+**Cost.** Every request carrying an access token reads its device row: one
+more D1 statement per request, read in the same round trip as the token's
+other checks, so it adds no latency. It is not cached, because a revocation
+must take effect on the next request.
+
+**Deploying this release** adds no migration and signs nobody out, with one
+exception: a device whose row an earlier auth upgrade emptied, and which has
+not refreshed since (see the previous entry), is now signed out at its next
+request rather than at its next refresh.
+
 ### Auth: a revoked device stays revoked, even mid-refresh
 
 **What changes.** A signed-in device is a row in `wafer_run__auth__sessions`,

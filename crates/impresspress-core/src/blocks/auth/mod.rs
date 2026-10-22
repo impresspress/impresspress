@@ -573,8 +573,8 @@ pub(crate) async fn current_auth_version(
 /// is answered with.
 ///
 /// Both request-time credential checks read the database —
-/// `crate::crypto::verify_access_token` (the JWT blocklist and
-/// `auth_version`) and [`authenticate_api_key`] (the key, its user and their
+/// `crate::crypto::verify_access_token` (the JWT blocklist, the login
+/// family's session row and `auth_version`) and [`authenticate_api_key`] (the key, its user and their
 /// roles) — and a failed read decides neither way: the request is not
 /// authenticated, and it is not anonymous either, because answering it as
 /// anonymous tells a signed-in client it has been signed out. So the request
@@ -669,7 +669,7 @@ fn invalidate_auth_version_cache(user_id: &str) {
 /// the cache (or vice versa).
 ///
 /// The single call site for every security-relevant mutation: password
-/// change and reset ([`end_sessions_after_password_change`]), disable/soft-delete
+/// change and reset ([`end_credentials_after_password_change`]), disable/soft-delete
 /// (`admin::ops::{set_user_disabled,delete_user,update_user_fields}`), and
 /// role change (`admin::iam::{handle_assign_role,handle_remove_role,
 /// cascade_role_rename}` and `admin::ops::delete_role`).
@@ -695,43 +695,98 @@ pub(crate) async fn bump_auth_version(
     Ok(())
 }
 
-/// End every session `user_id` holds after its password changed
-/// (`auth_ui::api::{change_password,reset_password}`).
+/// End everything durable `user_id` holds after its password changed
+/// (`auth_ui::api::{change_password,reset_password}`): every device, every
+/// access token already issued, and every API key.
 ///
-/// The [`bump_auth_version`] is the invalidation: it retires already-issued
-/// access JWTs (`crate::crypto::verify_access_token`) and every refresh family
-/// issued before it (`auth_ui::api::refresh`), including one whose row a
-/// racing sign-in writes after the revocation below has run. It runs whether
-/// or not that revocation succeeded, and its failure is the one returned: the
-/// credential has already changed, so an account whose version did not move
-/// must not be answered as secured. There is no cross-op transaction primitive
-/// available to block code, so the error is the durable partial-failure
-/// signal.
+/// Three steps, in this order, and all three always run:
 ///
-/// The revocation marks the rows revoked, keeping them as reuse-detection
-/// tombstones (SEC-032/039), so a later presentation takes the row-level
-/// refusal without reading the account. It is housekeeping, the status
-/// `refresh`'s stale-family refusal gives it too: a failed revocation is
-/// logged, and the bump still refuses every token it left live.
-pub(crate) async fn end_sessions_after_password_change(
+/// 1. [`helpers::end_all_families`]: delete the account's session rows, then
+///    revoke its refresh rows. Deleting the rows is what signs the devices
+///    out — their access tokens stop authenticating
+///    (`crate::crypto::verify_access_token` requires a live family) and their
+///    refresh is refused — and it empties the device list. The refresh rows
+///    are revoked rather than deleted, as reuse-detection tombstones
+///    (SEC-032/039).
+/// 2. [`bump_auth_version`]. It retires every access JWT and refresh family
+///    issued before it, including one whose rows a racing sign-in with the
+///    old password writes after step 1 has run: that sign-in read the version
+///    before it checked the password.
+/// 3. [`repo::api_keys::revoke_all_for_user`]. A key does not check
+///    `auth_version`, deliberately (every role change bumps it too), so
+///    nothing else would end a key the old password's holder minted.
+///
+/// **Why the bump comes before the keys.** A request creating a key checks
+/// its credential again after it writes the key
+/// ([`presented_credential_is_live`]): an access token's family row AND its
+/// version against the account's, read uncached. Every credential the old
+/// password could reach is dead to that check once steps 1 and 2 have run —
+/// a family that predates the change has no row, and one a racing old-password
+/// sign-in wrote after step 1 carries the version step 2 passed. So a key
+/// whose re-check runs after step 3 began was created on a dead credential
+/// and is withdrawn, and a key whose re-check ran before it was already
+/// written when step 3 revoked the account's keys. With the keys revoked
+/// before the bump, a key created on the racing sign-in's family between the
+/// two would pass its re-check and survive.
+///
+/// **Failure policy.** The password has already changed when this runs, and
+/// there is no cross-op transaction primitive available to block code, so the
+/// returned error is the durable partial-failure signal. The steps after a
+/// failed one still run, so one failure costs only what that step covers.
+///
+/// - **Fails closed** (the first such error, in step order, is returned, and
+///   the caller does not answer success):
+///   - session-row deletion: the devices would stay signed in, and listed,
+///     until the bump is read, which logout already treats as a failure;
+///   - the bump: an account whose version did not move;
+///   - API-key revocation: it leaves a credential nothing else reaches.
+/// - **Logged only:** refresh-row revocation after the rows were deleted.
+///   Nothing it covers is left alive — the families have no rows, and the
+///   bump refuses their tokens as well — so a failure there is housekeeping.
+///
+/// A reset gives the link back on an error, and the retry repeats every step;
+/// a change is retried by changing the password again.
+pub(crate) async fn end_credentials_after_password_change(
     ctx: &dyn wafer_run::context::Context,
     user_id: &str,
 ) -> Result<(), WaferError> {
-    if let Err(e) = repo::tokens::revoke_all_for_user(ctx, user_id).await {
-        tracing::warn!(
-            user_id = %user_id,
-            error = %e,
-            "password changed but refresh-token revocation failed; \
-             the auth_version bump still refuses those tokens"
-        );
-    }
-    bump_auth_version(ctx, user_id).await.inspect_err(|e| {
+    let devices = match helpers::end_all_families(ctx, user_id).await {
+        Ok(()) => Ok(()),
+        Err(helpers::DevicesNotEnded::RefreshRowsLive(e)) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %e,
+                "password changed but refresh-token revocation failed; \
+                 the devices' rows are gone and the auth_version bump refuses those tokens"
+            );
+            Ok(())
+        }
+        Err(helpers::DevicesNotEnded::StillSignedIn(e)) => {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "password changed but its devices could not be signed out"
+            );
+            Err(e)
+        }
+    };
+    let version = bump_auth_version(ctx, user_id).await;
+    if let Err(e) = &version {
         tracing::error!(
             user_id = %user_id,
             error = %e,
             "password changed but auth_version bump failed"
         );
-    })
+    }
+    let keys = repo::api_keys::revoke_all_for_user(ctx, user_id).await;
+    if let Err(e) = &keys {
+        tracing::error!(
+            user_id = %user_id,
+            error = %e,
+            "password changed but its API keys could not be revoked"
+        );
+    }
+    devices.and(version).and(keys)
 }
 
 #[cfg(test)]
@@ -749,6 +804,40 @@ mod auth_version_cache_tests {
             .insert(&ctx.fixture())
             .await
             .id
+    }
+
+    /// The key-create re-check (`presented_credential_is_live`) reads the
+    /// account's version from the row, not through this cache. On Cloudflare
+    /// a bump invalidates only its own isolate's entry, so another isolate
+    /// can hold the old version for up to the TTL; a re-check through the
+    /// cache would pass a token the bump retired, and a key created on a
+    /// session signed in with the old password would survive the change
+    /// (E2-review F3). Here the cache holds that other isolate's stale view.
+    #[tokio::test]
+    async fn the_key_create_recheck_ignores_a_stale_version_cache() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let uid = seed(&ctx).await;
+        crate::test_support::seed_login_family(&ctx, &uid, "fam-stale").await;
+        repo::users::bump_auth_version(&ctx.fixture(), &uid)
+            .await
+            .unwrap();
+        // Another isolate's view: version 0, cached just now.
+        auth_version_cache().lock().unwrap().insert(
+            uid.clone(),
+            AuthVersionCacheEntry {
+                version: 0,
+                cached_at_ms: crate::util::now_millis() as i64,
+            },
+        );
+        let mut msg = crate::test_support::auth_msg("create", "/b/auth/api/api-keys", &uid);
+        msg.set_meta(crate::crypto::META_AUTH_FAMILY, "fam-stale");
+        msg.set_meta(crate::crypto::META_AUTH_VERSION, "0");
+        assert!(
+            !presented_credential_is_live(&ctx, &msg).await.unwrap(),
+            "a token behind the account's stored version is dead, whatever the cache holds"
+        );
     }
 
     #[tokio::test]
@@ -1011,10 +1100,14 @@ pub(crate) mod helpers {
 
     /// End the access token the request presented: put its `jti` on the
     /// blocklist until the token's own expiry, so `extract_auth_meta` refuses
-    /// it from the next request on (SEC-042). An access JWT is otherwise
-    /// structurally valid until its `exp`, whatever happened to its refresh
-    /// family, so this is what makes "you are signed out on this device"
-    /// true at once. Per-`jti`: the account's other sessions are untouched.
+    /// it from the next request on (SEC-042). Per-`jti`: the account's other
+    /// sessions are untouched.
+    ///
+    /// Both callers also delete the token's family row ([`end_family`],
+    /// [`end_all_families`]), which ends the token by itself:
+    /// `crate::crypto::verify_access_token` refuses a token whose family has
+    /// no live row. The blocklist entry is the older, per-token record of the
+    /// same end, written before an access token's family was checked.
     ///
     /// No-op for a request that presented no verified token. The expiry is
     /// the token's own `exp` (`META_AUTH_EXP`), which `extract_auth_meta`
@@ -1566,6 +1659,61 @@ pub(crate) mod helpers {
         super::repo::tokens::revoke_family(ctx, family).await
     }
 
+    /// [`end_family`] for every family `user_id` holds: delete all of their
+    /// session rows, then revoke all of their refresh rows, in that order for
+    /// the reason [`end_family`] gives. Logout and a password change or reset
+    /// end a whole account's devices through here.
+    ///
+    /// Stops at the first error, like [`end_family`], and says which step it
+    /// was ([`DevicesNotEnded`]): the two leave the account in different
+    /// states, and the callers weigh them differently.
+    ///
+    /// One race is left, and it is cosmetic: a sign-in of this account whose
+    /// batch lands between the delete and the revocation keeps its session
+    /// row while its refresh row is revoked. That device cannot refresh, but
+    /// its row stays listed, and its first access token authenticates, until
+    /// the row expires or is revoked. A second delete after the revocation
+    /// would only move the window, onto a sign-in landing between the two.
+    /// After a password change it is harmless: a sign-in with the old
+    /// password read the account's version before the bump that follows, so
+    /// that bump refuses its tokens, and a key created on them is withdrawn
+    /// ([`super::presented_credential_is_live`] compares that version, and the
+    /// change bumps before it revokes the keys). A sign-in with the new
+    /// password is the account's owner.
+    pub(crate) async fn end_all_families(
+        ctx: &dyn wafer_run::context::Context,
+        user_id: &str,
+    ) -> Result<(), DevicesNotEnded> {
+        super::repo::sessions::delete_all_for_user(ctx, user_id)
+            .await
+            .map_err(DevicesNotEnded::StillSignedIn)?;
+        super::repo::tokens::revoke_all_for_user(ctx, user_id)
+            .await
+            .map_err(DevicesNotEnded::RefreshRowsLive)
+    }
+
+    /// Which step of [`end_all_families`] failed.
+    #[derive(Debug)]
+    pub(crate) enum DevicesNotEnded {
+        /// The session rows could not be deleted, so every device is still
+        /// signed in: its access tokens authenticate and it can refresh.
+        StillSignedIn(WaferError),
+        /// The rows are gone, so every device is signed out, but the refresh
+        /// rows could not be revoked. Each one's next presentation is still
+        /// refused — a rotation finds no row to touch — but it does not take
+        /// the revoked-row refusal, and it is not yet a reuse-detection
+        /// tombstone.
+        RefreshRowsLive(WaferError),
+    }
+
+    impl DevicesNotEnded {
+        pub(crate) fn into_error(self) -> WaferError {
+            match self {
+                Self::StillSignedIn(e) | Self::RefreshRowsLive(e) => e,
+            }
+        }
+    }
+
     /// The answer to a refresh token that can no longer refresh: rotated away,
     /// issued before the account's latest `auth_version`, or of a family that
     /// has been revoked. The client is told the same thing in every case,
@@ -1894,6 +2042,72 @@ pub(crate) mod helpers {
     }
 }
 
+/// Meta key holding the id of the API key that authenticated the request.
+/// Set by [`authenticate_api_key`] and nowhere else — like the other `auth.*`
+/// meta it is written by the pipeline's credential step, never taken from the
+/// request — and read by [`presented_credential_is_live`].
+pub const META_AUTH_API_KEY_ID: &str = "auth.api_key_id";
+
+/// Whether the credential that authenticated `msg` is still live, read now.
+///
+/// The pipeline checks the credential when the request starts; a write that
+/// mints a new credential from it must check again after that write, or a
+/// revocation landing between the two misses the new credential. The order
+/// closes the race without a transaction, as `helpers::end_family` does for a
+/// rotation. A password change ([`end_credentials_after_password_change`])
+/// makes every credential the old password could reach fail this check —
+/// session rows deleted, then the version bumped — before it revokes the
+/// account's API keys. So a re-check that runs after the key revocation began
+/// sees the presenting credential dead and withdraws the new key, and one that
+/// ran before it means the new key was already written when the keys were
+/// revoked, so their revocation covered it.
+///
+/// - An access token (`auth.family`, set by `crate::crypto::extract_auth_meta`):
+///   its login family's session row is live ([`repo::sessions::is_live`]) AND
+///   its `auth_version` claim (`auth.version`) is not behind the account's,
+///   read from the row ([`repo::users::auth_version`]), not through the
+///   short-lived cache the per-request check uses. The version catches a
+///   family a sign-in with the old password wrote after the change deleted
+///   the rows: its row is live, but its token predates the bump. Uncached,
+///   because another instance's cache may still hold the old version for a
+///   few seconds after the bump.
+/// - An API key ([`META_AUTH_API_KEY_ID`], set by [`authenticate_api_key`]):
+///   the key's own row — present, the caller's, not revoked, not expired.
+/// - Neither: `false`. Every request the pipeline authenticated carries one,
+///   so a caller with neither presented nothing that can be checked again.
+pub(crate) async fn presented_credential_is_live(
+    ctx: &dyn wafer_run::context::Context,
+    msg: &wafer_run::Message,
+) -> Result<bool, WaferError> {
+    let user_id = msg.user_id();
+    if user_id.is_empty() {
+        return Ok(false);
+    }
+    let family = msg.get_meta(crate::crypto::META_AUTH_FAMILY);
+    if !family.is_empty() {
+        let Ok(claim_version) = msg
+            .get_meta(crate::crypto::META_AUTH_VERSION)
+            .parse::<i64>()
+        else {
+            return Ok(false);
+        };
+        let (live, current) = futures::join!(
+            repo::sessions::is_live(ctx, user_id, family),
+            repo::users::auth_version(ctx, user_id),
+        );
+        return Ok(live? && claim_version >= current?);
+    }
+    let key_id = msg.get_meta(META_AUTH_API_KEY_ID);
+    if !key_id.is_empty() {
+        return Ok(repo::api_keys::find_by_id(ctx, key_id)
+            .await?
+            .is_some_and(|key| {
+                key.user_id == user_id && !key.is_revoked() && !key.is_expired(chrono::Utc::now())
+            }));
+    }
+    Ok(false)
+}
+
 /// Authenticate a request using an API key.
 ///
 /// Hashes the key with SHA-256, looks it up in the database by key_hash,
@@ -1960,6 +2174,7 @@ pub async fn authenticate_api_key(
     msg.set_meta(META_AUTH_USER_ID, &key_row.user_id);
     msg.set_meta(META_AUTH_USER_EMAIL, &user.email);
     msg.set_meta(META_AUTH_USER_ROLES, &roles_str);
+    msg.set_meta(META_AUTH_API_KEY_ID, &key_row.id);
     Ok(())
 }
 

@@ -232,10 +232,12 @@ pub async fn handle_revoke(ctx: &dyn Context, msg: &Message) -> OutputStream {
     }
 
     // Revoking the session this request belongs to signs the reader out
-    // here and now, as the confirmation said: burning the refresh family
-    // alone left the access token in the cookie working until its expiry.
-    // So that token is ended too, the cookie cleared, and the page sent to
-    // sign in (`HX-Redirect`, a full navigation).
+    // here and now, as the confirmation said. Deleting the family's row
+    // already ended the access token in the cookie (an access token needs a
+    // live family, `crypto::verify_access_token`); its `jti` is blocklisted
+    // as well, the per-token record logout also writes. The cookie is
+    // cleared and the page sent to sign in (`HX-Redirect`, a full
+    // navigation).
     if current_session_family(msg) == Some(family.as_str()) {
         if let Err(e) = end_presented_access_token(ctx, msg).await {
             return crud::db_error_internal(e, "Could not end the current session");
@@ -1176,6 +1178,87 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty());
+        }
+    }
+
+    /// A revoked device's access token, presented the way a client presents
+    /// it, through the production request path (`TestContext::request`: the
+    /// router block and `pipeline::handle_request`). The token still has a
+    /// good signature, no blocklisted `jti` and a current `auth_version`;
+    /// only its family is gone.
+    mod revoked_device_access {
+        use std::sync::Arc;
+
+        use crate::{
+            blocks::{auth::repo::users::InitialRole, userportal::UserPortalBlock},
+            test_support::{anon_msg, Session, TestContext},
+        };
+
+        const EMAIL: &str = "revoked-device@example.com";
+        const PASSWORD: &str = "correct-horse-battery";
+
+        /// The `family` claim of `session`'s access token, read back by the
+        /// crypto block that signed it.
+        async fn family_of(ctx: &TestContext, session: &Session) -> String {
+            let auth_ui = ctx
+                .clone()
+                .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+            let claims = wafer_core::clients::crypto::verify(&auth_ui, &session.access_token)
+                .await
+                .expect("the token the login handed out verifies");
+            claims["family"]
+                .as_str()
+                .expect("every issued access token names its family")
+                .to_string()
+        }
+
+        async fn me_status(ctx: &TestContext, session: &Session) -> u16 {
+            let out = ctx
+                .request(session.bearer(anon_msg("retrieve", "/b/auth/api/me")))
+                .await;
+            wafer_block::http_codec::collect_http_response(out)
+                .await
+                .status
+        }
+
+        #[tokio::test]
+        async fn revoking_a_device_ends_its_access_token_at_once() {
+            let mut ctx = TestContext::with_auth().await.with_sign_in_added();
+            ctx.register_block(
+                UserPortalBlock::BLOCK_NAME,
+                Arc::new(UserPortalBlock::new()),
+            );
+            ctx.seed_account(EMAIL, PASSWORD, InitialRole::User).await;
+            let a = ctx.sign_in(EMAIL, PASSWORD).await;
+            let b = ctx.sign_in(EMAIL, PASSWORD).await;
+            let b_family = family_of(&ctx, &b).await;
+            assert_eq!(me_status(&ctx, &b).await, 200, "B is signed in");
+
+            // Device A revokes device B on the sessions page.
+            let out = ctx
+                .request(a.bearer(anon_msg(
+                    "delete",
+                    &format!("/b/userportal/sessions/{b_family}"),
+                )))
+                .await;
+            assert_eq!(
+                wafer_block::http_codec::collect_http_response(out)
+                    .await
+                    .status,
+                200,
+                "A's revoke of B is answered"
+            );
+
+            assert_eq!(
+                me_status(&ctx, &b).await,
+                401,
+                "the revoked device's access token no longer authenticates"
+            );
+            assert_eq!(
+                me_status(&ctx, &a).await,
+                200,
+                "the device that revoked stays signed in"
+            );
         }
     }
 }
