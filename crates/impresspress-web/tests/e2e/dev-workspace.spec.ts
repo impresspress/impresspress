@@ -884,7 +884,8 @@ test('the workspace discovers the packaged compiler on a cross-origin-isolated d
 test('the editor refuses to save a binary file over itself', async ({ page }) => {
   test.setTimeout(300_000);
 
-  // `dev.js` uses `alert`/`confirm`/`prompt`; the only one reachable here is
+  // `dev.js` uses `alert`/`prompt` (Delete asks in the page's shared confirm
+  // dialog, which is not a browser dialog); the only one reachable here is
   // `save()`'s refusal alert, which fires for ANY status the server refuses
   // with, not just a 409. Playwright auto-dismisses an unhandled dialog, so
   // without this the one thing a broken guard might surface would vanish

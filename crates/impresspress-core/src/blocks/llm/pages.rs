@@ -616,6 +616,8 @@ fn render_overrides_table(rows: &[repo::settings::ThreadSettingRow]) -> Markup {
                         type="button"
                         hx-delete={"/b/llm/api/config/" (ov.id)}
                         hx-confirm={"Remove override for thread " (tid) "?"}
+                        data-confirm-label="Remove override"
+                        data-confirm-tone="danger"
                         hx-target="closest tr"
                         hx-swap="outerHTML"
                         aria-label={"Remove override for thread " (tid)}

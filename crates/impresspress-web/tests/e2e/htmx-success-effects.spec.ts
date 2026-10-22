@@ -7,6 +7,7 @@ import {
 } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
 import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
+import { answerConfirm } from './fixtures/confirm';
 
 /**
  * The after-success effects of htmx controls, under the CSP the server really
@@ -367,9 +368,9 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await page.route('**/b/llm/api/providers/*/discover-models', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
     );
-    page.once('dialog', (dialog) => dialog.accept());
     const rediscovered = page.waitForEvent('load');
     await row.getByRole('button', { name: 'Discover' }).click();
+    await answerConfirm(page, 'Discover models', 'confirm');
     await rediscovered;
     await expect(page.locator('tr', { hasText: name })).toBeVisible();
     expect(refusals).toEqual([]);

@@ -27,6 +27,7 @@
 
 use maud::{html, Markup};
 
+use super::{Action, ActionTarget};
 use crate::ui::icons;
 
 /// How wide a modal may grow. Every modal is the full viewport width less a
@@ -59,6 +60,7 @@ pub struct Modal<'a> {
     title: &'a str,
     size: ModalSize,
     focusable_body: bool,
+    described_by: Option<&'a str>,
 }
 
 impl<'a> Modal<'a> {
@@ -71,6 +73,7 @@ impl<'a> Modal<'a> {
             title,
             size: ModalSize::Default,
             focusable_body: false,
+            described_by: None,
         }
     }
 
@@ -90,6 +93,14 @@ impl<'a> Modal<'a> {
         self
     }
 
+    /// Make it an `alertdialog`: a dialog that interrupts to ask about what
+    /// the reader just did, described by the element with id `description`
+    /// (the question it asks). Only [`confirm_dialog`] is one.
+    pub fn alert(mut self, description: &'a str) -> Self {
+        self.described_by = Some(description);
+        self
+    }
+
     /// Render the closed dialog with `body` in its scrolling body.
     pub fn render(self, body: Markup) -> Markup {
         self.render_with_meta(html! {}, body)
@@ -101,7 +112,11 @@ impl<'a> Modal<'a> {
         let title_id = format!("{}-title", self.id);
         let large = self.size == ModalSize::Large;
         html! {
-            dialog .modal .modal--lg[large] id=(self.id) aria-labelledby=(title_id) {
+            dialog .modal .modal--lg[large] id=(self.id)
+                role=[self.described_by.map(|_| "alertdialog")]
+                aria-labelledby=(title_id)
+                aria-describedby=[self.described_by]
+            {
                 div .modal__header {
                     div .modal__heading {
                         h2 .modal__title id=(title_id) { (self.title) }
@@ -147,6 +162,54 @@ pub fn modal_cancel() -> Markup {
     html! {
         button .btn .btn--secondary type="button" data-action="modal-close" { "Cancel" }
     }
+}
+
+/// The id of the page's one confirm dialog, [`confirm_dialog`].
+pub const CONFIRM_DIALOG_ID: &str = "confirm-dialog";
+
+/// The one dialog every page asks "are you sure?" in. `ui::layout::page`
+/// renders it once per document, and the confirm half of chrome.js's modal
+/// section fills it in and opens it, for an htmx control's `hx-confirm` and
+/// for a block script's `window.impresspressConfirm` alike.
+///
+/// The markup holds no wording of its own. chrome.js writes the action's
+/// label ("Revoke session") into the title and the confirm button, and the
+/// question into `#confirm-dialog-question`, as text. Cancel carries
+/// `autofocus`, so it is what `showModal()` focuses: a stray Enter cancels.
+///
+/// There are two confirm buttons, both hidden until chrome.js shows the one
+/// the action's tone names. Each is an [`Action`], so the class is written
+/// here and never by a script, and the dialog shows exactly one: its own
+/// primary.
+///
+/// The tone rule, for every `data-confirm-tone` and `impresspressConfirm`
+/// caller:
+/// - `danger` when this app cannot undo the action: data is deleted, access
+///   is taken from someone (a session, a key, a share link, a linked
+///   provider), or a Stripe object is archived;
+/// - `primary` when the app offers its undo: Disable has Enable, Archive
+///   product has Publish, Reset to environment holds until the restart,
+///   Discover / Load / Unload models can be run again.
+pub fn confirm_dialog() -> Markup {
+    let question = format!("{CONFIRM_DIALOG_ID}-question");
+    Modal::new(CONFIRM_DIALOG_ID, "Confirm")
+        .alert(&question)
+        .render(html! {
+            p .confirm-dialog__question id=(question) {}
+            (modal_footer(html! {
+                (Action::secondary("Cancel", ActionTarget::Delegated("modal-close"))
+                    .autofocus()
+                    .render())
+                (Action::danger("Confirm", ActionTarget::Delegated("confirm-accept"))
+                    .data("confirm-tone", "danger")
+                    .hidden(true)
+                    .render())
+                (Action::primary("Confirm", ActionTarget::Delegated("confirm-accept"))
+                    .data("confirm-tone", "primary")
+                    .hidden(true)
+                    .render())
+            }))
+        })
 }
 
 #[cfg(test)]
@@ -245,5 +308,153 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"</h2><small>v1</small></div>"#), "{html}");
+    }
+
+    /// The shared confirm dialog is an `alertdialog` named by its title and
+    /// described by its question, with Cancel focused and both confirm
+    /// buttons hidden until a tone picks one. The page's one-primary rule
+    /// therefore holds whatever the dialog asks: a closed or open dialog
+    /// shows at most its own primary.
+    #[test]
+    fn the_confirm_dialog_asks_with_cancel_focused_and_one_confirm_per_tone() {
+        let html = confirm_dialog().into_string();
+        assert!(
+            html.starts_with(
+                r#"<dialog class="modal" id="confirm-dialog" role="alertdialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-question">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<p class="confirm-dialog__question" id="confirm-dialog-question"></p>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<button class="btn btn--secondary" autofocus type="button" data-action="modal-close">Cancel</button>"#
+            ),
+            "{html}"
+        );
+        for (class, tone) in [("btn--danger", "danger"), ("btn--primary", "primary")] {
+            assert!(
+                html.contains(&format!(
+                    r#"<button data-confirm-tone="{tone}" class="btn {class}" hidden type="button" data-action="confirm-accept">Confirm</button>"#
+                )),
+                "{html}"
+            );
+        }
+        let (page, dialogs) = crate::test_support::dom::visible_primaries(&html);
+        assert!(
+            page.is_empty() && dialogs == vec![Vec::<String>::new()],
+            "{html}"
+        );
+    }
+
+    /// The scripts this repository ships: every `.js`, `.mjs` and `.ts`
+    /// under `crates/` and `packages/`, less tests, dependencies, build
+    /// output and vendored code. `htmx.min.js` is vendored htmx: its own
+    /// `confirm(question)` runs only for an `hx-confirm` whose `htmx:confirm`
+    /// event nobody prevented, and chrome.js prevents every one that asks.
+    fn shipped_scripts() -> Vec<(String, String)> {
+        const SKIP_DIRS: &[&str] = &[
+            "test",
+            "tests",
+            "node_modules",
+            "target",
+            "pkg",
+            "vendor",
+            "dist",
+        ];
+        const SKIP_FILES: &[&str] = &["htmx.min.js"];
+        fn visit(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("read dir") {
+                let path = entry.expect("dir entry").path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    if !SKIP_DIRS.contains(&name.as_str()) && !name.starts_with('.') {
+                        visit(root, &path, out);
+                    }
+                } else if ["js", "mjs", "ts"]
+                    .iter()
+                    .any(|ext| path.extension().is_some_and(|e| e == *ext))
+                    && !SKIP_FILES.contains(&name.as_str())
+                {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((rel, std::fs::read_to_string(&path).expect("read script")));
+                }
+            }
+        }
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let mut out = Vec::new();
+        for top in ["crates", "packages"] {
+            visit(root, &root.join(top), &mut out);
+        }
+        out.sort();
+        out
+    }
+
+    /// No script file the repository ships reaches the browser's own
+    /// `confirm`, by any spelling `dom::browser_confirm_references` knows: a
+    /// global's `.confirm` or `["confirm"]`, called or not, or a bare
+    /// `confirm(`. Every confirm is the shared page-built dialog, asked
+    /// through `window.impresspressConfirm` or an `hx-confirm` (chrome.js).
+    /// Scripts a page carries inline are held to the same rule by
+    /// `htmx_guard::every_page_confirms_through_the_one_shared_dialog`.
+    #[test]
+    fn no_shipped_script_refers_to_the_browser_confirm() {
+        let scripts = shipped_scripts();
+        assert!(
+            scripts.len() > 40,
+            "the walk reached {} scripts; it must reach every shipped one",
+            scripts.len()
+        );
+        assert!(
+            scripts
+                .iter()
+                .any(|(rel, _)| rel.ends_with("ui/assets/chrome.js")),
+            "the walk must reach chrome.js"
+        );
+        let found: Vec<String> = scripts
+            .iter()
+            .flat_map(|(rel, src)| {
+                crate::test_support::dom::browser_confirm_references(src)
+                    .into_iter()
+                    .map(move |at| format!("{rel}:{at}"))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "ask in the shared confirm dialog (window.impresspressConfirm), not the browser's \
+             confirm:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The e2e suites that build a page by hand (the products scripts' specs)
+    /// put this file and chrome.js on it, so their scripts confirm through
+    /// the real dialog. Kept equal to what every page renders.
+    #[test]
+    fn the_confirm_dialog_fixture_is_what_pages_render() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-web/tests/e2e/fixtures/confirm-dialog.html"
+        );
+        let expected = format!("{}\n", confirm_dialog().into_string());
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            on_disk, expected,
+            "{path} is out of date; write the expected text to it"
+        );
+    }
+
+    #[test]
+    fn only_the_confirm_dialog_is_an_alertdialog() {
+        assert!(!rendered().contains("role="), "{}", rendered());
+        assert!(!rendered().contains("aria-describedby"), "{}", rendered());
     }
 }

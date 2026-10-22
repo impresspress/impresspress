@@ -452,6 +452,8 @@ fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> 
                 // show it, so nothing is swapped.
                 hx-swap="none"
                 hx-confirm={"Discover models for \"" (cfg.name) "\" from its /v1/models endpoint?"}
+                data-confirm-label="Discover models"
+                data-confirm-tone="primary"
                 data-reload-on-success
                 aria-label={"Discover models for " (cfg.name)}
             {
@@ -462,6 +464,8 @@ fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> 
                 type="button"
                 hx-delete={"/b/llm/api/providers/" (id)}
                 hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
+                data-confirm-label="Delete provider"
+                data-confirm-tone="danger"
                 // The page reloads rather than dropping the row in place, so
                 // deleting the last provider lands on the empty state.
                 hx-swap="none"
@@ -633,6 +637,8 @@ fn model_cells(model: &ModelInfo) -> Vec<Markup> {
                 hx-post=(load_url)
                 hx-swap="none"
                 hx-confirm={"Load model \"" (model_id) "\" on backend \"" (backend_id) "\"?"}
+                data-confirm-label="Load model"
+                data-confirm-tone="primary"
                 aria-label={"Load " (display_name)}
             {
                 "Load"
@@ -643,6 +649,8 @@ fn model_cells(model: &ModelInfo) -> Vec<Markup> {
                 hx-post=(unload_url)
                 hx-swap="none"
                 hx-confirm={"Unload model \"" (model_id) "\" on backend \"" (backend_id) "\"?"}
+                data-confirm-label="Unload model"
+                data-confirm-tone="primary"
                 aria-label={"Unload " (display_name)}
             {
                 "Unload"

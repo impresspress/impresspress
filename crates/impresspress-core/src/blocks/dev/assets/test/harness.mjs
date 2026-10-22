@@ -77,8 +77,10 @@ const core = fs.readFileSync(
  * @param {Promise<void>|null} [options.exportGate]  when set, the archive
  *   request parks on this promise, so a test can observe the page WHILE an
  *   export is in flight.
- * @param {() => boolean} [options.confirm]  the human's answer to Delete's
- *   `window.confirm()`. Throws when not given.
+ * @param {(asked: {question: string, label: string, tone: string}) => boolean} [options.confirm]
+ *   the human's answer to what Delete asks through the page's shared confirm
+ *   dialog (`window.impresspressConfirm`, which chrome.js provides on the real
+ *   page), given what it asked. Throws when not given.
  * @param {() => string|null} [options.prompt]  the human's answer to New
  *   file's `window.prompt()`. Throws when not given.
  * @param {object|(() => object)} [options.status]  what `/b/dev/api/status`
@@ -167,11 +169,11 @@ export function instantiate({
   exportZip = { status: 200, body: 'PK\u0003\u0004zip' },
   exportGate = null,
   exportRefusal = null,
-  // The human's answers to Delete's `confirm()` and New file's `prompt()`.
+  // The human's answers to Delete's confirm dialog and New file's `prompt()`.
   // Throwing by default: a test that reaches a dialog it did not answer is
   // testing something it did not mean to.
   confirm = () => {
-    throw new Error('this harness instance was not given an answer to confirm()');
+    throw new Error('this harness instance was not given an answer to the confirm dialog');
   },
   prompt = () => {
     throw new Error('this harness instance was not given an answer to prompt()');
@@ -330,7 +332,8 @@ export function instantiate({
         windowListeners.push({ type, listener });
       },
       ...(siteRegistrar ? { __impresspressWebmcp: siteRegistrar } : {}),
-      confirm,
+      // chrome.js's promise-returning confirm, answered by the test.
+      impresspressConfirm: async (asked) => confirm(asked),
       prompt
     },
     navigator: {

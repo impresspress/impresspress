@@ -1,6 +1,7 @@
 import { expect, test, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { answerConfirm, confirmChrome } from "./fixtures/confirm";
 
 const bundlesUrl = new URL(
   "../../../impresspress-core/src/blocks/products/assets/",
@@ -20,20 +21,11 @@ function bundle(name: string) {
 
 const adminOrigin = "https://admin.example";
 
-/**
- * The shell's own script, which opens and closes every `components::Modal`
- * dialog (the group editor is one) through its `openModal` door.
- */
-const chromeJs = readFileSync(
-  fileURLToPath(new URL("../../../impresspress-core/src/ui/assets/chrome.js", import.meta.url)),
-  "utf8",
-);
-
 function shell(body: string) {
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
     <p id="catalog-admin-error" role="alert" aria-live="assertive" hidden></p>
     ${body}
-    <script>${chromeJs}</script>
+    ${confirmChrome}
     <script>${bundle("products-catalog-admin.js")}</script>
   </body></html>`;
 }
@@ -126,8 +118,8 @@ test.describe("products catalog admin lifecycle forms", () => {
     await page.getByRole("button", { name: "Save group" }).click();
     await expect.poll(() => requests.some((request) => request.method === "PATCH")).toBe(true);
 
-    page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Delete Consulting" }).click();
+    await answerConfirm(page, "Delete group", "confirm", "Delete group Consulting?");
     await expect.poll(() => requests.some((request) => request.method === "DELETE")).toBe(true);
 
     expect(requests).toContainEqual({

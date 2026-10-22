@@ -292,9 +292,13 @@ test('a Save, Delete or New file that does nothing neither reloads the preview n
   // Nothing was asked of the sandbox, so nothing changed: no generation will
   // be pushed and no data write owes a reload. Counting these as calls that
   // "published no generation" reloaded the preview for a no-op.
+  const asked = [];
   const { handle, frame, fetchCalls } = withPreview({
     workspace: [{ path: 'site/index.html', sha256: 'aa', content: '<h1>hi</h1>' }],
-    confirm: () => false,
+    confirm: (question) => {
+      asked.push(question);
+      return false;
+    },
     prompt: () => null
   });
   await settle();
@@ -311,4 +315,8 @@ test('a Save, Delete or New file that does nothing neither reloads the preview n
   assert.equal(handle.isPolling, false);
   assert.equal(handle.outstanding, 0);
   assert.equal(fetchCalls.length, before, 'not even the file tree is re-read');
+  // Delete asked in the page's shared dialog, naming the file and the action.
+  assert.deepEqual(asked, [
+    { question: 'Delete site/index.html?', label: 'Delete file', tone: 'danger' }
+  ]);
 });

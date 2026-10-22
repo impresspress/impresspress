@@ -1272,10 +1272,16 @@ var writeOpenFile = withProgress(async function () {
   return written;
 });
 
-function remove() {
-  if (!current || !window.confirm('Delete ' + current.path + '?')) {
-    return Promise.resolve();
-  }
+// Asked in the page's shared confirm dialog (`window.impresspressConfirm`,
+// `ui/assets/chrome.js`): "Delete file", in danger red, Cancel focused.
+async function remove() {
+  if (!current) return;
+  var confirmed = await window.impresspressConfirm({
+    question: 'Delete ' + current.path + '?',
+    label: 'Delete file',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
   return deleteOpenFile();
 }
 

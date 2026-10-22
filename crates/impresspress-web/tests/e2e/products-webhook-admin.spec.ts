@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { answerConfirm, confirmChrome } from "./fixtures/confirm";
 
 const bundlesUrl = new URL(
   "../../../impresspress-core/src/blocks/products/assets/",
@@ -110,6 +111,7 @@ const operationsHtml = `<!doctype html>
       <p id="stripe-provider-error" role="alert" aria-live="assertive" hidden></p>
       <div id="stripe-provider-operations-list" aria-live="polite">Loading provider operations…</div>
     </section>
+    ${confirmChrome}
   </body>
 </html>`;
 
@@ -274,16 +276,21 @@ test.describe("products admin webhook recovery", () => {
     await expect(operations).toContainText("invoice.payment_failed");
     await expect(operations).toContainText("Live · 2");
 
-    page.once("dialog", async (dialog) => dialog.dismiss());
     await operations
       .getByRole("button", { name: "Replay webhook evt_failed_456" })
       .click();
+    await answerConfirm(page, "Replay webhook", "cancel");
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(0);
 
-    page.once("dialog", async (dialog) => dialog.accept());
     await operations
       .getByRole("button", { name: "Replay webhook evt_failed_456" })
       .click();
+    await answerConfirm(
+      page,
+      "Replay webhook",
+      "confirm",
+      "Replay this Stripe webhook through the normal validation pipeline?",
+    );
     await expect(operations).toContainText("No matching webhook events.");
     expect(requests.filter((request) => request.method === "POST")).toEqual([
       {
@@ -359,8 +366,8 @@ test.describe("products admin webhook recovery", () => {
       name: "Replay webhook evt_dead_123",
     });
     await expect(replay).toBeEnabled();
-    page.once("dialog", async (dialog) => dialog.accept());
     await replay.click();
+    await answerConfirm(page, "Replay webhook", "confirm");
     await expect(operations.getByRole("alert")).toHaveText(
       "Replay integrity check failed.",
     );
