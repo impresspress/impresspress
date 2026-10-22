@@ -55,7 +55,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let token = msg.get_meta("req.query.token").to_string();
     if token.is_empty() {
         return html_respond(
-            "Invalid Link",
+            "Invalid link",
             "This password reset link is invalid.",
             false,
             &logo_url,
@@ -168,7 +168,7 @@ fn html_respond(
                         h2 .auth-status__title { (title) }
                         p .auth-status__message { (message) }
                         a .login-button .auth-status__action href="/b/auth/login" {
-                            "Go to Sign In"
+                            "Go to sign in"
                         }
                     }
                 }

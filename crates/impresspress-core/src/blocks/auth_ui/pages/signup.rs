@@ -66,7 +66,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         h2 .auth-status__title { "Check your email" }
                         p #verify-msg .auth-status__message {}
                         a #back-to-signin .login-button .auth-status__action href={"/b/auth/login" (redirect_qs)} {
-                            "Back to Sign In"
+                            "Back to sign in"
                         }
                     }
 
@@ -83,7 +83,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             (password_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
 
-                        button .login-button type="submit" #btn { "Create Account" }
+                        button .login-button type="submit" #btn { "Create account" }
                     }
 
                     div #signin-link .signup-link {

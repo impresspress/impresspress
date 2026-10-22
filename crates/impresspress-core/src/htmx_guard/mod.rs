@@ -647,34 +647,19 @@ async fn every_page_header_holds_exactly_the_actions_it_names() {
     );
 }
 
-/// Every tab on every page the crawl renders is a text label in sentence
-/// case (design rules 4 and 7): no icon or other element inside the `.tab`,
-/// a capital on the first word, and no word after it capitalised, except an
-/// acronym or a proper noun ("API keys", "SQL editor", "Database & config"),
-/// by [`crate::test_support::case::is_sentence_case`]. `components::Tab` has
-/// no icon field, so this pins the labels each page writes, and any
-/// hand-written `.tab`.
+/// Every tab on every page the crawl renders is a text label (design rule
+/// 7): no icon or other element inside the `.tab`. `components::Tab` has no
+/// icon field, so this pins any hand-written `.tab`. Its case is
+/// [`every_label_is_in_sentence_case`]'s, with every other label's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_tab_is_a_sentence_case_text_label() {
+async fn every_tab_is_a_text_label() {
     let mut wrong: Vec<String> = Vec::new();
     let mut checked = 0;
-    for entry in entries() {
-        let Some(make) = entry.fixture else {
-            continue;
-        };
-        let fixture = make().await;
-        for view in crawl(&fixture).await {
-            let page = view.page(&fixture);
-            let html = crate::test_support::htmx::render(&fixture, &page).await;
-            for label in crate::test_support::dom::tab_labels(&html) {
-                checked += 1;
-                match label {
-                    Ok(text) if crate::test_support::case::is_sentence_case(&text) => {}
-                    Ok(text) => {
-                        wrong.push(format!("{}: tab {text:?} is not sentence case", page.url()))
-                    }
-                    Err(tab) => wrong.push(format!("{}: {tab} holds an element", page.url())),
-                }
+    for (url, html) in rendered_pages().await {
+        for label in crate::test_support::dom::tab_labels(&html) {
+            checked += 1;
+            if let Err(tab) = label {
+                wrong.push(format!("{url}: {tab} holds an element"));
             }
         }
     }
@@ -716,6 +701,167 @@ async fn every_page_confirms_through_the_one_shared_dialog() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     assert!(documents > 50, "only {documents} documents were checked");
     assert!(asked > 10, "only {asked} hx-confirm controls were checked");
+}
+
+/// Every page the crawl renders, every entry's, as `(url, html)`: the set
+/// the layout guards below hold to the design rules.
+async fn rendered_pages() -> Vec<(String, String)> {
+    let mut pages = Vec::new();
+    for entry in entries() {
+        let Some(make) = entry.fixture else {
+            continue;
+        };
+        let fixture = make().await;
+        for view in crawl(&fixture).await {
+            let page = view.page(&fixture);
+            let html = crate::test_support::htmx::render(&fixture, &page).await;
+            pages.push((page.url(), html));
+        }
+    }
+    pages
+}
+
+/// Design rule 6: at most one visible primary action per page, and at most
+/// one in each `<dialog>`, which is its own context
+/// (`test_support::dom::visible_primaries`: anything in a `[hidden]` region
+/// or a `<template>` is not visible). Over every whole page the crawl
+/// renders, in the shell or not (sign-in, status and public pages too); a
+/// fragment is part of the page it lands in. What a script reveals later is
+/// the e2e suite's to check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_page_has_at_most_one_visible_primary() {
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    for (url, html) in rendered_pages().await {
+        if !crate::ui::layout::is_document(&html) {
+            continue;
+        }
+        checked += 1;
+        let (page, dialogs) = crate::test_support::dom::visible_primaries(&html);
+        if page.len() > 1 {
+            wrong.push(format!("{url}: {} visible primaries: {page:?}", page.len()));
+        }
+        for dialog in dialogs.iter().filter(|primaries| primaries.len() > 1) {
+            wrong.push(format!("{url}: a dialog with {} primaries: {dialog:?}", dialog.len()));
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(checked > 50, "only {checked} pages were checked");
+}
+
+/// Design rule 2: nothing card-level (`.card`, `.stat`, `.empty`,
+/// `.chat-panes`, `.data-table`) sits inside a `.card`, except a
+/// `.data-table` whose closest card is flush
+/// (`test_support::dom::card_level_inside_card`). Over every page and
+/// fragment the crawl renders: a fragment lands in a page, and brings its
+/// nesting with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_card_level_surface_inside_a_card() {
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    for (url, html) in rendered_pages().await {
+        checked += 1;
+        for nested in crate::test_support::dom::card_level_inside_card(&html) {
+            wrong.push(format!("{url}: {nested}"));
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(checked > 50, "only {checked} pages were checked");
+}
+
+/// The page's outline: exactly one `h1` (in the shell, `h1.topbar__title`,
+/// so one more is a second title, and none is a page that lost its own),
+/// and no heading more than one level below the one before it
+/// (`test_support::dom::heading_outline`, which leaves out concealed
+/// headings and a dialog's own). Over every whole page the crawl renders,
+/// in the shell or not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headings_descend_without_skipping() {
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    for (url, html) in rendered_pages().await {
+        if !crate::ui::layout::is_document(&html) {
+            continue;
+        }
+        checked += 1;
+        let outline = crate::test_support::dom::heading_outline(&html);
+        let h1s = outline.iter().filter(|(level, _)| *level == 1).count();
+        if h1s != 1 {
+            wrong.push(format!("{url}: {h1s} h1s in {outline:?}"));
+        }
+        for pair in outline.windows(2) {
+            let ((from, a), (to, b)) = (&pair[0], &pair[1]);
+            if *to > from + 1 {
+                wrong.push(format!("{url}: h{from} {a:?} is followed by h{to} {b:?}"));
+            }
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(checked > 50, "only {checked} pages were checked");
+}
+
+/// Whether a phrase is a value written as itself rather than words: one
+/// token, lowercase first, with a mark no word has (`impresspress/probe`,
+/// `user.disable`, `open_ai`, `v1`, `http-handler@v1`, `wafer-run`). A
+/// block name, an audit action, a provider kind or a version is shown as it
+/// is stored, so it keeps its own case.
+fn is_identifier(phrase: &str) -> bool {
+    !phrase.contains(char::is_whitespace)
+        && phrase.starts_with(|c: char| c.is_lowercase())
+        && phrase.contains(|c: char| !c.is_alphabetic())
+}
+
+/// Labels the crawl shows that are a value, written as it is stored, not
+/// words the page writes: `(kind, phrase, what it is)`. Each must still be
+/// seen, so an entry does not outlive its page.
+const DATA_LABELS: &[(&str, &str, &str)] = &[
+    ("heading", "photos", "the fixture's bucket, its name the page's title"),
+    ("heading", "docs", "the fixture's vector index, its name the page's title"),
+    ("summary", "admin", "a block's name, heading its tables in the database list"),
+    ("summary", "auth", "a block's name, heading its tables in the database list"),
+    ("summary", "impresspress", "the org a block belongs to, in the database list"),
+];
+
+/// Design rule 4: every label a page writes is in sentence case
+/// (`test_support::case::is_sentence_case`): headings, table headers, form
+/// labels, buttons, summaries, stat labels, badges and tabs, phrase by
+/// phrase (`test_support::dom::ui_labels`). Over every page and fragment the
+/// crawl renders. A value shown as itself keeps its own case: an identifier
+/// ([`is_identifier`]) or one of [`DATA_LABELS`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_label_is_in_sentence_case() {
+    let mut wrong: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut seen_data: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut checked = 0;
+    for (url, html) in rendered_pages().await {
+        for (kind, text) in crate::test_support::dom::ui_labels(&html) {
+            checked += 1;
+            if let Some((k, p, _)) = DATA_LABELS.iter().find(|(k, p, _)| *k == kind && *p == text) {
+                seen_data.insert((k, p));
+                continue;
+            }
+            if !crate::test_support::case::is_sentence_case(&text) && !is_identifier(&text) {
+                wrong.entry(format!("{kind} {text:?}")).or_default().push(stable_url(&url));
+            }
+        }
+    }
+    let mut report: Vec<String> = wrong
+        .iter()
+        .map(|(label, urls)| format!("{label} on {} page(s), e.g. {}", urls.len(), urls[0]))
+        .collect();
+    for (kind, phrase, _) in DATA_LABELS {
+        if !seen_data.contains(&(*kind, *phrase)) {
+            report.push(format!("DATA_LABELS ({kind}, {phrase:?}) is on no page any more"));
+        }
+    }
+    assert!(report.is_empty(), "{} labels:\n{}", report.len(), report.join("\n"));
+    assert!(checked > 2000, "only {checked} labels were checked");
 }
 
 /// The guard's failure, by page: each row named but not rendered, each row
@@ -788,10 +934,10 @@ fn stable_status(item: &str) -> String {
 
 /// Each crawled page with anything in its header, sorted by URL.
 const EXPECTED_HEADERS: &[&str] = &[
-    r#"/b/admin/blocks => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
-    r#"/b/admin/blocks?tab=custom => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
-    r#"/b/admin/blocks?tab=infrastructure => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
-    r#"/b/admin/blocks?tab=services => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open Inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks?tab=custom => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks?tab=infrastructure => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open inspector (opens in a new tab)""#,
+    r#"/b/admin/blocks?tab=services => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open inspector (opens in a new tab)""#,
     r#"/b/admin/database => status "SQLite · N tables""#,
     r#"/b/admin/database?tab=schema => status "SQLite · N tables""#,
     r#"/b/admin/database?tab=sql => status "SQLite · N tables""#,

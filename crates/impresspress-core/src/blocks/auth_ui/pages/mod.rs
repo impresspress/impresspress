@@ -205,7 +205,7 @@ async function handleLogin(ev){
     keepSession(d);
     var redir=$('redirect').value||d.default_redirect||'/';
     window.location.href=redir;
-  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign In'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign in'}
   return false;
 }
 async function handleForgot(){
@@ -238,7 +238,7 @@ async function handleLogin(ev){
     var d=await apiPost('/b/auth/api/login',{email:$('email').value,password:$('password').value});
     var redir=$('redirect').value||d.default_redirect||'/';
     window.location.href=redir;
-  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign In'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign in'}
   return false;
 }
 async function handleForgot(){
@@ -305,7 +305,7 @@ async function handleSignup(ev){
       var redir=$('redirect').value||d.default_redirect||'/';
       window.location.href=redir;
     }
-  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Create Account'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Create account'}
   return false;
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleSignup(e)});
@@ -333,7 +333,7 @@ async function handleSignup(ev){
       var redir=$('redirect').value||d.default_redirect||'/';
       window.location.href=redir;
     }
-  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Create Account'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Create account'}
   return false;
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleSignup(e)});

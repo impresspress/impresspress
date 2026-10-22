@@ -164,6 +164,55 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
         .collect()
 }
 
+/// The labels a page writes for a reader, in document order, as
+/// `(kind, phrase)`: headings (`h1`…`h6`), table headers (`th`), form labels
+/// (`label`, `legend`), buttons (`button`, `.btn`), disclosure summaries
+/// (`summary`), stat labels (`.stat__label`), badges (`.badge`) and tabs
+/// (`.tab`).
+///
+/// Each text node is its own phrase, whitespace collapsed: a checkbox card's
+/// `label` holds its name and the sentence under it (`strong` "Automatic
+/// tax", `small` "Ask Stripe to calculate tax…"), and a wizard step badge
+/// its number and its name, and each reads on its own. Concealed labels are
+/// included: a region revealed later shows the labels it has. An element
+/// with no text (an icon button) has no phrase. The sidebar (`.sidebar`) is
+/// left out: it is outside the redesign. So are select options, which are
+/// the values a reader picks (countries, currencies, model ids), not labels
+/// the page writes about them.
+pub fn ui_labels(html: &str) -> Vec<(&'static str, String)> {
+    const KINDS: [(&str, &str); 8] = [
+        ("h1, h2, h3, h4, h5, h6", "heading"),
+        ("th", "table header"),
+        ("label, legend", "label"),
+        ("button, .btn", "button"),
+        ("summary", "summary"),
+        (".stat__label", "stat label"),
+        (".badge", "badge"),
+        (".tab", "tab"),
+    ];
+    let doc = Html::parse_document(html);
+    let kinds: Vec<(Selector, &'static str)> =
+        KINDS.iter().map(|(css, kind)| (selector(css), *kind)).collect();
+    let mut out = Vec::new();
+    for el in doc.root_element().descendants().filter_map(ElementRef::wrap) {
+        let Some((_, kind)) = kinds.iter().find(|(sel, _)| sel.matches(&el)) else {
+            continue;
+        };
+        if self_or_ancestor(el, |el| has_class(el, "sidebar")) {
+            continue;
+        }
+        for node in el.descendants() {
+            if let Node::Text(text) = node.value() {
+                let phrase = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !phrase.is_empty() {
+                    out.push((*kind, phrase));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every way the page departs from the one confirm mechanism
 /// (`ui::components::confirm_dialog`, asked through by chrome.js), as one line
 /// each:

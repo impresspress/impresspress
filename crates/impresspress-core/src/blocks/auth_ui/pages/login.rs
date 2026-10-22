@@ -86,7 +86,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     }
 
     let markup = ui::layout::page(
-        "Sign In",
+        "Sign in",
         &config,
         auth_split(
             // `None`: login is the one auth page that shows the brand
@@ -132,7 +132,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             }
                         }
 
-                        button .login-button type="submit" #btn { "Sign In" }
+                        button .login-button type="submit" #btn { "Sign in" }
                     }
 
                     @if allow_signup {

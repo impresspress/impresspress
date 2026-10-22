@@ -1746,7 +1746,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         ("wizard-automatic-tax", "Automatic tax", "Ask Stripe to calculate tax for this checkout.", automatic_tax),
                         ("wizard-billing-address", "Billing address", "Collect the customer's billing address.", false),
                         ("wizard-shipping-address", "Shipping address", "Collect delivery details and show shipping rates.", false),
-                        ("wizard-create-customer", "Create a Stripe Customer for one-time payments", "Useful when customers may buy again or need billing support.", false),
+                        ("wizard-create-customer", "Create a Stripe customer for one-time payments", "Useful when customers may buy again or need billing support.", false),
                         ("wizard-terms", "Terms consent", "Require customers to accept your terms before paying.", false),
                     ] {
                         label .products-choice {
@@ -2328,7 +2328,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
         }
         @if managed.status == OfferStatus::Active {
             section .details-block--divider {
-                h3 .products-subheading .m-0 { "Shareable Stripe Payment Links" }
+                h3 .products-subheading .m-0 { "Shareable Stripe payment links" }
                 p .text-muted .text-sm { "Create a hosted checkout link you can paste into an email, button, or social post. Products with choices save those choices as a reusable preset." }
                 @if !offer.variables.is_empty() {
                     div .grid .grid-auto-260 .gap-4 {
@@ -2352,7 +2352,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     input .form-input id=(format!("link-{}-completion-url", offer.id)) data-link-completion-url type="url" placeholder="https://example.com/thank-you";
                 }
                 div .flex .gap-2 .flex-wrap {
-                    button .btn .btn--secondary .btn--sm type="button" data-create-link data-action="pm-create-link" { "Create or reuse Payment Link" }
+                    button .btn .btn--secondary .btn--sm type="button" data-create-link data-action="pm-create-link" { "Create or reuse payment link" }
                     @if !offer.variables.is_empty() {
                         button .btn .btn--secondary .btn--sm type="button" data-action="pm-new-preset" { "New preset" }
                     }
@@ -2367,12 +2367,12 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                 summary .summary-strong { "Hosted, embedded, and static-site integration" }
                 p .text-muted .text-sm { "The browser sends inputs to Impresspress for authoritative pricing. Replace the placeholder domain with this Impresspress deployment; secret Stripe keys never belong in static HTML." }
                 div .form-group {
-                    label .form-label for=(format!("snippet-{}-hosted", offer.id)) { "Hosted Checkout widget" }
+                    label .form-label for=(format!("snippet-{}-hosted", offer.id)) { "Hosted checkout widget" }
                     textarea .form-textarea id=(format!("snippet-{}-hosted", offer.id)) data-integration-snippet readonly rows="4" spellcheck="false" { (hosted_snippet) }
                     button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy hosted snippet" }
                 }
                 div .form-group {
-                    label .form-label for=(format!("snippet-{}-embedded", offer.id)) { "Embedded Checkout widget" }
+                    label .form-label for=(format!("snippet-{}-embedded", offer.id)) { "Embedded checkout widget" }
                     textarea .form-textarea id=(format!("snippet-{}-embedded", offer.id)) data-integration-snippet readonly rows="4" spellcheck="false" { (embedded_snippet) }
                     button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy embedded snippet" }
                 }

@@ -89,7 +89,7 @@ function configurableManagerHtml() {
         <input id="preset-seats" data-offer-variable="preset" data-variable-key="seats" data-variable-kind="integer" type="number" min="1" step="1" required>
         <label for="completion-url">After-completion URL (optional)</label>
         <input id="completion-url" data-link-completion-url type="url" value="https://shop.example/thanks">
-        <button type="button" data-create-link data-action="pm-create-link">Create or reuse Payment Link</button>
+        <button type="button" data-create-link data-action="pm-create-link">Create or reuse payment link</button>
         <div data-checkout-presets></div>
         <div data-payment-links></div>
 
@@ -486,7 +486,7 @@ test.describe("products manager Stripe catalog actions", () => {
     );
 
     await page
-      .getByRole("button", { name: "Create or reuse Payment Link" })
+      .getByRole("button", { name: "Create or reuse payment link" })
       .click();
     await expect(page.locator("[data-offer-error]"))
       .toContainText("Seats is invalid");
@@ -498,7 +498,7 @@ test.describe("products manager Stripe catalog actions", () => {
 
     await page.locator("#preset-seats").fill("5");
     await page
-      .getByRole("button", { name: "Create or reuse Payment Link" })
+      .getByRole("button", { name: "Create or reuse payment link" })
       .click();
     await expect(
       page.getByRole("link", { name: "Open hosted payment page" }),

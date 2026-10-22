@@ -206,8 +206,9 @@ const USER_COLUMNS: [components::TableCol<'static>; 5] = [
 /// fragment (no "You" in place of the actions) — the mutation endpoints
 /// reject self-disable before reaching this path.
 ///
-/// The status is "Active" or "Disabled", in sentence case at the source
-/// (`status_badge` prints the stored word as it is, lowercase).
+/// The status goes through the one status mapping (`status_badge`: "Active"
+/// in the success tone, "Disabled" in the danger tone), and each role reads
+/// as `components::humanize` writes it ("Admin", "Billing admin").
 fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> components::TableRow {
     let email = record.email.as_str();
     let disabled = record.disabled;
@@ -217,19 +218,13 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
         components::user_identity(email),
         html! {
             @for role in roles {
-                (Badge::new(BadgeVariant::Secondary).classes("mr-1").render(html! { (role) }))
+                (Badge::new(BadgeVariant::Secondary).classes("mr-1").render(html! { (components::humanize(role)) }))
             }
             @if roles.is_empty() {
                 span .text-muted { (components::NO_VALUE) }
             }
         },
-        html! {
-            @if disabled {
-                (badge(BadgeVariant::Danger, "Disabled"))
-            } @else {
-                (badge(BadgeVariant::Success, "Active"))
-            }
-        },
+        components::status_badge(if disabled { "disabled" } else { "active" }),
         html! { span .text-muted { (components::timestamp(created)) } },
         html! {
                 @if is_self {
@@ -841,7 +836,7 @@ mod tests {
             .find(&format!(r#"<tr id="user-row-{id}""#))
             .unwrap_or_else(|| panic!("no row for the admin: {html}"));
         let row = &html[start..start + html[start..].find("</tr>").expect("a closed row")];
-        assert!(row.contains(">admin</span>"), "the admin badge: {row}");
+        assert!(row.contains(">Admin</span>"), "the admin badge: {row}");
         assert!(
             !row.contains(components::NO_VALUE),
             "the row must not say the admin holds no role: {row}"
