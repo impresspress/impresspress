@@ -265,8 +265,7 @@ pub async fn handle_request(
         let checked = if header.starts_with("Bearer ") {
             // [SEC-038] Read the deployment's expected issuer once per request
             // so JWTs minted under a different deployment's FRONTEND_URL get
-            // rejected even if their HMAC secret matches. [SEC-042] also
-            // consults the JWT blocklist via the ctx-aware extractor.
+            // rejected even if their HMAC secret matches.
             let expected_iss = match crate::crypto::expected_issuer(ctx).await {
                 Ok(expected_iss) => expected_iss,
                 Err(e) => {
@@ -4392,7 +4391,7 @@ mod credential_check_tests {
 
     use super::handle_request;
     use crate::{
-        blocks::auth::repo::{api_keys, jwt_blocklist, users},
+        blocks::auth::repo::{api_keys, sessions, users},
         features::AllEnabled,
         test_support::{
             anon_msg, real_block_infos, FailingDbOpContext, TestContext, TEST_JWT_SECRET,
@@ -4411,10 +4410,10 @@ mod credential_check_tests {
             .id
     }
 
-    /// An access token for `sub` carrying a `jti`, signed and issued the way
-    /// `test_support::access_token_for` signs one, so step 2 reads the
-    /// blocklist and the login family's session row as well as
-    /// `auth_version`. The family is given its row, as a sign-in would.
+    /// An access token for `sub`, signed and issued the way
+    /// `test_support::access_token_for` signs one, so step 2 reads the login
+    /// family's session row as well as `auth_version`. The family is given
+    /// its row, as a sign-in would.
     async fn bearer(ctx: &TestContext, sub: &str) -> String {
         let family = uuid::Uuid::new_v4().to_string();
         crate::test_support::seed_login_family(ctx, sub, &family).await;
@@ -4430,10 +4429,6 @@ mod credential_check_tests {
             serde_json::json!("http://localhost:5173"),
         );
         claims.insert("roles".to_string(), serde_json::json!(["user"]));
-        claims.insert(
-            "jti".to_string(),
-            serde_json::json!(uuid::Uuid::new_v4().to_string()),
-        );
         claims.insert("family".to_string(), serde_json::json!(family));
         let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
             .expect("test jwt_sign");
@@ -4533,27 +4528,6 @@ mod credential_check_tests {
         );
     }
 
-    /// The JWT blocklist read failing is refused the same way. Before, the
-    /// lookup "failed closed" by reporting every token as blocklisted — so
-    /// during an outage every signed-in caller looked logged out.
-    #[tokio::test]
-    async fn a_failed_blocklist_read_is_a_503_not_a_sign_out() {
-        let (ctx, uid) = signed_in_fixture().await;
-        let token = bearer(&ctx, &uid).await;
-        let down = FailingDbOpContext::new(ctx, vec![("database.list", jwt_blocklist::TABLE)]);
-
-        let (status, location, body) = answer(get_me(&down, &token, true).await).await;
-        assert_eq!(status, 503, "{body}");
-        assert!(
-            location.is_empty(),
-            "no redirect to the login form: {location}"
-        );
-        assert!(
-            !body.contains("simulated database outage") && !body.contains(jwt_blocklist::TABLE),
-            "the fault's own text stays in the log: {body}"
-        );
-    }
-
     /// The login family read (`sessions::is_live`) failing is refused the
     /// same way: it decides whether the token's device is still signed in,
     /// and a read that could not run has not decided that it is not.
@@ -4561,16 +4535,17 @@ mod credential_check_tests {
     async fn a_failed_login_family_read_is_a_503_not_a_sign_out() {
         let (ctx, uid) = signed_in_fixture().await;
         let token = bearer(&ctx, &uid).await;
-        let down = FailingDbOpContext::new(
-            ctx,
-            vec![("database.list", crate::blocks::auth::repo::sessions::TABLE)],
-        );
+        let down = FailingDbOpContext::new(ctx, vec![("database.list", sessions::TABLE)]);
 
         let (status, location, body) = answer(get_me(&down, &token, true).await).await;
         assert_eq!(status, 503, "{body}");
         assert!(
             location.is_empty(),
             "no redirect to the login form: {location}"
+        );
+        assert!(
+            !body.contains("simulated database outage") && !body.contains(sessions::TABLE),
+            "the fault's own text stays in the log: {body}"
         );
     }
 

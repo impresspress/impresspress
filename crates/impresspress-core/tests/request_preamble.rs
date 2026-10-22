@@ -246,10 +246,9 @@ async fn a_cross_site_profile_post_is_refused_even_with_the_token() {
     assert_eq!(display_name(&ctx, &member.user_id).await, before);
 }
 
-/// Signing out blocklists the access token presented with the sign-out, and
-/// the preamble refuses it from then on. With the caller injected as meta,
-/// sign-out has no `jti` to blocklist and the next request is admitted
-/// regardless.
+/// Signing out deletes the session row of every login family the account
+/// has, and the preamble refuses an access token whose family has no live
+/// row, so the token presented with the sign-out is refused from then on.
 #[tokio::test]
 async fn a_signed_out_access_token_is_refused() {
     let ctx = deployment().await;

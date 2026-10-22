@@ -4,7 +4,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
     blocks::{
-        auth::helpers::{clear_auth_cookie, end_all_families, end_presented_access_token},
+        auth::helpers::{clear_auth_cookie, end_all_families},
         auth_ui::contracts::MessageResponse,
         crud,
     },
@@ -34,19 +34,6 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
             );
             return crud::db_error_internal(e, "Logout could not fully revoke the session");
         }
-
-        // SEC-042: blocklist the presented access JWT's `jti` as well. The
-        // row deletion above already ended it (an access token needs a live
-        // family, `crypto::verify_access_token`); this is the per-token
-        // record of the same end. Same fail-closed treatment.
-        if let Err(e) = end_presented_access_token(ctx, msg).await {
-            tracing::error!(
-                user_id = %user_id,
-                error = %e,
-                "logout: jwt blocklist insert failed"
-            );
-            return crud::db_error_internal(e, "Logout could not fully revoke the session");
-        }
     }
 
     let cookie = match clear_auth_cookie(ctx).await {
@@ -66,8 +53,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 mod tests {
     use super::*;
     use crate::{
-        blocks::auth::repo::{jwt_blocklist, sessions, tokens},
-        crypto::{META_AUTH_EXP, META_AUTH_JTI},
+        blocks::auth::repo::{sessions, tokens},
         test_support::{auth_msg, output_is_error, output_status, FailingDbOpContext, TestContext},
     };
 
@@ -96,27 +82,6 @@ mod tests {
         assert!(
             output_is_error(out, "Internal").await,
             "a refresh-token revocation failure must not be reported as a successful logout"
-        );
-    }
-
-    #[tokio::test]
-    async fn jwt_blocklist_insert_failure_does_not_report_success() {
-        let ctx = TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        let failing = FailingDbOpContext::new(ctx, vec![("database.create", jwt_blocklist::TABLE)]);
-
-        let mut msg = auth_msg("update", "/b/auth/api/logout", "user-1");
-        msg.set_meta(META_AUTH_JTI, "jti-1");
-        msg.set_meta(
-            META_AUTH_EXP,
-            (chrono::Utc::now().timestamp() + 3600).to_string(),
-        );
-        let out = handle(&failing, &msg).await;
-
-        assert!(
-            output_is_error(out, "Internal").await,
-            "a JWT blocklist insert failure must not be reported as a successful logout"
         );
     }
 
@@ -188,12 +153,7 @@ mod tests {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
-        let mut msg = auth_msg("update", "/b/auth/api/logout", "user-1");
-        msg.set_meta(META_AUTH_JTI, "jti-1");
-        msg.set_meta(
-            META_AUTH_EXP,
-            (chrono::Utc::now().timestamp() + 3600).to_string(),
-        );
+        let msg = auth_msg("update", "/b/auth/api/logout", "user-1");
         let out = handle(&ctx, &msg).await;
         assert_eq!(output_status(out).await, 303);
     }

@@ -73,8 +73,8 @@ To choose the values instead, export `IMPRESSPRESS_DEPLOY_TOKEN` (and
 
 ## The scheduled sweep is opt-in — two steps
 
-The auth retention sweep (expired sessions, tokens, JWT blocklist rows, OAuth
-PKCE rows) runs opportunistically on login, so a busy deployment already prunes.
+The auth retention sweep (expired sessions, tokens and OAuth PKCE rows) runs
+opportunistically on login, so a busy deployment already prunes.
 The cron exists for a deployment with no logins. It is **off by default**:
 `impresspress` cannot supply the `scheduled` export for you (it needs your own
 registration hooks) and the CLI scaffolds no consumer source file, so a default

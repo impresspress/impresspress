@@ -863,7 +863,8 @@ fn deliberately_readable_tables_stay_readable() {
         ),
         (
             "wafer_run__auth__jwt_blocklist",
-            "revoked `jti`s: identifiers of tokens, not tokens",
+            "retired and unused; its old rows are revoked `jti`s: identifiers \
+             of tokens, not tokens",
         ),
         ("wafer_run__auth__orgs", "org names and verification refs"),
         ("wafer_run__auth__rate_limits", "counters keyed by bucket"),
