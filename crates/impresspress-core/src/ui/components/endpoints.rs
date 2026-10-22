@@ -35,7 +35,10 @@ pub fn endpoint_table(label: &str, endpoints: &[BlockEndpoint]) -> Markup {
                 html! { code { (breakable_id(&ep.path)) } },
                 badge(BadgeVariant::for_method(ep.method), &ep.method.to_string()),
                 html! { (ep.summary) },
-                badge(BadgeVariant::for_auth(ep.auth), &humanize(&ep.auth.to_string())),
+                badge(
+                    BadgeVariant::for_auth(ep.auth),
+                    &humanize(&ep.auth.to_string()),
+                ),
             ])
         })
         .collect();

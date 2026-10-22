@@ -1,5 +1,7 @@
 /* ===== Card =====
-   `components::Card` is the only writer of `.card` and `.card__*`. One
+   `components::Card` is the only writer of `.card`, `.card__*` and
+   `.card--*` (pinned by `only_the_builder_writes_its_classes` in
+   ui/mod.rs). One
    surface, one padding: the card owns it, so a card with a head and a body
    and a card with only a body sit their content the same `--card-pad` in
    (20px; 16px on a phone, tokens.css), and the

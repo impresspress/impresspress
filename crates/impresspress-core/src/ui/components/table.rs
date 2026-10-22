@@ -889,7 +889,10 @@ mod tests {
             ])
             .render()
             .into_string();
-        assert!(kept.contains(r#"<th data-label="Roles">Roles</th>"#), "{kept}");
+        assert!(
+            kept.contains(r#"<th data-label="Roles">Roles</th>"#),
+            "{kept}"
+        );
         // The header and the two cells.
         assert_eq!(kept.matches(r#"data-label="Roles""#).count(), 3, "{kept}");
     }

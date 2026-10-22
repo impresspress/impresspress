@@ -2331,7 +2331,11 @@ mod tests {
             .into_iter()
             .filter_entry(|e| !matches!(e.file_name().to_str(), Some("test" | "tests" | "vendor")))
             .filter_map(Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|x| x == "js" || x == "mjs"))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x == "js" || x == "mjs")
+            })
         {
             let name = entry.file_name().to_string_lossy();
             // Vendored third-party bundles, not this codebase's markup.
@@ -2422,7 +2426,12 @@ mod tests {
         value: &str,
         tokens: &std::collections::HashMap<String, String>,
     ) -> Option<FontSize> {
-        let value = value.split('!').next().unwrap_or("").trim().to_ascii_lowercase();
+        let value = value
+            .split('!')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
         let value = substitute_tokens(&value, tokens, 0)?;
         let value = value.trim();
         match value {
@@ -2457,8 +2466,16 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     fn shorthand_size(value: &str) -> Option<String> {
         const KEYWORDS: [&str; 10] = [
-            "xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large",
-            "xxx-large", "smaller", "larger",
+            "xx-small",
+            "x-small",
+            "small",
+            "medium",
+            "large",
+            "x-large",
+            "xx-large",
+            "xxx-large",
+            "smaller",
+            "larger",
         ];
         let value = value.split('!').next().unwrap_or("");
         let mut depth = 0;
@@ -2507,21 +2524,36 @@ mod tests {
         (".chart__range", "a chart's range ticks"),
         (".callout__code", "a code chip"),
         (".bootstrap-hint code", "a code chip"),
-        (".public-page__content code", "a code chip (0.9em of its text)"),
+        (
+            ".public-page__content code",
+            "a code chip (0.9em of its text)",
+        ),
         (".share-token", "a token chip"),
         (".db-sql__input", "a code textarea (the SQL editor)"),
         (".dev-workspace code", "a code chip in the dev workspace"),
         ("#dev-console-schema", "a code block (a tool's JSON schema)"),
         ("#dev-console-result", "a code block (a tool's JSON result)"),
         ("#dev-log", "a code block (the compiler's log)"),
-        ("#dev-console-args", "a code textarea (a tool's JSON arguments)"),
+        (
+            "#dev-console-args",
+            "a code textarea (a tool's JSON arguments)",
+        ),
         ("#dev-editor-text", "a code textarea (the file editor)"),
-        ("#dev-suggested-prompt", "a code block (the agent prompt to copy)"),
+        (
+            "#dev-suggested-prompt",
+            "a code block (the agent prompt to copy)",
+        ),
         // The sidebar is outside the redesign.
         (".sidebar__group-label", "the sidebar"),
         (".sidebar__user-role", "the sidebar"),
-        (".profile-menu-role", "the sidebar's profile menu (ui/sidebar.rs)"),
-        (".avatar--sm", "the sidebar's avatar initial (ui/sidebar.rs)"),
+        (
+            ".profile-menu-role",
+            "the sidebar's profile menu (ui/sidebar.rs)",
+        ),
+        (
+            ".avatar--sm",
+            "the sidebar's avatar initial (ui/sidebar.rs)",
+        ),
     ];
 
     /// Every rule in `sheets` that sets text under 14px without being on

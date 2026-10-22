@@ -8,10 +8,13 @@ use crate::ui::icons;
 /// A card: one framed surface on the page background, holding one section of
 /// a page's content.
 ///
-/// This is the only writer of `.card` and `.card__*`. A card never holds
-/// another card-level surface (a card, a stat, a framed empty state, a bare
-/// data table), with one exception: a [`flush`](Card::flush) card's body may
-/// hold a `DataTable`, whose frame the card absorbs.
+/// This is the only writer of `.card`, `.card__*` and `.card--*`, in Rust
+/// and in script (`ui::tests::only_the_builder_writes_its_classes`; the
+/// storefront's own card, inside its shadow root, is not this class). A
+/// card never holds another card-level surface (a card, a stat, a framed
+/// empty state, a bare data table), with one exception: a
+/// [`flush`](Card::flush) card's body may hold a `DataTable`, whose frame
+/// the card absorbs.
 ///
 /// - [`Card::titled`] renders `section.card > header.card__head + div.card__body`.
 ///   The title is an `h2`: the shell's topbar owns the page's one `h1`

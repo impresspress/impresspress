@@ -1,5 +1,7 @@
 # Admin Redesign Implementation Plan
 
+> **Superseded in part (2026-10-23).** The 2026-10 admin layout redesign reversed this plan's stat tiles (icon, uppercase label, sparkline), replaced its chart cards and deleted `components::button`. Each step or line it superseded carries a **[superseded 2026-10: …]** marker naming what replaced it; the asset pipeline and the rest stand.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Redesign the admin login and dashboard to the supplied mockups, consolidate the shared style/component layer, and make every static asset detachable so a Cloudflare wasm can drop ~370 KB while a native binary stays self-contained.
@@ -41,7 +43,7 @@ Two details resolved while mapping the code. Both satisfy the spec's intent with
 | `crates/impresspress-core/build.rs` | Hash asset sources, assemble `app.css`, emit the manifest |
 | `crates/impresspress-core/src/ui/styles/` | CSS, split by component (was `ui/assets/*.css`) |
 | `crates/impresspress-core/src/ui/components/` | Component module dir (was the 611-line `components.rs`) |
-| `crates/impresspress-core/src/ui/components/chart.rs` | `sparkline`, `bar_chart_card`, `line_chart_card` |
+| `crates/impresspress-core/src/ui/components/chart.rs` | `sparkline`, `bar_chart_card`, `line_chart_card` **[superseded 2026-10: the dashboard's charts are `components::ChartCard`; `line_chart_card`/`bar_chart_card` are gone; `sparkline` is deleted]** |
 | `crates/impresspress-core/src/ui/components/auth.rs` | `auth_panel`, `oauth_button`, `alert` |
 | `site/cdn/` (site repo) | Cloudflare Worker serving `/ui/v{version}/*` |
 
@@ -907,7 +909,7 @@ git commit -m "refactor(ui): split CSS into styles/ by component"
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: **the public API is unchanged.** `ui::components::button`, `::stat_card`, `::data_table`, `::badge`, `::status_badge`, `::modal`, `::page_header`, `::tab_navigation`, `::search_input`, `::search_input_with_value`, `::empty_state`, `::pagination`, `::avatar`, plus the `Tab`, `TableCol`, `BadgeVariant`, `CtrlSize` types, all re-exported from `mod.rs`.
+- Produces: **the public API is unchanged.** `ui::components::button`, `::stat_card`, `::data_table`, `::badge`, `::status_badge`, `::modal`, `::page_header`, `::tab_navigation`, `::search_input`, `::search_input_with_value`, `::empty_state`, `::pagination`, `::avatar`, plus the `Tab`, `TableCol`, `BadgeVariant`, `CtrlSize` types, all re-exported from `mod.rs`. **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant; `stat_card` is `Stat`/`stat_row`, `page_header` is deleted (a section heading is a `components::Card` title), and `CtrlSize` is `AvatarSize`]**
 
 - [ ] **Step 1: Create the directory and move code**
 
@@ -1523,7 +1525,7 @@ pub fn line_chart_card(
 }
 ```
 
-- [ ] **Step 5: Extend `stat_card`**
+- [ ] **Step 5: Extend `stat_card`** **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]**
 
 ```rust
 /// Dashboard stat tile: icon, uppercase label, value, optional sparkline.
@@ -1545,7 +1547,7 @@ Update every existing `stat_card(` call site to pass `None` as the fourth argume
 
 - [ ] **Step 6: Add the CSS**
 
-In `styles/components/chart.css` add `.chart`, `.chart__yaxis`, `.chart__ytick`, `.chart__plot`, `.chart__gridline` (a hairline in `--border-light`), `.chart__area` (`fill: var(--chart-color); opacity: .12`), `.chart__line` (`stroke: var(--chart-color); stroke-width: 1.5; vector-effect: non-scaling-stroke`) and `.chart__dot` (`fill: var(--chart-color)`). In `stat.css` add `.stat-spark { width: 4rem; height: 1.5rem; }` and make `.stat-label` uppercase with `letter-spacing: .06em`.
+In `styles/components/chart.css` add `.chart`, `.chart__yaxis`, `.chart__ytick`, `.chart__plot`, `.chart__gridline` (a hairline in `--border-light`), `.chart__area` (`fill: var(--chart-color); opacity: .12`), `.chart__line` (`stroke: var(--chart-color); stroke-width: 1.5; vector-effect: non-scaling-stroke`) and `.chart__dot` (`fill: var(--chart-color)`). In `stat.css` add `.stat-spark { width: 4rem; height: 1.5rem; }` and make `.stat-label` uppercase with `letter-spacing: .06em`. **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]**
 
 `vector-effect: non-scaling-stroke` matters: the viewBox is stretched non-uniformly, so without it the line thickness distorts.
 
@@ -1571,7 +1573,7 @@ git commit -m "feat(ui): sparkline, line chart card, and icon+spark stat tiles"
 
 **Interfaces:**
 - Consumes: `components::{sparkline, line_chart_card, bar_chart_card, stat_card}` from Task 10.
-- Produces: `StatTile` gains `pub icon: Markup` and `pub spark: Option<Markup>`, replacing `trend`. `dashboard_page` renders stats **before** charts.
+- Produces: `StatTile` gains `pub icon: Markup` and `pub spark: Option<Markup>`, replacing `trend`. `dashboard_page` renders stats **before** charts. **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]**
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1639,7 +1641,7 @@ pub fn activity() -> Markup {
 }
 ```
 
-Then in `blocks/admin/pages/dashboard.rs` give each of the five tiles its icon and a sparkline built from the series already fetched for the charts:
+Then in `blocks/admin/pages/dashboard.rs` give each of the five tiles its icon and a sparkline built from the series already fetched for the charts: **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]**
 
 | Tile | Icon | Sparkline series |
 |---|---|---|
@@ -1649,7 +1651,7 @@ Then in `blocks/admin/pages/dashboard.rs` give each of the five tiles its icon a
 | Errors today | `icons::triangle_alert()` | `errors_daily` |
 | Avg response | `icons::activity()` | `None` — no per-day series is fetched |
 
-Switch the New users and Errors cards from `bar_chart_card` to `line_chart_card`; leave Requests on bars.
+Switch the New users and Errors cards from `bar_chart_card` to `line_chart_card`; leave Requests on bars. **[superseded 2026-10: the dashboard's charts are `components::ChartCard`; `line_chart_card`/`bar_chart_card` are gone]**
 
 - [ ] **Step 5: Run to verify it passes**
 

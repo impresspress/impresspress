@@ -295,7 +295,7 @@ test('an open modal swapped out of the document hands focus to the replacement t
   page.click(trigger);
   submit.focus();
 
-  // Add Variable's form targets `#content` and answers the whole settings
+  // Add variable's form targets `#content` and answers the whole settings
   // body: the open dialog is simply replaced, with no closeModal and no
   // `close` event.
   page.htmx.beforeRequest(submit);
@@ -414,7 +414,7 @@ test('a toast raised by the response that swaps the modal away survives the swap
   page.click(trigger);
   submit.focus();
 
-  // Add Variable: the answer replaces `#content`, which holds the open modal
+  // Add variable: the answer replaces `#content`, which holds the open modal
   // and so the toast container; its `showToast` arrives before the swap.
   page.htmx.beforeRequest(submit);
   page.htmx.trigger(submit, 'showToast', { message: 'Variable created', type: 'success' });
@@ -443,7 +443,7 @@ test('closeModal moves the toasts out at once, so the swap that follows cannot t
 
 test('after an htmx-loaded modal saves, focus returns to the re-rendered opener with the same id', async () => {
   const page = loadChromeDom();
-  // Edit Variable: the row's Edit button (an `hx-get`, not a modal-open
+  // Edit variable: the row's Edit button (an `hx-get`, not a modal-open
   // trigger) opens it; Save re-renders `#content`, row button and all.
   const content = page.el('div', { id: 'content-region' });
   const edit = page.el('button', { id: 'edit-var-open-APP', 'hx-get': '/b/admin/variables/APP/edit' });

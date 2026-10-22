@@ -742,7 +742,10 @@ async fn every_page_has_at_most_one_visible_primary() {
             wrong.push(format!("{url}: {} visible primaries: {page:?}", page.len()));
         }
         for dialog in dialogs.iter().filter(|primaries| primaries.len() > 1) {
-            wrong.push(format!("{url}: a dialog with {} primaries: {dialog:?}", dialog.len()));
+            wrong.push(format!(
+                "{url}: a dialog with {} primaries: {dialog:?}",
+                dialog.len()
+            ));
         }
     }
     wrong.sort();
@@ -821,11 +824,33 @@ fn is_identifier(phrase: &str) -> bool {
 /// words the page writes: `(kind, phrase, what it is)`. Each must still be
 /// seen, so an entry does not outlive its page.
 const DATA_LABELS: &[(&str, &str, &str)] = &[
-    ("heading", "photos", "the fixture's bucket, its name the page's title"),
-    ("heading", "docs", "the fixture's vector index, its name the page's title"),
-    ("summary", "admin", "a block's name, heading its tables in the database list"),
-    ("summary", "auth", "a block's name, heading its tables in the database list"),
-    ("summary", "impresspress", "the org a block belongs to, in the database list"),
+    #[cfg(feature = "block-files")]
+    (
+        "heading",
+        "photos",
+        "the fixture's bucket, its name the page's title",
+    ),
+    #[cfg(feature = "block-vector")]
+    (
+        "heading",
+        "docs",
+        "the fixture's vector index, its name the page's title",
+    ),
+    (
+        "summary",
+        "admin",
+        "a block's name, heading its tables in the database list",
+    ),
+    (
+        "summary",
+        "auth",
+        "a block's name, heading its tables in the database list",
+    ),
+    (
+        "summary",
+        "impresspress",
+        "the org a block belongs to, in the database list",
+    ),
 ];
 
 /// Design rule 4: every label a page writes is in sentence case
@@ -842,12 +867,18 @@ async fn every_label_is_in_sentence_case() {
     for (url, html) in rendered_pages().await {
         for (kind, text) in crate::test_support::dom::ui_labels(&html) {
             checked += 1;
-            if let Some((k, p, _)) = DATA_LABELS.iter().find(|(k, p, _)| *k == kind && *p == text) {
+            if let Some((k, p, _)) = DATA_LABELS
+                .iter()
+                .find(|(k, p, _)| *k == kind && *p == text)
+            {
                 seen_data.insert((k, p));
                 continue;
             }
             if !crate::test_support::case::is_sentence_case(&text) && !is_identifier(&text) {
-                wrong.entry(format!("{kind} {text:?}")).or_default().push(stable_url(&url));
+                wrong
+                    .entry(format!("{kind} {text:?}"))
+                    .or_default()
+                    .push(stable_url(&url));
             }
         }
     }
@@ -857,10 +888,17 @@ async fn every_label_is_in_sentence_case() {
         .collect();
     for (kind, phrase, _) in DATA_LABELS {
         if !seen_data.contains(&(*kind, *phrase)) {
-            report.push(format!("DATA_LABELS ({kind}, {phrase:?}) is on no page any more"));
+            report.push(format!(
+                "DATA_LABELS ({kind}, {phrase:?}) is on no page any more"
+            ));
         }
     }
-    assert!(report.is_empty(), "{} labels:\n{}", report.len(), report.join("\n"));
+    assert!(
+        report.is_empty(),
+        "{} labels:\n{}",
+        report.len(),
+        report.join("\n")
+    );
     assert!(checked > 2000, "only {checked} labels were checked");
 }
 
@@ -933,6 +971,13 @@ fn stable_status(item: &str) -> String {
 }
 
 /// Each crawled page with anything in its header, sorted by URL.
+///
+/// The table stays now that the redesign is done: the typed slot makes a
+/// misplaced or mis-emphasised header action unwritable, but only this
+/// table notices one that drops out of a page's header, on every page at
+/// once. A status reads by its text; its tone is pinned where it is chosen
+/// (`components::status_badge`'s tests, Database's
+/// `the_backend_badge_is_neutral`).
 const EXPECTED_HEADERS: &[&str] = &[
     r#"/b/admin/blocks => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open inspector (opens in a new tab)""#,
     r#"/b/admin/blocks?tab=custom => secondary "Explore WASM blocks (opens in a new tab)" | secondary "Open inspector (opens in a new tab)""#,

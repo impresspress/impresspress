@@ -3379,7 +3379,8 @@ mod tests {
     /// a hand-written `.card` is a card the one-level rule cannot see the
     /// shape of, a hand-written `.btn--primary` is a primary the header slot
     /// and `Action` did not place.
-    const ONE_WRITER: &[(&str, fn(&str) -> bool)] = &[
+    type OwnsClass = fn(&str) -> bool;
+    const ONE_WRITER: &[(&str, OwnsClass)] = &[
         ("ui/components/card.rs", |class| {
             class == "card" || class.starts_with("card__") || class.starts_with("card--")
         }),
@@ -3456,7 +3457,12 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
         {
-            let rel = entry.path().strip_prefix(&root).unwrap().display().to_string();
+            let rel = entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap()
+                .display()
+                .to_string();
             let src = std::fs::read_to_string(entry.path()).unwrap();
             out.push((rel, strip_test_modules(&src)));
         }
@@ -3473,10 +3479,19 @@ mod tests {
             .into_iter()
             .filter_entry(|e| !matches!(e.file_name().to_str(), Some("test" | "tests")))
             .filter_map(Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|x| x == "js" || x == "mjs"))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x == "js" || x == "mjs")
+            })
             .filter(|e| !e.file_name().to_string_lossy().ends_with(".min.js"))
         {
-            let rel = entry.path().strip_prefix(&root).unwrap().display().to_string();
+            let rel = entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap()
+                .display()
+                .to_string();
             out.push((rel, std::fs::read_to_string(entry.path()).unwrap()));
         }
         assert!(out.len() > 10, "only {} scripts", out.len());
@@ -3532,11 +3547,17 @@ mod tests {
             }
             if rust {
                 // A raw string: r"…", r#"…"#, br"…".
-                let raw_at = if c == 'r' && !chars[..i].last().is_some_and(|p| p.is_alphanumeric() || *p == '_') {
+                let raw_at = if c == 'r'
+                    && !chars[..i]
+                        .last()
+                        .is_some_and(|p| p.is_alphanumeric() || *p == '_')
+                {
                     Some(i + 1)
                 } else if c == 'b'
                     && chars.get(i + 1) == Some(&'r')
-                    && !chars[..i].last().is_some_and(|p| p.is_alphanumeric() || *p == '_')
+                    && !chars[..i]
+                        .last()
+                        .is_some_and(|p| p.is_alphanumeric() || *p == '_')
                 {
                     Some(i + 2)
                 } else {
@@ -3658,9 +3679,8 @@ mod tests {
     fn literal_classes(content: &str, defined: &std::collections::HashSet<String>) -> Vec<String> {
         static ATTR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
         static LIST: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let attr = ATTR.get_or_init(|| {
-            regex::Regex::new(r#"class\s*=\s*\\?["']([^"'\\]*)"#).unwrap()
-        });
+        let attr =
+            ATTR.get_or_init(|| regex::Regex::new(r#"class\s*=\s*\\?["']([^"'\\]*)"#).unwrap());
         let list = LIST.get_or_init(|| {
             regex::Regex::new(r"^\s*[a-z][a-z0-9_-]*(?:\s+[a-z][a-z0-9_-]*)*\s*$").unwrap()
         });
@@ -3673,7 +3693,11 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        if list.is_match(content) && content.split_whitespace().all(|word| defined.contains(word)) {
+        if list.is_match(content)
+            && content
+                .split_whitespace()
+                .all(|word| defined.contains(word))
+        {
             out.extend(content.split_whitespace().map(str::to_string));
         }
         out
@@ -3764,20 +3788,39 @@ mod tests {
     fn the_writer_scan_reads_every_way_a_class_is_written() {
         let defined = defined_classes();
         let rust = |src: &str| -> Vec<String> {
-            rust_class_writes(src, &defined).into_iter().map(|(_, c)| c).collect()
+            rust_class_writes(src, &defined)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect()
         };
         for (src, class) in [
             (r#"html! { section .card { } }"#, "card"),
-            (r#"html! { div class="card card--flush" {} }"#, "card--flush"),
-            (r#"html! { div class={ "x" @if a { " card__body" } } {} }"#, "card__body"),
+            (
+                r#"html! { div class="card card--flush" {} }"#,
+                "card--flush",
+            ),
+            (
+                r#"html! { div class={ "x" @if a { " card__body" } } {} }"#,
+                "card__body",
+            ),
             (r#"Badge::new(v).classes("empty-note")"#, "empty-note"),
-            (r#"const C: &str = "btn btn--primary"; html! { a class=(C) {} }"#, "btn--primary"),
+            (
+                r#"const C: &str = "btn btn--primary"; html! { a class=(C) {} }"#,
+                "btn--primary",
+            ),
             (r#"format!("<p class=\"empty {x}\">")"#, "empty"),
             (r##"PreEscaped(r#"<div class="card">"#)"##, "card"),
-            (r#"const JS: &str = "el.className = 'card__head';";"#, "card__head"),
+            (
+                r#"const JS: &str = "el.className = 'card__head';";"#,
+                "card__head",
+            ),
             (r#"const JS: &str = "el.classList.add('card');";"#, "card"),
         ] {
-            assert!(rust(src).iter().any(|c| c == class), "{src}: {:?}", rust(src));
+            assert!(
+                rust(src).iter().any(|c| c == class),
+                "{src}: {:?}",
+                rust(src)
+            );
         }
         for src in [
             r#"// html! { section .card {} }"#,
@@ -3795,13 +3838,22 @@ mod tests {
             );
         }
         let js = |src: &str| -> Vec<String> {
-            script_class_writes(src, &defined).into_iter().map(|(_, c)| c).collect()
+            script_class_writes(src, &defined)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect()
         };
         for (src, class) in [
             ("el.className = 'card';", "card"),
             ("el.classList.add(\"empty-note\");", "empty-note"),
-            ("el.setAttribute('class', 'card card--flush');", "card--flush"),
-            ("host.innerHTML = `<section class=\"card\">${x}</section>`;", "card"),
+            (
+                "el.setAttribute('class', 'card card--flush');",
+                "card--flush",
+            ),
+            (
+                "host.innerHTML = `<section class=\"card\">${x}</section>`;",
+                "card",
+            ),
             ("b.className = 'btn btn--primary';", "btn--primary"),
             ("s.replace(/\"/g, '&quot;'); el.className = 'card';", "card"),
             ("var r = x / 2; el.className = 'card';", "card"),
@@ -3876,7 +3928,10 @@ mod tests {
              components::Card, empty_state/empty_note or Action instead:\n{}",
             wrong.join("\n")
         );
-        assert!(owner_writes >= 10, "the builders' own writes were not found: {owner_writes}");
+        assert!(
+            owner_writes >= 10,
+            "the builders' own writes were not found: {owner_writes}"
+        );
     }
 
     /// The labels a stylesheet selects table cells and headers by
@@ -3889,7 +3944,8 @@ mod tests {
         // A `th`/`td` compound with a `:nth-*` pseudo-class anywhere in it,
         // `:is(…)` included.
         let place = PLACE.get_or_init(|| {
-            regex::Regex::new(r"(?:^|[\s>+~(,])t[hd](?:[.:\[][^\s>+~,]*)?:(?:is\([^)]*)?nth-").unwrap()
+            regex::Regex::new(r"(?:^|[\s>+~(,])t[hd](?:[.:\[][^\s>+~,]*)?:(?:is\([^)]*)?nth-")
+                .unwrap()
         });
         let mut labels = Vec::new();
         let mut placed = Vec::new();
@@ -3928,8 +3984,8 @@ mod tests {
         let declared: std::collections::HashSet<String> = production_rust_sources()
             .iter()
             .flat_map(|(_, src)| {
-                let at: Vec<usize> = src.match_indices("TableCol::new(\"").map(|(i, _)| i).collect();
-                at.into_iter()
+                src.match_indices("TableCol::new(\"")
+                    .map(|(i, _)| i)
                     .filter_map(|i| {
                         let rest = &src[i + "TableCol::new(\"".len()..];
                         rest.find('"').map(|end| rest[..end].to_string())
@@ -3937,7 +3993,11 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        assert!(declared.len() > 50, "only {} column labels found", declared.len());
+        assert!(
+            declared.len() > 50,
+            "only {} column labels found",
+            declared.len()
+        );
         let mut wrong = Vec::new();
         let mut selected = 0;
         for entry in walkdir::WalkDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
@@ -3951,11 +4011,15 @@ mod tests {
             for label in labels {
                 selected += 1;
                 if !declared.contains(&label) {
-                    wrong.push(format!("{file}: [data-label={label:?}] names no declared column"));
+                    wrong.push(format!(
+                        "{file}: [data-label={label:?}] names no declared column"
+                    ));
                 }
             }
             for part in placed {
-                wrong.push(format!("{file}: `{part}` picks a header or cell by its place"));
+                wrong.push(format!(
+                    "{file}: `{part}` picks a header or cell by its place"
+                ));
             }
         }
         assert!(selected > 50, "only {selected} label selectors found");
@@ -4030,7 +4094,12 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.path().extension().is_some_and(|x| x == "css"))
         {
-            let rel = entry.path().strip_prefix(&root).unwrap().display().to_string();
+            let rel = entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap()
+                .display()
+                .to_string();
             if rel == "ui/styles/tokens.css" {
                 continue;
             }

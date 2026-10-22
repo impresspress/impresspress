@@ -30,8 +30,8 @@
  * variants are the five emphases `components::Action` draws -- primary,
  * secondary, quiet, quiet danger and danger, one class each, named as the
  * emphasis is (`.btn--quiet` for `Emphasis::Quiet`).
- * `.btn--primary` is meant to have `Action` as its only writer; pages that
- * still hand-write it move to `Action` as each one is redesigned.
+ * `Action` is the only writer of `.btn--primary` (pinned by
+ * `only_the_builder_writes_its_classes` in ui/mod.rs).
  */
 .btn {
 	display: inline-flex; align-items: center; justify-content: center;

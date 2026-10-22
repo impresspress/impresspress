@@ -127,7 +127,7 @@ test.describe('htmx after-success effects under the served CSP', () => {
   test.use({ storageState: ADMIN_STATE_PATH });
 
   /**
-   * A created variable redraws the settings body ONCE. The Add Variable form
+   * A created variable redraws the settings body ONCE. The Add variable form
    * used to target `#variables-content` (one tab's table) while its handler
    * answers the whole settings body for `#content`, so a successful create
    * drew the settings page — nav, tabs, modal — inside its own table.
@@ -187,12 +187,12 @@ test.describe('htmx after-success effects under the served CSP', () => {
   });
 
   /**
-   * Edit Variable is an htmx-loaded modal opened from a row's `hx-get` button,
+   * Edit variable is an htmx-loaded modal opened from a row's `hx-get` button,
    * and its Save re-renders `#content` — row, button and all. Focus must come
    * back to that row's (re-rendered) Edit button, found again by its id.
    * Saves the value it already holds.
    */
-  test('saving Edit Variable returns focus to the row it was opened from', async ({ page }) => {
+  test('saving Edit variable returns focus to the row it was opened from', async ({ page }) => {
     await loginAsAdmin(page);
     await gotoUnderCsp(page, '/b/admin/settings/variables?tab=all');
 

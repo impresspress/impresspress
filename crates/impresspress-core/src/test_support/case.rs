@@ -27,7 +27,9 @@ const PROPER_NOUNS: &[&str] = &["OAuth", "Stripe"];
 /// plural `s` ("URLs").
 pub fn is_sentence_case(label: &str) -> bool {
     let first_is_capital = label.chars().next().is_some_and(|c| !c.is_lowercase());
-    let words: Vec<&str> = label.split(|c: char| c.is_whitespace() || c == '-').collect();
+    let words: Vec<&str> = label
+        .split(|c: char| c.is_whitespace() || c == '-')
+        .collect();
     first_is_capital
         && words.windows(2).all(|pair| {
             let (before, raw) = (pair[0], pair[1]);

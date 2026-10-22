@@ -191,10 +191,16 @@ pub fn ui_labels(html: &str) -> Vec<(&'static str, String)> {
         (".tab", "tab"),
     ];
     let doc = Html::parse_document(html);
-    let kinds: Vec<(Selector, &'static str)> =
-        KINDS.iter().map(|(css, kind)| (selector(css), *kind)).collect();
+    let kinds: Vec<(Selector, &'static str)> = KINDS
+        .iter()
+        .map(|(css, kind)| (selector(css), *kind))
+        .collect();
     let mut out = Vec::new();
-    for el in doc.root_element().descendants().filter_map(ElementRef::wrap) {
+    for el in doc
+        .root_element()
+        .descendants()
+        .filter_map(ElementRef::wrap)
+    {
         let Some((_, kind)) = kinds.iter().find(|(sel, _)| sel.matches(&el)) else {
             continue;
         };

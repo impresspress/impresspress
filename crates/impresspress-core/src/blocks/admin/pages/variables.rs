@@ -835,11 +835,11 @@ fn variable_groups(
                                 @if *grantee != block.name {
                                     " "
                                     (Badge::new(BadgeVariant::Secondary).render(html! {
-                                        (grantee) ": "
+                                        (grantee)
                                         (match write {
-                                            wafer_block::GrantWrite::Full => "read+write",
-                                            wafer_block::GrantWrite::Append => "append",
-                                            wafer_block::GrantWrite::None => "read",
+                                            wafer_block::GrantWrite::Full => " can read and write",
+                                            wafer_block::GrantWrite::Append => " can append",
+                                            wafer_block::GrantWrite::None => " can read",
                                         })
                                     }))
                                 }

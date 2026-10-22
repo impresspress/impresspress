@@ -1,10 +1,12 @@
 //! Action: a button or link drawn as a `.btn`, with its place in the page's
 //! hierarchy chosen by its [`Emphasis`].
 //!
-//! [`Action`] is meant to be the only writer of `.btn--primary`, the class
-//! the page's one-primary rule is about: a page shows at most one visible
-//! primary (one per `<dialog>`, which is its own context). Pages that still
-//! hand-write `.btn--primary` move to `Action` as each one is redesigned.
+//! [`Action`] is the only writer of `.btn--primary`, the class the page's
+//! one-primary rule is about: a page shows at most one visible primary (one
+//! per `<dialog>`, which is its own context). No other production source,
+//! Rust or script, writes it (`ui::tests::only_the_builder_writes_its_classes`),
+//! and the crawl holds every page to one
+//! (`htmx_guard::every_page_has_at_most_one_visible_primary`).
 //! Hand-written secondary, quiet and danger `.btn` markup stays legitimate —
 //! an in-row control with its own `hx-*` wiring, a modal footer — because
 //! the rule constrains only the primary.
