@@ -54,6 +54,15 @@ class El {
   appendChild(c) { if (c.parent) c.remove(); c.parent = this; this.children.push(c); return c; }
   insertBefore(c, ref) { c.parent = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   get firstChild() { return this.children[0] || null; }
+  get firstElementChild() { return this.children[0] || null; }
+  cloneNode(deep) {
+    const copy = new El(this.tagName);
+    for (const [k, v] of this.attrs) copy.attrs.set(k, v);
+    copy._text = this._text;
+    copy._html = this._html;
+    if (deep) for (const c of this.children) copy.appendChild(c.cloneNode(true));
+    return copy;
+  }
   remove() { if (this.parent) { this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; } }
   matches(sel) { return matches(this, sel); }
   closest(sel) { for (let e = this; e; e = e.parent) if (e.matches && matches(e, sel)) return e; return null; }
@@ -77,7 +86,7 @@ function matches(el, sel) {
 }
 
 /** A chat page: `.page--chat` > (aside.chat-threads > #thread-list) + (section.chat-main > #messages-area + form#chat-form). */
-function harness({ bootstrap = [], conversationDisplay = 'flex', reply = null } = {}) {
+function harness({ bootstrap = [], conversationDisplay = 'flex', reply = null, noMessagesTemplate = true } = {}) {
   const listeners = { click: [], submit: [], change: [], DOMContentLoaded: [] };
   const body = new El('body');
   const page = body.appendChild(new El('div'));
@@ -100,6 +109,16 @@ function harness({ bootstrap = [], conversationDisplay = 'flex', reply = null } 
   const input = form.appendChild(new El('textarea'));
   input.id = 'chat-input';
   input.value = '';
+  // The server-rendered note llm-chat.js clones for a thread with no
+  // messages (`render_messages_pane`), outside `#messages-area`.
+  if (noMessagesTemplate) {
+    const template = main.appendChild(new El('template'));
+    template.id = 'no-messages-note';
+    template.content = new El('fragment');
+    const note = template.content.appendChild(new El('p'));
+    note.className = 'empty-note';
+    note.textContent = 'No messages yet.';
+  }
   const carrier = body.appendChild(new El('script'));
   carrier.id = 'llm-chat-bootstrap';
   carrier.textContent = JSON.stringify(bootstrap);
@@ -215,6 +234,14 @@ test('beside the list, a thread link opens the thread in place and marks it curr
   await new Promise((r) => setImmediate(r));
   assert.equal(h.area.children.length, 1);
   assert.equal(h.area.children[0].className, 'empty-note');
+  assert.equal(h.area.children[0].textContent, 'No messages yet.');
+});
+
+test('a thread with no messages clones the server note and writes none itself', async () => {
+  const h = harness({ conversationDisplay: 'flex', noMessagesTemplate: false });
+  h.click(threadLink(h.list, 't-1'));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.area.children.length, 0, 'no template, so no note: the script builds none');
 });
 
 test('the first message sent into an empty thread replaces its empty note', async () => {

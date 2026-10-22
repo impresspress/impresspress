@@ -14,11 +14,11 @@ use crate::{
     },
 };
 
-/// The orgs table: the org's name is the row (the card title on a phone).
-/// A name is a GitHub login or a domain, so it breaks after its separators
+/// The orgs table: the org's name is the row (the card title on a phone). A
+/// name is a GitHub login or a domain, so it breaks after its separators
 /// (`components::breakable_id`). Narrow, the provider and the date move into
-/// one line under the name (table.css `.org-table`, which hides the headers
-/// by position: a column moved here must move there).
+/// one line under the name (table.css `.org-table`, which hides headers and
+/// cells by their label: a column renamed here is renamed there).
 const COLUMNS: [TableCol<'static>; 3] = [
     TableCol::new("Name").primary(),
     TableCol::new("Verified via"),

@@ -56,8 +56,8 @@ pub struct SourceFile {
     pub text: String,
 }
 
-/// Every `.rs` file under a root, minus the directories and file names a gate
-/// exempts.
+/// Every source file under a root — `.rs` unless [`Self::extensions`] says
+/// otherwise — minus the directories and file names a gate exempts.
 ///
 /// Built with [`Self::crate_src`] (or [`Self::new`] for a subtree or, in a
 /// gate's own self-test, a temporary one), narrowed with [`Self::skip_dir`] /
@@ -67,6 +67,7 @@ pub struct SourceWalk {
     root: PathBuf,
     skip_dirs: Vec<&'static str>,
     skip_files: Vec<&'static str>,
+    extensions: Vec<&'static str>,
     least: usize,
 }
 
@@ -77,6 +78,7 @@ impl SourceWalk {
             root: root.into(),
             skip_dirs: Vec::new(),
             skip_files: Vec::new(),
+            extensions: vec!["rs"],
             least: 0,
         }
     }
@@ -95,6 +97,12 @@ impl SourceWalk {
     /// under it.
     pub fn skip_dir(mut self, name: &'static str) -> Self {
         self.skip_dirs.push(name);
+        self
+    }
+
+    /// Read files with these extensions instead of `.rs`.
+    pub fn extensions(mut self, extensions: &[&'static str]) -> Self {
+        self.extensions = extensions.to_vec();
         self
     }
 
@@ -144,9 +152,10 @@ impl SourceWalk {
                 }
                 continue;
             }
-            if path.extension().is_none_or(|ext| ext != "rs")
-                || self.skip_files.contains(&name.as_str())
-            {
+            let wanted = path
+                .extension()
+                .is_some_and(|ext| self.extensions.iter().any(|w| ext == *w));
+            if !wanted || self.skip_files.contains(&name.as_str()) {
                 continue;
             }
             let rel = path
@@ -500,9 +509,174 @@ fn top_level_operands(inner: &str) -> impl Iterator<Item = &str> {
     out.into_iter()
 }
 
+/// The repository's root, two levels above this crate.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Directories no shipped source lives in: tests, dependencies, build output,
+/// vendored code and dot-directories' usual names.
+const NOT_SHIPPED_DIRS: &[&str] = &[
+    "test",
+    "tests",
+    "node_modules",
+    "target",
+    "pkg",
+    "vendor",
+    "dist",
+    ".git",
+];
+
+/// The scripts this repository ships: every `.js`, `.mjs` and `.ts` under
+/// `crates/` and `packages/`, less tests, dependencies, build output and
+/// vendored code ([`NOT_SHIPPED_DIRS`]), with `rel` relative to the
+/// repository root. `htmx.min.js` is vendored htmx and left out; the two
+/// other vendored bundles (`marked.min.js`, `purify.min.js`) are read like
+/// any script, and a gate that cannot hold third-party code to its rule says
+/// so with [`is_vendored_bundle`].
+///
+/// The one walk every script gate shares, so their scopes cannot drift.
+pub fn shipped_scripts() -> Vec<SourceFile> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    for top in ["crates", "packages"] {
+        let mut walk = SourceWalk::new(root.join(top))
+            .extensions(&["js", "mjs", "ts"])
+            .skip_file("htmx.min.js");
+        for dir in NOT_SHIPPED_DIRS {
+            walk = walk.skip_dir(dir);
+        }
+        out.extend(walk.collect().into_iter().map(|mut file| {
+            file.rel = format!("{top}/{}", file.rel);
+            file
+        }));
+    }
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    assert!(out.len() > 40, "only {} shipped scripts", out.len());
+    out
+}
+
+/// Whether a shipped script is a third-party minified bundle
+/// (`marked.min.js`, `purify.min.js`): code this repository serves but did
+/// not write, so its markup, colours and case are not this codebase's.
+pub fn is_vendored_bundle(file: &SourceFile) -> bool {
+    file.rel.ends_with(".min.js")
+}
+
+/// Every `mod name;` the crate compiles only for tests (behind a `cfg` that
+/// names `test`, and not `not(test)`), resolved to the file and directory
+/// that could hold it.
+fn test_only_module_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for file in SourceWalk::new(root).collect() {
+        let dir = file.path.parent().expect("a file has a parent");
+        let stem = file
+            .path
+            .file_stem()
+            .expect("a file has a stem")
+            .to_string_lossy()
+            .into_owned();
+        let base = if matches!(stem.as_str(), "mod" | "lib") {
+            dir.to_path_buf()
+        } else {
+            dir.join(&stem)
+        };
+        for (cfg, name) in cfg_gated_modules(&file.text) {
+            if cfg.contains("test") && !cfg.contains("not(test") {
+                out.push(base.join(format!("{name}.rs")));
+                out.push(base.join(name));
+            }
+        }
+    }
+    out
+}
+
+/// Each `#[cfg(…)] mod name;` declaration in `src` (other attributes and a
+/// `pub` or `pub(…)` may sit between), as `(cfg contents, name)`.
+fn cfg_gated_modules(src: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(at) = rest.find("#[cfg(") {
+        let after = &rest[at + "#[cfg(".len()..];
+        let Some(close) = after.find(")]") else { break };
+        let cfg = &after[..close];
+        let mut tail = after[close + 2..].trim_start();
+        while tail.starts_with("#[") {
+            match tail.find(']') {
+                Some(end) => tail = tail[end + 1..].trim_start(),
+                None => break,
+            }
+        }
+        if let Some(t) = tail.strip_prefix("pub") {
+            tail = t.trim_start();
+            if tail.starts_with('(') {
+                tail = tail[tail.find(')').map_or(0, |e| e + 1)..].trim_start();
+            }
+        }
+        if let Some(t) = tail.strip_prefix("mod ") {
+            let name: &str = t
+                .trim_start()
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            let after_name = t.trim_start()[name.len()..].trim_start();
+            if !name.is_empty() && after_name.starts_with(';') {
+                out.push((cfg, name));
+            }
+        }
+        rest = &after[close..];
+    }
+    out
+}
+
+/// This crate's production Rust: every `.rs` under `src/` except the files
+/// it compiles only for tests, with each inline test item stripped
+/// ([`strip_test_modules`]). `rel` is relative to `src/`.
+pub fn production_rust_sources() -> Vec<SourceFile> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let test_only = test_only_module_paths(&root);
+    let out: Vec<SourceFile> = SourceWalk::crate_src()
+        .collect()
+        .into_iter()
+        .filter(|file| {
+            !test_only
+                .iter()
+                .any(|t| file.path == *t || file.path.starts_with(t))
+        })
+        .map(|mut file| {
+            file.text = strip_test_modules(&file.text);
+            file
+        })
+        .collect();
+    assert!(out.len() > 300, "only {} production sources", out.len());
+    out
+}
+
+/// Every stylesheet this crate serves: the shared bundle's sources under
+/// `ui/styles/` and each block's own, with `rel` relative to `src/`.
+pub fn stylesheets() -> Vec<SourceFile> {
+    SourceWalk::crate_src()
+        .extensions(&["css"])
+        .least(15)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cfg_gated_modules_reads_each_declaration_shape() {
+        let src = "#[cfg(test)]\nmod tests;\n#[cfg(any(test, feature = \"x\"))]\n#[allow(dead_code)]\npub(crate) mod helpers;\n#[cfg(not(test))]\nmod real;\n#[cfg(test)]\nmod inline {}\n";
+        assert_eq!(
+            cfg_gated_modules(src),
+            [
+                ("test", "tests"),
+                ("any(test, feature = \"x\")", "helpers"),
+                ("not(test)", "real")
+            ]
+        );
+    }
 
     #[test]
     fn strip_line_comments_drops_full_line_comments_and_keeps_trailing_ones() {

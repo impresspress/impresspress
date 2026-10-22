@@ -32,8 +32,26 @@ use scraper::{ElementRef, Html, Node, Selector};
 const PRIMARY: &str = "btn--primary";
 
 /// The classes that draw a card-level surface on the page background. Rule 2
-/// of the layout: none of them sits inside a `.card`.
-const CARD_LEVEL: [&str; 5] = ["card", "stat", "empty", "chat-panes", "data-table"];
+/// of the layout: none of them sits inside a `.card`. Kept complete against
+/// the stylesheets by `ui::tests::card_level_covers_every_framed_surface`:
+/// every class a stylesheet draws as a framed white surface is here or is
+/// named there as not card-level.
+pub const CARD_LEVEL: [&str; 14] = [
+    "card",
+    "stat",
+    "empty",
+    "chat-panes",
+    "data-table",
+    "page--chat",
+    "block-card",
+    "thread-card",
+    "messages-list__item",
+    "editor-pane",
+    "model-progress",
+    "form-tabs",
+    "account-nav",
+    "login-container",
+];
 
 /// The `.btn--primary` elements a reader can see, in document order.
 ///
@@ -73,8 +91,8 @@ pub fn visible_primaries(html: &str) -> (Vec<String>, Vec<Vec<String>>) {
     (page, per_dialog)
 }
 
-/// Every card-level surface (`.card`, `.stat`, `.empty`, `.chat-panes`,
-/// `.data-table`) that sits inside a `.card`, in document order.
+/// Every card-level surface ([`CARD_LEVEL`]) that sits inside a `.card`, in
+/// document order.
 ///
 /// The one exception is a `.data-table` whose closest `.card` is
 /// `.card--flush`: a flush card's body is the table, and the card absorbs the
@@ -162,6 +180,56 @@ pub fn tab_labels(html: &str) -> Vec<Result<String, String>> {
             }
         })
         .collect()
+}
+
+/// The labels a page writes for a reader, in document order, as
+/// `(kind, phrase)`: headings (`h1`…`h6`), table headers (`th`), form labels
+/// (`label`, `legend`), buttons (`button`, `.btn`), disclosure summaries
+/// (`summary`), stat labels (`.stat__label`), badges (`.badge`) and tabs
+/// (`.tab`).
+///
+/// Each is the element's whole text, whitespace collapsed, so a label split
+/// across inline elements (`Create <span>New</span> Bucket`) reads as the
+/// reader hears it. Concealed labels are
+/// included: a region revealed later shows the labels it has. An element
+/// with no text (an icon button) has no phrase. The sidebar (`.sidebar`) is
+/// left out: it is outside the redesign. So are select options, which are
+/// the values a reader picks (countries, currencies, model ids), not labels
+/// the page writes about them.
+pub fn ui_labels(html: &str) -> Vec<(&'static str, String)> {
+    const KINDS: [(&str, &str); 8] = [
+        ("h1, h2, h3, h4, h5, h6", "heading"),
+        ("th", "table header"),
+        ("label, legend", "label"),
+        ("button, .btn", "button"),
+        ("summary", "summary"),
+        (".stat__label", "stat label"),
+        (".badge", "badge"),
+        (".tab", "tab"),
+    ];
+    let doc = Html::parse_document(html);
+    let kinds: Vec<(Selector, &'static str)> = KINDS
+        .iter()
+        .map(|(css, kind)| (selector(css), *kind))
+        .collect();
+    let mut out = Vec::new();
+    for el in doc
+        .root_element()
+        .descendants()
+        .filter_map(ElementRef::wrap)
+    {
+        let Some((_, kind)) = kinds.iter().find(|(sel, _)| sel.matches(&el)) else {
+            continue;
+        };
+        if self_or_ancestor(el, |el| has_class(el, "sidebar")) {
+            continue;
+        }
+        let text = text_of(el);
+        if !text.is_empty() {
+            out.push((*kind, text));
+        }
+    }
+    out
 }
 
 /// Every way the page departs from the one confirm mechanism
@@ -471,6 +539,22 @@ fn selector(css: &str) -> Selector {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ui_labels_reads_a_label_whole_across_its_inline_elements() {
+        let html =
+            "<button>Create <span>New</span> Bucket</button><label>Name <strong>*</strong></label>";
+        assert_eq!(
+            ui_labels(html),
+            vec![
+                ("button", "Create New Bucket".to_string()),
+                ("label", "Name *".to_string()),
+            ]
+        );
+        assert!(!crate::test_support::case::is_sentence_case(
+            "Create New Bucket"
+        ));
+    }
+
     fn btn(label: &str) -> String {
         format!(r#"<button class="btn btn--primary">{label}</button>"#)
     }
@@ -509,7 +593,7 @@ mod tests {
             r#"<span class="badge badge-info">SQLite · 3 tables</span>"#,
             r#"<a class="btn btn--secondary" href="/x">Open <span class="sr-only">(new tab)</span></a>"#,
             r#"<button class="btn btn--secondary" hidden>Save</button>"#,
-            r#"<button class="btn btn--ghost">Quiet</button>"#,
+            r#"<button class="btn btn--quiet">Quiet</button>"#,
             r#"<button class="btn btn--primary">Publish</button>"#,
             r#"</div></header><main><button class="btn btn--primary">Body</button></main>"#,
         );
@@ -519,7 +603,7 @@ mod tests {
                 r#"status "SQLite · 3 tables""#,
                 r#"secondary "Open (new tab)""#,
                 r#"secondary "Save" hidden"#,
-                r#"button.btn.btn--ghost "Quiet""#,
+                r#"button.btn.btn--quiet "Quiet""#,
                 r#"primary "Publish""#,
             ]
         );
@@ -880,7 +964,7 @@ mod tests {
                 r#"<div hx-delete="/b" hx-confirm="B?"><button class="btn btn--danger">Inherited</button></div>"#,
                 r#"<template><button class="btn btn--danger">Templated</button></template>"#,
                 r#"<button class="btn btn--danger" hidden>Hidden</button>"#,
-                r#"<button class="btn btn--ghost-danger">Quiet</button>"#,
+                r#"<button class="btn btn--quiet-danger">Quiet</button>"#,
                 r#"<button class="btn btn--danger-ish">Lookalike</button>"#,
                 r#"<button class="btn btn--danger" hx-delete="/e" hx-confirm="" data-confirm-label="E" data-confirm-tone="danger">Empty</button>"#,
                 r#"<button class="btn btn--danger" hx-delete="/u" hx-confirm=" unset " data-confirm-label="U" data-confirm-tone="danger">Unset</button>"#,

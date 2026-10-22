@@ -210,7 +210,7 @@ pub(crate) async fn grants_custom_tab(
                 access_badge(grant.write),
                 html! { (grant.description) },
                 html! {
-                    button .btn .btn--ghost-danger .btn--icon
+                    button .btn .btn--quiet-danger .btn--icon
                         type="button"
                         title="Delete grant"
                         aria-label=(format!("Delete grant of {} to {grantee}", grant.resource))
@@ -232,7 +232,7 @@ pub(crate) async fn grants_custom_tab(
         (Card::titled(
             "Custom grants",
             html! {
-                div .grant-table .grant-table--custom {
+                div .grant-table {
                     (components::DataTable::new(&CUSTOM_GRANT_COLUMNS)
                         .rows(rows)
                         .empty_note("No custom grants configured.")
@@ -768,7 +768,7 @@ mod wording_tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<div class="card__body"><div class="grant-table grant-table--custom"><p class="empty-note">No custom grants configured.</p></div></div>"#),
+            html.contains(r#"<div class="card__body"><div class="grant-table"><p class="empty-note">No custom grants configured.</p></div></div>"#),
             "{html}"
         );
         let (page, dialogs) = dom::visible_primaries(&html);
@@ -786,9 +786,7 @@ mod wording_tests {
             "{html}"
         );
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
-        for small in ["text-13", "text-11", "text-10", "text-xs", "text-center"] {
-            assert!(!html.contains(small), "{small}: {html}");
-        }
+        assert!(!html.contains("text-center"), "{html}");
     }
 
     /// A stored grant is a row of the custom card's table, its columns and
@@ -813,8 +811,8 @@ mod wording_tests {
         .expect("seed a grant");
         let html = database_subtab(&ctx).await;
         for text in [
-            "<th>Resource pattern</th>",
-            "<th>Grantee</th>",
+            r#"<th data-label="Resource pattern">Resource pattern</th>"#,
+            r#"<th data-label="Grantee">Grantee</th>"#,
             r#"<span class="badge badge-info">DB</span>"#,
             r#"<span class="badge badge-secondary">Append only</span>"#,
             r#"<td data-label="Description">Audit the uploads</td>"#,
@@ -824,7 +822,7 @@ mod wording_tests {
                 r#"<code>impresspress/<wbr>files</code><span class="grant-table__meta">"#,
                 r#"<span class="badge badge-info">DB</span> · <code>impresspress__<wbr>admin__<wbr>audit_<wbr>logs</code> · Audit the uploads</span>"#,
             ),
-            r#"<div class="grant-table grant-table--custom"><div class="data-table">"#,
+            r#"<div class="grant-table"><div class="data-table">"#,
         ] {
             assert!(html.contains(text), "{text}: {html}");
         }

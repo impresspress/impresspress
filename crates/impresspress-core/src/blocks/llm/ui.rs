@@ -326,11 +326,11 @@ fn provider_form(form: ProviderForm<'_>) -> Markup {
 }
 
 /// The providers table's columns. A provider is named by its name with its
-/// endpoint, and the key variable and budget field it may set, on lines
-/// under it: eight columns of URLs and variable names did not fit the
-/// content column even at 1280px. Narrow, the protocol, the models and the
-/// status join those lines too (table.css `.llm-table--providers`, which
-/// hides the headers by position: a column moved here must move there).
+/// endpoint, and the key variable and budget field it may set, on lines under
+/// it: eight columns of URLs and variable names did not fit the content column
+/// even at 1280px. Narrow, the protocol, the models and the status join those
+/// lines too (table.css `.llm-table--providers`, which hides headers and cells
+/// by their label: a column renamed here is renamed there).
 const PROVIDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Provider").primary(),
     components::TableCol::new("Protocol"),
@@ -437,7 +437,7 @@ fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> 
     ];
     if manages {
         cells.push(html! {
-            button .btn.btn--sm.btn--icon.btn--ghost type="button"
+            button .btn.btn--sm.btn--icon.btn--quiet type="button"
                 data-action="modal-open" data-modal-target=(edit_modal_id(id))
                 aria-label={"Edit " (cfg.name)}
                 title="Edit provider"
@@ -460,7 +460,7 @@ fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> 
                 "Discover"
             }
             button
-                .btn.btn--sm.btn--icon.btn--ghost-danger
+                .btn.btn--sm.btn--icon.btn--quiet-danger
                 type="button"
                 hx-delete={"/b/llm/api/providers/" (id)}
                 hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
@@ -527,9 +527,9 @@ pub(super) async fn models_page(
     .await
 }
 
-/// The models table's columns. Narrow, the provider and capabilities move
-/// to a line under the model (table.css `.llm-table--models`, which hides
-/// the headers by position: a column moved here must move there).
+/// The models table's columns. Narrow, the provider and capabilities move to a
+/// line under the model (table.css `.llm-table--models`, which hides headers
+/// and cells by their label: a column renamed here is renamed there).
 const MODEL_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Model").primary(),
     components::TableCol::new("Provider"),
@@ -644,7 +644,7 @@ fn model_cells(model: &ModelInfo) -> Vec<Markup> {
                 "Load"
             }
             button
-                .btn.btn--sm.btn--ghost
+                .btn.btn--sm.btn--quiet
                 type="button"
                 hx-post=(unload_url)
                 hx-swap="none"
@@ -971,10 +971,10 @@ mod tests {
             m.contains(r#"aria-label="Discover models for openai-main""#),
             "got: {m}"
         );
-        // The delete control is an icon: a ghost-danger icon button whose
+        // The delete control is an icon: a quiet-danger icon button whose
         // only name is its label.
         assert!(
-            m.contains(r#"class="btn btn--sm btn--icon btn--ghost-danger""#),
+            m.contains(r#"class="btn btn--sm btn--icon btn--quiet-danger""#),
             "got: {m}"
         );
         assert!(m.contains(r#"aria-label="Delete openai-main""#), "got: {m}");

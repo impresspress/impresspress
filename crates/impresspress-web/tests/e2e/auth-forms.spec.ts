@@ -16,7 +16,7 @@ test.describe('auth forms', () => {
 
     await page.getByLabel('Email').fill('admin@example.com');
     await page.getByLabel('Password', { exact: true }).fill('not-the-password');
-    await page.getByRole('button', { name: 'Sign In' }).click();
+    await page.getByRole('button', { name: 'Sign in' }).click();
 
     const alert = page.getByRole('alert');
     await expect(alert).toBeVisible();

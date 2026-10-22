@@ -136,7 +136,7 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             ActionTarget::NewTab("https://wafer.run/registry"),
         )
         .icon(icons::arrow_up_right()),
-        HeaderAction::new("Open Inspector", ActionTarget::NewTab("/b/inspector/ui"))
+        HeaderAction::new("Open inspector", ActionTarget::NewTab("/b/inspector/ui"))
             .icon(icons::globe()),
     ];
 
@@ -993,10 +993,6 @@ mod card_tests {
             "{html}"
         );
         assert!(html.contains(r#"href="/b/aaa/admin/""#), "{html}");
-        assert!(
-            !html.contains("text-11") && !html.contains("text-xs"),
-            "{html}"
-        );
         assert!(html.contains("<code>\u{2014}</code>"), "{html}");
     }
 

@@ -665,7 +665,7 @@ fn check_writable_key(key: &str) -> Result<(), String> {
 
 /// Why [`create_variable`] refused, kept apart by FIELD so each surface can
 /// answer in its own shape: the JSON API with the status
-/// ([`CreateRefusal::into_response`]), the Add Variable modal with the
+/// ([`CreateRefusal::into_response`]), the Add variable modal with the
 /// sentence under the field it is about.
 pub(super) enum CreateRefusal {
     /// The key is missing, malformed or runtime-owned: a 400.
@@ -679,7 +679,7 @@ pub(super) enum CreateRefusal {
     Failed(OutputStream),
 }
 
-/// The Add Variable field a [`CreateRefusal`] is about.
+/// The Add variable field a [`CreateRefusal`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CreateField {
     Key,
@@ -1092,7 +1092,7 @@ pub(super) async fn create_variable(
     // makes a blank row a trap rather than a nuisance is that the boot seeder
     // owns the key and `delete_variable` protects it, and both of those follow
     // from the key's declaration or its `_SECRET`/`_KEY` spelling. An ad hoc
-    // key the caller merely asks to mask is deletable, and the Add Variable
+    // key the caller merely asks to mask is deletable, and the Add variable
     // modal checks that box by DEFAULT — gating on the argument would refuse
     // every empty variable an operator creates through the UI.
     if value.is_empty()
@@ -2394,7 +2394,7 @@ mod tests {
         let ctx = admin_ctx().await;
         let msg = admin_msg("update", "/admin/settings");
 
-        // Mis-flagged by the Add Variable modal's default tick.
+        // Mis-flagged by the Add variable modal's default tick.
         let key = EMBEDDED_SCRIPTS_KEY;
         expect_ok(create_variable(&ctx, &msg, key, "/analytics.js", None, None, true).await);
         expect_ok(

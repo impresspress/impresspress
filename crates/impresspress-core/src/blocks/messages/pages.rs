@@ -723,7 +723,6 @@ mod tests {
             user.contains(r#"<span class="badge badge-secondary">User</span>"#),
             "{user}"
         );
-        assert!(!user.contains("text-capitalize"), "{user}");
         assert!(user.contains("<time"), "the date is a timestamp: {user}");
         assert!(!user.contains("danger"), "{user}");
 

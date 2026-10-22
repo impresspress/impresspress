@@ -94,7 +94,7 @@ impl SearchInput<'_> {
                         span .text-muted { "Results for " }
                         strong { "\"" (self.value) "\"" }
                     }
-                    a .btn .btn--ghost .btn--sm
+                    a .btn .btn--quiet .btn--sm
                         href=(self.href)
                         hx-get=(self.href)
                         hx-target="#content"

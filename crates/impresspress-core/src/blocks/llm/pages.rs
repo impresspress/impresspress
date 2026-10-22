@@ -318,7 +318,9 @@ fn thread_list_items(threads: &[ContextView], active_id: Option<&str>) -> Markup
 /// framed surface, so the note adds none. When a thread
 /// IS selected, renders an empty `#messages-area` that the JS bootstrap
 /// fills from the `<script type="application/json" id="llm-chat-bootstrap">`
-/// carrier emitted by `render_page_body`.
+/// carrier emitted by `render_page_body`. Either way it carries the
+/// `#no-messages-note` template the script clones for a thread with no
+/// messages.
 fn render_messages_pane(_entries: &[serde_json::Value], thread_id: Option<&str>) -> Markup {
     html! {
         // The chat_page template's `.chat-messages` wrapper owns scroll,
@@ -334,6 +336,13 @@ fn render_messages_pane(_entries: &[serde_json::Value], thread_id: Option<&str>)
             }
             // When thread_id is Some, the JS bootstrap fills #messages-area
             // by JSON.parse-ing the #llm-chat-bootstrap carrier on init().
+        }
+        // The note a thread with no messages shows, rendered once here by
+        // `empty_note` and cloned by llm-chat.js, so the script writes no
+        // markup of its own. Outside `#messages-area`, which the script
+        // empties when it opens a thread.
+        template #no-messages-note {
+            (ui::components::empty_note("No messages yet.", None))
         }
     }
 }
@@ -423,7 +432,7 @@ fn render_right_rail(
                 div .model-progress {
                     div .flex .items-center .gap-2 .mb-2 {
                         span .text-sm .font-medium { "Loading model..." }
-                        button #model-unload-btn .btn.btn--sm.btn--ghost type="button" data-action="llm-unload-model" .ml-auto {
+                        button #model-unload-btn .btn.btn--sm.btn--quiet type="button" data-action="llm-unload-model" .ml-auto {
                             "Cancel"
                         }
                     }
@@ -437,7 +446,7 @@ fn render_right_rail(
                 }
             }
 
-            a .btn.btn--ghost.btn--sm .chat-options__settings href="/b/llm/settings" {
+            a .btn.btn--quiet.btn--sm .chat-options__settings href="/b/llm/settings" {
                 (ui::icons::settings())
                 span .chat-options__settings-text { "Settings" }
             }
@@ -567,9 +576,9 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// Where the block's variables — the two defaults among them — are edited.
 const VARIABLES_PAGE: &str = "/b/admin/settings/variables";
 
-/// The overrides table's columns. Narrow, the provider, model and date move
-/// to a line under the thread (table.css `.llm-table--overrides`, which
-/// hides the headers by position: a column moved here must move there).
+/// The overrides table's columns. Narrow, the provider, model and date move to
+/// a line under the thread (table.css `.llm-table--overrides`, which hides
+/// headers and cells by their label: a column renamed here is renamed there).
 const OVERRIDE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Thread").primary(),
     components::TableCol::new("Provider"),
@@ -612,7 +621,7 @@ fn render_overrides_table(rows: &[repo::settings::ThreadSettingRow]) -> Markup {
                 components::timestamp(&ov.updated_at),
                 html! {
                     button
-                        .btn.btn--sm.btn--icon.btn--ghost-danger
+                        .btn.btn--sm.btn--icon.btn--quiet-danger
                         type="button"
                         hx-delete={"/b/llm/api/config/" (ov.id)}
                         hx-confirm={"Remove override for thread " (tid) "?"}

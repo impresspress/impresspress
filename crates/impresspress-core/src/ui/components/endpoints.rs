@@ -3,7 +3,7 @@
 use maud::{html, Markup};
 use wafer_run::BlockEndpoint;
 
-use super::{badge, breakable_id, BadgeVariant, DataTable, TableCol, TableRow};
+use super::{badge, breakable_id, humanize, BadgeVariant, DataTable, TableCol, TableRow};
 
 const COLUMNS: [TableCol<'static>; 4] = [
     TableCol::new("Path"),
@@ -14,7 +14,8 @@ const COLUMNS: [TableCol<'static>; 4] = [
 
 /// `endpoints` as a grid named `label`: the path, the method and the access
 /// level as badges ([`BadgeVariant::for_method`], [`BadgeVariant::for_auth`]),
-/// and the endpoint's summary.
+/// and the endpoint's summary. The method is an acronym (`POST`); the access
+/// level is a word, in sentence case ("Admin").
 ///
 /// One rendering for every place the admin lists endpoints — a block's own
 /// Endpoints page and the block detail modal — so a method or an access level
@@ -34,7 +35,10 @@ pub fn endpoint_table(label: &str, endpoints: &[BlockEndpoint]) -> Markup {
                 html! { code { (breakable_id(&ep.path)) } },
                 badge(BadgeVariant::for_method(ep.method), &ep.method.to_string()),
                 html! { (ep.summary) },
-                badge(BadgeVariant::for_auth(ep.auth), &ep.auth.to_string()),
+                badge(
+                    BadgeVariant::for_auth(ep.auth),
+                    &humanize(&ep.auth.to_string()),
+                ),
             ])
         })
         .collect();
@@ -97,7 +101,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<span class="badge badge--tone-red">admin</span>"#),
+            html.contains(r#"<span class="badge badge--tone-red">Admin</span>"#),
             "{html}"
         );
     }

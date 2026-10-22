@@ -2556,7 +2556,7 @@ async fn admin_product_wizard_exposes_simple_and_advanced_templates() {
     assert!(html.contains(r#"id="wizard-shipping-countries""#));
     assert!(html.contains(r#"value="NZ""#));
     assert!(html.contains("Inline rates work in hosted and embedded Checkout"));
-    assert!(html.contains("Create a Stripe Customer for one-time payments"));
+    assert!(html.contains("Create a Stripe customer for one-time payments"));
 
     // The advanced rows are the page's, rendered once as `<template>`s the
     // bundle clones; the money maths are the bundle's. `loaded_bundle`
@@ -2660,8 +2660,8 @@ async fn admin_product_manager_renders_product_offer_lifecycle_and_payment_link_
     assert!(html.contains("Advanced draft definition"));
     assert!(html.contains("Duplicate to draft"));
     assert!(html.contains("Sync to Stripe"));
-    assert!(html.contains("Shareable Stripe Payment Links"));
-    assert!(html.contains("Create or reuse Payment Link"));
+    assert!(html.contains("Shareable Stripe payment links"));
+    assert!(html.contains("Create or reuse payment link"));
     assert!(html.contains("unit_amount_minor"));
     assert!(html.contains(&format!(
         "/b/products/api/admin/products/{product_id}/offers/{draft_id}"

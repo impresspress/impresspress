@@ -197,7 +197,7 @@ test.describe('legal editor', () => {
 
     await page.getByRole('button', { name: 'Write the privacy policy' }).click();
     await expect(page.getByLabel('Title', { exact: true })).toBeFocused();
-    await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Privacy Policy');
+    await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Privacy policy');
     await expect(page.locator('#next-version')).toHaveText('Publishes as v1');
     await expect(page.locator('#legal-editor-empty')).toBeHidden();
 

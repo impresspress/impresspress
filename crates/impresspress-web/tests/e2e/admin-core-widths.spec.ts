@@ -346,14 +346,25 @@ test.describe('admin core pages at in-between widths', () => {
       // configurable pricing step with its rows, then checkout with the
       // shipping settings open. Each step keeps one primary in view.
       await page.goto('/b/products/admin/new', { waitUntil: 'networkidle' });
-      await page.getByText('Configurable one-time product', { exact: true }).click();
+      // Each choice is named by its title and picked by a click anywhere on
+      // its card: here, on the sentence under the title, where the title's
+      // label is stretched over it (a mouse click at that point, since the
+      // label covering it is the point).
+      const clickOn = async (text: string) => {
+        const box = await page.getByText(text, { exact: true }).boundingBox();
+        if (!box) throw new Error(`no box for ${text}`);
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      };
+      await clickOn('Use for bookings, quantities, customer choices, and optional add-ons.');
+      await expect(page.getByRole('radio', { name: 'Configurable one-time product', exact: true })).toBeChecked();
       await page.getByRole('button', { name: 'Continue' }).click();
       await page.getByLabel('Product name').fill('Width check');
       await page.getByRole('button', { name: 'Continue' }).click();
       await expect(page.locator('[data-wizard-step="3"] [data-component-row]')).toHaveCount(2);
       const pricing = await layout(page);
       await page.getByRole('button', { name: 'Continue' }).click();
-      await page.getByText('Shipping address', { exact: true }).click();
+      await clickOn('Collect delivery details and show shipping rates.');
+      await expect(page.getByRole('checkbox', { name: 'Shipping address', exact: true })).toBeChecked();
       await expect(page.locator('#wizard-shipping-settings')).toBeVisible();
       const checkout = await layout(page);
       for (const [step, r] of Object.entries({ pricing, checkout })) {

@@ -30,11 +30,11 @@ use crate::{
     },
 };
 
-/// The sessions table: the sign-in method names the row (the card title on
-/// a phone), the three dates follow, and Revoke sits under a screen-reader-only
+/// The sessions table: the sign-in method names the row (the card title on a
+/// phone), the three dates follow, and Revoke sits under a screen-reader-only
 /// "Actions" header. Narrow, the dates move into one line under the method
-/// (table.css `.session-table`, which hides the headers by position: a column
-/// moved here must move there).
+/// (table.css `.session-table`, which hides headers and cells by their label: a
+/// column renamed here is renamed there).
 const COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Signed in with").primary(),
     TableCol::new("Started"),
@@ -140,7 +140,7 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
                 // Named by its session ("Revoke Password 2026-10-22 09:14
                 // UTC"), so a list of them is not six bare "Revoke"s.
                 html! {
-                    button .btn .btn--ghost-danger .btn--sm
+                    button .btn .btn--quiet-danger .btn--sm
                         type="button"
                         id=(format!("revoke-{}", r.family))
                         aria-labelledby=(format!("revoke-{0} session-{0} last-used-{0}", r.family))
@@ -385,7 +385,7 @@ mod tests {
 
         assert!(html.contains(r#"<div class="data-table">"#), "{html}");
         assert!(
-            html.contains(r#"<th><span class="sr-only">Actions</span></th>"#),
+            html.contains(r#"<th data-label="Actions"><span class="sr-only">Actions</span></th>"#),
             "the actions column has a screen-reader header: {html}"
         );
         assert!(!html.contains("<th></th>"), "no empty header: {html}");
@@ -396,7 +396,7 @@ mod tests {
         );
         // Quiet in the row: the confirmation is the guard.
         assert_eq!(
-            html.matches(r#"class="btn btn--ghost-danger btn--sm""#)
+            html.matches(r#"class="btn btn--quiet-danger btn--sm""#)
                 .count(),
             2,
             "{html}"

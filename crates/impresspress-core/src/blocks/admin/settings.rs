@@ -1658,7 +1658,7 @@ mod tests {
     /// ...and it may be created empty while ASKING to be masked.
     ///
     /// This is the fixture that pins the guard to the KEY rather than to the
-    /// `sensitive` argument. The Add Variable modal renders its Sensitive box
+    /// `sensitive` argument. The Add variable modal renders its Sensitive box
     /// `checked` by default (`pages/variables.rs`, and
     /// `create_modal_posts_the_flag_explicitly_and_is_checked_by_default`
     /// asserts it), so every empty variable an operator creates through the UI
@@ -1693,7 +1693,7 @@ mod tests {
             output_http_status(handle_create(&ctx, &post, InputStream::from_bytes(body)).await)
                 .await,
             200,
-            "the Add Variable modal's default flow must not be refused",
+            "the Add variable modal's default flow must not be refused",
         );
         assert!(
             variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::SITE_NOTES)

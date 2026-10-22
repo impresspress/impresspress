@@ -135,6 +135,11 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    sentence, no frame. In a flush card it takes the card's inset
    (card.css). */
 .empty-note { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
+/* A link in the sentence ("Go to files") takes the text-safe red a card
+   head's link uses (`.card__link`, 4.99:1 on white, 4.70:1 on the page
+   background), not the browser's default blue, and keeps its underline:
+   inside a muted sentence the colour alone does not mark it as a link. */
+.empty-note a { color: var(--primary-button); }
 
 /* ===== Pagination ===== */
 /* One row at every width: the total on the left, the controls on the right.
@@ -369,11 +374,10 @@ a.pagination__link:hover { background: var(--bg-hover); }
      hidden here. */
 .network-routes { container: network-routes / inline-size; }
 @container network-routes (max-width: 46rem) {
-	.network-routes > .data-table > table > thead > tr > th:nth-child(n+6),
-	.network-routes > .data-table > table > tbody > tr.network-row > td:nth-child(n+6) { display: none; }
+	.network-routes > .data-table > table > :is(thead, tbody) > tr > :is(th, td):is([data-label="Avg duration"], [data-label="Last seen"]) { display: none; }
 }
 @container network-routes (max-width: 32rem) {
-	.network-routes > .data-table > table > thead > tr > th:nth-child(n+3),
+	.network-routes > .data-table > table > thead > tr > th:is([data-label="Requests"], [data-label="Server errors"], [data-label="Client errors"]),
 	.network-row td:not(.data-table__cell--primary):not(.data-table__cell--actions) { display: none; }
 	.network-route__meta {
 		display: block; margin-top: var(--space-1);
@@ -390,15 +394,12 @@ a.pagination__link:hover { background: var(--bg-hover); }
    40rem a row keeps its grantee, its access and its controls, and the
    other columns (the owner, the type, the resource pattern, the
    description) are one line under the grantee (`.grant-table__meta`).
-   The headers of the hidden columns go with them: the custom table's
-   Description is an optional column, so it is the 5th header only when
-   it is not the last. */
+   The headers of the hidden columns go with them, selected by the same
+   label (`DataTable` writes `data-label` on each `th` as on each `td`). */
 .grant-table { container: grant-table / inline-size; }
 .grant-table__meta { display: none; }
 @container grant-table (max-width: 40rem) {
-	.grant-table td:is([data-label="Block (owner)"], [data-label="Type"], [data-label="Resource pattern"], [data-label="Description"]) { display: none; }
-	.grant-table--code > .data-table > table > thead > tr > th:is(:nth-child(1), :nth-child(3), :nth-child(4)),
-	.grant-table--custom > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(5):not(:last-child)) { display: none; }
+	.grant-table :is(th, td):is([data-label="Block (owner)"], [data-label="Type"], [data-label="Resource pattern"], [data-label="Description"]) { display: none; }
 	.grant-table__meta {
 		display: block; margin-top: var(--space-1);
 		font-weight: 400; color: var(--text-secondary);
@@ -409,7 +410,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
    first column has on a wide screen. */
 @media (min-width: 721px) {
 	@container grant-table (max-width: 40rem) {
-		.card--flush .grant-table--code > .data-table > table > thead > tr > th:nth-child(2),
+		.card--flush .grant-table--code th[data-label="Grantee"],
 		.card--flush .grant-table--code td.data-table__cell--primary { padding-left: var(--card-pad); }
 	}
 }
@@ -430,24 +431,23 @@ a.pagination__link:hover { background: var(--bg-hover); }
    container at 960 with a 40rem threshold), so it goes compact below
    45rem.
 
-   The headers are hidden by position, the cells by their label: a column
-   moved in `SHARE_COLUMNS` / `ADMIN_SHARE_COLUMNS` must move here too. */
+   Headers and cells are hidden by their column's label (`data-label`):
+   a column renamed in `SHARE_COLUMNS` / `ADMIN_SHARE_COLUMNS` is renamed here too,
+   and its place in the list does not matter. */
 .share-table { container: share-table / inline-size; }
 .share-table__meta {
 	display: none; margin-top: var(--space-1);
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
 @container share-table (max-width: 45rem) {
-	.share-table--owner td:is([data-label="Token"], [data-label="Created"]),
-	.share-table--owner > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.share-table--owner :is(th, td):is([data-label="Token"], [data-label="Created"]) { display: none; }
 	.share-table--owner .share-table__meta { display: block; }
 	/* The expiry is the row's one date left in a column: it wraps between
 	   the day and the time rather than push Revoke out of view. */
 	.share-table--owner td[data-label="Expires"] .datetime { white-space: normal; }
 }
 @container share-table (max-width: 34rem) {
-	.share-table--admin td:is([data-label="Token"], [data-label="Created by"]),
-	.share-table--admin > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(5)) { display: none; }
+	.share-table--admin :is(th, td):is([data-label="Token"], [data-label="Created by"]) { display: none; }
 	.share-table--admin .share-table__meta { display: block; }
 }
 
@@ -455,7 +455,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
    its own width too: below 34rem the Modified date leaves its column for one
    line under the file's name (`.object-table__meta`), so a long name is not
    squeezed to a word per line. A size never breaks between its number and
-   its unit. The Modified header is hidden by position (`OBJECT_COLUMNS`). */
+   its unit. The Modified header and cells are hidden by their label. */
 .object-table { container: object-table / inline-size; }
 .object-table td[data-label="Size"] { white-space: nowrap; }
 .object-table__meta {
@@ -463,8 +463,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
 @container object-table (max-width: 34rem) {
-	.object-table td[data-label="Modified"],
-	.object-table > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
+	.object-table :is(th, td)[data-label="Modified"] { display: none; }
 	.object-table .object-table__meta { display: block; }
 }
 
@@ -501,9 +500,10 @@ a.pagination__link:hover { background: var(--bg-hover); }
    row's edit and delete controls stay in view. Without these the tables
    scrolled sideways from 721 to about 900px.
 
-   The headers are hidden by position, the cells by their label: a column
-   moved in `PRODUCT_COLUMNS`, `DELETED_PRODUCT_COLUMNS`, `OWN_PRODUCT_COLUMNS`,
-   `OWN_DELETED_PRODUCT_COLUMNS` or `GROUP_COLUMNS` must move here too. */
+   Headers and cells are hidden by their column's label (`data-label`):
+   a column renamed in `PRODUCT_COLUMNS`, `DELETED_PRODUCT_COLUMNS`, `OWN_PRODUCT_COLUMNS`,
+   `OWN_DELETED_PRODUCT_COLUMNS` or `GROUP_COLUMNS` is renamed here too,
+   and its place in the list does not matter. */
 .product-table { container: product-table / inline-size; }
 .group-table { container: group-table / inline-size; }
 .product-table__meta, .group-table__meta {
@@ -511,19 +511,14 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);
 }
 @container product-table (max-width: 40rem) {
-	.product-table--live td:is([data-label="Owner"], [data-label="Currency"], [data-label="Updated"]),
-	.product-table--live > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5)),
-	.product-table--deleted td:is([data-label="Owner"], [data-label="Currency"], [data-label="Deleted"]),
-	.product-table--deleted > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)),
-	.product-table--own td:is([data-label="Currency"], [data-label="Created"]),
-	.product-table--own > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4)),
-	.product-table--own-deleted td:is([data-label="Currency"], [data-label="Deleted"]),
-	.product-table--own-deleted > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.product-table--live :is(th, td):is([data-label="Owner"], [data-label="Currency"], [data-label="Updated"]),
+	.product-table--deleted :is(th, td):is([data-label="Owner"], [data-label="Currency"], [data-label="Deleted"]),
+	.product-table--own :is(th, td):is([data-label="Currency"], [data-label="Created"]),
+	.product-table--own-deleted :is(th, td):is([data-label="Currency"], [data-label="Deleted"]) { display: none; }
 	.product-table .product-table__meta { display: block; }
 }
 @container group-table (max-width: 34rem) {
-	.group-table td:is([data-label="Description"], [data-label="Created"]),
-	.group-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(4)) { display: none; }
+	.group-table :is(th, td):is([data-label="Description"], [data-label="Created"]) { display: none; }
 	.group-table .group-table__meta { display: block; }
 }
 
@@ -536,11 +531,11 @@ a.pagination__link:hover { background: var(--bg-hover); }
    721 and about 1100px: the content column beside the sidebar, or a card
    in it, is narrower than five or six columns.
 
-   The headers are hidden by position, the cells by their label: a column
-   moved in `ORDER_COLUMNS`, `SELLER_ORDER_COLUMNS`, `PURCHASE_COLUMNS`,
+   Headers and cells are hidden by their column's label (`data-label`):
+   a column renamed in `ORDER_COLUMNS`, `SELLER_ORDER_COLUMNS`, `PURCHASE_COLUMNS`,
    `SELLER_COLUMNS`, `OWNED_PRODUCT_COLUMNS`, `ITEM_COLUMNS`,
-   `REFUND_COLUMNS`, `DISPUTE_COLUMNS` or `FAILURE_COLUMNS` must move here
-   too. */
+   `REFUND_COLUMNS`, `DISPUTE_COLUMNS` or `FAILURE_COLUMNS` is renamed here
+   too, and its place in the list does not matter. */
 .commerce-table { container: commerce-table / inline-size; }
 .commerce-table__meta {
 	display: none; margin-top: var(--space-1);
@@ -550,42 +545,33 @@ a.pagination__link:hover { background: var(--bg-hover); }
    column's minimum and the narrow table still scrolled at 721px. */
 .commerce-table__meta .datetime { white-space: normal; }
 @container commerce-table (max-width: 44rem) {
-	.commerce-table--orders td:is([data-label="Customer"], [data-label="Status"], [data-label="Placed"]),
-	.commerce-table--orders > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(5)) { display: none; }
+	.commerce-table--orders :is(th, td):is([data-label="Customer"], [data-label="Status"], [data-label="Placed"]) { display: none; }
 	.commerce-table--orders .commerce-table__meta { display: block; }
-	.commerce-table--disputes td:is([data-label="Evidence due"], [data-label="Provider dispute"]),
-	.commerce-table--disputes > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--disputes :is(th, td):is([data-label="Evidence due"], [data-label="Provider dispute"]) { display: none; }
 	.commerce-table--disputes .commerce-table__meta { display: block; }
 }
 @container commerce-table (max-width: 43rem) {
-	.commerce-table--seller-orders td:is([data-label="Subscription"], [data-label="Date"]),
-	.commerce-table--seller-orders > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--seller-orders :is(th, td):is([data-label="Subscription"], [data-label="Date"]) { display: none; }
 	.commerce-table--seller-orders .commerce-table__meta { display: block; }
 }
 @container commerce-table (max-width: 40rem) {
-	.commerce-table--sellers td:is([data-label="Payments"], [data-label="Payouts"], [data-label="Listings"]),
-	.commerce-table--sellers > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--sellers :is(th, td):is([data-label="Payments"], [data-label="Payouts"], [data-label="Listings"]) { display: none; }
 	.commerce-table--sellers .commerce-table__meta { display: block; }
-	.commerce-table--purchases td:is([data-label="Provider"], [data-label="Date"]),
-	.commerce-table--purchases > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--purchases :is(th, td):is([data-label="Provider"], [data-label="Date"]) { display: none; }
 	.commerce-table--purchases .commerce-table__meta { display: block; }
-	.commerce-table--failures td[data-label="Date"],
-	.commerce-table--failures > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
+	.commerce-table--failures :is(th, td)[data-label="Date"] { display: none; }
 	.commerce-table--failures .commerce-table__meta { display: block; }
 }
 @container commerce-table (max-width: 38rem) {
-	.commerce-table--refunds td:is([data-label="Date"], [data-label="Provider refund"]),
-	.commerce-table--refunds > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5)) { display: none; }
+	.commerce-table--refunds :is(th, td):is([data-label="Date"], [data-label="Provider refund"]) { display: none; }
 	.commerce-table--refunds .commerce-table__meta { display: block; }
 }
 @container commerce-table (max-width: 32rem) {
-	.commerce-table--items td:is([data-label="Quantity"], [data-label="Unit"]),
-	.commerce-table--items > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.commerce-table--items :is(th, td):is([data-label="Quantity"], [data-label="Unit"]) { display: none; }
 	.commerce-table--items .commerce-table__meta { display: block; }
 }
 @container commerce-table (max-width: 34rem) {
-	.commerce-table--owned td[data-label="Updated"],
-	.commerce-table--owned > .data-table > table > thead > tr > th:nth-child(4) { display: none; }
+	.commerce-table--owned :is(th, td)[data-label="Updated"] { display: none; }
 	.commerce-table--owned .commerce-table__meta { display: block; }
 }
 
@@ -599,9 +585,10 @@ a.pagination__link:hover { background: var(--bg-hover); }
    tables scrolled sideways at every width on a real deployment's names,
    Azure endpoints and model ids.
 
-   The headers are hidden by position, the cells by their label: a column
-   moved in `PROVIDER_COLUMNS`, `MODEL_COLUMNS` or `OVERRIDE_COLUMNS` must
-   move here too. */
+   Headers and cells are hidden by their column's label (`data-label`):
+   a column renamed in `PROVIDER_COLUMNS`, `MODEL_COLUMNS` or
+   `OVERRIDE_COLUMNS` is renamed here too, and its place in the list does
+   not matter. */
 .llm-table { container: llm-table / inline-size; }
 .llm-table__line, .llm-table__meta {
 	display: block; margin-top: var(--space-1);
@@ -609,18 +596,15 @@ a.pagination__link:hover { background: var(--bg-hover); }
 }
 .llm-table__meta { display: none; }
 @container llm-table (max-width: 54rem) {
-	.llm-table--providers td:is([data-label="Protocol"], [data-label="Models"], [data-label="Status"]),
-	.llm-table--providers > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.llm-table--providers :is(th, td):is([data-label="Protocol"], [data-label="Models"], [data-label="Status"]) { display: none; }
 	.llm-table--providers .llm-table__meta { display: block; }
 }
 @container llm-table (max-width: 46rem) {
-	.llm-table--models td:is([data-label="Provider"], [data-label="Capabilities"]),
-	.llm-table--models > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.llm-table--models :is(th, td):is([data-label="Provider"], [data-label="Capabilities"]) { display: none; }
 	.llm-table--models .llm-table__meta { display: block; }
 }
 @container llm-table (max-width: 42rem) {
-	.llm-table--overrides td:is([data-label="Provider"], [data-label="Model"], [data-label="Updated"]),
-	.llm-table--overrides > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.llm-table--overrides :is(th, td):is([data-label="Provider"], [data-label="Model"], [data-label="Updated"]) { display: none; }
 	.llm-table--overrides .llm-table__meta { display: block; }
 }
 
@@ -631,8 +615,9 @@ a.pagination__link:hover { background: var(--bg-hover); }
    real type title ("Incorrect business information (opening hours, …)")
    scrolled the inbox, and the page with it, from 721 to about 960px.
 
-   The headers are hidden by position, the cells by their label: a column
-   moved in `TICKET_COLUMNS` or `TYPE_COLUMNS` must move here too. */
+   Headers and cells are hidden by their column's label (`data-label`):
+   a column renamed in `TICKET_COLUMNS` or `TYPE_COLUMNS` is renamed here too,
+   and its place in the list does not matter. */
 .ticket-table { container: ticket-table / inline-size; }
 .ticket-table__meta {
 	display: none; margin-top: var(--space-1);
@@ -642,13 +627,11 @@ a.pagination__link:hover { background: var(--bg-hover); }
    sets the narrowed grid's minimum and the inbox scrolls the page. */
 .ticket-table--inbox .data-table__title { overflow-wrap: anywhere; }
 @container ticket-table (max-width: 46rem) {
-	.ticket-table--inbox td:is([data-label="Type"], [data-label="Source"], [data-label="Created"]),
-	.ticket-table--inbox > .data-table > table > thead > tr > th:is(:nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }
+	.ticket-table--inbox :is(th, td):is([data-label="Type"], [data-label="Source"], [data-label="Created"]) { display: none; }
 	.ticket-table--inbox .ticket-table__meta { display: block; }
 }
 @container ticket-table (max-width: 40rem) {
-	.ticket-table--types td:is([data-label="Public form"], [data-label="Default priority"], [data-label="Escalation"], [data-label="Order"]),
-	.ticket-table--types > .data-table > table > thead > tr > th:is(:nth-child(3), :nth-child(4), :nth-child(5), :nth-child(6)) { display: none; }
+	.ticket-table--types :is(th, td):is([data-label="Public form"], [data-label="Default priority"], [data-label="Escalation"], [data-label="Order"]) { display: none; }
 	.ticket-table--types .ticket-table__meta { display: block; }
 }
 
@@ -663,9 +646,10 @@ a.pagination__link:hover { background: var(--bg-hover); }
    long domain at 721, the buttons list at 721, and the API keys list from
    721 to 960.
 
-   The headers are hidden by position, the cells by their label: a column
-   moved in `sessions::COLUMNS`, `orgs::COLUMNS`, `BUTTON_COLUMNS` or
-   `API_KEY_COLUMNS` must move here too. */
+   Headers and cells are hidden by their column's label (`data-label`):
+   a column renamed in `sessions::COLUMNS`, `orgs::COLUMNS`, `BUTTON_COLUMNS` or
+   `API_KEY_COLUMNS` is renamed here too,
+   and its place in the list does not matter. */
 .session-table, .org-table, .portal-button-table, .api-key-table { container-type: inline-size; }
 .session-table { container-name: session-table; }
 .org-table { container-name: org-table; }
@@ -685,22 +669,18 @@ a.pagination__link:hover { background: var(--bg-hover); }
    the table's minimum and the list scrolled sideways at 721 and 800px. */
 .portal-button-table td[data-label="Path"] code { overflow-wrap: anywhere; }
 @container session-table (max-width: 48rem) {
-	.session-table td:is([data-label="Started"], [data-label="Last used"], [data-label="Expires"]),
-	.session-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3), :nth-child(4)) { display: none; }
+	.session-table :is(th, td):is([data-label="Started"], [data-label="Last used"], [data-label="Expires"]) { display: none; }
 	.session-table .session-table__meta { display: block; }
 }
 @container org-table (max-width: 34rem) {
-	.org-table td:is([data-label="Verified via"], [data-label="Claimed"]),
-	.org-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(3)) { display: none; }
+	.org-table :is(th, td):is([data-label="Verified via"], [data-label="Claimed"]) { display: none; }
 	.org-table .org-table__meta { display: block; }
 }
 @container api-key-table (max-width: 48rem) {
-	.api-key-table td:is([data-label="Prefix"], [data-label="User"], [data-label="Created"], [data-label="Status"]),
-	.api-key-table > .data-table > table > thead > tr > th:is(:nth-child(1), :nth-child(3), :nth-child(4), :nth-child(5)) { display: none; }
+	.api-key-table :is(th, td):is([data-label="Prefix"], [data-label="User"], [data-label="Created"], [data-label="Status"]) { display: none; }
 	.api-key-table .api-key-table__meta { display: block; }
 }
 @container portal-button-table (max-width: 30rem) {
-	.portal-button-table td:is([data-label="Icon"], [data-label="Order"]),
-	.portal-button-table > .data-table > table > thead > tr > th:is(:nth-child(2), :nth-child(4)) { display: none; }
+	.portal-button-table :is(th, td):is([data-label="Icon"], [data-label="Order"]) { display: none; }
 	.portal-button-table .portal-button-table__meta { display: block; }
 }

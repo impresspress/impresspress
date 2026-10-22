@@ -34,8 +34,8 @@ impl DocumentType {
     /// about.
     pub const fn title(self) -> &'static str {
         match self {
-            Self::Terms => "Terms of Service",
-            Self::Privacy => "Privacy Policy",
+            Self::Terms => "Terms of service",
+            Self::Privacy => "Privacy policy",
         }
     }
 }

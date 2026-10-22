@@ -796,7 +796,6 @@ mod tests {
             html.contains(r#"<span class="db-table-list__count">"#),
             "{html}"
         );
-        assert!(!html.contains("text-xs"), "{html}");
         assert!(
             html.contains(r#"<div id="db-filter-empty" hidden><p class="empty-note">No tables match.</p></div>"#),
             "{html}"

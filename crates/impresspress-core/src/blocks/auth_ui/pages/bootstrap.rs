@@ -55,7 +55,7 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         (crate::csrf::hidden_field(ctx, msg))
 
                         div .form-group {
-                            label .form-label for="token" { "Bootstrap Token" }
+                            label .form-label for="token" { "Bootstrap token" }
                             input
                                 .form-input
                                 type="text"
@@ -67,7 +67,7 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         }
 
                         div .form-group {
-                            label .form-label for="email" { "Admin Email" }
+                            label .form-label for="email" { "Admin email" }
                             input
                                 .form-input
                                 type="email"
@@ -79,7 +79,7 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         }
 
                         div .form-group {
-                            label .form-label for="password" { "Admin Password" }
+                            label .form-label for="password" { "Admin password" }
                             (password_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
 

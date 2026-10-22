@@ -1,5 +1,7 @@
 # Phase 5 — UI, components and asset ownership
 
+> **Superseded in part (2026-10-23).** The 2026-10 admin layout redesign deleted `components::button`/`BtnVariant` (every button is `components::Action`) and `stat_card` (stats are `components::{Stat, stat_row}`), and removed uppercase table headers. Each line it superseded carries a **[superseded 2026-10: …]** marker; the rulings and the rest of the record stand.
+
 **Date:** 2026-09-08
 **Status:** Decided 2026-09-08. The six rulings below are taken; they override the inventory that
 follows wherever they differ, and they override `docs/CODE_REVIEW_2026-09-05.md` wherever they
@@ -87,7 +89,7 @@ Aim the phase at the table markup and the page header. Do not spend a pull reque
 buttons that already carry the right classes.
 
 **The stat tile is refuted as a second renderer** — `ui/templates.rs` already delegates to
-`components::stat_card`. Leave it alone.
+`components::stat_card`. Leave it alone. **[superseded 2026-10: `stat_card` is gone; stats are `components::{Stat, stat_row}`]**
 
 ### Ruling 5.3 — No live cross-site-scripting sink. Do the hygiene anyway, and say why
 
@@ -170,7 +172,7 @@ Consolidating the reconnaissance's first two, which are both asset plumbing with
    > `.form-bar` rule (its last caller went on 2026-07-11 in `b56c84f3`, which stopped
    > administration's Settings tabs nesting a per-tab `<form>` inside the template's outer one and
    > moved them to the form-less `tabbed_page`; nothing has called it in the two months since),
-   > `templates::StatTile` (`dashboard_page` now takes rendered `stat_card`s), and four dead
+   > `templates::StatTile` (`dashboard_page` now takes rendered `stat_card`s), and four dead **[superseded 2026-10: `stat_card` is gone; stats are `components::{Stat, stat_row}`]**
    > families in `table.css`: `.table th.sortable`, the single-dash
    > `.pagination-info`/`-controls`/`-btn` family superseded by `components::pagination`'s
    > `.pagination__*`, the flat `.db-table-list` the grouped redesign replaced, and the
@@ -195,7 +197,7 @@ Consolidating the reconnaissance's first two, which are both asset plumbing with
    >
    > **Deliberately not folded in:** roughly 25 further dead rules across `form.css`, `card.css`,
    > `button.css`, `badge.css`, `stat.css`, `shell.css`, `auth-split.css` and `toast.css`, and five
-   > never-constructed enum variants (`BtnVariant::{Secondary,Ghost,Danger}`, `CtrlSize::Lg`,
+   > never-constructed enum variants (`BtnVariant::{Secondary,Ghost,Danger}`, `CtrlSize::Lg`, **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant]**
    > `AlertVariant::Info`) with the CSS they gate. None of it is two-generation drift; it
    > accumulated because nothing guards the *defined → rendered* direction, which is a finding of
    > its own. The button variants in particular must not be read as dead code: 87, 29 and 9 sites
@@ -238,13 +240,13 @@ Things one pull request in this phase does that the reviewer of a later one has 
 | Admin api-key revoke posts to a nonexistent `/revoke` path (carry-forward) | **CLOSED (fixed)** | now `PATCH`; guarded by `blocks/admin/mod.rs:1809` link test |
 | LLM providers page offers controls a runtime cannot service (carry-forward) | **CLOSED (fixed)** | `blocks/llm/ui.rs:68,115,253,293` gate on `ProviderAdmin::manages_providers()` |
 | `components.rs:7-13, 121-127, 203-209` orphaned section headers | **REFUTED / does not exist** | there is no `ui/components.rs`; it is a directory of 14 files (PR #85 redesign) |
-| Admin is "fully gen-1", 35 legacy buttons | **PARTLY REFUTED** | 35 hand-written button *lines* is exact, but they already carry gen-2 BEM classes. The split is markup-level (`button .btn .btn--primary` vs `components::button()`), not class-level. Admin also makes 34 `components::` calls |
+| Admin is "fully gen-1", 35 legacy buttons | **PARTLY REFUTED** | 35 hand-written button *lines* is exact, but they already carry gen-2 BEM classes. The split is markup-level (`button .btn .btn--primary` vs `components::button()`), not class-level. Admin also makes 34 `components::` calls **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant]** |
 | Admin 19 raw tables | **REPRODUCES exactly** | 19 `table .table` lines across 9 admin page files |
 | Admin 39 raw badges | **REPRODUCES exactly** | 39 raw `.badge` spans across 9 admin page files |
 | Admin 7 `PageHeader`s all with `title: ""` | **REPRODUCES exactly** | 7 non-test sites, all empty-titled |
 | `BadgeVariant` 4 variants vs 6 CSS classes | **REPRODUCES, and worse** | 4 variants, 6 `.badge-*` classes, **plus** 5 `.badge--tone-*` BEM classes = three generations |
 | Products fully gen-2, 114 component calls | **REPRODUCES, grown** | `blocks/products/pages.rs` makes **198** `components::` references; 0 `templates::` uses |
-| `templates::StatTile` is a gen-1 renderer | **REFUTED** | `ui/templates.rs:240` already delegates to `components::stat_card`. It is one redundant struct layer, not a divergent renderer |
+| `templates::StatTile` is a gen-1 renderer | **REFUTED** | `ui/templates.rs:240` already delegates to `components::stat_card`. It is one redundant struct layer, not a divergent renderer **[superseded 2026-10: `stat_card` is gone; stats are `components::{Stat, stat_row}`]** |
 | Three hand-rolled modals | **REPRODUCES in count, different shape** | two raw `div.modal-overlay` copies in admin + one native `<dialog>` in files = three mechanisms |
 | JS embedded five ways | **REPRODUCES**, all five present | see §3 |
 | `palette_js` 141 lines at `ui/assets.rs:295-433` | **REPRODUCES, moved** | 139 lines at `ui/assets.rs:426-564` |
@@ -276,16 +278,16 @@ exports at `ui/components/mod.rs:15-27`:
 
 | Export | File:line | CSS |
 |---|---|---|
-| `button`, `tab_navigation`, `BtnVariant`, `Tab` | `ui/components/button.rs:93, 32, 60, 17` | `ui/styles/components/button.css` (BEM only) |
+| `button`, `tab_navigation`, `BtnVariant`, `Tab` | `ui/components/button.rs:93, 32, 60, 17` | `ui/styles/components/button.css` (BEM only) **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant; `Tab` has no icon]** |
 | `data_table`, `TableCol` | `ui/components/table.rs:20, 4` | `table.css:73-95` (`.data-table*`) |
 | `badge`, `status_badge`, `BadgeVariant` | `ui/components/badge.rs:41, 48, 9` | `badge.css` |
 | `page_header` | `ui/components/card.rs:9` | `.page-title` / `.page-subtitle` |
-| `stat_card` | `ui/components/stat.rs:6` | `stat.css` |
+| `stat_card` | `ui/components/stat.rs:6` | `stat.css` **[superseded 2026-10: `stat_card` is gone; stats are `components::{Stat, stat_row}`]** |
 | `modal` | `ui/components/modal.rs:8` | `modal.css` |
 | `empty_state`, `pagination`, `avatar`, `search_input*`, `alert`, `auth_panel`, `oauth_button`, charts | `empty.rs:3`, `pagination.rs:3`, `avatar.rs:17`, `form.rs:9,14`, `auth.rs:81,38,89`, `chart.rs:7,57,109` | per-file CSS |
 
 **Gen-1 page-template layer** — `ui/templates.rs` (1,000 lines). *Not uniformly legacy:* it uses
-BEM (`.page-header__title`) and `dashboard_page` already delegates to `components::stat_card`
+BEM (`.page-header__title`) and `dashboard_page` already delegates to `components::stat_card` **[superseded 2026-10: `stat_card` is gone; stats are `components::{Stat, stat_row}`]**
 (`ui/templates.rs:240`). Its genuinely gen-1 pieces are:
 
 - `PageHeader` (`ui/templates.rs:12-16`) + `render_header` (`:18-33`) — a **second, incompatible
@@ -328,7 +330,7 @@ calls (`users.rs` 12, `logs.rs` 6, `dashboard.rs`/`permissions.rs`/`variables.rs
 `network.rs` 2, `blocks.rs`/`storage.rs` 1, plus `tab_navigation`/`empty_state`/`Tab` imported
 unqualified in `blocks.rs:9`, `database.rs:183`, `logs.rs:11`, `users.rs:18`). What is *uniformly*
 gen-1 in admin is the **table** (19/19 raw, 0 `data_table`) and the **button** (35/35 hand-written,
-0 `components::button`). Badges are 39 raw against 6 `components::badge` calls.
+0 `components::button`). Badges are 39 raw against 6 `components::badge` calls. **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant]**
 
 ### 1.3 The header divergence (the real "two generations")
 
@@ -709,7 +711,7 @@ at `.gitignore:19-24`):
 
 1. **Admin's 19 raw tables → `data_table`.** Different chrome entirely: `.data-table` has
    `border: 1px solid`, `border-radius`, `background: var(--surface-1)`, a **sticky** `thead` on
-   `--surface-3`, `--text-xs` uppercase headers with `letter-spacing: 0.04em`, `1px dashed`
+   `--surface-3`, `--text-xs` uppercase headers with `letter-spacing: 0.04em`, `1px dashed` **[superseded 2026-10: no content-column text is uppercased, and table headers are 14px (`content_column_never_transforms_case`, `running_text_is_at_least_14px`)]**
    row separators and a `--space-2/--space-3` cell padding, against `.table`'s flat `--space-3`
    padding, `--bg-secondary` header and solid `1px solid` separators (`table.css:2-23` vs
    `:73-95`). Moves all 8 admin baselines. **Second-order effect:** `data_table` emits
@@ -728,12 +730,12 @@ at `.gitignore:19-24`):
 
 **Should NOT move baselines, but must be verified:**
 
-4. **Admin's 35 hand-written buttons → `components::button`.** `button()` emits
+4. **Admin's 35 hand-written buttons → `components::button`.** `button()` emits **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant]**
    `class="btn btn--primary btn--md"`; `button.css:29-38` gives the bare `.btn` **`--md`'s exact
    padding and font-size** ("The base carries `--md`'s padding so a bare `.btn` (no size modifier)
    is a medium button"), so adding `btn--md` is a visual no-op. Two blockers: `BtnVariant`
    (`ui/components/button.rs:60-65`) has no `Success`, and `blocks/admin/pages/users.rs:211` uses
-   `btn--success`; and `button()` only emits `<button>`, while 7 of admin's 35 are
+   `btn--success`; and `button()` only emits `<button>`, while 7 of admin's 35 are **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant]**
    `<a class="btn …">` anchors (`blocks.rs:90,94,192,354`, and 3 more). Needs a `Success` variant
    and either an anchor variant or those 7 left alone.
 5. **Admin's 39 raw badges → `components::badge`.** Emits `span.badge.badge-{success|danger|
@@ -780,7 +782,7 @@ satisfied (`shell_page`) or already fixed (B16/B24), so five PRs remain plus one
 | 1 | `ui/block-owned-static-assets` | Move `llm-chat.js`, `marked.min.js`, `purify.min.js` from `ui/assets/` to `blocks/llm/assets/`; `files-browser.js` to `blocks/files/assets/`. Delete the four `#[cfg(feature = "block-…")]` arms from `ui/assets.rs:152,162,172,180`. Follow the documented precedent in `blocks/dev/assets.rs:1-9`. Resolve the messages→llm-chat.js consumer explicitly (`blocks/messages/pages.rs`). | **No move** — script URLs change, pixels do not. Verify `admin-llm-chat*` and `admin-storage-*` still load their JS. |
 | 2 | `ui/hashed-chrome-js` | The "one hashed `admin.js`" clause. Move `palette_js`/`drawer_js`/`toast_js`/`modal_js` (202 inlined lines, `ui/assets.rs:398-620`) into a real `ui/assets/chrome.js`, served hashed through `ui/assets.rs::bytes` like `htmx.min.js`. Emit one `<script src>` from `ui/mod.rs:213-214` and `ui/layout.rs:45-46` instead of four inline blocks. | **No move.** Removes 202 lines from every page's `<head>`. |
 | 3 | `ui/data-action-delegation` | Convert the 111 attribute-handler lines to `data-action`/`data-*` and one delegated listener in the PR-2 `chrome.js`, applying the rule stated at `blocks/admin/pages/network.rs:62-65`. Includes `database.rs:90`'s 430-char `oninput`, the three copied `removeAttribute('hidden')` scripts (`blocks.rs:331,463`, `variables.rs:579`) and the two eye-toggles (`settings_form.rs:134`, `auth_ui/pages/mod.rs:176`). Add a render test that no page emits an `on*=` attribute. | **No move**; needs a behaviour test for the DB filter. |
-| 4 | `ui/admin-badges-and-buttons` | Admin's 39 raw badges → `components::badge`, widening `BadgeVariant` to cover `primary`/`secondary`/`tone-slate` and adding status-derived helpers for the 9 computed sites. Admin's 28 `<button class="btn …">` → `components::button`, adding a `Success` variant; leave the 7 `<a class="btn">` anchors or add an anchor variant. | **Should not move** — verify against the CSS equivalences in §6.3(4)(5). Run regen; expect an empty diff. If it is non-empty, that is a finding. |
+| 4 | `ui/admin-badges-and-buttons` | Admin's 39 raw badges → `components::badge`, widening `BadgeVariant` to cover `primary`/`secondary`/`tone-slate` and adding status-derived helpers for the 9 computed sites. Admin's 28 `<button class="btn …">` → `components::button`, adding a `Success` variant; leave the 7 `<a class="btn">` anchors or add an anchor variant. | **Should not move** — verify against the CSS equivalences in §6.3(4)(5). Run regen; expect an empty diff. If it is non-empty, that is a finding. **[superseded 2026-10: `components::button`/`BtnVariant` are deleted; every button is `components::Action` (Primary, Secondary, Quiet, QuietDanger, Danger), with no Success variant]** |
 | 5 | `ui/admin-data-table` | Admin's 19 raw `table .table` → `components::data_table`. | **MOVES all 8 admin baselines**, and newly activates the `td[data-label]` mask. Land alone; regen; re-push manually so CI reruns. |
 | 6 | `products/wizard-js-to-file` | `PRODUCT_WIZARD_JS` (403 lines) + `PRODUCT_MANAGER_JS` (39) + `PRODUCT_CATALOG_ADMIN_JS` (12) + `SELLER_ADMIN_JS` + `ORDER_DETAIL_JS` + `stripe_setup_js()` (159) + `commerce_portal_js()` (29) → `blocks/products/assets/*.js`, served the way `storefront.js` already is (`handlers/commerce.rs:73`). Keep the `window.__*Config` bootstrap inline (it is per-request), and add a `</script>`-safe JSON helper for the five `PreEscaped(format!(…))` sites while there. | **Risk.** `visual-baseline.spec.ts` waits `networkidle` and should be fine; `products-lifecycle.spec.ts` mocks its origins and will 404 the new URLs unless the mock passes `/b/products/static/*` through. Its 8 baselines cover exactly these flows. |
 | 7 | `ui/delete-gen1-templates` | Cut admin's 7 `PageHeader{title:""}` sites to `components::page_header` (they render nothing today, so this is free), delete `templates::StatTile` in favour of `stat_card` at the 5 `dashboard.rs` sites, and delete `.table-container`/`.table` from `table.css:2-23` once nothing renders them. | Admin `PageHeader` removal is pixel-neutral; `StatTile` removal is pixel-neutral (`templates.rs:240` already delegates). **CSS deletion is blocked until files/vector/llm/legalpages/tickets/userportal's 10 remaining raw tables are migrated** — `ui/mod.rs:1725` will fail the build. Ship it as "delete what is unused", not "delete gen-1 wholesale". |

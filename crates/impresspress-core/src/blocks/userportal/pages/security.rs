@@ -212,7 +212,7 @@ fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>)
             span .linked-provider__name { (provider) }
             span .linked-provider__login { (link.provider_login) }
             span .linked-provider__date { "linked " (timestamp(&link.linked_at)) }
-            button .btn .btn--ghost .btn--sm
+            button .btn .btn--quiet .btn--sm
                 type="button"
                 hx-delete=(format!("/b/userportal/security/providers/{}", link.provider))
                 hx-target="closest li"

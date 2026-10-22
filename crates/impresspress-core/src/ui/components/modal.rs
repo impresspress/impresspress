@@ -351,53 +351,6 @@ mod tests {
         );
     }
 
-    /// The scripts this repository ships: every `.js`, `.mjs` and `.ts`
-    /// under `crates/` and `packages/`, less tests, dependencies, build
-    /// output and vendored code. `htmx.min.js` is vendored htmx: its own
-    /// `confirm(question)` runs only for an `hx-confirm` whose `htmx:confirm`
-    /// event nobody prevented, and chrome.js prevents every one that asks.
-    fn shipped_scripts() -> Vec<(String, String)> {
-        const SKIP_DIRS: &[&str] = &[
-            "test",
-            "tests",
-            "node_modules",
-            "target",
-            "pkg",
-            "vendor",
-            "dist",
-        ];
-        const SKIP_FILES: &[&str] = &["htmx.min.js"];
-        fn visit(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-            for entry in std::fs::read_dir(dir).expect("read dir") {
-                let path = entry.expect("dir entry").path();
-                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                if path.is_dir() {
-                    if !SKIP_DIRS.contains(&name.as_str()) && !name.starts_with('.') {
-                        visit(root, &path, out);
-                    }
-                } else if ["js", "mjs", "ts"]
-                    .iter()
-                    .any(|ext| path.extension().is_some_and(|e| e == *ext))
-                    && !SKIP_FILES.contains(&name.as_str())
-                {
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    out.push((rel, std::fs::read_to_string(&path).expect("read script")));
-                }
-            }
-        }
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        let mut out = Vec::new();
-        for top in ["crates", "packages"] {
-            visit(root, &root.join(top), &mut out);
-        }
-        out.sort();
-        out
-    }
-
     /// No script file the repository ships reaches the browser's own
     /// `confirm`, by any spelling `dom::browser_confirm_references` knows: a
     /// global's `.confirm` or `["confirm"]`, called or not, or a bare
@@ -407,7 +360,10 @@ mod tests {
     /// `htmx_guard::every_page_confirms_through_the_one_shared_dialog`.
     #[test]
     fn no_shipped_script_refers_to_the_browser_confirm() {
-        let scripts = shipped_scripts();
+        let scripts: Vec<(String, String)> = crate::test_support::source_scan::shipped_scripts()
+            .into_iter()
+            .map(|file| (file.rel, file.text))
+            .collect();
         assert!(
             scripts.len() > 40,
             "the walk reached {} scripts; it must reach every shipped one",
@@ -443,7 +399,10 @@ mod tests {
     /// `every_page_confirms_through_the_one_shared_dialog`.
     #[test]
     fn no_shipped_script_draws_a_danger_button() {
-        let scripts = shipped_scripts();
+        let scripts: Vec<(String, String)> = crate::test_support::source_scan::shipped_scripts()
+            .into_iter()
+            .map(|file| (file.rel, file.text))
+            .collect();
         assert!(
             scripts.len() > 40,
             "the walk reached {} scripts; it must reach every shipped one",

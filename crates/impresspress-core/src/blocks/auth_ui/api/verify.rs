@@ -63,7 +63,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         // away, or never minted. That is the real invalid-or-expired link.
         Ok(None) => {
             return html_respond(
-                "Invalid Link",
+                "Invalid link",
                 "This verification link is invalid or has expired. Please request a new one.",
                 false,
                 &logo_url,
@@ -248,7 +248,7 @@ fn html_respond(
                         h2 .auth-status__title { (title) }
                         p .auth-status__message { (message) }
                         a .login-button .auth-status__action href="/b/auth/login" {
-                            "Go to Sign In"
+                            "Go to sign in"
                         }
                     }
                 }

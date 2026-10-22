@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
 
 /**
- * The Add Variable modal's key rule, in a real browser.
+ * The Add variable modal's key rule, in a real browser.
  *
  * The server refuses a malformed or unnamespaced variable key with a 400 and a
  * taken one with a 409 (`config_vars::check_variable_key`,

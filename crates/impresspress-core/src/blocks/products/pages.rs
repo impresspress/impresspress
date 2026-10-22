@@ -162,8 +162,8 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
 
 /// A seller's recent failed orders. Narrow (table.css
 /// `.commerce-table--failures`), the date becomes the line under the order.
-/// Column order is part of that rule (headers hidden by position): reorder
-/// both together.
+/// That rule hides headers and cells by their label, so a column renamed here
+/// is renamed there.
 const FAILURE_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Order").primary(),
     components::TableCol::new("Amount"),
@@ -776,9 +776,8 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// the currency and the updated date leave their columns for one line under
 /// the name (`.product-table__meta`).
 ///
-/// Column order is part of table.css `.product-table--live`, which hides the
-/// narrow layout's headers by position (`th:nth-child`): reorder both
-/// together.
+/// table.css `.product-table--live` hides headers and cells by their label, so
+/// a column renamed here is renamed there.
 const PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Availability"),
@@ -787,10 +786,10 @@ const PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Updated"),
 ];
 
-/// The administration's Deleted view. Narrow, the owner, the currency and
-/// the deletion date become the line under the name, so the two ways out
-/// stay in view. Column order is part of table.css `.product-table--deleted`
-/// (headers hidden by position): reorder both together.
+/// The administration's Deleted view. Narrow, the owner, the currency and the
+/// deletion date become the line under the name, so the two ways out stay in
+/// view. table.css `.product-table--deleted` hides headers and cells by their
+/// label, so a column renamed here is renamed there.
 const DELETED_PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Owner"),
@@ -799,10 +798,9 @@ const DELETED_PRODUCT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Actions").actions(),
 ];
 
-/// A seller's product list (My products). Narrow, the currency and the
-/// created date become the line under the name. Column order is part of
-/// table.css `.product-table--own` (headers hidden by position): reorder
-/// both together.
+/// A seller's product list (My products). Narrow, the currency and the created
+/// date become the line under the name. table.css `.product-table--own` hides
+/// headers and cells by their label, so a column renamed here is renamed there.
 const OWN_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Status"),
@@ -810,10 +808,10 @@ const OWN_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Created"),
 ];
 
-/// A seller's Deleted view (My products). Narrow, the currency and the
-/// deletion date become the line under the name, as in administration's.
-/// Column order is part of table.css `.product-table--own-deleted` (headers
-/// hidden by position): reorder both together.
+/// A seller's Deleted view (My products). Narrow, the currency and the deletion
+/// date become the line under the name, as in administration's. table.css
+/// `.product-table--own-deleted` hides headers and cells by their label, so a
+/// column renamed here is renamed there.
 const OWN_DELETED_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Currency"),
@@ -1134,10 +1132,10 @@ pub async fn deleted_product_close(
 // Admin: seller governance and moderation
 // ---------------------------------------------------------------------------
 
-/// The seller accounts list. Narrow (table.css `.commerce-table--sellers`),
-/// the payment and payout states and the listing count become the line under
-/// the seller. Column order is part of that rule (headers hidden by
-/// position): reorder both together.
+/// The seller accounts list. Narrow (table.css `.commerce-table--sellers`), the
+/// payment and payout states and the listing count become the line under the
+/// seller. That rule hides headers and cells by their label, so a column
+/// renamed here is renamed there.
 const SELLER_COLUMNS: [components::TableCol<'static>; 6] = [
     components::TableCol::new("Seller").primary(),
     components::TableCol::new("Selling"),
@@ -1149,8 +1147,8 @@ const SELLER_COLUMNS: [components::TableCol<'static>; 6] = [
 
 /// A seller's own products, on the seller's admin page. Narrow (table.css
 /// `.commerce-table--owned`), the update date becomes the line under the
-/// product. Column order is part of that rule (headers hidden by position):
-/// reorder both together.
+/// product. That rule hides headers and cells by their label, so a column
+/// renamed here is renamed there.
 const OWNED_PRODUCT_COLUMNS: [components::TableCol<'static>; 4] = [
     components::TableCol::new("Product").primary(),
     components::TableCol::new("Status"),
@@ -1636,10 +1634,16 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         legend .sr-only { "Product template" }
                         div .product-template-grid {
                             @for (value, title, description) in &template_definitions {
-                                label .product-template-card {
-                                    input type="radio" name="product_template" value=(value) checked[*value == initial_template] data-action="pw-template-changed";
-                                    strong { (title) }
-                                    span .text-muted .text-sm { (description) }
+                                // The card's name is its title alone; the
+                                // sentence under it describes the choice. The
+                                // label stretches over the card (card.css), so
+                                // the whole card still picks it.
+                                @let id = format!("wizard-template-{value}");
+                                @let described = format!("{id}-help");
+                                div .product-template-card {
+                                    input #(id) type="radio" name="product_template" value=(value) checked[*value == initial_template] aria-describedby=(described) data-action="pw-template-changed";
+                                    label for=(id) { (title) }
+                                    span #(described) .text-muted .text-sm { (description) }
                                 }
                             }
                         }
@@ -1761,12 +1765,16 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         ("wizard-automatic-tax", "Automatic tax", "Ask Stripe to calculate tax for this checkout.", automatic_tax),
                         ("wizard-billing-address", "Billing address", "Collect the customer's billing address.", false),
                         ("wizard-shipping-address", "Shipping address", "Collect delivery details and show shipping rates.", false),
-                        ("wizard-create-customer", "Create a Stripe Customer for one-time payments", "Useful when customers may buy again or need billing support.", false),
+                        ("wizard-create-customer", "Create a Stripe customer for one-time payments", "Useful when customers may buy again or need billing support.", false),
                         ("wizard-terms", "Terms consent", "Require customers to accept your terms before paying.", false),
                     ] {
-                        label .products-choice {
-                            input id=(id) type="checkbox" checked[checked] data-action="pw-shipping-changed";
-                            span { strong { (label) } small .text-muted { (help) } }
+                        // Named by its label alone, described by the
+                        // sentence under it; the label stretches over the
+                        // tile (form.css), so the whole tile toggles it.
+                        @let described = format!("{id}-help");
+                        div .products-choice {
+                            input id=(id) type="checkbox" checked[checked] aria-describedby=(described) data-action="pw-shipping-changed";
+                            span { label for=(id) { (label) } small #(described) .text-muted { (help) } }
                         }
                     }
                     div .form-group data-subscription-field hidden {
@@ -2343,7 +2351,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
         }
         @if managed.status == OfferStatus::Active {
             section .details-block--divider {
-                h3 .products-subheading .m-0 { "Shareable Stripe Payment Links" }
+                h3 .products-subheading .m-0 { "Shareable Stripe payment links" }
                 p .text-muted .text-sm { "Create a hosted checkout link you can paste into an email, button, or social post. Products with choices save those choices as a reusable preset." }
                 @if !offer.variables.is_empty() {
                     div .grid .grid-auto-260 .gap-4 {
@@ -2367,7 +2375,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     input .form-input id=(format!("link-{}-completion-url", offer.id)) data-link-completion-url type="url" placeholder="https://example.com/thank-you";
                 }
                 div .flex .gap-2 .flex-wrap {
-                    button .btn .btn--secondary .btn--sm type="button" data-create-link data-action="pm-create-link" { "Create or reuse Payment Link" }
+                    button .btn .btn--secondary .btn--sm type="button" data-create-link data-action="pm-create-link" { "Create or reuse payment link" }
                     @if !offer.variables.is_empty() {
                         button .btn .btn--secondary .btn--sm type="button" data-action="pm-new-preset" { "New preset" }
                     }
@@ -2376,18 +2384,18 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     h4 .products-subheading .mb-1 { "Saved presets" }
                     div data-checkout-presets aria-live="polite" { p .text-muted .text-sm { "Loading presets…" } }
                 }
-                div data-payment-links .mt-4 { p .text-muted .text-sm { "Loading Payment Links…" } }
+                div data-payment-links .mt-4 { p .text-muted .text-sm { "Loading payment links…" } }
             }
             details .details-block--divider {
                 summary .summary-strong { "Hosted, embedded, and static-site integration" }
                 p .text-muted .text-sm { "The browser sends inputs to Impresspress for authoritative pricing. Replace the placeholder domain with this Impresspress deployment; secret Stripe keys never belong in static HTML." }
                 div .form-group {
-                    label .form-label for=(format!("snippet-{}-hosted", offer.id)) { "Hosted Checkout widget" }
+                    label .form-label for=(format!("snippet-{}-hosted", offer.id)) { "Hosted checkout widget" }
                     textarea .form-textarea id=(format!("snippet-{}-hosted", offer.id)) data-integration-snippet readonly rows="4" spellcheck="false" { (hosted_snippet) }
                     button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy hosted snippet" }
                 }
                 div .form-group {
-                    label .form-label for=(format!("snippet-{}-embedded", offer.id)) { "Embedded Checkout widget" }
+                    label .form-label for=(format!("snippet-{}-embedded", offer.id)) { "Embedded checkout widget" }
                     textarea .form-textarea id=(format!("snippet-{}-embedded", offer.id)) data-integration-snippet readonly rows="4" spellcheck="false" { (embedded_snippet) }
                     button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy embedded snippet" }
                 }
@@ -2801,10 +2809,10 @@ fn new_offer_definition(
 /// empty list. `products-catalog-admin.js` clears the editor and opens it.
 const NEW_GROUP: (&str, ActionTarget<'static>) = ("New group", ActionTarget::Delegated("pc-new"));
 
-/// The groups list. Narrow (table.css `.group-table`), the description
-/// column drops and the created date becomes one line under the name, so the
-/// edit and delete controls stay in view. Column order is part of that rule,
-/// which hides the headers by position: reorder both together.
+/// The groups list. Narrow (table.css `.group-table`), the description column
+/// drops and the created date becomes one line under the name, so the edit and
+/// delete controls stay in view. That rule hides headers and cells by their
+/// label, so a column renamed here is renamed there.
 const GROUP_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Name").primary(),
     components::TableCol::new("Description"),
@@ -2873,14 +2881,14 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     components::status_badge(r.str_field("status")),
                     components::timestamp(r.str_field("created_at")),
                     html! { div .products-actions {
-                        button .btn .btn--ghost .btn--sm .btn--icon type="button"
+                        button .btn .btn--quiet .btn--sm .btn--icon type="button"
                             aria-label={ "Edit " (name) } title="Edit"
                             data-record-id=(r.id) data-record-name=(name) data-record-description=(description) data-record-status=(r.str_field("status"))
                             data-action="pc-edit-group"
                         { (icons::edit()) }
                         // Destructive, so set apart: the danger colour, and
                         // the script asks before it deletes.
-                        button .btn .btn--ghost-danger .btn--sm .btn--icon type="button"
+                        button .btn .btn--quiet-danger .btn--sm .btn--icon type="button"
                             aria-label={ "Delete " (name) } title="Delete"
                             data-record-id=(r.id) data-record-name=(name)
                             data-action="pc-delete"
@@ -2992,8 +3000,8 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// the customer and the date leave their columns for one line under the
 /// order (`.commerce-table__meta`), so the total keeps its room.
 ///
-/// Column order is part of that rule, which hides the narrow layout's
-/// headers by position (`th:nth-child`): reorder both together.
+/// That rule hides headers and cells by their label, so a column renamed here
+/// is renamed there.
 const ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Order").primary(),
     components::TableCol::new("Customer"),
@@ -3003,9 +3011,9 @@ const ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
 ];
 
 /// A seller's order list. Narrow (table.css `.commerce-table--seller-orders`),
-/// the subscription and the date become the line under the buyer. Column
-/// order is part of that rule (headers hidden by position): reorder both
-/// together.
+/// the subscription and the date become the line under the buyer. That rule
+/// hides headers and cells by their label, so a column renamed here is renamed
+/// there.
 const SELLER_ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Buyer").primary(),
     components::TableCol::new("Status"),
@@ -3014,10 +3022,10 @@ const SELLER_ORDER_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Date"),
 ];
 
-/// A buyer's purchases. Each row is titled by its order number, as the
-/// order's own page is; narrow (table.css `.commerce-table--purchases`), the
-/// provider and the date become the line under it. Column order is part of
-/// that rule (headers hidden by position): reorder both together.
+/// A buyer's purchases. Each row is titled by its order number, as the order's
+/// own page is; narrow (table.css `.commerce-table--purchases`), the provider
+/// and the date become the line under it. That rule hides headers and cells by
+/// their label, so a column renamed here is renamed there.
 const PURCHASE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Order").primary(),
     components::TableCol::new("Status"),
@@ -3806,8 +3814,8 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
 }
 
 /// An order's line items. Narrow (table.css `.commerce-table--items`), the
-/// quantity and unit price become the line under the item. Column order is
-/// part of that rule (headers hidden by position): reorder both together.
+/// quantity and unit price become the line under the item. That rule hides
+/// headers and cells by their label, so a column renamed here is renamed there.
 const ITEM_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Item").primary(),
     components::TableCol::new("Quantity"),
@@ -3817,9 +3825,9 @@ const ITEM_COLUMNS: [components::TableCol<'static>; 5] = [
 ];
 
 /// An order's refunds, each titled by its amount. Narrow (table.css
-/// `.commerce-table--refunds`), the date and Stripe's refund id become the
-/// line under it. Column order is part of that rule (headers hidden by
-/// position): reorder both together.
+/// `.commerce-table--refunds`), the date and Stripe's refund id become the line
+/// under it. That rule hides headers and cells by their label, so a column
+/// renamed here is renamed there.
 const REFUND_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Amount").primary(),
     components::TableCol::new("Status"),
@@ -3844,9 +3852,9 @@ fn dispute_reason(code: &str) -> String {
 }
 
 /// An order's disputes, each titled by its amount. Narrow (table.css
-/// `.commerce-table--disputes`), the evidence deadline and Stripe's dispute
-/// id become the line under it. Column order is part of that rule (headers
-/// hidden by position): reorder both together.
+/// `.commerce-table--disputes`), the evidence deadline and Stripe's dispute id
+/// become the line under it. That rule hides headers and cells by their label,
+/// so a column renamed here is renamed there.
 const DISPUTE_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Amount").primary(),
     components::TableCol::new("Status"),

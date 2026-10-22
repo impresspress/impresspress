@@ -1,5 +1,7 @@
 # Admin redesign: shared style layer, navy chrome, and detachable assets
 
+> **Superseded in part (2026-10-23).** The 2026-10 admin layout redesign reversed this spec's stat tiles (icon, uppercase label, sparkline) and replaced its chart cards. Each line it superseded carries a **[superseded 2026-10: …]** marker naming what replaced it; everything else stands.
+
 **Date:** 2026-09-01
 **Branch:** `feat/admin-redesign` (worktree `.claude/worktrees/admin-redesign`, based on `8b48bcd`)
 **Repos touched:** `impresspress` (producer), `impresspress/site` (consumer — the CDN)
@@ -68,7 +70,7 @@ partial, logo-only version of the flag this spec generalises.
 | Login panel | Orange (`#f0480f`) | Navy `#02112a`, logo top-left, headline bottom-left |
 | Login form | Bordered centred card | Card-less on `#fdfdfd`, full-width red CTA |
 | Dashboard order | Charts → stats → tables | Stats → charts → tables |
-| Stat tiles | Label + value + icon | Icon + uppercase label + value + **sparkline** |
+| Stat tiles | Label + value + icon | Icon + uppercase label + value + **sparkline** **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]** |
 | Chart types | Column bars only | Line + area with gridlines, y-ticks, endpoint dots |
 | Type | Itim everywhere | System stack; Itim for the wordmark only |
 
@@ -149,10 +151,10 @@ the same name.
 
 | Component | Status | Why |
 |---|---|---|
-| `sparkline(series, color)` | New | Stat tiles in the mockup carry one; inline SVG polyline, no library |
-| `line_chart_card(...)` | New | The New-users/Errors cards are line+area with gridlines, y-ticks and endpoint dots. `bar_chart_card` (a private fn in `dashboard.rs`) only draws bars |
-| `bar_chart_card(...)` | Moved | From `blocks/admin/pages/dashboard.rs` into `ui/components/chart.rs` — it is shared UI, not page code |
-| `stat_card(...)` | Extended | Gains icon, optional sparkline, accent |
+| `sparkline(series, color)` | New | Stat tiles in the mockup carry one; inline SVG polyline, no library **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]** |
+| `line_chart_card(...)` | New | The New-users/Errors cards are line+area with gridlines, y-ticks and endpoint dots. `bar_chart_card` (a private fn in `dashboard.rs`) only draws bars **[superseded 2026-10: the dashboard's charts are `components::ChartCard`; `line_chart_card`/`bar_chart_card` are gone]** |
+| `bar_chart_card(...)` | Moved | From `blocks/admin/pages/dashboard.rs` into `ui/components/chart.rs` — it is shared UI, not page code **[superseded 2026-10: the dashboard's charts are `components::ChartCard`; `line_chart_card`/`bar_chart_card` are gone]** |
+| `stat_card(...)` | Extended | Gains icon, optional sparkline, accent **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]** |
 | `alert(variant, msg)` | New | Replaces the hand-inlined `#error` / `#info` divs in the auth pages |
 | `oauth_button(provider)` | New | `login.rs` currently inlines ~10 CSS declarations per button |
 | `auth_panel(config, tagline)` | Moved | From `blocks::auth::brand_panel` into `ui/components/auth.rs`, where shared chrome belongs |
@@ -166,7 +168,7 @@ the same name.
 | Template | Treatment |
 |---|---|
 | `auth_split` + `BrandPanel` | Redesigned — navy panel, card-less form |
-| `dashboard_page` + `StatTile` | Redesigned — reorder, icon + sparkline tiles |
+| `dashboard_page` + `StatTile` | Redesigned — reorder, icon + sparkline tiles **[superseded 2026-10: stats are `components::{Stat, stat_row}`, a number and a sentence-case label, with no icon, sparkline or uppercase]** |
 | `list_page` + `PageHeader` | Design pass — table, filter row, pagination |
 | `detail_page` + `DetailHero`/`DetailMeta` | Design pass — hero, meta grid |
 | `form_page` + `FormSection` | Design pass — fields, sections, actions |

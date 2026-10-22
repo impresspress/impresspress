@@ -1646,12 +1646,10 @@ mod tests {
         // `.auth-split__form` (login) or `.login-container` (signup, white);
         // it is measured on `.auth-split__form`, the darker of the two.
         (".signup-link", ".auth-split__form"),
-        // The page header and the body have no box of their own: they sit
-        // on the shell's page background (layouts/shell.css). Every
-        // `.topbar*` crumb, title, subtitle and palette label renders on it,
-        // and so does text set directly on the body.
+        // The page header has no box of its own: it sits on the shell's
+        // page background (layouts/shell.css). Every `.topbar*` crumb,
+        // title, subtitle and palette label renders on it.
         (".topbar", ".shell"),
-        (".shell__body", ".shell"),
     ];
 
     /// The surfaces a rule with no background of its own and no
@@ -1855,6 +1853,64 @@ mod tests {
             "only {checked} text/background pairs were resolvable -- expected >120; \
              the resolver has probably stopped understanding a common value form, \
              which would make the contrast assertion above vacuous"
+        );
+    }
+
+    /// The entries of the contrast guard's two tables that no measured rule
+    /// uses any more: an `ANCESTOR_BACKGROUNDS` prefix that starts no
+    /// selector setting a text colour, and a `CONTRAST_EXEMPT_SELECTORS`
+    /// entry that names no such selector. Either would quietly re-route or
+    /// excuse the next rule that happened to match it.
+    #[cfg(feature = "embed-assets")]
+    fn stale_contrast_entries(sheets: &[(String, String)]) -> Vec<String> {
+        let coloured: Vec<String> = sheets
+            .iter()
+            .flat_map(|(_, css)| css_leaf_blocks(css))
+            .filter(|(_, body)| {
+                body.split(';')
+                    .any(|decl| decl.trim_start().starts_with("color:"))
+            })
+            .flat_map(|(selector, _)| {
+                selector
+                    .split(',')
+                    .map(|part| part.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut stale = Vec::new();
+        for (prefix, _) in ANCESTOR_BACKGROUNDS {
+            if !coloured.iter().any(|part| part.starts_with(prefix)) {
+                stale.push(format!("ANCESTOR_BACKGROUNDS {prefix}"));
+            }
+        }
+        for selector in CONTRAST_EXEMPT_SELECTORS {
+            if !coloured.iter().any(|part| part == selector) {
+                stale.push(format!("CONTRAST_EXEMPT_SELECTORS {selector}"));
+            }
+        }
+        stale
+    }
+
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_contrast_tables_name_only_rules_that_exist() {
+        let stale = stale_contrast_entries(&all_stylesheets());
+        assert!(
+            stale.is_empty(),
+            "contrast table entries that match no rule setting a colour -- remove them: {stale:?}"
+        );
+        // Each kind of entry goes stale once its rule is gone.
+        let sheet = |css: &str| vec![("t.css".to_string(), css.to_string())];
+        let none = stale_contrast_entries(&sheet(".unrelated { color: red; }"));
+        assert_eq!(
+            none.len(),
+            ANCESTOR_BACKGROUNDS.len() + CONTRAST_EXEMPT_SELECTORS.len(),
+            "{none:?}"
+        );
+        let one_left = stale_contrast_entries(&sheet(".topbar__title { color: red; }"));
+        assert!(
+            !one_left.iter().any(|e| e == "ANCESTOR_BACKGROUNDS .topbar"),
+            "{one_left:?}"
         );
     }
 
@@ -2142,171 +2198,572 @@ mod tests {
         assert!(footer.contains("background: var(--surface-2)"), "{footer}");
     }
 
-    /// Design rule 4: case is the source's, never the stylesheet's. A label
-    /// set in capitals by CSS hides a Title Case string (and reads as
-    /// shouting); the content column writes sentence case and shows it as
-    /// written. The sidebar's group labels are the one exception: the
-    /// sidebar is outside the redesign. Covers the shared bundle and every
-    /// block stylesheet.
+    /// The declarations that change how a letter's case is drawn: any
+    /// `text-transform`; the `font-variant` capitals (`small-caps`,
+    /// `all-small-caps`, `petite-caps`, `all-petite-caps`, `unicase`,
+    /// `titling-caps`), whether spelled through `font-variant-caps`,
+    /// `font-variant` or the `font` shorthand; and the OpenType features
+    /// that draw them (`font-feature-settings: "smcp"`, `"c2sc"`, `"pcap"`,
+    /// `"c2pc"`, `"unic"`, `"titl"`). Each `(property, value)` is read with
+    /// any `!important` stripped, case folded and its tokens resolved
+    /// (`font-variant: var(--caps)`). A value that names a token nobody
+    /// defines cannot be read, so it counts.
     #[cfg(feature = "embed-assets")]
-    #[test]
-    fn only_the_sidebar_sets_text_in_capitals() {
+    fn transforms_case(
+        property: &str,
+        value: &str,
+        tokens: &std::collections::HashMap<String, String>,
+    ) -> bool {
+        const FEATURES: [&str; 6] = ["smcp", "c2sc", "pcap", "c2pc", "unic", "titl"];
+        const CAPS: [&str; 6] = [
+            "small-caps",
+            "all-small-caps",
+            "petite-caps",
+            "all-petite-caps",
+            "unicase",
+            "titling-caps",
+        ];
+        let property = property.trim().to_ascii_lowercase();
+        let value = value
+            .split('!')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let reads_case = matches!(
+            property.as_str(),
+            "font-variant" | "font-variant-caps" | "font" | "font-feature-settings"
+        );
+        if property == "text-transform" {
+            return true;
+        }
+        if !reads_case {
+            return false;
+        }
+        let Some(value) = substitute_tokens(&value, tokens, 0) else {
+            return true;
+        };
+        if property == "font-feature-settings" {
+            return FEATURES.iter().any(|feature| value.contains(feature));
+        }
+        value
+            .split_whitespace()
+            .any(|word| CAPS.contains(&word.trim_matches(',')))
+    }
+
+    /// Every rule in `sheets` that draws case (see [`transforms_case`]),
+    /// outside the sidebar.
+    #[cfg(feature = "embed-assets")]
+    fn case_transforms(sheets: &[(String, String)]) -> Vec<String> {
+        let tokens = parse_root_tokens(super::css());
         let mut wrong = Vec::new();
-        for (sheet, css) in all_stylesheets() {
-            for (selector, body) in css_leaf_blocks(&css) {
-                let capitals = body.split(';').any(|decl| {
-                    decl.split_once(':').is_some_and(|(prop, value)| {
-                        // `uppercase !important` (or `! important`) is
-                        // still uppercase: the value is what precedes `!`.
-                        let value = value
-                            .split('!')
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_ascii_lowercase();
-                        prop.trim().eq_ignore_ascii_case("text-transform") && value == "uppercase"
-                    })
+        for (sheet, css) in sheets {
+            for (selector, body) in css_leaf_blocks(css) {
+                let transforms = body.split(';').any(|decl| {
+                    decl.split_once(':')
+                        .is_some_and(|(prop, value)| transforms_case(prop, value, &tokens))
                 });
                 let sidebar = selector
                     .split(',')
                     .all(|part| part.trim().starts_with(".sidebar__"));
-                if capitals && !sidebar {
+                if transforms && !sidebar {
+                    wrong.push(format!("{sheet}: {selector}"));
+                }
+            }
+        }
+        wrong
+    }
+
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_case_check_reads_every_way_css_draws_case() {
+        let sheet = |css: &str| vec![("t.css".to_string(), css.to_string())];
+        for css in [
+            ".a { text-transform: uppercase; }",
+            ".a { text-transform: capitalize; }",
+            ".a { text-transform: lowercase; }",
+            ".a { text-transform: none; }",
+            ".a { TEXT-TRANSFORM: Uppercase !important; }",
+            ".a { font-variant: small-caps; }",
+            ".a { font-variant-caps: all-small-caps; }",
+            ".a { font-variant: common-ligatures petite-caps; }",
+            ".a { font: small-caps 600 1rem/1.2 sans-serif; }",
+            r#".a { font-feature-settings: "smcp"; }"#,
+            r#".a { font-feature-settings: "liga" 1, "c2sc" 1; }"#,
+            ".a { font-variant: var(--nope); }",
+            ".a { font-variant-caps: var(--nope, all-small-caps); }",
+            "@media (min-width: 1px) { .a { text-transform: uppercase; } }",
+            ".sidebar__x, .a { text-transform: uppercase; }",
+        ] {
+            assert_eq!(case_transforms(&sheet(css)).len(), 1, "{css}");
+        }
+        for css in [
+            ".a { font-variant-numeric: tabular-nums; }",
+            r#".a { font-feature-settings: "tnum"; }"#,
+            ".a { font-variant: var(--text-sm); }",
+            ".a { font: 600 1rem/1.2 sans-serif; }",
+            ".sidebar__group-label { text-transform: uppercase; }",
+        ] {
+            assert!(case_transforms(&sheet(css)).is_empty(), "{css}");
+        }
+    }
+
+    /// Design rule 4: case is the source's, never the stylesheet's. A label
+    /// whose case CSS draws hides how its string is written (and capitals
+    /// read as shouting): the content column writes sentence case and shows
+    /// it as written, so no rule outside the sidebar transforms case, by any
+    /// spelling ([`transforms_case`]). The sidebar's group labels are the
+    /// one exception: the sidebar is outside the redesign. Covers the shared
+    /// bundle and every block stylesheet; the same spellings in a script or
+    /// a Rust-embedded `<style>` are refused by
+    /// `nothing_outside_a_stylesheet_draws_case` below.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn content_column_never_transforms_case() {
+        let wrong = case_transforms(&all_stylesheets());
+        assert!(
+            wrong.is_empty(),
+            "a rule outside the sidebar draws case; write the label in sentence case at \
+             its source instead:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The other places a page can set case: a script (`el.style.textTransform`,
+    /// a `style` string it writes) and a stylesheet or `style` attribute
+    /// embedded in a Rust string. Production sources only: test modules
+    /// spell the property out to test this very rule.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn nothing_outside_a_stylesheet_draws_case() {
+        use crate::test_support::source_scan as scan;
+        const SPELLINGS: [&str; 8] = [
+            "text-transform",
+            "textTransform",
+            "small-caps",
+            "fontVariant",
+            "font-variant-caps",
+            "font-feature-settings",
+            "fontFeatureSettings",
+            "smcp",
+        ];
+        let mut wrong = Vec::new();
+        for file in scan::production_rust_sources() {
+            let text = crate::ui::test_support::mask_rust_comments(&file.text);
+            for (n, line) in text.lines().enumerate() {
+                if SPELLINGS.iter().any(|s| line.contains(s)) {
+                    wrong.push(format!("{}:{}: {}", file.rel, n + 1, line.trim()));
+                }
+            }
+        }
+        let scripts: Vec<_> = scan::shipped_scripts()
+            .into_iter()
+            .filter(|file| !scan::is_vendored_bundle(file))
+            .collect();
+        for file in &scripts {
+            for (n, line) in file.text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || code.starts_with('*') || code.starts_with("/*") {
+                    continue;
+                }
+                if SPELLINGS.iter().any(|s| line.contains(s)) {
+                    wrong.push(format!("{}:{}: {}", file.rel, n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            scripts.len() > 30,
+            "only {} scripts were read",
+            scripts.len()
+        );
+        assert!(
+            wrong.is_empty(),
+            "case drawn outside a stylesheet; write the label in sentence case at its \
+             source instead:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// A token (`--text-sm`, `--caps`) is defined once, in `tokens.css`'s
+    /// `:root`, which is where the case and size guards resolve it from. A
+    /// custom property declared in any other rule (`.x { --text-sm: 11px }`)
+    /// would change what `var(--text-sm)` draws under that rule while the
+    /// guards still read the `:root` value.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn tokens_are_defined_only_in_the_token_sheet() {
+        let mut wrong = Vec::new();
+        for (sheet, css) in all_stylesheets() {
+            for (selector, body) in css_leaf_blocks(&css) {
+                let declares = body
+                    .split(';')
+                    .any(|decl| decl.trim_start().starts_with("--"));
+                if declares && selector.trim() != ":root" {
                     wrong.push(format!("{sheet}: {selector}"));
                 }
             }
         }
         assert!(
             wrong.is_empty(),
-            "text-transform: uppercase outside the sidebar:\n{}",
+            "custom properties declared outside tokens.css's :root:\n{}",
             wrong.join("\n")
         );
     }
 
-    /// The running-text rules design rule 5 raised to 14px (`--text-sm`), and
-    /// the rule each one takes its size from: `None` when it states its own,
-    /// or the ancestor rule it inherits from. Badges, `kbd`, chart ticks, code
-    /// chips, `.share-token` and `.db-sql__input` are the exemptions and are
-    /// not here.
+    /// What a `font-size` value does to the text under it.
     #[cfg(feature = "embed-assets")]
-    const RUNNING_TEXT_RULES: &[(&str, Option<&str>)] = &[
-        // Tables and forms.
-        (".data-table thead th", None),
-        (".data-table:not(.data-table--scroll) td::before", None),
-        (".chart__table thead th", Some(".chart__values")),
-        (".chart__table caption", Some(".chart__values")),
-        (".chart__values summary", Some(".chart__values")),
-        (".chart__note", None),
-        (".chart__col::after", None),
-        (".card__subtitle", None),
-        (".form-hint", None),
-        (".form-error", None),
-        // Dates. A `components::timestamp` sets no size of its own, so these
-        // are where one shown outside a table cell gets it.
-        (".linked-provider__date", None),
-        (".messages-list__date", None),
-        (".message-card__date", None),
-        (".thread-card__date", None),
-        (".legal-editor__meta", None),
-        (".ticket-event__head", None),
-        (".group-fold__stats", None),
-        (".group-fold__lead", None),
-        (".data-table tbody td", None),
-        // Named rules.
-        (".network-route__method", Some(".data-table tbody td")),
+    #[derive(Debug, PartialEq)]
+    enum FontSize {
+        /// An absolute size, in px.
+        Px(f64),
+        /// No smaller than what it inherits: `inherit`, `1em`, `larger`, `100%`.
+        NoSmaller,
+        /// Smaller than what it inherits: `0.9em`, `85%`, `smaller`.
+        Shrinks,
+    }
+
+    /// `value` with every `var(--x)` (and `var(--x, fallback)`) replaced by
+    /// the token's own value, recursively; `None` when a token is unknown.
+    #[cfg(feature = "embed-assets")]
+    fn substitute_tokens(
+        value: &str,
+        tokens: &std::collections::HashMap<String, String>,
+        depth: u8,
+    ) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        let Some(start) = value.find("var(") else {
+            return Some(value.to_string());
+        };
+        let mut level = 0;
+        let mut end = None;
+        for (i, c) in value[start + 4..].char_indices() {
+            match c {
+                '(' => level += 1,
+                ')' if level == 0 => {
+                    end = Some(start + 4 + i);
+                    break;
+                }
+                ')' => level -= 1,
+                _ => {}
+            }
+        }
+        let end = end?;
+        let args = split_top_level(&value[start + 4..end]);
+        let name = args.first()?.trim();
+        let resolved = match tokens.get(name) {
+            Some(token) => substitute_tokens(token, tokens, depth + 1)?,
+            None => substitute_tokens(args.get(1)?, tokens, depth + 1)?,
+        };
+        let rest = substitute_tokens(&value[end + 1..], tokens, depth)?;
+        Some(format!("{}{resolved}{rest}", &value[..start]))
+    }
+
+    /// What a `font-size` value (or the size in a `font` shorthand) does,
+    /// tokens resolved; `None` when it cannot be read, which the guard
+    /// reports rather than passes.
+    #[cfg(feature = "embed-assets")]
+    fn font_size(
+        value: &str,
+        tokens: &std::collections::HashMap<String, String>,
+    ) -> Option<FontSize> {
+        let value = value
+            .split('!')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let value = substitute_tokens(&value, tokens, 0)?;
+        let value = value.trim();
+        match value {
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "medium" | "larger"
+            | "large" | "x-large" | "xx-large" | "xxx-large" => return Some(FontSize::NoSmaller),
+            "smaller" | "small" | "x-small" | "xx-small" => return Some(FontSize::Shrinks),
+            _ => {}
+        }
+        let relative = |unit: &str, one: f64| -> Option<FontSize> {
+            let n: f64 = value.strip_suffix(unit)?.trim().parse().ok()?;
+            Some(if n < one {
+                FontSize::Shrinks
+            } else {
+                FontSize::NoSmaller
+            })
+        };
+        if !value.ends_with("rem") {
+            if let Some(size) = relative("em", 1.0).or_else(|| relative("%", 100.0)) {
+                return Some(size);
+            }
+        }
+        if value.contains('%') || (value.contains("em") && !value.contains("rem")) {
+            // A relative size inside a calc(): not something this reads.
+            return None;
+        }
+        css_length_px(value).map(FontSize::Px)
+    }
+
+    /// The size a `font` shorthand sets: the token before any `/line-height`
+    /// that reads as a size. `None` when the shorthand sets none
+    /// (`font: inherit`), which is no change.
+    #[cfg(feature = "embed-assets")]
+    fn shorthand_size(value: &str) -> Option<String> {
+        const KEYWORDS: [&str; 10] = [
+            "xx-small",
+            "x-small",
+            "small",
+            "medium",
+            "large",
+            "x-large",
+            "xx-large",
+            "xxx-large",
+            "smaller",
+            "larger",
+        ];
+        let value = value.split('!').next().unwrap_or("");
+        let mut depth = 0;
+        let mut token = String::new();
+        let mut tokens = Vec::new();
+        for c in value.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                c if c.is_whitespace() && depth == 0 => {
+                    tokens.push(std::mem::take(&mut token));
+                    continue;
+                }
+                _ => {}
+            }
+            token.push(c);
+        }
+        tokens.push(token);
+        tokens.into_iter().find_map(|token| {
+            let size = token.split('/').next().unwrap_or("").to_ascii_lowercase();
+            // A bare number is a weight (`600`) or a line height, never a
+            // size: a size has a unit.
+            let has_unit = size.ends_with(|c: char| c.is_ascii_alphabetic() || c == '%');
+            let reads_as_size = (size.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+                && has_unit)
+                || size.starts_with("var(")
+                || size.starts_with("calc(")
+                || size.starts_with("clamp(")
+                || size.starts_with("max(")
+                || size.starts_with("min(")
+                || KEYWORDS.contains(&size.as_str());
+            (reads_as_size && !size.is_empty()).then_some(size)
+        })
+    }
+
+    /// The only text allowed under 14px (design rule 5's exemption list,
+    /// P8), each by the exact selector that sets its size and why. A rule
+    /// sets a size under 14px only when EVERY selector in its list is here,
+    /// so a running-text selector that shares a small rule with an exempt
+    /// one (`.chart__yaxis, .chart__table td { … }`) fails.
+    #[cfg(feature = "embed-assets")]
+    const SMALL_TEXT_EXEMPT: &[(&str, &str)] = &[
+        (".badge", "a badge (the pill, not running text)"),
+        (".topbar__palette kbd", "a keyboard key"),
+        (".chart__yaxis", "a chart's axis ticks"),
+        (".chart__range", "a chart's range ticks"),
+        (".callout__code", "a code chip"),
+        (".bootstrap-hint code", "a code chip"),
         (
-            ".network-route__meta",
-            Some(".data-table:not(.data-table--scroll) td.data-table__cell--primary"),
+            ".public-page__content code",
+            "a code chip (0.9em of its text)",
         ),
-        (".var-warning-note", None),
-        (".var-warning-banner", None),
-        (".product-wizard-progress li", None),
-        (".products-plain-details > summary", None),
-        (".products-choice small", None),
-        (".db-count", None),
-        (".db-table-group__title", None),
-        (".db-table-group__org", None),
-        (".db-table-list__name", Some(".db-table-list__item")),
-        (".db-table-list__count", None),
-        (".block-card__runtime", Some(".block-card__meta")),
-        (".block-card__version", Some(".block-card__meta")),
-        (".var-cell__key", None),
-        (".var-cell__name", None),
-        (".var-cell__note", None),
-        (".linked-provider__name", None),
-        (".thread-pane__title", None),
-        (".api-key-name-hint", None),
-        (".ticket-ref", None),
-        (".palette__hint", None),
-        (".modal-tech", None),
-        // The account pages and the API-key card.
-        (".profile-header__email", None),
-        (".session-table__meta", None),
-        (".org-table__meta", None),
-        (".portal-button-table__meta", None),
-        (".api-key-table__meta", None),
-        (".api-key-copy-hint", None),
-        // The dev workspace (`blocks/dev/assets/dev.css`): its file list,
-        // its progress steps and the compiler's version.
-        (".dev-file", None),
-        (".dev-step", None),
-        ("#dev-compiler-version", None),
+        (".share-token", "a token chip"),
+        (".db-sql__input", "a code textarea (the SQL editor)"),
+        (".dev-workspace code", "a code chip in the dev workspace"),
+        ("#dev-console-schema", "a code block (a tool's JSON schema)"),
+        ("#dev-console-result", "a code block (a tool's JSON result)"),
+        ("#dev-log", "a code block (the compiler's log)"),
+        (
+            "#dev-console-args",
+            "a code textarea (a tool's JSON arguments)",
+        ),
+        ("#dev-editor-text", "a code textarea (the file editor)"),
+        (
+            "#dev-suggested-prompt",
+            "a code block (the agent prompt to copy)",
+        ),
+        // The sidebar is outside the redesign.
+        (".sidebar__group-label", "the sidebar"),
+        (".sidebar__user-role", "the sidebar"),
+        (
+            ".profile-menu-role",
+            "the sidebar's profile menu (ui/sidebar.rs)",
+        ),
+        (
+            ".avatar--sm",
+            "the sidebar's avatar initial (ui/sidebar.rs)",
+        ),
     ];
 
-    /// Design rule 5 for every rule in [`RUNNING_TEXT_RULES`]: wherever the
-    /// bundle or a block stylesheet sets its `font-size` (in any rule naming
-    /// exactly that selector, `@media` included), it resolves to 14px or more, and the rule it
-    /// inherits from, if any, states 14px or more. A rule that states its own
-    /// size must state one, so a deleted declaration is not a silent pass.
+    /// Every rule in `sheets` that sets text under 14px without being on
+    /// [`SMALL_TEXT_EXEMPT`] (or whose size cannot be read), and every
+    /// exemption no rule needs any more. Over any stylesheets, so a fixture
+    /// can pin it.
+    #[cfg(feature = "embed-assets")]
+    fn small_text(
+        sheets: &[(String, String)],
+        tokens: &std::collections::HashMap<String, String>,
+    ) -> (Vec<String>, Vec<&'static str>, usize) {
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut wrong = Vec::new();
+        let mut needed: std::collections::BTreeSet<&str> = Default::default();
+        let mut sizes = 0;
+        for (sheet, css) in sheets {
+            for (selector, body) in css_leaf_blocks(css) {
+                for decl in body.split(';') {
+                    let Some((prop, value)) = decl.split_once(':') else {
+                        continue;
+                    };
+                    const SYSTEM_FONTS: [&str; 6] = [
+                        "caption",
+                        "icon",
+                        "menu",
+                        "message-box",
+                        "small-caption",
+                        "status-bar",
+                    ];
+                    let value = match prop.trim().to_ascii_lowercase().as_str() {
+                        "font-size" => value.trim().to_string(),
+                        // A system font takes the platform's size, often
+                        // under 14px, which nothing here can read.
+                        "font"
+                            if SYSTEM_FONTS.contains(
+                                &value
+                                    .split('!')
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_ascii_lowercase()
+                                    .as_str(),
+                            ) =>
+                        {
+                            sizes += 1;
+                            wrong.push(format!(
+                                "{sheet}: {selector}: font {} takes the platform's size",
+                                value.trim()
+                            ));
+                            continue;
+                        }
+                        "font" => match shorthand_size(value) {
+                            Some(size) => size,
+                            None => continue,
+                        },
+                        _ => continue,
+                    };
+                    sizes += 1;
+                    let small = match font_size(&value, tokens) {
+                        Some(FontSize::Px(px)) => px < 14.0,
+                        Some(FontSize::NoSmaller) => false,
+                        Some(FontSize::Shrinks) => true,
+                        None => {
+                            wrong.push(format!(
+                                "{sheet}: {selector}: font-size {value} cannot be measured"
+                            ));
+                            continue;
+                        }
+                    };
+                    if !small {
+                        continue;
+                    }
+                    let parts: Vec<String> = selector.split(',').map(normalise).collect();
+                    let exempt: Vec<Option<&'static str>> = parts
+                        .iter()
+                        .map(|part| {
+                            SMALL_TEXT_EXEMPT
+                                .iter()
+                                .find(|(s, _)| *s == part)
+                                .map(|(s, _)| *s)
+                        })
+                        .collect();
+                    if exempt.iter().all(Option::is_some) {
+                        needed.extend(exempt.into_iter().flatten());
+                    } else {
+                        wrong.push(format!(
+                            "{sheet}: {selector}: font-size {value} is under 14px"
+                        ));
+                    }
+                }
+            }
+        }
+        let stale = SMALL_TEXT_EXEMPT
+            .iter()
+            .map(|(s, _)| *s)
+            .filter(|s| !needed.contains(s))
+            .collect();
+        (wrong, stale, sizes)
+    }
+
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn the_size_check_reads_every_way_css_sets_a_size() {
+        let tokens = parse_root_tokens(super::css());
+        let measure = |css: &str| small_text(&[("t.css".to_string(), css.to_string())], &tokens);
+        for css in [
+            ".a { font-size: 13px; }",
+            ".a { font-size: 0.75rem; }",
+            ".a { font-size: var(--text-xs); }",
+            ".a { font-size: var(--nope, 12px); }",
+            ".a { font-size: 0.9em; }",
+            ".a { font-size: 85%; }",
+            ".a { font-size: smaller; }",
+            ".a { font-size: small; }",
+            ".a { FONT-SIZE: 12px !important; }",
+            ".a { font-size: calc(var(--text-sm) - 2px); }",
+            ".a { font: 600 12px/1.4 sans-serif; }",
+            ".a { font: italic var(--text-xs) sans-serif; }",
+            ".a { font-size: calc(1em - 2px); }",
+            ".a { font: caption; }",
+            ".a { font: small-caption; }",
+            "@media (min-width: 1px) { .a { font-size: 12px; } }",
+            // A running-text selector sharing an exempt rule.
+            ".badge, .chart__table td { font-size: 12px; }",
+        ] {
+            let (wrong, _, _) = measure(css);
+            assert_eq!(wrong.len(), 1, "{css}: {wrong:?}");
+        }
+        for css in [
+            ".a { font-size: var(--text-sm); }",
+            ".a { font-size: 1em; }",
+            ".a { font-size: inherit; }",
+            ".a { font-size: larger; }",
+            ".a { font: inherit; }",
+            ".a { font: 600 var(--text-base)/1.4 sans-serif; }",
+            ".a { font-size: max(12px, 1rem); }",
+            ".badge { font-size: 12px; }",
+        ] {
+            let (wrong, _, _) = measure(css);
+            assert!(wrong.is_empty(), "{css}: {wrong:?}");
+        }
+        let (_, stale, _) = measure(".badge { font-size: 12px; }");
+        assert!(!stale.contains(&".badge"), "{stale:?}");
+        assert!(stale.contains(&".callout__code"), "{stale:?}");
+    }
+
+    /// Design rule 5: running text is 14px (`--text-sm`) or larger. Every
+    /// `font-size` (and `font` shorthand size) in the bundle and every block
+    /// stylesheet, tokens resolved, is 14px or more, does not shrink what it
+    /// inherits (`0.9em`, `85%`, `smaller`), or sits on a rule whose every
+    /// selector is on [`SMALL_TEXT_EXEMPT`]. The page's own size is 14px or
+    /// more, so text that states no size inherits a legal one. A size this
+    /// cannot read fails, and so does an exemption no rule needs.
     #[cfg(feature = "embed-assets")]
     #[test]
     fn running_text_is_at_least_14px() {
         let tokens = parse_root_tokens(super::css());
-        let sheets = all_stylesheets()
-            .into_iter()
-            .map(|(_, css)| css)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let blocks = css_leaf_blocks(&sheets);
-        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-        let px = |value: &str| -> Option<f64> {
-            let value = value.trim();
-            match value.strip_prefix("var(").and_then(|v| v.strip_suffix(')')) {
-                Some(name) => css_length_px(tokens.get(name.trim())?),
-                None => css_length_px(value),
-            }
-        };
-        // Every font-size declared by a rule whose selector list names `selector`.
-        let sizes = |selector: &str| -> Vec<String> {
-            blocks
-                .iter()
-                .filter(|(list, _)| list.split(',').any(|part| normalise(part) == selector))
-                .flat_map(|(_, body)| body.split(';'))
-                .filter_map(|decl| {
-                    let (prop, value) = decl.split_once(':')?;
-                    (prop.trim() == "font-size").then(|| value.trim().to_string())
-                })
-                .collect()
-        };
-        let mut wrong = Vec::new();
-        for (selector, inherits) in RUNNING_TEXT_RULES {
-            let own = sizes(selector);
-            let source = inherits.unwrap_or(selector);
-            let stated = sizes(source);
-            if stated.is_empty() {
-                wrong.push(format!("{source} (for {selector}) states no font-size"));
-            }
-            let mut checked = own.clone();
-            if inherits.is_some() {
-                checked.extend(stated);
-            }
-            for value in &checked {
-                match px(value) {
-                    Some(size) if size >= 14.0 => {}
-                    _ => wrong.push(format!("{selector}: font-size {value} is under 14px")),
-                }
-            }
-        }
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        let (wrong, stale, sizes) = small_text(&all_stylesheets(), &tokens);
+        assert!(
+            wrong.is_empty(),
+            "text under 14px that is not on SMALL_TEXT_EXEMPT:\n{}",
+            wrong.join("\n")
+        );
+        assert!(
+            stale.is_empty(),
+            "SMALL_TEXT_EXEMPT entries no rule needs any more -- remove them: {stale:?}"
+        );
+        assert!(sizes > 150, "only {sizes} font sizes were read");
     }
 
     #[cfg(feature = "embed-assets")]

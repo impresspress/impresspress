@@ -369,7 +369,7 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
         html! {
             div .flex .gap-1 {
                 @if editable(row.key) {
-                    button .btn .btn--ghost .btn--icon
+                    button .btn .btn--quiet .btn--icon
                         type="button"
                         hx-get={"/b/admin/variables/" (url_path_encode(row.key)) "/edit"}
                         hx-target="#edit-var-slot"
@@ -526,7 +526,7 @@ fn delete_button(key: &str, declared: bool) -> Markup {
         format!("Delete {key}")
     };
     html! {
-        button .btn .btn--ghost-danger .btn--icon
+        button .btn .btn--quiet-danger .btn--icon
             type="button"
             hx-delete={"/b/admin/variables/" (url_path_encode(key))}
             hx-target="#content"
@@ -563,7 +563,7 @@ fn is_declared(ctx: &dyn Context, key: &str) -> bool {
 /// does not take effect until a restart either.
 fn reset_to_environment_button(key: &str) -> Markup {
     html! {
-        button .btn .btn--ghost .btn--icon type="button"
+        button .btn .btn--quiet .btn--icon type="button"
             hx-post={"/b/admin/variables/" (url_path_encode(key)) "/reset-to-environment"}
             hx-swap="none"
             hx-confirm={
@@ -725,6 +725,19 @@ struct VarGroup {
     pinned: usize,
 }
 
+/// Another block's grant on a block's variables, in words: "impresspress/admin
+/// can read and write". The grantee is a block name, written as it is.
+fn grant_badge(grantee: &str, write: wafer_block::GrantWrite) -> Markup {
+    Badge::new(BadgeVariant::Secondary).render(html! {
+        (grantee)
+        (match write {
+            wafer_block::GrantWrite::Full => " can read and write",
+            wafer_block::GrantWrite::Append => " can append",
+            wafer_block::GrantWrite::None => " can read",
+        })
+    })
+}
+
 /// Every variable on one page, grouped by who owns it.
 ///
 /// Collapsible groups rather than one flat table, because the owner is what
@@ -834,14 +847,7 @@ fn variable_groups(
                             @for (grantee, write) in matches {
                                 @if *grantee != block.name {
                                     " "
-                                    (Badge::new(BadgeVariant::Secondary).render(html! {
-                                        (grantee) ": "
-                                        (match write {
-                                            wafer_block::GrantWrite::Full => "read+write",
-                                            wafer_block::GrantWrite::Append => "append",
-                                            wafer_block::GrantWrite::None => "read",
-                                        })
-                                    }))
+                                    (grant_badge(grantee, *write))
                                 }
                             }
                         }
@@ -1356,6 +1362,28 @@ pub async fn handle_delete_variable(ctx: &dyn Context, msg: &Message) -> OutputS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grant reads as a sentence that opens with the grantee's block name,
+    /// which the label guard reads as a value, not a lowercase first word.
+    #[test]
+    fn a_grant_badge_is_a_sentence_after_the_block_name() {
+        for (write, text) in [
+            (
+                wafer_block::GrantWrite::Full,
+                "impresspress/admin can read and write",
+            ),
+            (
+                wafer_block::GrantWrite::Append,
+                "impresspress/admin can append",
+            ),
+            (wafer_block::GrantWrite::None, "impresspress/admin can read"),
+        ] {
+            let html = grant_badge("impresspress/admin", write).into_string();
+            let labels = crate::test_support::dom::ui_labels(&html);
+            assert_eq!(labels, vec![("badge", text.to_string())], "{html}");
+            assert!(crate::test_support::case::is_sentence_case(text), "{text}");
+        }
+    }
     use crate::{
         config_vars::{APP_NAME_KEY, AUTH_HEADLINE_KEY},
         test_support::{admin_msg, output_html, TestContext},
@@ -2491,9 +2519,7 @@ mod tests {
             html.contains(r#"<h2 class="modal__title" id="create-var-title">Add variable</h2>"#),
             "{html}"
         );
-        // The pin badges take their size from `.badge` alone.
         assert!(html.contains(">Pinned at upgrade</span>"), "{html}");
-        assert!(!html.contains("text-11"), "{html}");
     }
 
     /// Each owner's variables are a flush fold card, the shared config drawn
@@ -2535,9 +2561,7 @@ mod tests {
         );
         assert!(dom::card_level_inside_card(&html).is_empty(), "{html}");
         assert!(VAR_FILTER_JS.contains(r#"querySelectorAll('[data-fold="variable"]')"#));
-        for small in ["text-13", "text-11", "text-xs", "var-group"] {
-            assert!(!html.contains(small), "{small}: {html}");
-        }
+        assert!(!html.contains("var-group"), "{html}");
     }
 
     /// The value column has its own share of the row (`VAR_COLUMNS`), and a
@@ -2553,7 +2577,7 @@ mod tests {
             ])])
             .render()
             .into_string()
-            .contains(r#"<th class="data-table__col-w" style="--col-width:35%">Value</th>"#));
+            .contains(r#"<th class="data-table__col-w" style="--col-width:35%" data-label="Value">Value</th>"#));
         let cells = var_row(&VarRow {
             key: crate::config_vars::FRONTEND_URL_KEY,
             name: Some("Frontend URL"),

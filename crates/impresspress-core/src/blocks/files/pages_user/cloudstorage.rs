@@ -108,8 +108,8 @@ pub fn render_quota_card(q: &QuotaInfo) -> Markup {
     .render()
 }
 
-/// Column order is part of table.css `.share-table--owner`, which hides narrow-layout
-/// headers by position (`th:nth-child`): reorder both together.
+/// table.css `.share-table--owner` hides headers and cells by their label, so a
+/// column renamed here is renamed there.
 const SHARE_COLUMNS: [TableCol<'static>; 6] = [
     TableCol::new("File").primary(),
     TableCol::new("Token"),
@@ -146,7 +146,7 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
                         // action is `DELETE /b/cloudstorage/shares/{id}`,
                         // which is keyed on the row id.
                         html! {
-                            button .btn .btn--ghost-danger .btn--icon
+                            button .btn .btn--quiet-danger .btn--icon
                                 type="button"
                                 data-action="revoke-share"
                                 data-share-id=(r.id)

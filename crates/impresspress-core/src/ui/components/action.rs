@@ -1,10 +1,12 @@
 //! Action: a button or link drawn as a `.btn`, with its place in the page's
 //! hierarchy chosen by its [`Emphasis`].
 //!
-//! [`Action`] is meant to be the only writer of `.btn--primary`, the class
-//! the page's one-primary rule is about: a page shows at most one visible
-//! primary (one per `<dialog>`, which is its own context). Pages that still
-//! hand-write `.btn--primary` move to `Action` as each one is redesigned.
+//! [`Action`] is the only writer of `.btn--primary`, the class the page's
+//! one-primary rule is about: a page shows at most one visible primary (one
+//! per `<dialog>`, which is its own context). No other production source,
+//! Rust or script, writes it (`ui::tests::only_the_builder_writes_its_classes`),
+//! and the crawl holds every page to one
+//! (`htmx_guard::every_page_has_at_most_one_visible_primary`).
 //! Hand-written secondary, quiet and danger `.btn` markup stays legitimate —
 //! an in-row control with its own `hx-*` wiring, a modal footer — because
 //! the rule constrains only the primary.
@@ -19,12 +21,12 @@ use super::card::{is_data_name, with_data_attributes};
 /// |---|---|---|---|
 /// | `Primary` | `.btn--primary` | `--primary-button`, white text | the page's one main action |
 /// | `Secondary` | `.btn--secondary` | `--surface-1`, 1px border | every other action |
-/// | `Quiet` | `.btn--ghost` | transparent | in-row and in-card controls |
-/// | `QuietDanger` | `.btn--ghost-danger` | transparent, danger text | an in-row destructive control |
+/// | `Quiet` | `.btn--quiet` | transparent | in-row and in-card controls |
+/// | `QuietDanger` | `.btn--quiet-danger` | transparent, danger text | an in-row destructive control |
 /// | `Danger` | `.btn--danger` | danger fill, white text | a destructive confirm |
 ///
-/// `Quiet` and `QuietDanger` draw the existing `.btn--ghost` /
-/// `.btn--ghost-danger` rules, which hand-written in-row buttons also use.
+/// `Quiet` and `QuietDanger` draw the existing `.btn--quiet` /
+/// `.btn--quiet-danger` rules, which hand-written in-row buttons also use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emphasis {
     Primary,
@@ -39,8 +41,8 @@ impl Emphasis {
         match self {
             Emphasis::Primary => "btn--primary",
             Emphasis::Secondary => "btn--secondary",
-            Emphasis::Quiet => "btn--ghost",
-            Emphasis::QuietDanger => "btn--ghost-danger",
+            Emphasis::Quiet => "btn--quiet",
+            Emphasis::QuietDanger => "btn--quiet-danger",
             Emphasis::Danger => "btn--danger",
         }
     }
@@ -362,11 +364,11 @@ mod tests {
             ),
             (
                 Action::quiet("Go", ActionTarget::Link("/x")),
-                "btn btn--ghost",
+                "btn btn--quiet",
             ),
             (
                 Action::quiet_danger("Go", ActionTarget::Link("/x")),
-                "btn btn--ghost-danger",
+                "btn btn--quiet-danger",
             ),
             (
                 Action::danger("Go", ActionTarget::Link("/x")),
@@ -430,7 +432,7 @@ mod tests {
         );
         assert!(
             s.starts_with(
-                r#"<button class="btn btn--ghost-danger btn--sm" id="remove-1" hidden type="button" data-action="remove-row"><svg"#
+                r#"<button class="btn btn--quiet-danger btn--sm" id="remove-1" hidden type="button" data-action="remove-row"><svg"#
             ),
             "{s}"
         );

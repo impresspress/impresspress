@@ -93,8 +93,8 @@ fn url_encode_prefix(prefix: &str) -> String {
     parts.join("/") + "/"
 }
 
-/// Column order is part of table.css `.object-table`, which hides narrow-layout
-/// headers by position (`th:nth-child`): reorder both together.
+/// table.css `.object-table` hides headers and cells by their label, so a
+/// column renamed here is renamed there.
 const OBJECT_COLUMNS: [TableCol<'static>; 5] = [
     TableCol::new("Select").select(),
     TableCol::new("Name").primary(),
@@ -129,7 +129,7 @@ fn upload_secondary() -> Markup {
 /// / Delete) from it and drives the menu from the keyboard.
 fn row_menu_trigger(bucket: &str, key: &str, filename: &str) -> Markup {
     html! {
-        button .btn .btn--ghost .btn--icon
+        button .btn .btn--quiet .btn--icon
             type="button"
             data-action-menu
             data-bucket=(bucket)
@@ -158,7 +158,7 @@ fn render_bulk_bar() -> Markup {
                 "Select all files"
             }
             span .bulk-bar__count aria-live="polite" data-bulk-count {}
-            button .btn .btn--ghost-danger type="button" data-bulk-delete hidden {
+            button .btn .btn--quiet-danger type="button" data-bulk-delete hidden {
                 (icons::trash()) "Delete selected"
             }
         }
@@ -702,7 +702,7 @@ mod tests {
             "the row checkbox is labelled: {html}"
         );
         assert!(
-            html.contains(r#"<button class="btn btn--ghost btn--icon" type="button" data-action-menu data-bucket="photos" data-key="nested/report.pdf" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for report.pdf"><svg"#),
+            html.contains(r#"<button class="btn btn--quiet btn--icon" type="button" data-action-menu data-bucket="photos" data-key="nested/report.pdf" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for report.pdf"><svg"#),
             "the menu trigger is the shared icon button with an SVG and a name: {html}"
         );
         assert!(!html.contains('⋯'), "no text glyph for an icon: {html}");
@@ -712,11 +712,11 @@ mod tests {
         );
         // The select and actions columns are headed for screen readers only.
         assert!(
-            html.contains(r#"<th><span class="sr-only">Select</span></th>"#),
+            html.contains(r#"<th data-label="Select"><span class="sr-only">Select</span></th>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<th><span class="sr-only">Actions</span></th>"#),
+            html.contains(r#"<th data-label="Actions"><span class="sr-only">Actions</span></th>"#),
             "{html}"
         );
         // The folder row's control, size and date cells are empty cells.
@@ -772,7 +772,7 @@ mod tests {
         let html = render_objects_table("photos", "", &listing).into_string();
         assert!(html.starts_with(r#"<div id="object-listing">"#), "{html}");
         assert!(
-            html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--ghost-danger" type="button" data-bulk-delete hidden>"#),
+            html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--quiet-danger" type="button" data-bulk-delete hidden>"#),
             "{html}"
         );
     }

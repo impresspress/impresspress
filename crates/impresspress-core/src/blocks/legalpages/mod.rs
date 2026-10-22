@@ -1853,7 +1853,7 @@ mod tests {
             .expect("the Save row ends the form");
         assert!(appearance < preview && preview < save, "{html}");
         assert!(
-            html.contains(r#"<a class="btn btn--ghost" href="/b/legalpages/terms" target="_blank" rel="noopener">"#),
+            html.contains(r#"<a class="btn btn--quiet" href="/b/legalpages/terms" target="_blank" rel="noopener">"#),
             "{html}"
         );
         assert_eq!(

@@ -319,9 +319,9 @@ pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
 // Inbox
 // ---------------------------------------------------------------------------
 
-/// The inbox's columns. Narrow, the type, source and date move to a line
-/// under the subject (table.css `.ticket-table--inbox`, which hides the
-/// headers by position: a column moved here must move there).
+/// The inbox's columns. Narrow, the type, source and date move to a line under
+/// the subject (table.css `.ticket-table--inbox`, which hides headers and cells
+/// by their label: a column renamed here is renamed there).
 const TICKET_COLUMNS: [TableCol<'static>; 6] = [
     TableCol::new("Ticket").primary(),
     TableCol::new("Status"),
@@ -880,8 +880,8 @@ fn event_label(event_type: &str) -> String {
 
 /// The types page's columns. Narrow, the public form, default priority,
 /// escalation and order move to a line under the type (table.css
-/// `.ticket-table--types`, which hides the headers by position: a column
-/// moved here must move there).
+/// `.ticket-table--types`, which hides headers and cells by their label: a
+/// column renamed here is renamed there).
 const TYPE_COLUMNS: [TableCol<'static>; 7] = [
     TableCol::new("Type").primary(),
     TableCol::new("State"),
@@ -946,7 +946,7 @@ pub(super) fn types_region(types: &[db::Record]) -> Markup {
                 },
                 html! { span .ticket-number { (number_field(kind, "sort_order")) } },
                 html! {
-                    button .btn .btn--ghost .btn--icon type="button"
+                    button .btn .btn--quiet .btn--icon type="button"
                         id={ "edit-type-open-" (kind.id) }
                         data-action="modal-open" data-modal-target=(edit_type_modal_id(&kind.id))
                         aria-label={ "Edit " (title) } {

@@ -2860,61 +2860,120 @@ mod tests {
         spans
     }
 
-    /// Maud's dot-shorthand class syntax (`div .card__body { ... }`,
-    /// `.alert .alert--success .mb-4`). A `.` only starts a class token
-    /// when the previous character is a maud "new selector position"
-    /// boundary (whitespace, `{`, `}`, `;`, or the very start of the
-    /// block) -- this is what tells a real class shorthand apart from an
-    /// ordinary Rust field/method access like `readiness.reasons` or
-    /// `c.label` (preceded by an identifier character, never a boundary)
-    /// inside the very same `html! { ... }` block, without needing to
-    /// parse the surrounding Rust expression at all.
+    /// Maud's dot-shorthand class syntax, in each of its spellings:
+    /// `div .card__body { ... }`, `.alert .alert--success .mb-4`, a chain on
+    /// one element (`button .btn.btn--primary`, `span.badge.badge-info`) and
+    /// a class straight after its tag or id (`section.card`,
+    /// `div#main.card`).
+    ///
+    /// A `.` opens a class at a maud "new selector position": the very start
+    /// of the block, or after whitespace, `{`, `}` or `;`. It continues a
+    /// chain right after a class just read. And it follows an element name or
+    /// id (`section`, `div#main`) that itself starts at such a position.
+    ///
+    /// What is not markup is skipped by where it sits. A Rust expression is
+    /// inside a splice (`(item.card)`, `[cond]`), so nothing is read inside
+    /// parentheses or brackets. A control line is Rust, not markup:
+    /// `@if offer.card {` to its `{`, and `@let x = if a { b.c } else { d };`
+    /// to its `;`. That is what tells `section.card` (a tag and a class) from
+    /// `offer.card` (a field), and `.card` from `readiness.reasons`.
     ///
     /// Runs against the *masked* body (string/char-literal contents and
-    /// comments already blanked by `scan_delimited_block`) so a raw CSS
+    /// comments already blanked by `scan_delimited_block`), so a raw CSS
     /// blob embedded via `style { (PreEscaped("...")) }` never gets read
     /// as if it were maud markup.
     ///
     /// A token immediately followed by `(` is a method call
-    /// (`.into_iter()`, `.filter_map(...)`), not a class -- skipped
-    /// *without* backtracking to a shorter match. (An earlier version of
-    /// this scan used a greedy-regex-style match with a `(?!\()`
-    /// lookahead; on backtracking failure the engine retried with the
-    /// match one character shorter, which passed the lookahead and
-    /// silently reported truncated garbage like `.as_st` for
-    /// `.as_str()`. Consuming the full identifier once and only then
-    /// checking the next character -- never re-shortening the match --
-    /// avoids that class of bug entirely.)
+    /// (`.into_iter()`), not a class. It is skipped *without* backtracking to
+    /// a shorter match: the full identifier is consumed once and only then is
+    /// the next character checked. An earlier greedy-regex version retried
+    /// one character shorter and reported garbage like `.as_st` for
+    /// `.as_str()`.
     fn find_shorthand_classes(masked: &[char]) -> Vec<(usize, String)> {
+        let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        let boundary = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '{' | '}' | ';');
         let mut out = Vec::new();
+        let mut depth = 0usize;
+        // A control line: `@if`/`@for`/`@while`/`@match` up to its `{`, or
+        // `@let` up to its `;` (its value may hold braces of its own:
+        // `@let x = if a { b.c } else { d };`).
+        enum Control {
+            No,
+            Head,
+            Let { braces: usize },
+        }
+        let mut control = Control::No;
+        // Where the last class read ended, so a `.` there continues a chain.
+        let mut chain_end: Option<usize> = None;
         let mut i = 0;
         while i < masked.len() {
-            if masked[i] == '.' {
-                let boundary_ok =
-                    i == 0 || matches!(masked[i - 1], ' ' | '\t' | '\n' | '\r' | '{' | '}' | ';');
-                if boundary_ok && masked.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
-                    let start = i + 1;
-                    let mut j = start;
-                    while j < masked.len()
-                        && (masked[j].is_ascii_alphanumeric()
-                            || masked[j] == '_'
-                            || masked[j] == '-')
-                    {
-                        j += 1;
-                    }
-                    if masked.get(j) == Some(&'(') {
-                        // Method call, not a class -- record nothing, and
-                        // resume scanning right after the identifier (not
-                        // a shorter prefix of it).
-                        i = j;
-                        continue;
-                    }
-                    out.push((start, masked[start..j].iter().collect()));
-                    i = j;
-                    continue;
+            let c = masked[i];
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
+                '@' if depth == 0 => {
+                    let word: String = masked[i + 1..]
+                        .iter()
+                        .take_while(|c| c.is_ascii_alphabetic())
+                        .collect();
+                    control = if word == "let" {
+                        Control::Let { braces: 0 }
+                    } else {
+                        Control::Head
+                    };
                 }
+                '{' if depth == 0 => match &mut control {
+                    Control::Let { braces } => *braces += 1,
+                    _ => control = Control::No,
+                },
+                '}' if depth == 0 => {
+                    if let Control::Let { braces } = &mut control {
+                        *braces = braces.saturating_sub(1);
+                    }
+                }
+                ';' if depth == 0 => match control {
+                    Control::Let { braces: 0 } | Control::Head => control = Control::No,
+                    _ => {}
+                },
+                _ => {}
             }
-            i += 1;
+            if c != '.' || depth > 0 || !matches!(control, Control::No) {
+                i += 1;
+                continue;
+            }
+            let opens = i == 0 || boundary(masked[i - 1]) || chain_end == Some(i) || {
+                // `section.card`, `div#main.card`: a tag (and id) that
+                // itself starts at a selector position.
+                let mut k = i;
+                while k > 0 && (is_name(masked[k - 1]) || masked[k - 1] == '#') {
+                    k -= 1;
+                }
+                k < i
+                    && masked[k].is_ascii_lowercase()
+                    && (k == 0 || boundary(masked[k - 1]))
+                    && masked[k..i]
+                        .iter()
+                        .all(|ch| !ch.is_ascii_uppercase() && *ch != '_')
+            };
+            if !opens || !masked.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut j = start;
+            while j < masked.len() && is_name(masked[j]) {
+                j += 1;
+            }
+            if masked.get(j) == Some(&'(') {
+                // A method call, not a class: record nothing, and resume
+                // right after the identifier (not a shorter prefix of it).
+                chain_end = None;
+                i = j;
+                continue;
+            }
+            out.push((start, masked[start..j].iter().collect()));
+            chain_end = Some(j);
+            i = j;
         }
         out
     }
@@ -2946,7 +3005,7 @@ mod tests {
     }
 
     /// Utility classes handed to a component builder as a string literal --
-    /// `Badge::new(..).classes("text-11 mr-1")`. They land in the rendered
+    /// `Badge::new(..).classes("mr-1 nowrap")`. They land in the rendered
     /// `class` attribute exactly like a maud shorthand does, so this guard has
     /// to see them; without this pass, moving a pill onto `components::Badge`
     /// would quietly drop its utility classes out of the scan.
@@ -3052,7 +3111,9 @@ mod tests {
         let needle: Vec<char> = "html!".chars().collect();
         let mut i = 0;
         while i + needle.len() <= chars.len() {
-            if chars[i..i + needle.len()] != needle[..] {
+            // Matched in the comment-masked text, so an `html! {` in a doc
+            // example is not read as markup.
+            if comment_masked[i..i + needle.len()] != needle[..] {
                 i += 1;
                 continue;
             }
@@ -3369,6 +3430,1285 @@ mod tests {
         assert!(
             hits.is_empty(),
             "`.{class}` is back; put the phone layout on the button row instead:\n{}",
+            hits.join("\n")
+        );
+    }
+
+    /// The classes one builder alone writes (PLAN §2, "One writer per
+    /// class"), as (the builder's file, whether a class is one of its own).
+    /// Every other production source, Rust or script, writes none of them:
+    /// a hand-written `.card` is a card the one-level rule cannot see the
+    /// shape of, a hand-written `.btn--primary` is a primary the header slot
+    /// and `Action` did not place.
+    type OwnsClass = fn(&str) -> bool;
+    const ONE_WRITER: &[(&str, OwnsClass)] = &[
+        ("ui/components/card.rs", |class| {
+            class == "card" || class.starts_with("card__") || class.starts_with("card--")
+        }),
+        ("ui/components/empty.rs", |class| {
+            class == "empty" || class.starts_with("empty__") || class == "empty-note"
+        }),
+        ("ui/components/action.rs", |class| class == "btn--primary"),
+    ];
+
+    /// Writes of a builder's class that are not a second writer, each with
+    /// its exact count and why. The count is exact, so a new write beside a
+    /// listed one fails, and an entry no source needs any more fails too.
+    const NOT_A_SECOND_WRITER: &[(&str, &str, usize, &str)] = &[
+        (
+            "blocks/products/stripe.rs",
+            "card",
+            1,
+            "Stripe's `payment_method_types[]` value, sent to Stripe, not a class",
+        ),
+        (
+            "crates/impresspress-core/src/blocks/products/assets/storefront.js",
+            "card",
+            1,
+            "the storefront's own card, inside its shadow root and styled by its own \
+             stylesheet; the admin `.card` rule never reaches it",
+        ),
+    ];
+
+    /// Every string literal in `src`, in order, with the line it starts on:
+    /// Rust's `"…"`, `r#"…"#` and `b"…"` when `rust`, else a script's
+    /// `'…'`, `"…"` and `` `…` ``. Comments are skipped, so prose is never
+    /// read as a literal. Contents are raw: escapes are left as written.
+    fn string_literals(src: &str, rust: bool) -> Vec<(usize, String)> {
+        let chars: Vec<char> = src.chars().collect();
+        let n = chars.len();
+        let mut out = Vec::new();
+        let mut line = 1;
+        let mut i = 0;
+        while i < n {
+            let c = chars[i];
+            if c == '\n' {
+                line += 1;
+                i += 1;
+                continue;
+            }
+            // Comments: `//` to end of line, `/* .. */` (nested in Rust).
+            if c == '/' && chars.get(i + 1) == Some(&'/') {
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && chars.get(i + 1) == Some(&'*') {
+                let mut depth = 0;
+                while i < n {
+                    if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        i += 2;
+                        depth -= 1;
+                        if depth == 0 || !rust {
+                            break;
+                        }
+                        continue;
+                    }
+                    if chars[i] == '\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if rust {
+                // A raw string: r"…", r#"…"#, br"…".
+                let raw_at = if c == 'r'
+                    && !chars[..i]
+                        .last()
+                        .is_some_and(|p| p.is_alphanumeric() || *p == '_')
+                {
+                    Some(i + 1)
+                } else if c == 'b'
+                    && chars.get(i + 1) == Some(&'r')
+                    && !chars[..i]
+                        .last()
+                        .is_some_and(|p| p.is_alphanumeric() || *p == '_')
+                {
+                    Some(i + 2)
+                } else {
+                    None
+                };
+                if let Some(mut k) = raw_at {
+                    let mut hashes = 0;
+                    while chars.get(k) == Some(&'#') {
+                        hashes += 1;
+                        k += 1;
+                    }
+                    if chars.get(k) == Some(&'"') {
+                        let start_line = line;
+                        let body_start = k + 1;
+                        let mut j = body_start;
+                        loop {
+                            if j >= n {
+                                break;
+                            }
+                            if chars[j] == '"'
+                                && (0..hashes).all(|h| chars.get(j + 1 + h) == Some(&'#'))
+                            {
+                                break;
+                            }
+                            if chars[j] == '\n' {
+                                line += 1;
+                            }
+                            j += 1;
+                        }
+                        out.push((start_line, chars[body_start..j.min(n)].iter().collect()));
+                        i = j + 1 + hashes;
+                        continue;
+                    }
+                }
+                // A char literal or a lifetime: only `'x'` / `'\…'` is a literal.
+                if c == '\'' {
+                    if chars.get(i + 1) == Some(&'\\') {
+                        let mut j = i + 2;
+                        while j < n && chars[j] != '\'' {
+                            j += 1;
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    if chars.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                        continue;
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+            // A script's regex literal (`/"/g`): a `/` where an expression
+            // starts. Its quotes are not string delimiters.
+            if !rust && c == '/' {
+                let before: String = chars[..i].iter().collect();
+                let before = before.trim_end();
+                let starts_expression = before
+                    .chars()
+                    .last()
+                    .is_none_or(|p| "(,=:[!&|?{};+-*%<>~^".contains(p))
+                    || ["return", "typeof", "case"].iter().any(|k| {
+                        before.ends_with(k)
+                            && !before[..before.len() - k.len()]
+                                .ends_with(|p: char| p.is_alphanumeric() || p == '_')
+                    });
+                if starts_expression {
+                    let mut j = i + 1;
+                    let mut class = false;
+                    while j < n && chars[j] != '\n' {
+                        match chars[j] {
+                            '\\' => j += 1,
+                            '[' => class = true,
+                            ']' => class = false,
+                            '/' if !class => break,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            let quote = if rust {
+                (c == '"').then_some('"')
+            } else {
+                matches!(c, '"' | '\'' | '`').then_some(c)
+            };
+            if let Some(q) = quote {
+                let start_line = line;
+                let mut j = i + 1;
+                while j < n && chars[j] != q {
+                    if chars[j] == '\\' {
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '\n' {
+                        line += 1;
+                    }
+                    j += 1;
+                }
+                out.push((start_line, chars[i + 1..j.min(n)].iter().collect()));
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The class names a string literal writes, in each spelling a class
+    /// reaches the page by:
+    /// - every token of a `class` attribute it holds (`class="card"`,
+    ///   `class=\"card {x}\"`, `class='card'`);
+    /// - every token of a literal that is itself a class list
+    ///   (`"card card--flush"`, `" empty-note"`). That is what a maud
+    ///   `class="…"`, a `class={ "…" }` fragment, `.classes("…")`, a `const`
+    ///   handed to `class=(…)`, and a script's `className = '…'`,
+    ///   `classList.add('…')` or `setAttribute('class', '…')` all are.
+    ///
+    /// A placeholder is read as the unknown part of a class:
+    /// - a Rust `{…}` (`format!("card {}", x)`, `format!("btn--{kind}")`);
+    /// - a template literal's `${…}` (`` `card ${variant}` ``);
+    /// - the end of a literal that a `+` carries on (`'btn btn--' + kind`).
+    ///
+    /// A token cut by one is reported as its known start plus `…`
+    /// (`btn--…`), which [`could_write`] holds to the owned classes.
+    ///
+    /// A literal is a class list when it is made of class-shaped words and
+    /// either one of them is a BEM name (`x--y`, `x__y`), which prose never
+    /// holds, or every word is a class some stylesheet defines (`defined`),
+    /// a placeholder or a class the guard owns. So prose ("must not be
+    /// empty") is not a class list, and `"btn btn--primary is-busy"` (with a
+    /// hook class no stylesheet defines) still is.
+    ///
+    /// Out of reach, and pinned by `the_writer_scan_reads_every_way_a_class_is_written`:
+    /// - a bare `card`/`empty` beside a word that is neither a defined class
+    ///   nor a BEM name (`"card is-busy"`). It reads as prose, and treating
+    ///   it as a class list would flag every sentence with the word "card"
+    ///   in it.
+    /// - a class name built from pieces that are not themselves class-like
+    ///   (`"ca" + "rd"`).
+    fn literal_classes(content: &str, defined: &std::collections::HashSet<String>) -> Vec<String> {
+        static ATTR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static PLACEHOLDER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        // A placeholder becomes `\u{1}`: `${…}`, or a Rust `{…}` that is not
+        // an escaped `{{`.
+        let placeholder = PLACEHOLDER
+            .get_or_init(|| regex::Regex::new(r"\$\{[^}]*\}|\{[A-Za-z0-9_:?.#<>]*\}").unwrap());
+        let content = placeholder.replace_all(content, "\u{1}").into_owned();
+        // A literal whose last token is cut off by its end (`'btn btn--'`):
+        // the next part is carried by a `+`.
+        let ends_open = content.ends_with("--") || content.ends_with("__");
+        let attr =
+            ATTR.get_or_init(|| regex::Regex::new(r#"class\s*=\s*\\?["']([^"'\\]*)"#).unwrap());
+        let word =
+            WORD.get_or_init(|| regex::Regex::new(r"^[a-z][a-z0-9_-]*\x01?[a-z0-9_-]*$").unwrap());
+        let class_name = |token: &str| -> String {
+            match token.split_once('\u{1}') {
+                Some((known, _)) => format!("{known}…"),
+                None => token.to_string(),
+            }
+        };
+        let mut out: Vec<String> = attr
+            .captures_iter(&content)
+            .flat_map(|caps| {
+                caps[1]
+                    .split_whitespace()
+                    .filter(|t| !t.is_empty() && *t != "\u{1}")
+                    .map(&class_name)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let tokens: Vec<&str> = content.split_whitespace().collect();
+        let listy = !tokens.is_empty() && tokens.iter().all(|t| *t == "\u{1}" || word.is_match(t));
+        let class_like = |t: &str| {
+            t == "\u{1}"
+                || t.contains('\u{1}')
+                || defined.contains(t)
+                || t.contains("--")
+                || t.contains("__")
+                || could_write(t)
+        };
+        // A BEM name (`x--y`, `x__y`, or one cut at its modifier) never
+        // occurs in prose, so it marks the literal as a class list whatever
+        // the words beside it are.
+        let bem = tokens.iter().any(|t| t.contains("--") || t.contains("__"));
+        if listy && (bem || tokens.iter().all(|t| class_like(t))) {
+            out.extend(
+                tokens
+                    .iter()
+                    .filter(|t| **t != "\u{1}")
+                    .map(|t| class_name(t)),
+            );
+            if ends_open {
+                if let Some(last) = out.last_mut() {
+                    last.push('…');
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether a class token (`card`, or a cut one: `btn--…`) is, or could be,
+    /// a class one builder alone writes ([`ONE_WRITER`]).
+    fn could_write(class: &str) -> bool {
+        owner_of(class).is_some()
+    }
+
+    /// The builder that alone writes `class`, if any. A cut token (`btn--…`)
+    /// belongs to the builder whose class it could become.
+    fn owner_of(class: &str) -> Option<&'static str> {
+        match class.strip_suffix('…') {
+            None => ONE_WRITER
+                .iter()
+                .find(|(_, owns)| owns(class))
+                .map(|(owner, _)| *owner),
+            Some(known) => {
+                const SAMPLES: [&str; 7] = [
+                    "card",
+                    "card__x",
+                    "card--x",
+                    "empty",
+                    "empty__x",
+                    "empty-note",
+                    "btn--primary",
+                ];
+                SAMPLES
+                    .iter()
+                    .find(|sample| !known.is_empty() && sample.starts_with(known))
+                    .and_then(|sample| owner_of(sample))
+            }
+        }
+    }
+
+    /// Every class the shared bundle and the block stylesheets define.
+    fn defined_classes() -> std::collections::HashSet<String> {
+        let mut defined = std::collections::HashSet::new();
+        for sheet in crate::test_support::source_scan::stylesheets() {
+            collect_css_classes(&strip_css_comments(&sheet.text), &mut defined);
+        }
+        assert!(defined.contains("card") && defined.contains("btn--primary"));
+        defined
+    }
+
+    /// The classes a production Rust source writes, with their lines: every
+    /// string literal's ([`literal_classes`]) and every maud `.class`
+    /// shorthand inside an `html!` body.
+    fn rust_class_writes(
+        src: &str,
+        defined: &std::collections::HashSet<String>,
+    ) -> Vec<(usize, String)> {
+        // A literal is read as written, and as the script it may hold
+        // (`const JS: &str = "el.className = 'card';"`).
+        let mut out: Vec<(usize, String)> = string_literals(src, true)
+            .into_iter()
+            .flat_map(|(line, content)| {
+                let embedded = string_literals(&content, false)
+                    .into_iter()
+                    .flat_map(|(_, inner)| literal_classes(&inner, defined));
+                literal_classes(&content, defined)
+                    .into_iter()
+                    .chain(embedded)
+                    .map(move |class| (line, class))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // Comments blanked first, so an `html!` named in prose is not read.
+        let chars: Vec<char> = mask_rust_comments(src).chars().collect();
+        let needle: Vec<char> = "html!".chars().collect();
+        let mut i = 0;
+        while i + needle.len() <= chars.len() {
+            if chars[i..i + needle.len()] != needle[..] {
+                i += 1;
+                continue;
+            }
+            let mut p = i + needle.len();
+            while p < chars.len() && chars[p].is_whitespace() {
+                p += 1;
+            }
+            if chars.get(p) != Some(&'{') {
+                i += 1;
+                continue;
+            }
+            let (end, masked) = scan_delimited_block(&chars, p);
+            let base_line = 1 + chars[..p].iter().filter(|&&c| c == '\n').count();
+            let line_at =
+                |idx: usize| base_line + chars[p..p + idx].iter().filter(|&&c| c == '\n').count();
+            for (idx, class) in find_shorthand_classes(&masked) {
+                out.push((line_at(idx), class));
+            }
+            // A maud `class="…"` or `class={ "…" }` literal is a class list
+            // whatever its words are.
+            let body = &chars[p..end];
+            for (idx, value) in find_class_attr_literals(body) {
+                out.extend(
+                    value
+                        .split_whitespace()
+                        .map(|c| (line_at(idx), c.to_string())),
+                );
+            }
+            for (idx, values) in find_class_dyn_literals(body) {
+                for value in values {
+                    out.extend(
+                        value
+                            .split_whitespace()
+                            .map(|c| (line_at(idx), c.to_string())),
+                    );
+                }
+            }
+            i = end;
+        }
+        // So is a component's `.classes("…")`.
+        for (idx, value) in find_component_class_literals(&chars) {
+            let line = 1 + chars[..idx].iter().filter(|&&c| c == '\n').count();
+            out.extend(value.split_whitespace().map(|c| (line, c.to_string())));
+        }
+        out
+    }
+
+    /// The classes a script writes, with their lines ([`literal_classes`]
+    /// over every string and template literal).
+    fn script_class_writes(
+        src: &str,
+        defined: &std::collections::HashSet<String>,
+    ) -> Vec<(usize, String)> {
+        string_literals(src, false)
+            .into_iter()
+            .flat_map(|(line, content)| {
+                literal_classes(&content, defined)
+                    .into_iter()
+                    .map(move |class| (line, class))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_writer_scan_reads_every_way_a_class_is_written() {
+        let defined = defined_classes();
+        let rust = |src: &str| -> Vec<String> {
+            rust_class_writes(src, &defined)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect()
+        };
+        for (src, class) in [
+            (r#"html! { section .card { } }"#, "card"),
+            (
+                r#"html! { div class="card card--flush" {} }"#,
+                "card--flush",
+            ),
+            (
+                r#"html! { div class={ "x" @if a { " card__body" } } {} }"#,
+                "card__body",
+            ),
+            (r#"Badge::new(v).classes("empty-note")"#, "empty-note"),
+            (
+                r#"const C: &str = "btn btn--primary"; html! { a class=(C) {} }"#,
+                "btn--primary",
+            ),
+            (r#"format!("<p class=\"empty {x}\">")"#, "empty"),
+            (r##"PreEscaped(r#"<div class="card">"#)"##, "card"),
+            (
+                r#"const JS: &str = "el.className = 'card__head';";"#,
+                "card__head",
+            ),
+            (r#"const JS: &str = "el.classList.add('card');";"#, "card"),
+            // Chained shorthand, and a class straight after its tag or id.
+            (
+                r#"html! { button .btn.btn--primary { "Go" } }"#,
+                "btn--primary",
+            ),
+            (r#"html! { section.card { } }"#, "card"),
+            (r#"html! { div#main.card__body { } }"#, "card__body"),
+            (r#"html! { span.badge.empty-note { } }"#, "empty-note"),
+            // A Rust `format!` class string.
+            (
+                r#"html! { div class=(format!("card {}", extra)) {} }"#,
+                "card",
+            ),
+            (
+                r#"Badge::new(v).classes(&format!("btn--{kind}"))"#,
+                "btn--…",
+            ),
+            (r#"format!("<a class=\"btn btn--{}\">", kind)"#, "btn--…"),
+            // A hook class no stylesheet defines does not hide the list.
+            (
+                r#"html! { a class="btn btn--primary is-busy" {} }"#,
+                "btn--primary",
+            ),
+            (
+                r#"const C: &str = "btn btn--primary is-busy";"#,
+                "btn--primary",
+            ),
+        ] {
+            assert!(
+                rust(src).iter().any(|c| c == class),
+                "{src}: {:?}",
+                rust(src)
+            );
+        }
+        for src in [
+            r#"// html! { section .card {} }"#,
+            r#"/// a `.card` in prose"#,
+            r#"let msg = "the card is empty";"#,
+            r#"Err("must not be empty")"#,
+            r#"html! { p { "No cards" } }"#,
+            r#"html! { div #empty-card .offer-card {} }"#,
+            r#"x.card.render()"#,
+            // Rust inside markup is not markup: a splice, a control line, a
+            // `@let` whose value has braces of its own.
+            r#"html! { p { (offer.card) } }"#,
+            r#"html! { @if offer.card { p {} } }"#,
+            r#"html! { @let c = if a { x.card } else { y.empty }; p { (c) } }"#,
+            r#"html! { @for card in cards.iter() { p { (card.title) } } }"#,
+            // An `html!` in a doc example.
+            "/// html! {\n/// section.card {}\n/// }",
+        ] {
+            let found = rust(src);
+            assert!(
+                !found.iter().any(|c| c == "card" || c == "empty"),
+                "{src}: {found:?}"
+            );
+        }
+        let js = |src: &str| -> Vec<String> {
+            script_class_writes(src, &defined)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect()
+        };
+        for (src, class) in [
+            ("el.className = 'card';", "card"),
+            ("el.classList.add(\"empty-note\");", "empty-note"),
+            (
+                "el.setAttribute('class', 'card card--flush');",
+                "card--flush",
+            ),
+            (
+                "host.innerHTML = `<section class=\"card\">${x}</section>`;",
+                "card",
+            ),
+            ("b.className = 'btn btn--primary';", "btn--primary"),
+            ("s.replace(/\"/g, '&quot;'); el.className = 'card';", "card"),
+            ("var r = x / 2; el.className = 'card';", "card"),
+            // Template literals and concatenation.
+            ("el.className = `card ${variant}`;", "card"),
+            (
+                "el.setAttribute('class', `card card--flush ${x}`);",
+                "card--flush",
+            ),
+            ("b.className = 'btn btn--' + kind;", "btn--…"),
+            ("b.className = `btn btn--${kind}`;", "btn--…"),
+            ("el.className = ['card', x].join(' ');", "card"),
+            ("b.className = 'btn btn--primary is-busy';", "btn--primary"),
+        ] {
+            assert!(js(src).iter().any(|c| c == class), "{src}: {:?}", js(src));
+        }
+        for src in [
+            "// el.className = 'card';",
+            "/* class=\"card\" */",
+            "el.querySelector('.card');",
+            "throw new Error('the card is empty');",
+            "el.textContent = `No ${noun} yet.`;",
+            "msg = 'Delete ' + name + '?';",
+        ] {
+            assert!(js(src).is_empty(), "{src}: {:?}", js(src));
+        }
+        // Out of reach, as `literal_classes` says: a bare `card` beside a word
+        // that is neither a defined class nor a BEM name reads as prose, and a
+        // name split into non-class pieces is not seen. Pinned, so a change
+        // that reaches them updates the doc too.
+        assert!(js("el.className = 'card is-busy';").is_empty());
+        assert!(js("el.className = 'ca' + 'rd';").is_empty());
+    }
+
+    /// Design rules 2, 6 and 9 rest on one writer per class (PLAN §2): the
+    /// builder in [`ONE_WRITER`] is the only production source, Rust or
+    /// script, that writes `.card`/`.card__*`/`.card--*` (`components::Card`),
+    /// `.empty`/`.empty__*`/`.empty-note` (`components::{empty_state,
+    /// empty_note}`) or `.btn--primary` (`components::Action`).
+    ///
+    /// It reads:
+    /// - maud shorthand, chained or after a tag (`find_shorthand_classes`);
+    /// - maud `class="…"`, `class={ "…" }` and `.classes("…")`;
+    /// - a class attribute in any string;
+    /// - a class-list literal however it reaches the page, with a `format!`
+    ///   or `${…}` placeholder, or a `+` after it, read as the unknown part
+    ///   of a class (`btn--…` could be `btn--primary`);
+    /// - a script's `className`, `classList` or markup string.
+    ///
+    /// [`literal_classes`] names the two spellings that stay out of reach.
+    /// Tests and test-only modules are not production and are not read;
+    /// [`NOT_A_SECOND_WRITER`] names, with exact counts, the two literals
+    /// that spell a class name without writing that class.
+    #[test]
+    fn only_the_builder_writes_its_classes() {
+        let mut found: std::collections::BTreeMap<(String, String), Vec<usize>> =
+            Default::default();
+        let mut owner_writes = 0;
+        let defined = defined_classes();
+        let sources = crate::test_support::source_scan::production_rust_sources()
+            .into_iter()
+            .map(|file| (file.rel, rust_class_writes(&file.text, &defined)))
+            .chain(
+                crate::test_support::source_scan::shipped_scripts()
+                    .into_iter()
+                    .filter(|file| !crate::test_support::source_scan::is_vendored_bundle(file))
+                    .map(|file| (file.rel, script_class_writes(&file.text, &defined))),
+            );
+        for (rel, writes) in sources {
+            for (line, class) in writes {
+                let Some(owner) = owner_of(&class) else {
+                    continue;
+                };
+                if rel == owner {
+                    owner_writes += 1;
+                    continue;
+                }
+                found.entry((rel.clone(), class)).or_default().push(line);
+            }
+        }
+        let mut wrong = Vec::new();
+        for ((rel, class), lines) in &found {
+            let excused = NOT_A_SECOND_WRITER
+                .iter()
+                .find(|(file, c, _, _)| file == rel && c == class);
+            match excused {
+                Some((_, _, count, _)) if *count == lines.len() => {}
+                _ => wrong.push(format!("{rel}:{lines:?}: .{class}")),
+            }
+        }
+        for (file, class, _, _) in NOT_A_SECOND_WRITER {
+            if !found.contains_key(&(file.to_string(), class.to_string())) {
+                wrong.push(format!("NOT_A_SECOND_WRITER ({file}, {class}) is stale"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a class with one writer is written somewhere else; build it with \
+             components::Card, empty_state/empty_note or Action instead:\n{}",
+            wrong.join("\n")
+        );
+        assert!(
+            owner_writes >= 10,
+            "the builders' own writes were not found: {owner_writes}"
+        );
+    }
+
+    /// Classes a stylesheet draws as a framed white surface that are not a
+    /// card-level surface, each with why: a control, or a popover that
+    /// floats above the page rather than sitting on it.
+    const NOT_CARD_LEVEL: &[(&str, &str)] = &[
+        ("form-input", "a form control"),
+        ("form-select", "a form control"),
+        ("form-textarea", "a form control"),
+        (
+            "products-choice",
+            "a checkbox tile, a control inside the wizard's step card",
+        ),
+        ("topbar__palette", "the header's search button"),
+        ("palette__panel", "the command palette, a popover"),
+        ("profile-menu", "the sidebar's profile menu, a popover"),
+        ("row-menu", "a row's action menu, a popover"),
+    ];
+
+    /// `test_support::dom::CARD_LEVEL` is complete: every class a
+    /// stylesheet draws as a framed white surface (a `--surface-1` or white
+    /// background, a solid border and a radius, on that class alone) is
+    /// card-level, so `no_card_level_surface_inside_a_card` sees it, or is
+    /// named in [`NOT_CARD_LEVEL`]. A new surface class has to be put in one
+    /// of the two, and an entry no stylesheet draws any more is stale.
+    #[test]
+    fn card_level_covers_every_framed_surface() {
+        let mut framed: std::collections::BTreeSet<String> = Default::default();
+        for sheet in crate::test_support::source_scan::stylesheets() {
+            for (selector, body) in super::test_support::css_rules(&strip_css_comments(&sheet.text))
+            {
+                let decl = |prop: &str| {
+                    body.split(';')
+                        .filter_map(|d| d.split_once(':'))
+                        .find(|(p, _)| p.trim() == prop)
+                        .map(|(_, v)| v.trim().to_ascii_lowercase())
+                };
+                let surface = ["background", "background-color"].iter().any(|p| {
+                    decl(p).is_some_and(|v| {
+                        matches!(
+                            v.as_str(),
+                            "var(--surface-1)" | "white" | "#fff" | "#ffffff"
+                        )
+                    })
+                });
+                let bordered = decl("border").is_some_and(|v| v.contains("solid"));
+                let rounded = decl("border-radius").is_some();
+                if !(surface && bordered && rounded) {
+                    continue;
+                }
+                for part in selector.split(',').map(str::trim) {
+                    // `.x` or `tag.x`: the class alone draws it.
+                    let class = part.split_once('.');
+                    if let Some((tag, class)) = class {
+                        if tag.chars().all(|c| c.is_ascii_lowercase())
+                            && class
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        {
+                            framed.insert(class.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            framed.contains("card") && framed.contains("stat"),
+            "{framed:?}"
+        );
+        let card_level = crate::test_support::dom::CARD_LEVEL;
+        let mut wrong = Vec::new();
+        for class in &framed {
+            let named = card_level.contains(&class.as_str())
+                || NOT_CARD_LEVEL.iter().any(|(c, _)| c == class);
+            if !named {
+                wrong.push(format!(
+                    ".{class} draws a framed surface: add it to CARD_LEVEL or NOT_CARD_LEVEL"
+                ));
+            }
+        }
+        for (class, _) in NOT_CARD_LEVEL {
+            if !framed.contains(*class) {
+                wrong.push(format!("NOT_CARD_LEVEL .{class} is stale"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The labels a stylesheet selects table cells and headers by
+    /// (`[data-label="…"]`), and the selectors that pick a header or a cell
+    /// by its place (`th:nth-child(2)`), over `css`.
+    fn table_selectors(css: &str) -> (Vec<String>, Vec<String>) {
+        static LABEL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static PLACE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let label = LABEL.get_or_init(|| regex::Regex::new(r#"\[data-label="([^"]*)"\]"#).unwrap());
+        // A `th`/`td` compound with a `:nth-*` pseudo-class anywhere in it,
+        // `:is(…)` included.
+        let place = PLACE.get_or_init(|| {
+            regex::Regex::new(r"(?:^|[\s>+~(,])t[hd](?:[.:\[][^\s>+~,]*)?:(?:is\([^)]*)?nth-")
+                .unwrap()
+        });
+        let mut labels = Vec::new();
+        let mut placed = Vec::new();
+        for (selector, _) in super::test_support::css_rules(&strip_css_comments(css)) {
+            labels.extend(label.captures_iter(&selector).map(|c| c[1].to_string()));
+            for part in selector.split(',') {
+                if place.is_match(part.trim()) {
+                    placed.push(part.trim().to_string());
+                }
+            }
+        }
+        (labels, placed)
+    }
+
+    #[test]
+    fn the_table_selector_scan_finds_labels_and_places() {
+        let (labels, placed) = table_selectors(concat!(
+            r#".a :is(th, td):is([data-label="Type"], [data-label="Created"]) { display: none; }"#,
+            "\n.b > table > thead > tr > th:nth-child(2), .c td:nth-child(n+3) { display: none; }",
+            "\n.d th:is(:nth-child(1), :nth-child(3)) { x: y; }",
+            "\n.e > .stat:nth-child(3) { x: y; } .f th { x: y; }",
+        ));
+        assert_eq!(labels, ["Type", "Created"]);
+        assert_eq!(placed.len(), 3, "{placed:?}");
+    }
+
+    /// The narrowing tables hide a column's header and its cells by the
+    /// column's label (`DataTable` writes `data-label` on each `th` and
+    /// `td`), never by place: a header picked by `th:nth-child(n)` hides the
+    /// wrong one the day its `*_COLUMNS` list is reordered, while the cells,
+    /// picked by label, follow. And every label a stylesheet selects is a
+    /// column some production table declares (`TableCol::new("…")`), so a
+    /// renamed column cannot leave a rule selecting nothing.
+    #[test]
+    fn tables_hide_columns_by_label_not_by_place() {
+        let declared: std::collections::HashSet<String> =
+            crate::test_support::source_scan::production_rust_sources()
+                .iter()
+                .map(|file| &file.text)
+                .flat_map(|src| {
+                    src.match_indices("TableCol::new(\"")
+                        .map(|(i, _)| i)
+                        .filter_map(|i| {
+                            let rest = &src[i + "TableCol::new(\"".len()..];
+                            rest.find('"').map(|end| rest[..end].to_string())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+        assert!(
+            declared.len() > 50,
+            "only {} column labels found",
+            declared.len()
+        );
+        let mut wrong = Vec::new();
+        let mut selected = 0;
+        for sheet in crate::test_support::source_scan::stylesheets() {
+            let (labels, placed) = table_selectors(&sheet.text);
+            let file = &sheet.rel;
+            for label in labels {
+                selected += 1;
+                if !declared.contains(&label) {
+                    wrong.push(format!(
+                        "{file}: [data-label={label:?}] names no declared column"
+                    ));
+                }
+            }
+            for part in placed {
+                wrong.push(format!(
+                    "{file}: `{part}` picks a header or cell by its place"
+                ));
+            }
+        }
+        assert!(selected > 50, "only {selected} label selectors found");
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The colour literals outside `ui/styles/tokens.css`, by file, with
+    /// their exact count and why they are there. A ratchet (PLAN §5.3, N10):
+    /// every colour is meant to come from a token, so a dark theme is a
+    /// second set of token values and nothing else; the files below still
+    /// spell some colours out ([`colour_literals`] says what counts). A
+    /// count may only go down (lower it, or delete the entry at zero), and a
+    /// file not listed may spell none.
+    const COLOUR_LITERALS: &[(&str, usize, &str)] = &[
+        (
+            "blocks/email.rs",
+            6,
+            "an email's inline styles: mail clients take no stylesheet",
+        ),
+        (
+            "crates/impresspress-core/src/blocks/products/assets/storefront.js",
+            11,
+            "the storefront's own stylesheet, inside its shadow root on a seller's site",
+        ),
+        (
+            "ui/assets.rs",
+            1,
+            "BRAND_ACCENT_HEX, the accent where no CSS variable reaches (email)",
+        ),
+        (
+            "ui/layout.rs",
+            1,
+            "the black a branded --primary-color's hover is mixed toward",
+        ),
+        (
+            "ui/styles/components/auth.css",
+            7,
+            "alert tints, and the OAuth button's provider black",
+        ),
+        (
+            "ui/styles/components/badge.css",
+            10,
+            "the badge tints, and the avatar initial's white",
+        ),
+        (
+            "ui/styles/components/button.css",
+            2,
+            "the white text on the primary and danger fills",
+        ),
+        (
+            "ui/styles/components/callout.css",
+            1,
+            "the code chip's tint",
+        ),
+        (
+            "ui/styles/components/card.css",
+            7,
+            "public-page text, the warning message and variable tints, two hover shadows",
+        ),
+        (
+            "ui/styles/components/form.css",
+            11,
+            "the field greys that predate the tokens, and the focus ring's shadow",
+        ),
+        (
+            "ui/styles/components/modal.css",
+            2,
+            "the dialog's shadow and backdrop",
+        ),
+        (
+            "ui/styles/components/nav.css",
+            2,
+            "the sidebar's white (out of scope) and the skip link's",
+        ),
+        (
+            "ui/styles/components/palette.css",
+            1,
+            "the palette's backdrop",
+        ),
+        (
+            "ui/styles/components/table.css",
+            2,
+            "the SQL editor's dark code surface",
+        ),
+        (
+            "ui/styles/components/toast.css",
+            4,
+            "the white text on each toast tone",
+        ),
+        (
+            "ui/styles/layouts/auth-split.css",
+            10,
+            "the sign-in page's surfaces and the brand-red shadow of its button",
+        ),
+        (
+            "ui/styles/layouts/shell.css",
+            11,
+            "the sidebar's whites (out of scope) and the profile menu's surface",
+        ),
+    ];
+
+    /// The CSS named colours, less `transparent` and `currentcolor`, which
+    /// name no colour of their own.
+    const NAMED_COLOURS: &[&str] = &[
+        "aliceblue",
+        "antiquewhite",
+        "aqua",
+        "aquamarine",
+        "azure",
+        "beige",
+        "bisque",
+        "black",
+        "blanchedalmond",
+        "blue",
+        "blueviolet",
+        "brown",
+        "burlywood",
+        "cadetblue",
+        "chartreuse",
+        "chocolate",
+        "coral",
+        "cornflowerblue",
+        "cornsilk",
+        "crimson",
+        "cyan",
+        "darkblue",
+        "darkcyan",
+        "darkgoldenrod",
+        "darkgray",
+        "darkgreen",
+        "darkgrey",
+        "darkkhaki",
+        "darkmagenta",
+        "darkolivegreen",
+        "darkorange",
+        "darkorchid",
+        "darkred",
+        "darksalmon",
+        "darkseagreen",
+        "darkslateblue",
+        "darkslategray",
+        "darkslategrey",
+        "darkturquoise",
+        "darkviolet",
+        "deeppink",
+        "deepskyblue",
+        "dimgray",
+        "dimgrey",
+        "dodgerblue",
+        "firebrick",
+        "floralwhite",
+        "forestgreen",
+        "fuchsia",
+        "gainsboro",
+        "ghostwhite",
+        "gold",
+        "goldenrod",
+        "gray",
+        "green",
+        "greenyellow",
+        "grey",
+        "honeydew",
+        "hotpink",
+        "indianred",
+        "indigo",
+        "ivory",
+        "khaki",
+        "lavender",
+        "lavenderblush",
+        "lawngreen",
+        "lemonchiffon",
+        "lightblue",
+        "lightcoral",
+        "lightcyan",
+        "lightgoldenrodyellow",
+        "lightgray",
+        "lightgreen",
+        "lightgrey",
+        "lightpink",
+        "lightsalmon",
+        "lightseagreen",
+        "lightskyblue",
+        "lightslategray",
+        "lightslategrey",
+        "lightsteelblue",
+        "lightyellow",
+        "lime",
+        "limegreen",
+        "linen",
+        "magenta",
+        "maroon",
+        "mediumaquamarine",
+        "mediumblue",
+        "mediumorchid",
+        "mediumpurple",
+        "mediumseagreen",
+        "mediumslateblue",
+        "mediumspringgreen",
+        "mediumturquoise",
+        "mediumvioletred",
+        "midnightblue",
+        "mintcream",
+        "mistyrose",
+        "moccasin",
+        "navajowhite",
+        "navy",
+        "oldlace",
+        "olive",
+        "olivedrab",
+        "orange",
+        "orangered",
+        "orchid",
+        "palegoldenrod",
+        "palegreen",
+        "paleturquoise",
+        "palevioletred",
+        "papayawhip",
+        "peachpuff",
+        "peru",
+        "pink",
+        "plum",
+        "powderblue",
+        "purple",
+        "rebeccapurple",
+        "red",
+        "rosybrown",
+        "royalblue",
+        "saddlebrown",
+        "salmon",
+        "sandybrown",
+        "seagreen",
+        "seashell",
+        "sienna",
+        "silver",
+        "skyblue",
+        "slateblue",
+        "slategray",
+        "slategrey",
+        "snow",
+        "springgreen",
+        "steelblue",
+        "tan",
+        "teal",
+        "thistle",
+        "tomato",
+        "turquoise",
+        "violet",
+        "wheat",
+        "white",
+        "whitesmoke",
+        "yellow",
+        "yellowgreen",
+    ];
+
+    /// The colour literals in a CSS value, or in a string that may hold
+    /// one:
+    /// - a hex colour (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`), as a whole
+    ///   word (`#add-grant`, an id, and `&#039;`, an entity, are not);
+    /// - a colour function (`rgb(`, `rgba(`, `hsl(`, `hsla(`, `hwb(`,
+    ///   `lab(`, `lch(`, `oklab(`, `oklch(`, `color(`);
+    /// - a named colour (`white`, `rebeccapurple`). In a stylesheet value
+    ///   any whole word counts. In a Rust or script string it counts after a
+    ///   `:` (`"color:white"`, a `background: red` declaration) or as the whole
+    ///   string (`fill="white"`), so prose ("a white page") is not one.
+    ///
+    /// `var(--x)` and `color-mix(in srgb, var(--a) 6%, var(--b))` are
+    /// tokens, so not counted; a literal mixed in (`color-mix(…, white)`)
+    /// is.
+    fn colour_literals(text: &str, css_value: bool) -> usize {
+        static FUNC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let func = FUNC.get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)(?:^|[^A-Za-z0-9_-])(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(",
+            )
+            .unwrap()
+        });
+        let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        let hex = text
+            .match_indices('#')
+            .filter(|(at, _)| !text[..*at].ends_with(|c: char| is_name(c) || c == '&'))
+            .filter(|(at, _)| {
+                let rest = &text[at + 1..];
+                let digits = rest.chars().take_while(char::is_ascii_hexdigit).count();
+                matches!(digits, 3 | 4 | 6 | 8) && !rest[digits..].starts_with(is_name)
+            })
+            .count();
+        let functions = func.find_iter(text).count();
+        let lower = text.to_ascii_lowercase();
+        let named = if css_value {
+            lower
+                .split(|c: char| !is_name(c))
+                .filter(|word| NAMED_COLOURS.contains(word))
+                .count()
+        } else if NAMED_COLOURS.contains(&lower.trim()) {
+            1
+        } else {
+            lower
+                .match_indices(':')
+                .filter(|(at, _)| {
+                    let after = lower[at + 1..].trim_start();
+                    let word: String = after.chars().take_while(|c| is_name(*c)).collect();
+                    NAMED_COLOURS.contains(&word.as_str())
+                })
+                .count()
+        };
+        hex + functions + named
+    }
+
+    #[test]
+    fn the_colour_count_reads_each_spelling_once() {
+        for (text, css, count) in [
+            ("color: #fff;", true, 1),
+            ("border: 1px solid #e5e7eb", true, 1),
+            ("background: linear-gradient(#000,#fffa)", true, 2),
+            ("#fd353480", true, 1),
+            ("#add-grant #dev-log #content &#039; a#bad", true, 0),
+            ("#12345", true, 0),
+            ("white", true, 1),
+            (
+                "0 1px 2px rgba(0,0,0,.1), 0 0 0 1px RGB(217 35 32)",
+                true,
+                2,
+            ),
+            ("hsl(0 0% 100%)", true, 1),
+            ("oklch(70% 0.1 30)", true, 1),
+            ("color-mix(in srgb, var(--a) 6%, white)", true, 1),
+            ("color-mix(in srgb, var(--a) 6%, var(--b))", true, 0),
+            ("var(--surface-1)", true, 0),
+            ("transparent", true, 0),
+            ("currentColor", true, 0),
+            ("1px solid var(--border-color)", true, 0),
+            ("color:white", false, 1),
+            ("background: Red; padding: 0", false, 1),
+            ("white", false, 1),
+            ("a white page", false, 0),
+            ("the red error", false, 0),
+            ("rgb(1,2,3)", false, 1),
+        ] {
+            assert_eq!(colour_literals(text, css), count, "{text} (css {css})");
+        }
+    }
+
+    /// Every colour literal outside the token sheet ([`colour_literals`]):
+    /// in a stylesheet's declarations (selectors are ids, not colours), in a
+    /// shipped script's strings and in a production Rust source's strings.
+    /// Pinned by file in [`COLOUR_LITERALS`]. Third-party bundles
+    /// (`marked.min.js`, `purify.min.js`) are not this codebase's colours.
+    #[test]
+    fn colour_literals_outside_the_tokens_only_go_down() {
+        use crate::test_support::source_scan as scan;
+        let mut found: std::collections::BTreeMap<String, usize> = Default::default();
+        for sheet in scan::stylesheets() {
+            if sheet.rel == "ui/styles/tokens.css" {
+                continue;
+            }
+            let count: usize = super::test_support::css_rules(&strip_css_comments(&sheet.text))
+                .iter()
+                .flat_map(|(_, body)| body.split(';'))
+                .filter_map(|decl| decl.split_once(':'))
+                // A custom property outside `:root` is a token by another
+                // name; its value is counted like any other.
+                .map(|(_, value)| colour_literals(value, true))
+                .sum();
+            if count > 0 {
+                found.insert(sheet.rel, count);
+            }
+        }
+        let literals = scan::production_rust_sources()
+            .into_iter()
+            .map(|file| (file.rel, string_literals(&file.text, true)))
+            .chain(
+                scan::shipped_scripts()
+                    .into_iter()
+                    .filter(|file| !scan::is_vendored_bundle(file))
+                    .map(|file| (file.rel, string_literals(&file.text, false))),
+            );
+        for (rel, strings) in literals {
+            let count: usize = strings.iter().map(|(_, s)| colour_literals(s, false)).sum();
+            if count > 0 {
+                found.insert(rel, count);
+            }
+        }
+        let expected: std::collections::BTreeMap<String, usize> = COLOUR_LITERALS
+            .iter()
+            .map(|(file, count, _)| (file.to_string(), *count))
+            .collect();
+        let table: Vec<String> = found
+            .iter()
+            .map(|(file, count)| format!("        (\"{file}\", {count}, \"…\"),"))
+            .collect();
+        assert_eq!(
+            found,
+            expected,
+            "colour literals outside tokens.css moved; use a token, and only lower \
+             COLOUR_LITERALS. Found:\n{}",
+            table.join("\n")
+        );
+    }
+
+    /// Class names this program retired, which no source may spell again:
+    /// `.btn--ghost`/`.btn--ghost-danger` (renamed `.btn--quiet`/
+    /// `.btn--quiet-danger`, so `Emphasis::Quiet` and its class share a
+    /// name), the sub-14px size utilities `.text-xs`/`.text-13`/`.text-11`/
+    /// `.text-10` (design rule 5) and `.text-capitalize` (rule 4: case is
+    /// written at the source). Read as whole class tokens in the code (not
+    /// the comments) of every Rust, CSS and script source under `src/`,
+    /// tests included, so neither a rule nor a use nor an assertion about
+    /// one comes back; `--text-xs`, the token, is a different name.
+    #[test]
+    fn retired_class_names_stay_retired() {
+        // Spelled in halves so this test is not its own hit.
+        let retired = [
+            concat!("btn--", "ghost"),
+            concat!("btn--", "ghost-danger"),
+            concat!("text-", "xs"),
+            concat!("text-", "13"),
+            concat!("text-", "11"),
+            concat!("text-", "10"),
+            concat!("text-", "capitalize"),
+        ];
+        let is_name = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        let mut hits = Vec::new();
+        let mut read = 0;
+        // Every source under `src/`, tests included, and every shipped script
+        // in the repository.
+        let sources = crate::test_support::source_scan::SourceWalk::crate_src()
+            .extensions(&["rs", "css", "js", "mjs"])
+            .collect()
+            .into_iter()
+            .chain(crate::test_support::source_scan::shipped_scripts());
+        for file in sources {
+            read += 1;
+            let src = &file.text;
+            // Code only: prose may still tell the history of a name.
+            let code = match file.path.extension().and_then(|x| x.to_str()) {
+                Some("rs") => mask_rust_comments(src),
+                Some("css") => strip_css_comments(src),
+                _ => src
+                    .lines()
+                    .map(|line| match line.trim_start() {
+                        l if l.starts_with("//") || l.starts_with('*') || l.starts_with("/*") => "",
+                        _ => line,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            for (n, line) in code.lines().enumerate() {
+                for name in retired {
+                    let found = line.match_indices(name).any(|(at, _)| {
+                        !line[..at].ends_with(is_name)
+                            && !line[at + name.len()..].starts_with(is_name)
+                    });
+                    if found {
+                        hits.push(format!("{}:{}: .{name}", file.rel, n + 1));
+                    }
+                }
+            }
+        }
+        assert!(read > 400, "only {read} sources were read");
+        assert!(
+            hits.is_empty(),
+            "a retired class name is back:\n{}",
             hits.join("\n")
         );
     }

@@ -1817,7 +1817,7 @@ async fn repair_sensitive_flags_in(db: &Arc<dyn DatabaseService>, rows: &[Loaded
 
         // RAISE ONLY. The pass used to also clear the flag on a declared key
         // whose declaration did not call for one, so a mis-flag was
-        // recoverable. That was the wrong trade and is gone: the Add Variable
+        // recoverable. That was the wrong trade and is gone: the Add variable
         // modal ticks Sensitive by default, and a declared var with an empty
         // default has no row until an admin makes one — so
         // `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS`, which carries operator-supplied
@@ -4007,7 +4007,7 @@ mod boot_tests {
     /// The repair pass NEVER clears a flag, only raises it.
     ///
     /// It used to clear one on any declared key the declaration did not call
-    /// for, so a mis-flag was recoverable. The Add Variable modal ticks
+    /// for, so a mis-flag was recoverable. The Add variable modal ticks
     /// Sensitive by default and a declared var with an empty default has no
     /// row until an admin makes one — so
     /// `WAFER_RUN_SHARED__EMBEDDED_SCRIPTS`, which carries operator-supplied
@@ -4024,7 +4024,7 @@ mod boot_tests {
             "the declaration does not call for a flag here — that is the case under test"
         );
 
-        // What the Add Variable modal produces with its default tick.
+        // What the Add variable modal produces with its default tick.
         seed_if_absent(&db, key, "/analytics.js?token=abc123", "", "", true)
             .await
             .expect("admin creates it flagged");
