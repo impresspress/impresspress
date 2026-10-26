@@ -91,7 +91,8 @@ use wafer_core::interfaces::{
     crypto::service::{CryptoError, CryptoService},
     database::service::{
         AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
+        GuardedUpdate, RawStatement, Record, RecordList, Table, TransactionError, UpsertSpec,
+        WriteOp, WriteOutcome,
     },
     logger::service::{Field, LoggerService},
     network::service::{
@@ -773,6 +774,16 @@ impl DatabaseService for ScopedDatabaseService {
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         self.current()?.exec_raw(query, args).await
+    }
+
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        self.current()
+            .map_err(TransactionError::whole)?
+            .exec_raw_transaction(statements)
+            .await
     }
 
     async fn delete_where(
