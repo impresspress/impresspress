@@ -29,11 +29,21 @@ async fn admin_page(ctx: &crate::test_support::TestContext, path: &str) -> Strin
     output_to_html(dispatch(ctx, msg, input).await).await
 }
 
-/// The topbar's actions slot, or "" when the page declares none.
-fn topbar_actions(html: &str) -> &str {
-    html.split_once(r#"<div class="topbar__actions">"#)
-        .and_then(|(_, rest)| rest.split_once("</header>"))
-        .map_or("", |(actions, _)| actions)
+/// The topbar's status and actions slots, from the first of them to the
+/// header's end, or "" when the page declares neither.
+fn topbar_slots(html: &str) -> &str {
+    let Some((_, rest)) = html.split_once(r#"<header class="topbar">"#) else {
+        return "";
+    };
+    let header = rest.split_once("</header>").map_or("", |(h, _)| h);
+    [
+        r#"<div class="topbar__status">"#,
+        r#"<div class="topbar__actions">"#,
+    ]
+    .iter()
+    .filter_map(|slot| header.find(slot))
+    .min()
+    .map_or("", |at| &header[at..])
 }
 
 /// The page body (`main#content`).
@@ -90,7 +100,7 @@ async fn manage_views_are_filter_links() {
         "{html}"
     );
     // The Deleted view has no create action: nothing to create there.
-    assert_eq!(topbar_actions(&html), "", "{html}");
+    assert_eq!(topbar_slots(&html), "", "{html}");
 }
 
 /// A product row is one link, named after the product; the row carries no
@@ -194,9 +204,11 @@ async fn product_detail_has_one_visible_primary() {
         html.contains(r#"<a href="/b/products/admin/manage">All products</a>"#),
         "{html}"
     );
-    let actions = topbar_actions(&html);
+    let actions = topbar_slots(&html);
     assert!(
-        actions.starts_with(r#"<span class="badge badge-warning">Draft</span>"#),
+        actions.starts_with(
+            r#"<div class="topbar__status"><span class="badge badge-warning">Draft</span></div>"#
+        ),
         "the product's state is the header's status: {actions}"
     );
     // `products-manager.js` reads the status each lifecycle action sets off
@@ -400,7 +412,7 @@ async fn stripe_page_states_are_badges_and_settings_have_one_way_in() {
     assert!(!html.contains("Edit Stripe settings"), "{html}");
     // Not configured, so configuring is the page's primary action.
     assert!(
-        topbar_actions(&html).contains(
+        topbar_slots(&html).contains(
             r#"<a class="btn btn--primary" href="/b/products/admin/settings">Configure Stripe</a>"#
         ),
         "{html}"
@@ -1088,11 +1100,11 @@ async fn the_seller_page_puts_its_state_and_control_in_the_header() {
     let ctx = commerce_ctx().await;
     let active = admin_page(&ctx, "/b/products/admin/sellers/seller_account_1").await;
     assert!(
-        topbar_actions(&active).contains(r#"<span class="badge badge-info">Onboarding</span>"#),
+        topbar_slots(&active).contains(r#"<span class="badge badge-info">Onboarding</span>"#),
         "{active}"
     );
     assert!(
-        topbar_actions(&active).contains(r#"<button data-seller-action="suspend" class="btn btn--secondary" type="button" data-action="psa-set-state">Suspend seller</button>"#),
+        topbar_slots(&active).contains(r#"<button data-seller-action="suspend" class="btn btn--secondary" type="button" data-action="psa-set-state">Suspend seller</button>"#),
         "{active}"
     );
     let body = body(&active);
@@ -1103,7 +1115,7 @@ async fn the_seller_page_puts_its_state_and_control_in_the_header() {
     assert!(stats < card, "{body}");
     let suspended = admin_page(&ctx, "/b/products/admin/sellers/seller_account_3").await;
     assert!(
-        topbar_actions(&suspended).contains(r#"<button data-seller-action="reactivate" class="btn btn--primary" type="button" data-action="psa-set-state">Reactivate seller</button>"#),
+        topbar_slots(&suspended).contains(r#"<button data-seller-action="reactivate" class="btn btn--primary" type="button" data-action="psa-set-state">Reactivate seller</button>"#),
         "{suspended}"
     );
 }
@@ -1319,7 +1331,7 @@ async fn the_order_header_names_the_mode_and_a_dispute_reason_reads_as_words() {
     )
     .await;
     assert!(
-        topbar_actions(&order).contains(r#"<span class="badge badge-secondary">Test mode</span>"#),
+        topbar_slots(&order).contains(r#"<span class="badge badge-secondary">Test mode</span>"#),
         "{order}"
     );
     let body = body(&order);

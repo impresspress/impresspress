@@ -83,6 +83,46 @@ test.describe('shell landmarks and keyboard scrolling', () => {
     expect(await main.evaluate((el) => getComputedStyle(el).boxShadow)).toBe('none');
   });
 
+  // PLAN §5.4: the first header action on Blocks takes a visible ring on
+  // the page background (the header has no box of its own), and
+  // Tab runs header → main → tabs → the tab's content, never back.
+  test('Tab reaches the header actions with a visible ring, then main, the tabs and the content', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/blocks', { waitUntil: 'networkidle' });
+    const first = page.locator('.topbar__actions .btn').first();
+    await expect(first).toBeVisible();
+
+    const regions: string[] = [];
+    for (let i = 0; i < 120 && regions.at(-1) !== 'content'; i++) {
+      await page.keyboard.press('Tab');
+      const region = await page.evaluate(() => {
+        const el = document.activeElement!;
+        if (el.closest('header.topbar')) return 'header';
+        if (el.id === 'content') return 'main';
+        if (el.closest('main#content .tabs')) return 'tabs';
+        if (el.closest('main#content')) return 'content';
+        return 'chrome';
+      });
+      if (region === 'chrome' && regions.length === 0) continue;
+      if (regions.at(-1) === region) continue;
+      regions.push(region);
+      if (region === 'header') {
+        await expect(first, 'the first header Tab stop is the first header action').toBeFocused();
+        const ring = await first.evaluate((el) => {
+          const s = getComputedStyle(el);
+          const bg = getComputedStyle(document.querySelector('.shell__main')!).backgroundColor;
+          return { visible: el.matches(':focus-visible'), shadow: s.boxShadow, outline: s.outlineStyle, bg };
+        });
+        expect(ring.visible).toBe(true);
+        expect(ring.outline, 'the forced-colors outline').toBe('solid');
+        expect(ring.shadow, 'the ring is drawn').not.toBe('none');
+        expect(ring.shadow.includes(ring.bg), `the ring is not the page background's colour: ${JSON.stringify(ring)}`).toBe(false);
+      }
+    }
+    expect(regions).toEqual(['header', 'main', 'tabs', 'content']);
+  });
+
   for (const width of [1440, 390]) {
     test(`exactly one banner at ${width}px, the mobile header a named nav`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });

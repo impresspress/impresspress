@@ -248,12 +248,18 @@ pub fn chat_page(
         div .chat-page {
             div .page--chat data-chat-focus=(focus.as_str()) {
                 aside .chat-threads aria-label=(threads.label) { (threads.body) }
+                // The rail before the conversation: below 60rem it is a
+                // toolbar drawn above the conversation, so Tab must reach
+                // its model picker before the composer and Send it applies
+                // to. The grid places each pane explicitly at every width
+                // (layouts/page.css), so the source order is free to follow
+                // the reading order.
+                @if let Some(r) = right_rail {
+                    aside .chat-rail aria-label=(r.label) { (r.body) }
+                }
                 section .chat-main {
                     div .chat-messages #(CHAT_MESSAGES_ID) { (messages) }
                     div .chat-composer { (composer) }
-                }
-                @if let Some(r) = right_rail {
-                    aside .chat-rail aria-label=(r.label) { (r.body) }
                 }
             }
         }
@@ -615,6 +621,26 @@ mod tests {
         assert!(s.contains("chat-composer"));
         assert!(s.contains("chat-rail"));
         assert!(s.contains(">rail<"));
+    }
+
+    /// The source order is the reading order where the rail is a toolbar
+    /// above the conversation: thread list, rail, conversation. Tab reaches
+    /// the model picker before the composer and Send it applies to.
+    #[test]
+    fn chat_page_puts_the_rail_before_the_conversation() {
+        let s = chat_page(
+            ChatFocus::Conversation,
+            pane("Threads", html! {}),
+            html! {},
+            html! { textarea {} },
+            Some(pane("Chat options", html! {})),
+        )
+        .into_string();
+        let at = |class: &str| s.find(&format!(r#"class="{class}""#)).unwrap();
+        assert!(
+            at("chat-threads") < at("chat-rail") && at("chat-rail") < at("chat-main"),
+            "{s}"
+        );
     }
 
     /// Both side panes are complementary landmarks, and each is named by the

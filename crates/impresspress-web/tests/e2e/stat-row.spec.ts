@@ -13,8 +13,8 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *   beside an empty column);
  * - one column when two do not fit.
  * Whatever the layout, no value word breaks mid-word: the fixture carries the
- * widest figures and markers the pages show. Only an email, wider than any
- * stat, may break.
+ * widest figures and markers the pages show. A value is never free text (an
+ * email), so no word is exempt.
  *
  * The markup is `fixtures/stat-row.html` (the dashboard, the dashboard during
  * an outage, an order, a seller's state words, and a single stat), which a Rust test
@@ -47,7 +47,6 @@ async function layout(page: Page) {
       const brokenWords = values.flatMap((value) => {
         const text = value.firstChild as Text;
         return [...text.data.matchAll(/\S+/g)]
-          .filter((m) => !m[0].includes('@'))
           .filter((m) => {
             const range = document.createRange();
             range.setStart(text, m.index!);
@@ -138,13 +137,14 @@ test.describe('a stat row', () => {
       await page.setViewportSize({ width, height: 860 });
       await mountFixture(page);
       const rows = await layout(page);
-      expect(rows.map((r) => r.stats.length)).toEqual([5, 5, 4, 4, 1]);
+      expect(rows.map((r) => r.stats.length)).toEqual([5, 5, 3, 4, 1]);
       for (const [r, row] of rows.entries()) {
         expectShape(row, expectedShape(row), `${NAMES[r]} at ${width}px`);
         expect(row.brokenWords, `${NAMES[r]} at ${width}px`).toEqual([]);
       }
       if (width === 1280) {
-        // The design target: a full dashboard and a row of four each in one row.
+        // The design target: a full dashboard and the rows of three and four,
+        // each in one row.
         expect(rows.map(expectedShape).slice(0, 4)).toEqual([
           'one row',
           'one row',

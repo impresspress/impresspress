@@ -148,21 +148,23 @@ pub fn heading_outline(html: &str) -> Vec<(u8, String)> {
 /// reported by [`describe`], so a guard sees it rather than skips it.
 pub fn header_items(html: &str) -> Vec<String> {
     let doc = Html::parse_document(html);
-    doc.select(&selector("header.topbar > .topbar__actions > *"))
-        .map(|item| {
-            let kind = if has_class(item, "badge") {
-                "status"
-            } else if has_class(item, "btn") && has_class(item, PRIMARY) {
-                "primary"
-            } else if has_class(item, "btn") && has_class(item, "btn--secondary") {
-                "secondary"
-            } else {
-                return describe(item);
-            };
-            let hidden = if concealed(item) { " hidden" } else { "" };
-            format!("{kind} {:?}{hidden}", text_of(item))
-        })
-        .collect()
+    doc.select(&selector(
+        "header.topbar > .topbar__status > *, header.topbar > .topbar__actions > *",
+    ))
+    .map(|item| {
+        let kind = if has_class(item, "badge") {
+            "status"
+        } else if has_class(item, "btn") && has_class(item, PRIMARY) {
+            "primary"
+        } else if has_class(item, "btn") && has_class(item, "btn--secondary") {
+            "secondary"
+        } else {
+            return describe(item);
+        };
+        let hidden = if concealed(item) { " hidden" } else { "" };
+        format!("{kind} {:?}{hidden}", text_of(item))
+    })
+    .collect()
 }
 
 /// Every tab's label (`.tabs > .tab`: a `tab_navigation` bar, a `subnav`,
@@ -589,8 +591,8 @@ mod tests {
     fn header_items_name_each_slot_in_order() {
         let html = concat!(
             r#"<header class="topbar"><div class="topbar__heading"><h1>T</h1></div>"#,
+            r#"<div class="topbar__status"><span class="badge badge-info">SQLite · 3 tables</span></div>"#,
             r#"<div class="topbar__actions">"#,
-            r#"<span class="badge badge-info">SQLite · 3 tables</span>"#,
             r#"<a class="btn btn--secondary" href="/x">Open <span class="sr-only">(new tab)</span></a>"#,
             r#"<button class="btn btn--secondary" hidden>Save</button>"#,
             r#"<button class="btn btn--quiet">Quiet</button>"#,

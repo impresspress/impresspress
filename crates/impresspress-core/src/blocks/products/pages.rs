@@ -4074,10 +4074,12 @@ async fn order_detail(
     let content = html! {
         p .text-muted .mt-0 .mb-4 { "Placed " (components::timestamp(purchase.str_field("created_at"))) }
         div #order-detail-error .login-error hidden {}
+        // The headline figures. The buyer is not one: an email is a word
+        // wider than a stat, and it is the first line of "Buyer and
+        // checkout" below.
         (components::stat_row(vec![
             components::Stat::new("Total", &display_money(purchase.i64_field("total_cents"), currency)),
             components::Stat::new("Refunded", &display_money(refunded_total, currency)),
-            components::Stat::new("Customer", if buyer.is_empty() { "Guest" } else { buyer }),
             components::Stat::new("Items", &line_items.len().to_string()),
         ]))
         div .grid .grid-auto-280 .gap-4 .card-grid {

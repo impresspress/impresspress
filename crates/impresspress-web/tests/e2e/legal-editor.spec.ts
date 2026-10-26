@@ -1,5 +1,6 @@
 import { test, expect, request as playwrightRequest, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { visiblePrimaries } from './fixtures/primaries';
 
 /**
  * The legal document editor (`blocks/legalpages/pages.rs`, script in
@@ -194,8 +195,13 @@ test.describe('legal editor', () => {
     // Nothing to save yet: the shortcut stays the browser's.
     expect(await pressSave(page)).toBe(false);
     expect(saves).toHaveLength(0);
+    // The empty state's call to action is the page's one primary; the
+    // header's Publish waits, hidden, for the editor.
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Write the privacy policy'], dialogs: [] });
 
     await page.getByRole('button', { name: 'Write the privacy policy' }).click();
+    // The script swaps them: the editor's Publish is now the one primary.
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Publish'], dialogs: [] });
     await expect(page.getByLabel('Title', { exact: true })).toBeFocused();
     await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Privacy policy');
     await expect(page.locator('#next-version')).toHaveText('Publishes as v1');

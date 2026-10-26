@@ -137,6 +137,38 @@ for (const target of PAGES) {
       await expect(box).toHaveValue(`${term}x`);
     });
 
+    // The box the first search's response swaps in is wired in the same
+    // task as the swap (`ui::layout`'s `defaultSettleDelay: 0`). With htmx's
+    // default 20ms settle, a keystroke landing in the new box in those 20ms
+    // changed its value and searched nothing: the list stayed on the first
+    // term, and "Back after searching" failed on some runs. A real keystroke
+    // arrives in a task of its own, so the next task after the swap is where
+    // this one types.
+    test('a keystroke in the box a search has just swapped in is searched', async ({ page, request }) => {
+      await loginAsAdmin(page);
+      const term = `srch${Date.now()}`;
+      await target.seed(request, term);
+      await page.goto(target.path, { waitUntil: 'networkidle' });
+      const box = target.box(page);
+      const id = await box.getAttribute('id');
+      await page.evaluate((id) => {
+        document.body.addEventListener(
+          'htmx:afterSwap',
+          () =>
+            setTimeout(() => {
+              const fresh = document.getElementById(id!) as HTMLInputElement;
+              fresh.value += 'none';
+              fresh.dispatchEvent(new Event('input', { bubbles: true }));
+            }, 0),
+          { once: true },
+        );
+      }, id);
+      await box.fill(term);
+      await expect(page).toHaveURL(searchedFor(`${term}none`));
+      await expect(page.locator('.search-summary')).toContainText(`${term}none`);
+      await expect(box).toHaveValue(`${term}none`);
+    });
+
     test('the search is in the URL, survives a reload, and Clear takes it out', async ({
       page,
       request,

@@ -28,13 +28,6 @@ import { answerConfirm } from './fixtures/confirm';
 
 test.use({ storageState: ADMIN_STATE_PATH });
 
-/** No horizontal scroll: the document is no wider than the viewport. */
-async function overflowX(page: Page): Promise<number> {
-  return page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
-}
-
 test.describe.serial('LLM providers and models', () => {
   const name = `e2e-provider-${Date.now().toString(36)}`;
 
@@ -109,7 +102,7 @@ test.describe.serial('LLM providers and models', () => {
     test('the providers list fits and its row actions are 44px targets', async ({ page }) => {
       await loginAsAdmin(page);
       await page.goto('/b/llm/providers');
-      expect(await overflowX(page)).toBe(0);
+      expect((await layout(page)).page).toBe(0);
       expect(await targetFloor(page)).toBe(44);
       for (const label of [`Edit ${name}`, `Delete ${name}`]) {
         const box = await page.getByRole('button', { name: label }).boundingBox();
@@ -152,7 +145,7 @@ test.describe('LLM chat', () => {
     // The list leads; the conversation and its options wait for a thread.
     await expect(page.getByRole('complementary', { name: 'Threads' })).toBeVisible();
     await expect(page.getByLabel('Model', { exact: true })).toBeHidden();
-    expect(await overflowX(page)).toBe(0);
+    expect((await layout(page)).page).toBe(0);
 
     // New thread on a phone goes to the thread's own page.
     await page.getByRole('button', { name: 'New thread' }).click();
@@ -167,7 +160,43 @@ test.describe('LLM chat', () => {
     await expect(settings).toBeVisible();
     // The crumb is the way back to the list.
     await expect(page.getByRole('link', { name: 'Chat' }).first()).toBeVisible();
-    expect(await overflowX(page)).toBe(0);
+    expect((await layout(page)).page).toBe(0);
+  });
+});
+
+test.describe('LLM chat keyboard order', () => {
+  /**
+   * The rail (the model picker) is in the source before the conversation,
+   * so Tab reaches it before the message box and Send it applies to. Below
+   * 60rem of chat the rail is a toolbar drawn above the conversation, where
+   * the other order sent Tab to the composer first; at 1280
+   * it is the column on the right, and choosing the model before writing is
+   * still the order the task runs in.
+   */
+  test('Tab reaches the model picker before the message box at every layout', async ({ page, baseURL }) => {
+    const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
+    const headers = { Authorization: await adminBearer(api), 'Content-Type': 'application/json' };
+    const thread = await api.post('/b/messages/api/contexts', {
+      headers,
+      data: { type: 'conversation', title: `Keyboard order ${Date.now().toString(36)}` },
+    });
+    expect(thread.ok(), await thread.text()).toBe(true);
+    const threadId = ((await thread.json()) as { id: string }).id;
+    await api.dispose();
+    await loginAsAdmin(page);
+    // 1280: three columns; 1024 and 960: the toolbar band; 390: one pane.
+    for (const width of [1280, 1024, 960, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`/b/llm/threads/${threadId}`, { waitUntil: 'networkidle' });
+      await expect(page.getByLabel('Message')).toBeEnabled();
+      const order: string[] = [];
+      for (let i = 0; i < 150 && !order.includes('chat-input'); i++) {
+        await page.keyboard.press('Tab');
+        const id = await page.evaluate(() => document.activeElement?.id ?? '');
+        if ((id === 'model-picker' || id === 'chat-input') && !order.includes(id)) order.push(id);
+      }
+      expect(order, `Tab order at ${width}px`).toEqual(['model-picker', 'chat-input']);
+    }
   });
 });
 
