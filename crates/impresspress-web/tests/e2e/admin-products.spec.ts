@@ -192,8 +192,8 @@ test.describe.serial('products admin pages', () => {
     };
     // Every name carries `WORST_WORD`, an unbreakable word wider than the
     // run's `stamp` (13 characters, 79-106px in the CI font, by its digits),
-    // so the narrowest the name cell can be is fixed by this word rather than
-    // by the clock: a table that only fit a short stamp failed on some runs.
+    // so a table that does not wrap the name fails on every run, not only
+    // when the clock gives a wide stamp.
     const long = `annual-enterprise-subscription-with-priority-support ${WORST_WORD} ${stamp}`;
     const groupId = await idOf(
       await api.post('/b/products/api/admin/groups', {

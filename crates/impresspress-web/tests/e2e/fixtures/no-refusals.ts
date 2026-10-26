@@ -3,9 +3,9 @@ import { ADMIN_STATE_PATH } from './global-setup';
 import { ADMIN_ROUTES } from './routes';
 
 /**
- * The read-only run's guard: after `e2e:visual`, the server it ran against
- * logged no request it refused or failed, apart from the pages below that
- * are captured for the refusal itself.
+ * The read-only run's guard: after `e2e:visual`, the request log of the
+ * server it ran against holds no request it refused or failed, apart from
+ * the pages below that are captured for the refusal itself.
  *
  * `e2e:visual` captures the admin dashboard, whose "Requests today" stat
  * counts client errors and whose two error charts are compared unmasked
@@ -17,9 +17,14 @@ import { ADMIN_ROUTES } from './routes';
  * by name.
  *
  * It reads the server's own request log (the System logs tab, filtered to
- * server and client errors), so every way a spec can reach the server counts:
- * a page's navigations and fetches, `page.request`, a second browser context,
- * an API context of its own. The run needs a fresh server, as CI gives it.
+ * server and client errors): the table the dashboard counts, so whatever
+ * could move the dashboard's figures is caught, however a spec made the
+ * request (a page's navigations and fetches, `page.request`, a second
+ * browser context, an API context of its own). What that log does not
+ * record is not seen here: a static asset (`/b/static/…`, a 404 included),
+ * `/favicon.ico`, and a path outside every block (`/totally-not-a-thing`).
+ * A refusal on a block's route, or under `/b/` for no block, is recorded.
+ * The run needs a fresh server, as CI gives it.
  */
 
 /** Refusals a capture makes on purpose: the routes `fixtures/routes.ts`

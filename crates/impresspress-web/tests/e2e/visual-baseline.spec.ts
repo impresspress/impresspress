@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { structureViolations } from './fixtures/axe';
 import { expectAtMostOnePrimary } from './fixtures/primaries';
 import { ADMIN_ROUTES, ANON_ROUTES } from './fixtures/routes';
 import { targetFloor } from './fixtures/targets';
@@ -196,6 +197,11 @@ test.describe('visual baseline — admin', () => {
         await expect(page.locator('.stat:has-text("Server errors today") .stat__value')).toHaveText('0');
       }
       await expectPageScreenshot(page, `admin-${r.name}.png`, volatileMasks(page));
+      // A refused page is the shared status page (`ui::forbidden_response`).
+      // `a11y.spec.ts` cannot open it (it runs before the dashboard capture,
+      // whose figures a refusal would move), so its structure is checked
+      // here, where it is already requested.
+      if (r.refused) expect(await structureViolations(page)).toEqual([]);
     });
   }
 
@@ -356,6 +362,10 @@ test.describe('visual baseline mobile — admin (375px)', () => {
       await expectPageScreenshot(page, `admin-${r.name}-mobile.png`, volatileMasks(page));
       // Still touch after the capture, so the baseline is a phone's.
       expect(await targetFloor(page)).toBe(44);
+      // A refused page's structure, on a phone (see the desktop capture).
+      if (ADMIN_ROUTES.find((a) => a.path === r.path)?.refused) {
+        expect(await structureViolations(page)).toEqual([]);
+      }
     });
   }
 });

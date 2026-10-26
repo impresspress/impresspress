@@ -1,12 +1,12 @@
-import { test, expect, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { test, expect } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { structureViolations } from './fixtures/axe';
 import { ADMIN_ROUTES, ANON_ROUTES, type Route } from './fixtures/routes';
 
 /**
  * axe over every page the visual suite captures (`fixtures/routes.ts`), at
  * 1280 and on a phone (375×812 with touch), for the document's structure
- * only (PLAN §5.4, S8):
+ * only (`fixtures/axe.ts`, PLAN §5.4, S8):
  * - `heading-order`: no heading level skipped;
  * - the `landmark-*` rules: one `main`, one top-level `banner`, unique
  *   names for repeated landmarks, none nested where it must not be;
@@ -22,26 +22,11 @@ import { ADMIN_ROUTES, ANON_ROUTES, type Route } from './fixtures/routes';
  * pages the read-only server refuses (`refused`) are left out too: a refused
  * request ahead of the dashboard capture changes its figures, and this file
  * runs before `visual-baseline.spec.ts`. They render `ui::forbidden_response`,
- * the shared status page, whose headings the Rust crawl guard
- * (`htmx_guard::headings_descend_without_skipping`, which reads status pages
- * too) holds.
+ * the shared status page, and `visual-baseline.spec.ts` runs these same rules
+ * on each of them where it captures them, after the dashboard.
  *
  * Reads only, so part of `e2e:visual`.
  */
-
-const RULES = [
-  'heading-order',
-  'region',
-  'landmark-banner-is-top-level',
-  'landmark-complementary-is-top-level',
-  'landmark-contentinfo-is-top-level',
-  'landmark-main-is-top-level',
-  'landmark-no-duplicate-banner',
-  'landmark-no-duplicate-contentinfo',
-  'landmark-no-duplicate-main',
-  'landmark-one-main',
-  'landmark-unique',
-];
 
 const SIZES = [
   { name: 'desktop', viewport: { width: 1280, height: 720 }, hasTouch: false },
@@ -52,11 +37,6 @@ const SIZES = [
  * read-only server answers. */
 const checked = (routes: Route[]) => routes.filter((r) => !r.notAPage && !r.refused);
 
-async function violations(page: Page) {
-  const result = await new AxeBuilder({ page }).withRules(RULES).analyze();
-  return result.violations.flatMap((v) => v.nodes.map((n) => `${v.id}: ${n.target.join(' ')}`));
-}
-
 for (const size of SIZES) {
   test.describe(`document structure, ${size.name}`, () => {
     test.use({ viewport: size.viewport, hasTouch: size.hasTouch });
@@ -64,7 +44,7 @@ for (const size of SIZES) {
     for (const r of checked(ANON_ROUTES)) {
       test(`anon ${r.name}`, async ({ page }) => {
         await page.goto(r.path, { waitUntil: 'networkidle' });
-        expect(await violations(page)).toEqual([]);
+        expect(await structureViolations(page)).toEqual([]);
       });
     }
 
@@ -74,7 +54,7 @@ for (const size of SIZES) {
         test(`admin ${r.name}`, async ({ page }) => {
           await loginAsAdmin(page);
           await page.goto(r.path, { waitUntil: 'networkidle' });
-          expect(await violations(page)).toEqual([]);
+          expect(await structureViolations(page)).toEqual([]);
         });
       }
     });

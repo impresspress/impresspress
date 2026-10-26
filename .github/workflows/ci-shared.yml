@@ -1717,7 +1717,9 @@ jobs:
       # `regen-visual-baselines.yml` must run exactly this set. Its config
       # (`playwright.read-only.config.ts`) holds the rule: the run's teardown
       # (`fixtures/no-refusals.ts`) reads this server's request log and fails
-      # on any refused or failed request but the captured 403 pages.
+      # on any refused or failed request it records but the captured 403
+      # pages. The log is the table the dashboard counts; static assets and
+      # paths outside every block are not logged.
       #
       # `e2e:writes` runs on a second, fresh server below: everything that
       # writes or is refused (a 4xx is an error on the admin dashboard) —

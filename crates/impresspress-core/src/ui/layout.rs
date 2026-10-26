@@ -71,8 +71,13 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
                 // screen but inert: a keystroke in a re-rendered search box
                 // changed its value and searched nothing, so the list stayed
                 // on the old term. Settling in the swap's own task leaves no
-                // such window. Nothing here animates the settle (no rule
-                // styles `htmx-settling` or `htmx-added`).
+                // such window. Nothing here animates the settle: no rule
+                // styles `htmx-settling` or `htmx-added`, and no swapped
+                // element with an id transitions a class or style change
+                // (htmx's id-matched attribute settle). With it, the settle
+                // events (`htmx:load`, `htmx:afterSettle`) fire before
+                // `htmx:afterRequest`, so chrome.js's after-request focus
+                // placement runs on content already wired and autofocused.
                 //
                 // Read at htmx's init, which waits for the document to be
                 // ready, so this tag only has to be in the head.
