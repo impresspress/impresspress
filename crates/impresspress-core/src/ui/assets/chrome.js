@@ -536,12 +536,15 @@ document.addEventListener("input", function (e) {
 //   and if the control is gone once the request has landed, focus goes to the
 //   same control in the row now at that place (the replacement row, or the
 //   one that moved up), else the nearest row after or before it that has a
-//   control. When no row is left — the last one was deleted, and the answer
-//   put an empty state where the list was — focus goes to that empty state's
-//   own action ("Add provider"), or to the empty state itself, which says the
-//   list is empty; only with none of those does it go to `main#content`. A
-//   list re-rendered whole by the response is found again inside the
-//   request's target by its position there.
+//   control. When no row with a control is left — the last one was deleted,
+//   and the answer put an empty state where the list was — focus goes to
+//   that empty state's own action ("Add provider"), or to the empty state
+//   itself, which says the list is empty; only with none of those does it go
+//   to `main#content`. The empty state is looked for where the list was: in
+//   the row's own card (found again by its place among the target's cards)
+//   when the row sat in one, else anywhere in the request's target. A list
+//   re-rendered whole by the response is found again inside the request's
+//   target by its position there.
 //
 // Two ways in, and no other:
 //   hx-confirm="<question>" on an htmx control, with
@@ -563,10 +566,11 @@ document.addEventListener("input", function (e) {
 //   keep.restore();                                                  // after
 // `scope` is the element the script re-renders the list inside (it stays in
 // the document), and `rows` a selector for the list's rows when they are not
-// `tr`/`li`. With no row left, focus goes to an empty state in `scope`, else
-// to `scope` itself, where the script says the list is empty. `restore` does
-// nothing when the opener is still there or something else already has
-// focus.
+// `tr`/`li`. With no row with a control left (the list is empty, or its
+// rows stay without controls, as an archived preset's does), focus goes to an
+// empty state in `scope`, else to `scope` itself: the list's place, whatever
+// the script now shows in it. `restore` does nothing when the opener is still
+// there or something else already has focus.
 // A confirm without a question, a label or a tone of danger or primary is a
 // TypeError, not a generic "OK".
 //
@@ -1129,7 +1133,10 @@ document.addEventListener("input", function (e) {
         var row = opener.closest(rows || "tr, li");
         var list = row ? row.parentNode : null;
         var scope = target instanceof Element ? target : null;
+        var card = row ? row.closest(".card") : null;
         return {
+            cardAt: card && scope && card !== scope && scope.contains(card) ?
+                Array.prototype.indexOf.call(scope.querySelectorAll(".card"), card) : -1,
             opener: opener,
             list: list,
             rowAt: list ? Array.prototype.indexOf.call(list.children, row) : -1,
@@ -1163,16 +1170,24 @@ document.addEventListener("input", function (e) {
         return emptyStatePlace(k);
     }
 
-    // No row is left: the empty state the answer put in the list's place,
-    // looked for in the request's target only (an empty state elsewhere on
-    // the page says nothing about this list). Its own action if it offers
+    // No row with a control is left: the empty state the answer put in the
+    // list's place, looked for in the row's own card or, when it sat in none,
+    // in the request's target (an empty state elsewhere on the page says
+    // nothing about this list). Its own action if it offers
     // one; else the empty state itself, made focusable from script only
     // (`tabindex="-1"`), so a screen reader reads that the list is empty.
     function emptyStatePlace(k) {
         var scope = k.scope && k.scope.isConnected === true ? k.scope :
             (k.scopeId ? document.getElementById(k.scopeId) : null);
         if (!scope) return null;
-        var empty = scope.matches(EMPTY) ? scope : scope.querySelector(EMPTY);
+        // The row's own card, at its place among the target's cards, when
+        // the row sat in one: another card's empty state is not this list's.
+        var region = scope;
+        if (k.cardAt >= 0) {
+            region = scope.querySelectorAll(".card")[k.cardAt];
+            if (!region) return null;
+        }
+        var empty = region.matches(EMPTY) ? region : region.querySelector(EMPTY);
         if (!empty || empty.getClientRects().length === 0) {
             // A script's list says it is empty in its own words, in the
             // element it names as the list's place: that element.

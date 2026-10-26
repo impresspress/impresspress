@@ -234,6 +234,11 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await expect(page.locator('dialog.modal[open]')).toHaveCount(0);
     await expect(page.locator('#buttons-table')).toContainText(`${label} saved`);
     await expect(page.getByRole('button', { name: `Edit ${label} saved` })).toBeFocused();
+
+    // Leave the list as it was found.
+    await page.getByRole('button', { name: `Delete ${label} saved` }).click();
+    await page.getByRole('alertdialog', { name: 'Delete button' }).getByRole('button', { name: 'Delete button' }).click();
+    await expect(page.locator('#buttons-table')).not.toContainText(label);
   });
 
   /**

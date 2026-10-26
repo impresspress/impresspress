@@ -348,6 +348,27 @@ test('the last row deleted and the list answered by its empty state: focus goes 
   assert.equal(page.doc.activeElement, add);
 });
 
+test('the empty state is the deleted row\'s own card\'s, not an earlier card\'s', async () => {
+  const page = loadChromeDom();
+  const { el } = page;
+  const ui = confirmDialog(page);
+  const content = el('main', { id: 'content', tabindex: '0' });
+  const revoke = el('button', { type: 'button', 'hx-delete': '/rows/0', 'hx-confirm': 'Revoke row 0?', 'data-confirm-label': 'Revoke row', 'data-confirm-tone': 'danger' });
+  content.appendChild(el('section', { class: 'card' }, [el('p', { class: 'empty-note' })]));
+  content.appendChild(el('section', { class: 'card' }, [el('table', {}, [el('tbody', {}, [el('tr', {}, [el('td', {}, [revoke])])])])]));
+  page.body.appendChild(content);
+  await askAndConfirm(page, revoke, content, ui);
+
+  // `hx-target="#content"`: both cards again, the second now empty.
+  [...content.children].forEach((c) => c.remove());
+  const add = el('button', { type: 'button' });
+  content.appendChild(el('section', { class: 'card' }, [el('p', { class: 'empty-note' })]));
+  content.appendChild(el('section', { class: 'card' }, [el('div', { class: 'empty' }, [el('div', { class: 'empty__action' }, [add])])]));
+  page.htmx.afterRequest(revoke);
+
+  assert.equal(page.doc.activeElement, add);
+});
+
 test('an empty state with no action takes focus itself, from script only', async () => {
   const page = loadChromeDom();
   const ui = confirmDialog(page);

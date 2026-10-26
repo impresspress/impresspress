@@ -146,6 +146,15 @@ test.describe('an hx-confirm, keyboard only', () => {
       const stamp = Date.now();
       const labels = ['first', 'second', 'third'].map((n) => `Confirm ${n} ${stamp}`);
       await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
+      // The test owns the list: what another run or spec left in it goes
+      // first, so the last row deleted below is the list's last.
+      const rows = page.locator('#buttons-table tbody tr');
+      while ((await rows.count()) > 0) {
+        const before = await rows.count();
+        await rows.first().getByRole('button', { name: /^Delete / }).click();
+        await page.getByRole('alertdialog', { name: 'Delete button' }).getByRole('button', { name: 'Delete button' }).click();
+        await expect(rows).toHaveCount(before - 1);
+      }
       for (const label of labels) {
         await page.locator('#label').fill(label);
         await page.locator('#path').fill('/b/userportal/');
@@ -187,25 +196,18 @@ test.describe('an hx-confirm, keyboard only', () => {
         // list's empty state, which says the list is empty: focus goes
         // there, not to the page body.
         for (const label of [labels[0], labels[2]]) {
-          // The button is in the table the last answer swapped in. htmx
-          // wires a swapped-in control in its settle step; under a settle
-          // delay (htmx's default is 20ms) a key pressed at once lands on a
-          // button that does nothing yet, so press again until it asks.
-          const del = page.getByRole('button', { name: `Delete ${label}` });
-          await expect(async () => {
-            await del.focus();
-            await page.keyboard.press('Enter');
-            await expect(page.getByRole('alertdialog', { name: 'Delete button', exact: true })).toBeVisible({ timeout: 500 });
-          }).toPass();
+          // One press: the button is in the table the last answer swapped
+          // in, and is live at once (`ui::layout`'s `defaultSettleDelay: 0`).
+          await page.getByRole('button', { name: `Delete ${label}` }).focus();
+          await page.keyboard.press('Enter');
           const asked = await asking(page, 'Delete button', `Delete the ${label} button?`, 'danger');
           await page.keyboard.press('Tab');
           await page.keyboard.press('Enter');
           await expect(asked).toBeHidden();
           await expect(page.locator('#buttons-table tr', { hasText: label })).toHaveCount(0);
         }
-        if ((await page.locator('#buttons-table tbody tr').count()) === 0) {
-          await expect(page.locator('#buttons-table .empty')).toBeFocused();
-        }
+        await expect(rows).toHaveCount(0);
+        await expect(page.locator('#buttons-table .empty')).toBeFocused();
       } finally {
         await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
         for (const label of [labels[0], labels[2]]) {
