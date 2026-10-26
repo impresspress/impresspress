@@ -778,6 +778,7 @@ mod tests {
                 sum: forward,
                 query_raw: forward,
                 exec_raw: forward,
+                exec_raw_transaction: forward,
                 delete_where: forward,
                 delete_where_count: forward,
                 take_where: forward,

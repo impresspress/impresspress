@@ -1915,6 +1915,7 @@ wafer_core::forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,
@@ -2007,6 +2008,7 @@ wafer_core::forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,
@@ -2281,6 +2283,13 @@ impl wafer_core::interfaces::database::service::DatabaseService for FailingReads
         args: &[serde_json::Value],
     ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
         self.inner.exec_raw(query, args).await
+    }
+
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[wafer_core::interfaces::database::service::RawStatement],
+    ) -> Result<Vec<i64>, wafer_core::interfaces::database::service::TransactionError> {
+        self.inner.exec_raw_transaction(statements).await
     }
 
     async fn upsert(
@@ -2588,6 +2597,17 @@ impl wafer_core::interfaces::database::service::DatabaseService for FailingWrite
         _args: &[serde_json::Value],
     ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
         Err(simulated_write_failure())
+    }
+
+    async fn exec_raw_transaction(
+        &self,
+        _statements: &[wafer_core::interfaces::database::service::RawStatement],
+    ) -> Result<Vec<i64>, wafer_core::interfaces::database::service::TransactionError> {
+        Err(
+            wafer_core::interfaces::database::service::TransactionError::whole(
+                simulated_write_failure(),
+            ),
+        )
     }
 
     async fn upsert(
