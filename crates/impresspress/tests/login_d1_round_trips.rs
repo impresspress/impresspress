@@ -53,7 +53,9 @@ use wafer_core::interfaces::database::{
     codec::JsonColumns,
     exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
-    service::{Column, DatabaseError, DatabaseService, Record, StatementBudget, Table},
+    service::{
+        Column, DatabaseError, DatabaseService, Record, StatementBudget, Table, TransactionError,
+    },
 };
 use wafer_run::Wafer;
 use wafer_sql_utils::Backend;
@@ -213,7 +215,13 @@ impl DbExec for D1Shaped {
         self.inner.dbx_table_exists(table).await
     }
 
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+    /// One round trip for every statement, all-or-nothing as D1's
+    /// `db.batch()` is (the SQLite service's own transaction), and failing
+    /// as a batch fails: one error for the whole call, its classified code
+    /// and message kept and no statement named, because D1's rejection names
+    /// none. SQLite knows which statement failed; D1 does not, so neither
+    /// does this.
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
         let sql = ops
             .iter()
             .map(|op| match op {
@@ -222,7 +230,10 @@ impl DbExec for D1Shaped {
             .collect::<Vec<_>>()
             .join("; ");
         let _trip = self.begin(ops.len(), sql).await;
-        self.inner.run_transaction(ops).await
+        self.inner
+            .run_transaction(ops)
+            .await
+            .map_err(|failed| TransactionError::whole(failed.error))
     }
 
     async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
@@ -257,6 +268,7 @@ wafer_core::forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,
@@ -774,4 +786,90 @@ async fn an_access_token_is_checked_in_one_round_trip() {
         3,
         "D1 statements before the response\n{trace}"
     );
+}
+
+/// **[`D1Shaped`] runs a raw transaction as D1 runs a `db.batch()`**, so a
+/// migration file applied through it costs and fails as it would on D1: one
+/// round trip for every statement, all-or-nothing with the DDL in it, and a
+/// failure that keeps its classified code and message but names no
+/// statement, because D1's rejection names none (D1-BATCH-MEASUREMENT.md).
+#[tokio::test]
+async fn a_raw_transaction_is_one_round_trip_that_fails_whole() {
+    use wafer_core::interfaces::database::service::RawStatement;
+
+    let raw = |query: &str| RawStatement {
+        query: query.to_string(),
+        args: vec![],
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ledger = Arc::new(Ledger::default());
+    let db = D1Shaped {
+        inner: SQLiteDatabaseService::open(
+            tmp.path()
+                .join("batch.sqlite3")
+                .to_str()
+                .expect("utf-8 path"),
+        )
+        .expect("open sqlite"),
+        cache: SchemaCache::new(),
+        strict: AtomicBool::new(true),
+        ledger: Arc::clone(&ledger),
+    };
+
+    let err = DatabaseService::exec_raw_transaction(
+        &db,
+        &[
+            raw("CREATE TABLE d1_tx_a (id TEXT PRIMARY KEY)"),
+            raw("CREATE TABLE d1_tx_b (x TEXT)"),
+            raw("INSERT INTO d1_tx_a (id) VALUES ('k')"),
+            raw("INSERT INTO d1_tx_a (id) VALUES ('k')"),
+        ],
+    )
+    .await
+    .expect_err("a taken key refuses the batch");
+    let trips = ledger.take();
+    assert_eq!(
+        trips.iter().map(|trip| trip.statements).collect::<Vec<_>>(),
+        [4],
+        "one round trip carrying every statement: {trips:?}"
+    );
+    assert_eq!(err.statement, None, "a D1 batch names no statement: {err}");
+    match &err.error {
+        DatabaseError::AlreadyExists(message) => {
+            assert!(message.contains("d1_tx_a"), "D1's own message: {message}");
+        }
+        other => panic!("a taken key is AlreadyExists, not {other:?}"),
+    }
+    for table in ["d1_tx_a", "d1_tx_b"] {
+        assert!(
+            !DatabaseService::schema_table_exists(&db, table)
+                .await
+                .expect("table lookup"),
+            "{table} survived the refused batch"
+        );
+    }
+
+    ledger.take();
+    let counts = DatabaseService::exec_raw_transaction(
+        &db,
+        &[
+            raw("CREATE TABLE d1_tx_a (id TEXT PRIMARY KEY)"),
+            raw("INSERT INTO d1_tx_a (id) VALUES ('k')"),
+        ],
+    )
+    .await
+    .expect("the batch commits");
+    assert_eq!(counts.len(), 2);
+    assert_eq!(
+        ledger
+            .take()
+            .iter()
+            .map(|trip| trip.statements)
+            .collect::<Vec<_>>(),
+        [2],
+        "one round trip"
+    );
+    assert!(DatabaseService::schema_table_exists(&db, "d1_tx_a")
+        .await
+        .expect("table lookup"));
 }
