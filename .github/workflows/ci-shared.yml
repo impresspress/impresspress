@@ -499,8 +499,8 @@ jobs:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
         run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test auth_roles_are_grants -- --ignored --nocapture
 
-      # `exec_raw_transaction`, the primitive a migration file is applied
-      # with, commits all of its statements or none, DDL included, and names
+      # `exec_raw_transaction`, the primitive the migration runner will apply
+      # a file with, commits all of its statements or none, DDL included, and names
       # the failing statement with its classified code. The SQLite half runs
       # in the step above; this is the PostgreSQL half. It creates a database
       # of its own.

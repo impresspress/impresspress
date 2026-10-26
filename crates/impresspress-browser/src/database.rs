@@ -714,7 +714,8 @@ fn rollback(control: &mut impl FnMut(&str) -> Result<(), String>) -> Result<(), 
 // ledger makes unrepresentable.
 //
 // The `custom` entries here are all the same thing: every method that can
-// mutate the sql.js database wraps its `DbExec` default in `with_flush`, so
+// mutate the sql.js database wraps its `DbExec` default in `with_flush` (or
+// `with_flush_mapped`, for an error type other than `DatabaseError`), so
 // exactly one OPFS flush happens per logical call however many `run_execute`
 // statements the shared default issued internally. `take_where` is a mutator
 // (`DELETE … RETURNING`) despite its read-shaped return, so it is flushed too.

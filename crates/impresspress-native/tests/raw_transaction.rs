@@ -4,9 +4,9 @@
 //! carries its classified code, the failing statement's position and the
 //! backend's message.
 //!
-//! This is the primitive the per-file migration runner applies a file with,
-//! its ledger row first, so "nothing of a refused file remains" is the claim
-//! every test here checks by reading the schema back.
+//! This is the primitive the per-file migration runner will apply a file
+//! with, its ledger row first, so "nothing of a refused file remains" is the
+//! claim every test here checks by reading the schema back.
 //!
 //! The SQLite tests run everywhere, on a file (the native topology: one
 //! writer, read-only readers). The PostgreSQL one needs a server, so it is
