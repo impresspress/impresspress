@@ -388,6 +388,13 @@ mod boot_hook_tests {
             Ok(0)
         }
 
+        async fn exec_raw_transaction(
+            &self,
+            _statements: &[wafer_core::interfaces::database::service::RawStatement],
+        ) -> Result<Vec<i64>, wafer_core::interfaces::database::service::TransactionError> {
+            unreachable!()
+        }
+
         async fn create_many(
             &self,
             _collection: &str,

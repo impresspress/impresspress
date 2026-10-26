@@ -168,8 +168,8 @@ use wafer_core::interfaces::database::{
     schema_cache::SchemaCache,
     service::{
         AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordData, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
-        WriteOutcome,
+        GuardedUpdate, Record, RecordData, RecordList, StatementBudget, Table, TransactionError,
+        UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 use wafer_sql_utils::{introspect, Backend};
@@ -697,15 +697,36 @@ impl DbExec for D1DatabaseService {
     /// Run `ops` as ONE native D1 `db.batch()`, which is what makes it a
     /// transaction: D1 runs a batch's statements in order inside one implicit
     /// transaction, and a failing statement rolls back every statement before
-    /// it and rejects the whole call (the outer `Err`, classified by
-    /// [`db_err`] so a taken key is `AlreadyExists`).
+    /// it — DDL included, measured on production D1 (a batch of two
+    /// `CREATE TABLE`s and a failing `INSERT` left neither table) — and
+    /// rejects the whole call, classified by [`db_err`] so a taken key is
+    /// `AlreadyExists`.
+    ///
+    /// Every failure is [`TransactionError::whole`]. D1 answers a failed
+    /// batch with one error for the whole sequence, and its text names no
+    /// statement (`UNIQUE constraint failed: t.id: SQLITE_CONSTRAINT`), so
+    /// this adapter cannot say which one failed and does not guess. The
+    /// classified code and D1's own message are kept.
     ///
     /// Decoded positionally, as [`run_batch`](DbExec::run_batch) is: a
     /// [`TxOp::Execute`] yields `meta().changes`, as
     /// [`run_execute`](DbExec::run_execute) does, and a [`TxOp::Returning`]
     /// its `RETURNING` rows through [`record_from_columns`], as
     /// [`run_execute_returning`](DbExec::run_execute_returning) does.
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
+        self.run_batched_transaction(ops)
+            .await
+            .map_err(TransactionError::whole)
+    }
+}
+
+impl D1DatabaseService {
+    /// [`DbExec::run_transaction`]'s body, in the one error type every step
+    /// of it fails with: none of them can name a statement.
+    async fn run_batched_transaction(
+        &self,
+        ops: &[TxOp<'_>],
+    ) -> Result<Vec<TxResult>, DatabaseError> {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
@@ -810,6 +831,13 @@ impl DatabaseService for D1DatabaseService {
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         DbExec::exec_raw(self, query, args).await
+    }
+
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[wafer_core::interfaces::database::service::RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        DbExec::exec_raw_transaction(self, statements).await
     }
 
     async fn delete_where(
@@ -2002,6 +2030,129 @@ mod tests {
             .await
             .expect_err("refused");
         assert!(matches!(err, DatabaseError::Internal(_)), "{err:?}");
+    }
+
+    // ── Raw-statement transactions (a migration file's primitive) ──────────
+
+    fn raw_statements(
+        queries: &[&str],
+    ) -> Vec<wafer_core::interfaces::database::service::RawStatement> {
+        queries
+            .iter()
+            .map(
+                |query| wafer_core::interfaces::database::service::RawStatement {
+                    query: (*query).to_string(),
+                    args: vec![],
+                },
+            )
+            .collect()
+    }
+
+    const FILE: &[&str] = &[
+        "CREATE TABLE t (id TEXT PRIMARY KEY)",
+        "ALTER TABLE t ADD COLUMN note TEXT",
+        "INSERT INTO t (id) VALUES ('k')",
+    ];
+
+    /// **A raw transaction is ONE `db.batch()`** carrying every statement in
+    /// order — the call D1 runs as one transaction, DDL included — not a
+    /// `run()` per statement, which would leave the statements before a
+    /// failing one applied. Counted one per statement, as every batch is.
+    #[wasm_bindgen_test]
+    async fn a_raw_transaction_is_one_batch_of_its_statements() {
+        forget_isolate_schema();
+        let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let svc = service(
+            batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
+            true,
+            "DB",
+        );
+
+        let counts = DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
+            .await
+            .expect("committed");
+
+        assert_eq!(counts, [1, 1, 1]);
+        assert_eq!(
+            *batches.borrow(),
+            [FILE.iter().map(|sql| sql.to_string()).collect::<Vec<_>>()]
+        );
+        assert_eq!(used(&svc), 3);
+    }
+
+    /// **A refused batch names no statement.** D1 rejects the whole
+    /// `batch()` with one error whose text names no statement, so the
+    /// failure keeps D1's classified code and message and carries no
+    /// position: a guessed one would point the runner at the wrong statement.
+    #[wasm_bindgen_test]
+    async fn a_refused_raw_transaction_keeps_its_code_and_names_no_statement() {
+        for (message, taken_key) in [
+            (
+                "D1_ERROR: UNIQUE constraint failed: t.id: SQLITE_CONSTRAINT",
+                true,
+            ),
+            ("D1_ERROR: no such table: t_missing: SQLITE_ERROR", false),
+        ] {
+            forget_isolate_schema();
+            let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let svc = service(
+                batching_d1(
+                    BatchAnswer::Reject {
+                        message,
+                        cause: None,
+                    },
+                    Rc::clone(&batches),
+                ),
+                true,
+                "DB",
+            );
+            let err = DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
+                .await
+                .expect_err("refused");
+            assert_eq!(err.statement, None, "{message}: {err}");
+            match (&err.error, taken_key) {
+                (DatabaseError::AlreadyExists(text), true)
+                | (DatabaseError::Internal(text), false) => {
+                    assert!(text.contains(&message["D1_ERROR: ".len()..]), "{text}");
+                }
+                (other, _) => panic!("{message} classified as {other:?}"),
+            }
+            assert_eq!(batches.borrow().len(), 1, "sent as one batch");
+        }
+    }
+
+    /// **Admitted whole.** A raw transaction that fits D1's limit but not
+    /// what this invocation has left is `ResourceExhausted` before anything
+    /// is sent: no batch, nothing counted, no statement named.
+    #[wasm_bindgen_test]
+    async fn a_raw_transaction_past_what_the_invocation_has_left_sends_nothing() {
+        let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let queries = D1QueryCount::new();
+        forget_isolate_schema();
+        let svc = D1DatabaseService::new(
+            batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
+            true,
+            "DB",
+            queries.clone(),
+            4,
+        );
+        DatabaseService::query_raw(&svc, "SELECT 1", &[])
+            .await
+            .expect("an earlier query in this invocation");
+        DatabaseService::query_raw(&svc, "SELECT 1", &[])
+            .await
+            .expect("an earlier query in this invocation");
+
+        let err = DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
+            .await
+            .expect_err("three statements do not fit the two left of four");
+        assert!(
+            matches!(err.error, DatabaseError::ResourceExhausted(_)),
+            "{err}"
+        );
+        assert_eq!(err.statement, None, "a refusal names no statement");
+        assert!(batches.borrow().is_empty(), "D1 was never sent the batch");
+        assert_eq!(queries.sent(), 2, "nothing more was counted");
     }
 
     // ── The per-invocation statement budget ─────────────────────────────────

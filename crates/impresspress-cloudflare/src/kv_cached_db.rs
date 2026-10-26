@@ -55,7 +55,7 @@ use impresspress_core::cache_key;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
     AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
-    Record, RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
+    RawStatement, Record, RecordList, Table, TransactionError, UpsertSpec, WriteOp, WriteOutcome,
 };
 
 /// KV TTL applied to every row-cache PUT (24 h).
@@ -337,6 +337,17 @@ impl DatabaseService for KvCachedD1DatabaseService {
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         self.inner.exec_raw(query, args).await
+    }
+
+    /// Forwarded. Like [`exec_raw`](Self::exec_raw) it invalidates no cached
+    /// row: a raw statement that writes a cached table leaves its KV keys to
+    /// the typed write or read-through read that follows it (see
+    /// `admin_migration_009_tests`).
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        self.inner.exec_raw_transaction(statements).await
     }
 
     async fn increment_field_where(
@@ -1027,6 +1038,13 @@ mod tests {
             _query: &str,
             _args: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn exec_raw_transaction(
+            &self,
+            _statements: &[wafer_core::interfaces::database::service::RawStatement],
+        ) -> Result<Vec<i64>, wafer_core::interfaces::database::service::TransactionError> {
             unreachable!()
         }
 
