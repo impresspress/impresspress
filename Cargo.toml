@@ -41,25 +41,25 @@ license = "MIT"
 
 [workspace.dependencies]
 # WAFER runtime (git deps pinned to rev)
-wafer-run = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a", default-features = false }
-wafer-block = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-core = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-sql-utils = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-cors = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-crypto = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-http-listener = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-inspector = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-local-storage = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-network = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-readonly-guard = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-router = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-s3 = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-security-headers = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-sqlite = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-web = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-postgres = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-block-fastembed = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
-wafer-net-security = { git = "https://github.com/wafer-run/wafer-run", rev = "ef3a510fc3fd1c1b6d00765943877dec8048aa0a" }
+wafer-run = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03", default-features = false }
+wafer-block = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-core = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-sql-utils = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-cors = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-crypto = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-http-listener = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-inspector = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-local-storage = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-network = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-readonly-guard = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-router = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-s3 = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-security-headers = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-sqlite = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-web = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-postgres = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-block-fastembed = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
+wafer-net-security = { git = "https://github.com/wafer-run/wafer-run", rev = "9845c38d006166379fed9ad6671e151e53e9cd03" }
 
 # Core
 async-trait = "0.1.92"
