@@ -292,6 +292,9 @@ test.describe("products admin webhook recovery", () => {
       "Replay this Stripe webhook through the normal validation pipeline?",
     );
     await expect(operations).toContainText("No matching webhook events.");
+    // The replayed row left the list with its button: focus goes to the
+    // list's place, which now says it is empty, not to the page body.
+    await expect(page.locator("#stripe-webhook-events")).toBeFocused();
     expect(requests.filter((request) => request.method === "POST")).toEqual([
       {
         method: "POST",

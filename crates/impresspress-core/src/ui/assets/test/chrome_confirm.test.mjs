@@ -319,7 +319,7 @@ test('a list re-rendered whole is found again by its place in the request\'s tar
   }
 });
 
-test('with no row left to hold it, focus goes to the page body', async () => {
+test('with no row and no empty state left to hold it, focus goes to the page body', async () => {
   const page = loadChromeDom();
   const ui = confirmDialog(page);
   const { rows, content } = pageWithRows(page, 1);
@@ -330,6 +330,138 @@ test('with no row left to hold it, focus goes to the page body', async () => {
   page.htmx.afterRequest(opener);
 
   assert.equal(page.doc.activeElement, content);
+});
+
+test('the last row deleted and the list answered by its empty state: focus goes to the empty state\'s action', async () => {
+  const page = loadChromeDom();
+  const ui = confirmDialog(page);
+  const { rows, content, table } = pageWithRows(page, 1);
+  const opener = rows[0].revoke;
+  await askAndConfirm(page, opener, content, ui);
+
+  // The list re-rendered into `#content` as `components::empty_state`.
+  const add = page.el('button', { type: 'button', class: 'btn btn--secondary' });
+  table.remove();
+  content.appendChild(page.el('div', { class: 'empty' }, [page.el('h2', { class: 'empty__title' }), page.el('div', { class: 'empty__action' }, [add])]));
+  page.htmx.afterRequest(opener);
+
+  assert.equal(page.doc.activeElement, add);
+});
+
+test('the empty state is the deleted row\'s own card\'s, not an earlier card\'s', async () => {
+  const page = loadChromeDom();
+  const { el } = page;
+  const ui = confirmDialog(page);
+  const content = el('main', { id: 'content', tabindex: '0' });
+  const revoke = el('button', { type: 'button', 'hx-delete': '/rows/0', 'hx-confirm': 'Revoke row 0?', 'data-confirm-label': 'Revoke row', 'data-confirm-tone': 'danger' });
+  content.appendChild(el('section', { class: 'card' }, [el('p', { class: 'empty-note' })]));
+  content.appendChild(el('section', { class: 'card' }, [el('table', {}, [el('tbody', {}, [el('tr', {}, [el('td', {}, [revoke])])])])]));
+  page.body.appendChild(content);
+  await askAndConfirm(page, revoke, content, ui);
+
+  // `hx-target="#content"`: both cards again, the second now empty.
+  [...content.children].forEach((c) => c.remove());
+  const add = el('button', { type: 'button' });
+  content.appendChild(el('section', { class: 'card' }, [el('p', { class: 'empty-note' })]));
+  content.appendChild(el('section', { class: 'card' }, [el('div', { class: 'empty' }, [el('div', { class: 'empty__action' }, [add])])]));
+  page.htmx.afterRequest(revoke);
+
+  assert.equal(page.doc.activeElement, add);
+});
+
+test('an empty state with no action takes focus itself, from script only', async () => {
+  const page = loadChromeDom();
+  const ui = confirmDialog(page);
+  const { rows, content, table } = pageWithRows(page, 1);
+  const opener = rows[0].revoke;
+  await askAndConfirm(page, opener, content, ui);
+
+  const note = page.el('p', { class: 'empty-note' });
+  table.remove();
+  content.appendChild(note);
+  page.htmx.afterRequest(opener);
+
+  assert.equal(page.doc.activeElement, note);
+  assert.equal(note.getAttribute('tabindex'), '-1');
+});
+
+test('an empty state outside the request\'s target is not this list\'s', async () => {
+  const page = loadChromeDom();
+  const ui = confirmDialog(page);
+  const { rows, content } = pageWithRows(page, 1);
+  const elsewhere = page.el('button', { type: 'button' });
+  content.appendChild(page.el('div', { class: 'empty' }, [elsewhere]));
+  const opener = rows[0].revoke;
+  await askAndConfirm(page, opener, rows[0].row, ui);
+
+  rows[0].row.remove();
+  page.htmx.afterRequest(opener);
+
+  assert.equal(page.doc.activeElement, content);
+});
+
+// --- the script path: a block's own re-render -------------------------------
+
+test('a script that re-renders its own list places focus as the htmx path does', async () => {
+  const page = loadChromeDom();
+  const { rows, content, table } = pageWithRows(page, 3);
+  const opener = rows[1].revoke;
+  opener.focus();
+  const keep = page.window.impresspressKeepFocus(opener, content);
+
+  // The script's own re-render: the whole table again, without row 1.
+  const fresh = page.el('tbody');
+  const kept = [0, 2].map((i) => {
+    const revoke = page.el('button', { type: 'button', 'data-row': String(i) });
+    fresh.appendChild(page.el('tr', {}, [page.el('td', {}, [page.el('button', { type: 'button' })]), page.el('td', {}, [revoke])]));
+    return revoke;
+  });
+  table.remove();
+  content.appendChild(page.el('table', {}, [fresh]));
+  keep.restore();
+
+  assert.equal(page.doc.activeElement, kept[1]);
+});
+
+test('a script\'s own rows, named by a selector, and its own empty list', () => {
+  const page = loadChromeDom();
+  const { el } = page;
+  const content = el('main', { id: 'content', tabindex: '0' });
+  const target = el('div', {});
+  const row = (n) => {
+    const archive = el('button', { type: 'button', 'data-n': String(n) });
+    return { row: el('div', { class: 'preset-row' }, [el('strong'), archive]), archive };
+  };
+  const rows = [row(0), row(1)];
+  rows.forEach((r) => target.appendChild(r.row));
+  content.appendChild(target);
+  page.body.appendChild(content);
+
+  rows[0].archive.focus();
+  let keep = page.window.impresspressKeepFocus(rows[0].archive, target, '.preset-row');
+  rows[0].row.remove();
+  keep.restore();
+  assert.equal(page.doc.activeElement, rows[1].archive);
+
+  keep = page.window.impresspressKeepFocus(rows[1].archive, target, '.preset-row');
+  rows[1].row.remove();
+  target.textContent = 'No saved presets yet.';
+  keep.restore();
+  assert.equal(page.doc.activeElement, target);
+  assert.equal(target.getAttribute('tabindex'), '-1');
+});
+
+test('a script\'s restore leaves focus alone when the opener is still there, and needs the opener', () => {
+  const page = loadChromeDom();
+  const { rows, content } = pageWithRows(page, 2);
+  const opener = rows[0].revoke;
+  opener.focus();
+  const keep = page.window.impresspressKeepFocus(opener, content);
+  rows[1].edit.focus();
+  keep.restore();
+  assert.equal(page.doc.activeElement, rows[1].edit);
+  assert.throws(() => page.window.impresspressKeepFocus(null, content), TypeError);
+  assert.throws(() => page.window.impresspressKeepFocus(opener, null), TypeError);
 });
 
 test('a control still there, or focus the response placed, is left alone', async () => {
