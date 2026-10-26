@@ -372,8 +372,8 @@
 }
 
 /* The page header (`ui::shell::Topbar`): crumbs + title + subtitle on the
-   left, the page's actions and the palette trigger on the right, on the page
-   background with no box of its own. */
+   left, the subject's status, the page's actions and the palette trigger on
+   the right, on the page background with no box of its own. */
 .topbar {
 	display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-4);
 }
@@ -394,7 +394,7 @@
 	overflow-wrap: anywhere;
 }
 .topbar__subtitle { font-size: var(--text-base); color: var(--text-secondary); margin: 0; }
-.topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.topbar__status, .topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
 	min-height: var(--control-height);
@@ -496,9 +496,13 @@
 
 	.shell__main { gap: var(--space-3); }
 
-	/* The topbar stacks: title, then the actions on a row of their own.
-	   The subtitle is desktop-only (`Topbar::subtitle`'s contract), and the
-	   desktop palette button gives way to the mobile header's icon. */
+	/* The topbar stacks: the title with the subject's status beside it,
+	   then the actions on a row of their own. The heading gives up width to
+	   the status (a basis of 0), so a badge never wraps under the title into
+	   the buttons' row, where it would read as one of them. The subtitle is
+	   desktop-only (`Topbar::subtitle`'s contract), and the desktop palette
+	   button gives way to the mobile header's icon. */
+	.topbar__heading { flex-basis: 0; }
 	.topbar__title { font-size: var(--text-xl); }
 	.topbar__subtitle { display: none; }
 	.topbar__actions { flex-basis: 100%; }

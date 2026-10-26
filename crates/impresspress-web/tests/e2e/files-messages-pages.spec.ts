@@ -1,6 +1,6 @@
 import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
-import { WIDTHS, isWrong, layout } from './fixtures/layout';
+import { WIDTHS, isWrong, layout, overflows } from './fixtures/layout';
 import { PHONE, targetFloor } from './fixtures/targets';
 import { seedBucket } from './fixtures/storage';
 
@@ -26,13 +26,6 @@ import { seedBucket } from './fixtures/storage';
  */
 
 test.use({ storageState: ADMIN_STATE_PATH });
-
-/** No horizontal scroll: the document is no wider than the viewport. */
-async function overflowX(page: Page): Promise<number> {
-  return page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
-}
 
 test('a bucket created from the modal takes an upload with labelled row controls', async ({ page }) => {
   const bucket = `e2e-${Date.now().toString(36)}`;
@@ -210,7 +203,7 @@ test('the share and file tables fit their card at every width', async ({ page, b
     await loginAsAdmin(page);
     const file = `${seeded.bucket}/${long}`;
     const found: Record<string, unknown> = {};
-    for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+    for (const width of WIDTHS) {
       await page.setViewportSize({ width, height: 900 });
       for (const [path, control] of [
         ['/b/cloudstorage/', `Revoke the share link for ${file}`],
@@ -218,15 +211,10 @@ test('the share and file tables fit their card at every width', async ({ page, b
         [`/b/storage/${seeded.bucket}/`, `Actions for ${long}`],
       ] as const) {
         await page.goto(path, { waitUntil: 'networkidle' });
-        const r = await page.evaluate(() => ({
-          page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-          tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
-            .filter((t) => t.scrollWidth > t.clientWidth + 1)
-            .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
-        }));
+        const r = await layout(page);
         const box = control ? await page.getByRole('button', { name: control }).boundingBox() : null;
         const offscreen = box ? box.x + box.width > width + 0.5 : false;
-        if (r.page > 0 || r.tables.length || offscreen) found[`${path} at ${width}`] = { ...r, offscreen };
+        if (overflows(r) || offscreen) found[`${path} at ${width}`] = { ...r, offscreen };
       }
     }
     expect(found, 'a page or table scrolled sideways, or a row control left the screen').toEqual({});
@@ -245,7 +233,7 @@ test.describe('on a phone', () => {
     await loginAsAdmin(page);
     await page.goto('/b/messages/', { waitUntil: 'networkidle' });
     await expect(page.getByRole('heading', { level: 1, name: 'Messages' })).toBeVisible();
-    expect(await overflowX(page)).toBe(0);
+    expect((await layout(page)).page).toBe(0);
 
     await page.getByLabel('Type').selectOption('conversation');
     await page.getByLabel('Title').fill(title);
@@ -267,7 +255,7 @@ test.describe('on a phone', () => {
     expect(inputBox.width).toBeGreaterThan(200);
     expect(sendBox.height).toBeGreaterThan(43.5);
     expect(sendBox.x + sendBox.width).toBeLessThanOrEqual(390);
-    expect(await overflowX(page)).toBe(0);
+    expect((await layout(page)).page).toBe(0);
 
     await input.fill('Ship it on Friday?');
     await send.click();

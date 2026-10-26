@@ -67,8 +67,10 @@
 }
 
 /* Within the limit stated at the top, the floor keeps every word whole;
-   `break-word` only breaks a word wider than the stat (an email on order
-   detail, or a figure past the limit) rather than let it overflow. */
+   `break-word` only breaks a word wider than the stat (a figure past the
+   limit) rather than let it overflow. A value is a figure or a marker, never
+   free text such as an email: that belongs in a card's key/value list. The
+   width specs (`fixtures/layout.ts`, `stats`) fail on any broken word. */
 .stat__value {
 	font-size: 1.25rem;
 	font-weight: 600;

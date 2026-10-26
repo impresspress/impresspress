@@ -1,5 +1,7 @@
 import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { WIDTHS, layout, overflows } from './fixtures/layout';
+import { visiblePrimaries } from './fixtures/primaries';
 import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
 
 /**
@@ -31,21 +33,9 @@ import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
 
 test.use({ storageState: ADMIN_STATE_PATH });
 
-/** The `.btn--primary` labels a reader sees outside any dialog. */
-async function visiblePrimaries(page: Page): Promise<string[]> {
-  return page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>('.btn--primary')]
-      .filter((b) => b.checkVisibility() && !b.closest('dialog'))
-      .map((b) => b.textContent!.trim()),
-  );
-}
-
-/** No horizontal scroll: the document is no wider than the viewport. */
-async function overflowX(page: Page): Promise<number> {
-  return page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
-}
+/** A real word with no break opportunity, wider than any table's narrowest
+ * name column (a seller can name a product anything). */
+const WORST_WORD = 'Wolfeschlegelsteinhausenbergerdorff';
 
 test.describe.serial('products admin pages', () => {
   const stamp = `pages${Date.now().toString(36)}`;
@@ -122,7 +112,7 @@ test.describe.serial('products admin pages', () => {
     await expect(page.getByRole('navigation', { name: 'Product setup progress' })).toContainText(
       'Checkout',
     );
-    expect(await overflowX(page)).toBeLessThanOrEqual(0);
+    expect((await layout(page)).page).toBeLessThanOrEqual(0);
   });
 
   test('a product page has one visible primary, in the topbar', async ({ page }) => {
@@ -134,9 +124,9 @@ test.describe.serial('products admin pages', () => {
     await expect(
       page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link', { name: 'All products' }),
     ).toBeVisible();
-    await expect(page.locator('.topbar__actions .badge')).toHaveText('Draft');
+    await expect(page.locator('.topbar__status .badge')).toHaveText('Draft');
 
-    await expect(visiblePrimaries(page)).resolves.toEqual(['Publish product']);
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Publish product'], dialogs: [] });
     await expect(page.locator('#product-manager-form').getByRole('button', { name: 'Save product details' })).toHaveClass(/btn--secondary/);
     const offer = page.locator('[data-offer-card]');
     await expect(offer).toHaveCount(1);
@@ -145,7 +135,7 @@ test.describe.serial('products admin pages', () => {
     // Revealing the pricing editor shows its Save, a secondary: still one.
     await offer.getByRole('button', { name: 'Edit visually' }).click();
     await expect(page.locator('#product-manager-visual-editor')).toBeVisible();
-    await expect(visiblePrimaries(page)).resolves.toEqual(['Publish product']);
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Publish product'], dialogs: [] });
     await page.locator('#product-manager-visual-editor').getByRole('button', { name: 'Cancel' }).click();
 
     await expect(page.getByText('Create a product with pricing')).toHaveCount(0);
@@ -154,15 +144,15 @@ test.describe.serial('products admin pages', () => {
   test('the wizard shows one primary at every step', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/products/admin/new', { waitUntil: 'networkidle' });
-    await expect(visiblePrimaries(page)).resolves.toEqual(['Continue']);
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Continue'], dialogs: [] });
     await page.getByRole('button', { name: 'Continue' }).click();
     await page.getByLabel('Product name').fill('One primary');
     for (let step = 2; step < 5; step++) {
-      await expect(visiblePrimaries(page)).resolves.toEqual(['Continue']);
+      await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Continue'], dialogs: [] });
       await page.getByRole('button', { name: 'Continue' }).click();
     }
     await expect(page.locator('[data-wizard-step="5"]')).toBeVisible();
-    await expect(visiblePrimaries(page)).resolves.toEqual(['Create and publish']);
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Create and publish'], dialogs: [] });
   });
 
   test('the group editor is a dialog with its own primary', async ({ page }) => {
@@ -173,8 +163,7 @@ test.describe.serial('products admin pages', () => {
     const dialog = page.getByRole('dialog', { name: 'New group' });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByLabel('Name')).toBeFocused();
-    await expect(dialog.locator('.btn--primary')).toHaveText(['Save group']);
-    await expect(visiblePrimaries(page)).resolves.toEqual(['New group']);
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['New group'], dialogs: [['Save group']] });
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(dialog).toBeHidden();
     await expect(opener).toBeFocused();
@@ -201,11 +190,15 @@ test.describe.serial('products admin pages', () => {
       const body = (await res.json()) as { id?: string; data?: { id?: string } };
       return (body.id ?? body.data?.id) as string;
     };
-    const long = `annual-enterprise-subscription-with-priority-support ${stamp}`;
+    // Every name carries `WORST_WORD`, an unbreakable word wider than the
+    // run's `stamp` (13 characters, 79-106px in the CI font, by its digits),
+    // so the narrowest the name cell can be is fixed by this word rather than
+    // by the clock: a table that only fit a short stamp failed on some runs.
+    const long = `annual-enterprise-subscription-with-priority-support ${WORST_WORD} ${stamp}`;
     const groupId = await idOf(
       await api.post('/b/products/api/admin/groups', {
         headers,
-        data: { name: `Printed goods and other physical merchandise ${stamp}`, description: 'Posters, mugs, and anything else that ships in a box', status: 'active' },
+        data: { name: `Printed goods and other physical merchandise ${WORST_WORD} ${stamp}`, description: 'Posters, mugs, and anything else that ships in a box', status: 'active' },
       }),
     );
     const deletedId = await idOf(
@@ -270,24 +263,21 @@ test.describe.serial('products admin pages', () => {
         '/b/products/my-products?view=deleted',
       ];
       const found: Record<string, unknown> = {};
-      for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+      for (const width of WIDTHS) {
         await page.setViewportSize({ width, height: 900 });
         for (const path of paths) {
           const res = await page.goto(path, { waitUntil: 'networkidle' });
           expect(res!.status(), path).toBe(200);
-          const r = await page.evaluate(() => ({
-            rows: document.querySelectorAll('.data-table tbody tr').length,
-            page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-            tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
-              .filter((t) => t.scrollWidth > t.clientWidth + 1)
-              .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
-            // Every row control in view (the Deleted views' two ways out).
-            clipped: [...document.querySelectorAll<HTMLElement>('.data-table .btn')]
+          const r = await layout(page);
+          const rows = await page.locator('.data-table tbody tr').count();
+          // Every row control in view (the Deleted views' two ways out).
+          const clipped = await page.evaluate(() =>
+            [...document.querySelectorAll<HTMLElement>('.data-table .btn')]
               .filter((b) => b.checkVisibility() && b.getBoundingClientRect().right > window.innerWidth)
               .map((b) => b.getAttribute('aria-label') ?? b.textContent),
-          }));
-          expect(r.rows, `${path}: the seeded rows render`).toBeGreaterThan(0);
-          if (r.page > 0 || r.tables.length || r.clipped.length) found[`${path} @${width}`] = r;
+          );
+          expect(rows, `${path}: the seeded rows render`).toBeGreaterThan(0);
+          if (overflows(r) || clipped.length) found[`${path} @${width}`] = { ...r, clipped };
         }
       }
       expect(found, 'a table scrolled sideways or hid a row control').toEqual({});
@@ -336,7 +326,7 @@ test.describe.serial('products admin pages', () => {
     // The draft's Publish and adding another price are both secondary: the
     // topbar's Publish product stays the page's one primary.
     await expect(pricing.locator('.btn--primary')).toHaveCount(0);
-    await expect(visiblePrimaries(page)).resolves.toEqual(['Publish product']);
+    await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['Publish product'], dialogs: [] });
     await expect(pricing.getByRole('button', { name: 'Add a price' })).toHaveClass(/btn--secondary/);
 
     await offer.getByRole('button', { name: 'Publish' }).click();
@@ -377,6 +367,6 @@ test.describe.serial('products admin pages', () => {
       .locator('.admin-buttons-form-grid > *')
       .evaluateAll((cells) => cells.map((c) => Math.round(c.getBoundingClientRect().left)));
     expect(new Set(lefts).size, JSON.stringify(lefts)).toBe(1);
-    expect(await overflowX(page)).toBeLessThanOrEqual(0);
+    expect((await layout(page)).page).toBeLessThanOrEqual(0);
   });
 });

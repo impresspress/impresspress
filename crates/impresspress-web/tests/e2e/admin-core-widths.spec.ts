@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
-import { WIDTHS as ALL_WIDTHS, isWrong, layout as blockLayout } from './fixtures/layout';
+import { WIDTHS, isWrong, layout, overflows } from './fixtures/layout';
+import { visiblePrimaries } from './fixtures/primaries';
 
 /**
  * The admin core pages between the phone and the 1280px baselines, where
@@ -81,13 +82,15 @@ import { WIDTHS as ALL_WIDTHS, isWrong, layout as blockLayout } from './fixtures
  *   so the page is laid out from `fixtures/dev-page.html` (kept equal to
  *   what it renders by `the_dev_fixture_is_what_the_page_renders`) with
  *   `dev.css` beside it.
- * The widths: 800 (the filter wraps; the database cards stack; the settings
- * rail is a tab row), and 960 and 1024 (the database cards side by side, the
- * Tables column at its narrowest). Writes nothing beyond the page loads'
- * own request-log rows (see `e2e:visual`).
+ * The first four checks run at `BETWEEN` (below); the page sweeps at every
+ * width in `fixtures/layout.ts`, measured by its one `layout`. Writes nothing
+ * beyond the page loads' own request-log rows (see `e2e:visual`).
  */
 
-const WIDTHS = [800, 960, 1024] as const;
+/** Where the in-between checks look: 800 (the filter wraps; the database
+ * cards stack; the settings rail is a tab row), and 960 and 1024 (the
+ * database cards side by side, the Tables column at its narrowest). */
+const BETWEEN = [800, 960, 1024] as const;
 
 async function open(page: Page, width: number, path: string) {
   await page.setViewportSize({ width, height: 900 });
@@ -98,7 +101,7 @@ async function open(page: Page, width: number, path: string) {
 test.describe('admin core pages at in-between widths', () => {
   test.use({ storageState: ADMIN_STATE_PATH });
 
-  for (const width of WIDTHS) {
+  for (const width of BETWEEN) {
     test(`blocks at ${width}px: the current tab's underline sits on the only rule`, async ({
       page,
     }) => {
@@ -194,7 +197,7 @@ test.describe('admin core pages at in-between widths', () => {
     });
   }
 
-  for (const width of [...WIDTHS, 1280]) {
+  for (const width of [...BETWEEN, 1280]) {
     test(`network at ${width}px: each route table fits its card and the route keeps its share`, async ({
       page,
     }) => {
@@ -284,19 +287,14 @@ test.describe('admin core pages at in-between widths', () => {
     '/b/storage/admin/quotas',
     '/b/vector/',
   ];
-  for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+  for (const width of WIDTHS) {
     test(`storage and vector pages at ${width}px: nothing scrolls sideways`, async ({ page }) => {
       await open(page, width, STORAGE_PAGES[0]);
       const found: Record<string, unknown> = {};
       for (const path of STORAGE_PAGES) {
         await page.goto(path, { waitUntil: 'networkidle' });
-        const r = await page.evaluate(() => ({
-          page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-          tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
-            .filter((t) => t.scrollWidth > t.clientWidth + 1)
-            .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
-        }));
-        if (r.page > 0 || r.tables.length) found[path] = r;
+        const r = await layout(page);
+        if (overflows(r)) found[path] = r;
       }
       expect(found, 'a page or a table scrolled sideways').toEqual({});
       // The seeded bucket's file rows keep their menu in view.
@@ -313,21 +311,7 @@ test.describe('admin core pages at in-between widths', () => {
     '/b/products/admin/groups',
     '/b/products/admin/new',
   ];
-  /** What overflows, and the primaries a reader sees outside any dialog. */
-  const layout = (page: Page) =>
-    page.evaluate(() => ({
-      page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
-        .filter((t) => t.checkVisibility() && t.scrollWidth > t.clientWidth + 1)
-        .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
-      cards: [...document.querySelectorAll<HTMLElement>('.card')]
-        .filter((c) => c.checkVisibility() && c.scrollWidth > c.clientWidth + 1)
-        .map((c) => c.querySelector('.card__title')?.textContent ?? 'card'),
-      primaries: [...document.querySelectorAll<HTMLElement>('.btn--primary')]
-        .filter((b) => b.checkVisibility() && !b.closest('dialog'))
-        .map((b) => b.textContent!.trim()),
-    }));
-  for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+  for (const width of WIDTHS) {
     test(`products catalog pages at ${width}px: nothing scrolls sideways and one primary shows`, async ({
       page,
     }) => {
@@ -338,7 +322,7 @@ test.describe('admin core pages at in-between widths', () => {
         const r = await layout(page);
         // The Deleted view has nothing to create, so no primary.
         const primaries = path.endsWith('view=deleted') ? 0 : 1;
-        if (r.page > 0 || r.tables.length || r.cards.length || r.primaries.length !== primaries) found[path] = r;
+        if (overflows(r) || r.primaries.length !== primaries) found[path] = r;
       }
       expect(found, 'a page scrolled sideways or showed other than one primary').toEqual({});
 
@@ -368,7 +352,7 @@ test.describe('admin core pages at in-between widths', () => {
       await expect(page.locator('#wizard-shipping-settings')).toBeVisible();
       const checkout = await layout(page);
       for (const [step, r] of Object.entries({ pricing, checkout })) {
-        expect({ step, ...r }).toEqual({ step, page: 0, tables: [], cards: [], primaries: ['Continue'] });
+        expect(isWrong(r, ['Continue']), `${step}: ${JSON.stringify(r)}`).toBe(false);
       }
 
       // The group editor is a dialog that fits the screen, with its own
@@ -380,8 +364,7 @@ test.describe('admin core pages at in-between widths', () => {
       await expect(dialog.getByLabel('Name')).toBeFocused();
       const box = await dialog.boundingBox();
       expect(box!.x >= 0 && box!.x + box!.width <= width, JSON.stringify(box)).toBe(true);
-      await expect(dialog.locator('.btn--primary')).toHaveText(['Save group']);
-      expect((await layout(page)).primaries).toEqual(['New group']);
+      await expect(visiblePrimaries(page)).resolves.toEqual({ page: ['New group'], dialogs: [['Save group']] });
     });
   }
 
@@ -398,7 +381,7 @@ test.describe('admin core pages at in-between widths', () => {
     '/b/legalpages/admin/endpoints': () => [],
     '/b/messages/': () => ['Create'],
   };
-  for (const width of ALL_WIDTHS) {
+  for (const width of WIDTHS) {
     test(`messages, llm and legal pages at ${width}px: nothing scrolls sideways and the chat keeps its room`, async ({
       page,
     }) => {
@@ -406,7 +389,7 @@ test.describe('admin core pages at in-between widths', () => {
       const found: Record<string, unknown> = {};
       for (const [path, primaries] of Object.entries(BLOCK_PAGES)) {
         await page.goto(path, { waitUntil: 'networkidle' });
-        const r = await blockLayout(page);
+        const r = await layout(page);
         if (isWrong(r, primaries(width))) found[path] = r;
       }
       expect(found, 'a page scrolled sideways, a card overflowed, the chat was squeezed or the primaries differ').toEqual({});
@@ -459,30 +442,6 @@ test.describe('admin core pages at in-between widths', () => {
       .slice(1)
       .reduce<string[][]>((pairs, part, i, all) => (i % 2 === 0 ? [...pairs, [part, all[i + 1]]] : pairs), []),
   );
-  /** As `layout`, plus anything drawn past the content column's right edge
-   * (an element's box) and any card whose content is wider than it (a long
-   * unbroken word overflows its line without moving any box). */
-  const commerceLayout = (page: Page) =>
-    page.evaluate(() => {
-      const edge = document.querySelector('main#content')!.getBoundingClientRect().right;
-      return {
-        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        tables: [...document.querySelectorAll<HTMLElement>('.data-table')]
-          .filter((t) => t.checkVisibility() && t.scrollWidth > t.clientWidth + 1)
-          .map((t) => `${t.scrollWidth}/${t.clientWidth}`),
-        past: [...document.querySelectorAll<HTMLElement>('main#content *')]
-          .filter((e) => e.checkVisibility() && !e.closest('.subnav, .tabs, .filter-links'))
-          .filter((e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().right > edge + 1)
-          .map((e) => `${e.tagName.toLowerCase()}.${e.className}`)
-          .slice(0, 4),
-        cards: [...document.querySelectorAll<HTMLElement>('main#content .card')]
-          .filter((c) => c.checkVisibility() && c.scrollWidth > c.clientWidth + 1)
-          .map((c) => `${c.querySelector('.card__title')?.textContent ?? 'card'} ${c.scrollWidth}/${c.clientWidth}`),
-        primaries: [...document.querySelectorAll<HTMLElement>('.btn--primary')]
-          .filter((b) => b.checkVisibility() && !b.closest('dialog'))
-          .map((b) => b.textContent!.trim()),
-      };
-    });
   const COMMERCE_PAGES: Record<string, string[]> = {
     '/b/products/admin/purchases': [],
     '/b/products/admin/sellers': [],
@@ -491,7 +450,7 @@ test.describe('admin core pages at in-between widths', () => {
     '/b/products/': ['View purchases'],
     '/b/products/my-purchases': [],
   };
-  for (const width of [375, 721, 800, 900, 960, 1024, 1100, 1200, 1280]) {
+  for (const width of WIDTHS) {
     test(`products commerce pages at ${width}px: nothing scrolls sideways and the tables fit`, async ({
       page,
     }) => {
@@ -499,10 +458,8 @@ test.describe('admin core pages at in-between widths', () => {
       const found: Record<string, unknown> = {};
       for (const [path, primaries] of Object.entries(COMMERCE_PAGES)) {
         await page.goto(path, { waitUntil: 'networkidle' });
-        const r = await commerceLayout(page);
-        if (r.page > 0 || r.tables.length || r.past.length || r.cards.length || JSON.stringify(r.primaries) !== JSON.stringify(primaries)) {
-          found[path] = r;
-        }
+        const r = await layout(page);
+        if (isWrong(r, primaries)) found[path] = r;
       }
 
       // The recovery tools, opened and filled as the page's script fills
@@ -532,8 +489,8 @@ test.describe('admin core pages at in-between widths', () => {
       });
       await expect(page.locator('#stripe-webhook-events table.data-table')).toBeVisible();
       await expect(page.locator('#stripe-provider-operations-list table.data-table')).toBeVisible();
-      const tools = await commerceLayout(page);
-      if (tools.page > 0 || tools.tables.length || tools.past.length || tools.cards.length) found['stripe tools'] = tools;
+      const tools = await layout(page);
+      if (overflows(tools)) found['stripe tools'] = tools;
 
       // The seeded pages, each mounted alone in this page's content column.
       await page.goto('/b/products/admin/purchases', { waitUntil: 'networkidle' });
@@ -542,8 +499,8 @@ test.describe('admin core pages at in-between widths', () => {
           main.innerHTML = body;
           main.querySelectorAll('details').forEach((d) => (d.open = true));
         }, html);
-        const r = await commerceLayout(page);
-        if (r.page > 0 || r.tables.length || r.past.length || r.cards.length) found[name] = r;
+        const r = await layout(page);
+        if (overflows(r)) found[name] = r;
       }
       expect(Object.keys(COMMERCE_FIXTURE).length).toBe(10);
       expect(found, 'a page or a table scrolled sideways').toEqual({});
@@ -558,7 +515,7 @@ test.describe('admin core pages at in-between widths', () => {
     new URL('../../../impresspress-core/src/blocks/dev/assets/dev.css', import.meta.url),
     'utf8',
   );
-  for (const width of ALL_WIDTHS) {
+  for (const width of WIDTHS) {
     test(`the dev workspace at ${width}px: cards spaced by the grid alone, Save the one primary`, async ({
       page,
     }) => {
@@ -568,7 +525,7 @@ test.describe('admin core pages at in-between widths', () => {
         main.innerHTML = body;
         main.querySelectorAll('details').forEach((d) => (d.open = true));
       }, DEV_PAGE);
-      const r = await blockLayout(page);
+      const r = await layout(page);
       expect(isWrong(r, ['Save']), JSON.stringify(r)).toBe(false);
       const gaps = await page.evaluate(() => {
         const grid = document.querySelector<HTMLElement>('.dev-workspace')!;
