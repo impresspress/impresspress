@@ -178,7 +178,7 @@ mod tests {
     /// The rows the layout spec (`stat-row.spec.ts`) lays out in a real
     /// browser, with values as the pages format them: the dashboard (five),
     /// the dashboard during an outage (five "Unavailable" markers), an order
-    /// (four, money and an email), a seller's state words (four, the longest
+    /// (three, money and a count), a seller's state words (four, the longest
     /// real ones) and a single stat. The spec reads them from
     /// a fixture file so it runs against `stat_row`'s markup rather than a
     /// copy of it; this keeps the file what `stat_row` renders today. To
@@ -207,7 +207,6 @@ mod tests {
         let order = stat_row(vec![
             Stat::new("Total", "12345.67 USD"),
             Stat::new("Refunded", "1000.00 USD"),
-            Stat::new("Customer", "jane.doe@example.com"),
             Stat::new("Items", "3"),
         ]);
         let seller = stat_row(vec![

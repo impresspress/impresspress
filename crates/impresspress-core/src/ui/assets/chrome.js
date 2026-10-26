@@ -536,8 +536,15 @@ document.addEventListener("input", function (e) {
 //   and if the control is gone once the request has landed, focus goes to the
 //   same control in the row now at that place (the replacement row, or the
 //   one that moved up), else the nearest row after or before it that has a
-//   control, else `main#content`. A list re-rendered whole by the response is
-//   found again inside the request's target by its position there.
+//   control. When no row with a control is left — the last one was deleted,
+//   and the answer put an empty state where the list was — focus goes to
+//   that empty state's own action ("Add provider"), or to the empty state
+//   itself, which says the list is empty; only with none of those does it go
+//   to `main#content`. The empty state is looked for where the list was: in
+//   the row's own card (found again by its place among the target's cards)
+//   when the row sat in one, else anywhere in the request's target. A list
+//   re-rendered whole by the response is found again inside the request's
+//   target by its position there.
 //
 // Two ways in, and no other:
 //   hx-confirm="<question>" on an htmx control, with
@@ -549,9 +556,21 @@ document.addEventListener("input", function (e) {
 //     block's own script: a promise of true (confirmed) or false (cancelled,
 //     however). `opener` is where focus returns; it defaults to the focused
 //     control, which a mouse click does not always leave on the button (Safari,
-//     Firefox on macOS), so a caller passes the button it has. What has focus
-//     once the script's own action has re-rendered its list is the script's
-//     to decide: the after-the-swap placement below is htmx's path only.
+//     Firefox on macOS), so a caller passes the button it has.
+//
+// A script that re-renders its own list after the action gets the same
+// placement as htmx's path, in two steps, because only it knows when its
+// re-render is done:
+//   var keep = window.impresspressKeepFocus(opener, scope[, rows]); // before
+//   ... the action, and the script's own re-render of `scope` ...
+//   keep.restore();                                                  // after
+// `scope` is the element the script re-renders the list inside (it stays in
+// the document), and `rows` a selector for the list's rows when they are not
+// `tr`/`li`. With no row with a control left (the list is empty, or its
+// rows stay without controls, as an archived preset's does), focus goes to an
+// empty state in `scope`, else to `scope` itself: the list's place, whatever
+// the script now shows in it. `restore` does nothing when the opener is still
+// there or something else already has focus.
 // A confirm without a question, a label or a tone of danger or primary is a
 // TypeError, not a generic "OK".
 //
@@ -1096,6 +1115,9 @@ document.addEventListener("input", function (e) {
     // Where focus goes once a confirmed htmx request has landed, noted before
     // it goes (see the head of this section).
     var keeping = null;
+    // What a selector for an empty state matches: the framed one and the
+    // one-line note (`components::{empty_state, empty_note}`).
+    var EMPTY = ".empty, .empty-note";
 
     // The lists with `tag`'s name in `scope`, `scope` itself first if it is
     // one, in document order — the same walk before and after a swap, so a
@@ -1105,11 +1127,16 @@ document.addEventListener("input", function (e) {
         return found.concat(Array.prototype.slice.call(scope.querySelectorAll(tag.toLowerCase())));
     }
 
-    function noteFocusPlace(opener, target) {
-        var row = opener.closest("tr, li");
+    // `rows` is what a row is: a table's or a list's (`tr, li`) on htmx's
+    // path; a script whose list is built of other elements names them.
+    function noteFocusPlace(opener, target, rows) {
+        var row = opener.closest(rows || "tr, li");
         var list = row ? row.parentNode : null;
         var scope = target instanceof Element ? target : null;
-        keeping = {
+        var card = row ? row.closest(".card") : null;
+        return {
+            cardAt: card && scope && card !== scope && scope.contains(card) ?
+                Array.prototype.indexOf.call(scope.querySelectorAll(".card"), card) : -1,
             opener: opener,
             list: list,
             rowAt: list ? Array.prototype.indexOf.call(list.children, row) : -1,
@@ -1131,7 +1158,7 @@ document.addEventListener("input", function (e) {
                 (k.scopeId ? document.getElementById(k.scopeId) : null);
             if (scope) list = listsIn(scope, k.list.tagName)[k.listAt] || null;
         }
-        if (!list || k.rowAt < 0) return null;
+        if (!list || k.rowAt < 0) return emptyStatePlace(k);
         var rows = list.children;
         var order = [];
         for (var i = k.rowAt; i < rows.length; i++) order.push(rows[i]);
@@ -1140,8 +1167,64 @@ document.addEventListener("input", function (e) {
             var items = tabbable(order[n]);
             if (items.length) return items[Math.min(Math.max(k.controlAt, 0), items.length - 1)];
         }
-        return null;
+        return emptyStatePlace(k);
     }
+
+    // No row with a control is left: the empty state the answer put in the
+    // list's place, looked for in the row's own card or, when it sat in none,
+    // in the request's target (an empty state elsewhere on the page says
+    // nothing about this list). Its own action if it offers
+    // one; else the empty state itself, made focusable from script only
+    // (`tabindex="-1"`), so a screen reader reads that the list is empty.
+    function emptyStatePlace(k) {
+        var scope = k.scope && k.scope.isConnected === true ? k.scope :
+            (k.scopeId ? document.getElementById(k.scopeId) : null);
+        if (!scope) return null;
+        // The row's own card, at its place among the target's cards, when
+        // the row sat in one: another card's empty state is not this list's.
+        var region = scope;
+        if (k.cardAt >= 0) {
+            region = scope.querySelectorAll(".card")[k.cardAt];
+            if (!region) return null;
+        }
+        var empty = region.matches(EMPTY) ? region : region.querySelector(EMPTY);
+        if (!empty || empty.getClientRects().length === 0) {
+            // A script's list says it is empty in its own words, in the
+            // element it names as the list's place: that element.
+            return k.ownScope && scope.getClientRects().length > 0 ? focusableFromScript(scope) : null;
+        }
+        var actions = tabbable(empty);
+        if (actions.length) return actions[0];
+        return focusableFromScript(empty);
+    }
+
+    function focusableFromScript(el) {
+        if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "-1");
+        return el;
+    }
+
+    // Focus is placed only when it was lost: a control still there keeps
+    // it, and a response that moved it somewhere on purpose (a modal it
+    // opened, a field it named) is left be.
+    function placeFocus(k) {
+        if (k.opener.isConnected === true || usable(document.activeElement)) return;
+        var place = placeAfterSwap(k);
+        if (place) {
+            place.focus();
+            return;
+        }
+        var content = document.getElementById("content");
+        if (usable(content)) content.focus();
+    }
+
+    // The script path's two steps (see the head of this section).
+    window.impresspressKeepFocus = function (opener, scope, rows) {
+        if (!(opener instanceof Element)) throw new TypeError("impresspressKeepFocus needs the control that asked");
+        if (!(scope instanceof Element)) throw new TypeError("impresspressKeepFocus needs the element the list is drawn in");
+        var k = noteFocusPlace(opener, scope, rows);
+        k.ownScope = true;
+        return { restore: function () { placeFocus(k); } };
+    };
 
     // htmx asks before any request whose element (or an ancestor) has
     // `hx-confirm`; without one there is no question and nothing to answer.
@@ -1159,7 +1242,7 @@ document.addEventListener("input", function (e) {
             opener: elt
         }).then(function (yes) {
             if (!yes) return;
-            if (elt) noteFocusPlace(elt, d.target);
+            if (elt) keeping = noteFocusPlace(elt, d.target);
             d.issueRequest(true);
         });
     });
@@ -1172,22 +1255,14 @@ document.addEventListener("input", function (e) {
     // issued it. That field is not one htmx documents: it is there because
     // htmx dispatches `htmx:configRequest` with the request config AS its
     // detail, and every dispatch stamps `detail.elt` (htmx 2.0.4, and 1.9 the
-    // same way). Check it again on an htmx upgrade; `chrome_dom.mjs` models it. Focus is only placed when it was lost: a control still there
-    // keeps it, and a response that moved it somewhere on purpose (a modal it
-    // opened, a field it named) is left be.
+    // same way). Check it again on an htmx upgrade; `chrome_dom.mjs` models
+    // it.
     document.body.addEventListener("htmx:afterRequest", function (e) {
         var k = keeping;
         var cfg = e.detail && e.detail.requestConfig;
         if (!k || !cfg || cfg.elt !== k.opener) return;
         keeping = null;
-        if (k.opener.isConnected === true || usable(document.activeElement)) return;
-        var place = placeAfterSwap(k);
-        if (place) {
-            place.focus();
-            return;
-        }
-        var content = document.getElementById("content");
-        if (usable(content)) content.focus();
+        placeFocus(k);
     });
 })();
 

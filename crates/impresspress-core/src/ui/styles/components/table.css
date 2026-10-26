@@ -506,6 +506,11 @@ a.pagination__link:hover { background: var(--bg-hover); }
    and its place in the list does not matter. */
 .product-table { container: product-table / inline-size; }
 .group-table { container: group-table / inline-size; }
+/* A product's or a group's name is whatever its owner typed, and one long
+   word in it (a surname, a model number) would hold the name column at its
+   width and push the table past its frame. It wraps inside the column
+   instead (the `.cell-wrap` rule above, for this column alone). */
+.product-table td[data-label="Name"], .group-table td[data-label="Name"] { overflow-wrap: anywhere; }
 .product-table__meta, .group-table__meta {
 	display: none; margin-top: var(--space-1);
 	font-size: var(--text-sm); font-weight: 400; color: var(--text-secondary);

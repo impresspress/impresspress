@@ -30,14 +30,17 @@ pub struct Crumb<'a> {
 /// - **Subtitle** — one short sentence describing the page, on its own line
 ///   under the title. Hidden below 720px, so it must never carry anything
 ///   the page needs to be usable.
-/// - **Status and actions** — typed slots, rendered right-aligned in one
-///   row: the `status` badges, then the `secondary_actions`, then the
+/// - **Status and actions** — typed slots, rendered right-aligned on the
+///   title's row: the `status` badges (`.topbar__status`), then the actions
+///   (`.topbar__actions`): the `secondary_actions`, then the
 ///   `primary_action` last. A [`HeaderAction`] has no emphasis or size of its
 ///   own (the slot gives it both), and a [`HeaderStatus`] is only ever a
 ///   badge, so a second header primary, a primary that is not last, a quiet,
 ///   destructive or small header button, and a badge posing as an action
-///   cannot be written. The row wraps onto its own line below 720px, so any
-///   number fits.
+///   cannot be written. Below 720px the actions wrap onto a row of their own,
+///   so any number fits, while the status stays on the title's row: it
+///   describes the page's subject, and among the buttons it would read as
+///   one of them.
 /// - **Palette** — the ⌘K / Ctrl+K command-palette trigger.
 pub struct Topbar<'a> {
     /// The trail; the last crumb is the page title (the `h1`).
@@ -73,9 +76,13 @@ impl Topbar<'_> {
         let t = self;
         // Skip rendering entirely when nothing was declared — avoids an empty
         // stripe on pages that don't need a topbar.
-        let has_actions =
-            !t.status.is_empty() || !t.secondary_actions.is_empty() || t.primary_action.is_some();
-        if t.crumbs.is_empty() && t.subtitle.is_none() && !has_actions && !t.show_palette {
+        let has_actions = !t.secondary_actions.is_empty() || t.primary_action.is_some();
+        if t.crumbs.is_empty()
+            && t.subtitle.is_none()
+            && t.status.is_empty()
+            && !has_actions
+            && !t.show_palette
+        {
             return html! {};
         }
         // The current page (last crumb) renders as the page's single `h1` AFTER
@@ -109,9 +116,13 @@ impl Topbar<'_> {
                         p .topbar__subtitle { (s) }
                     }
                 }
+                @if !t.status.is_empty() {
+                    div .topbar__status {
+                        @for s in t.status { (s.render()) }
+                    }
+                }
                 @if has_actions {
                     div .topbar__actions {
-                        @for s in t.status { (s.render()) }
                         @for a in t.secondary_actions { (a.render_secondary()) }
                         @if let Some(a) = t.primary_action { (a.render_primary()) }
                     }
@@ -559,8 +570,8 @@ mod tests {
     }
 
     /// The subtitle sits on its own line under the title (no "|" separator),
-    /// and the actions row renders its typed slots in order: the status
-    /// badges, then the secondaries, then the one primary, last. Each action
+    /// the status badges come first, in their own slot, and the actions row
+    /// renders the secondaries, then the one primary, last. Each action
     /// is a full-size `.btn`, whatever the slot: the header has no small
     /// button to write.
     #[test]
@@ -612,9 +623,10 @@ mod tests {
         assert!(
             s.contains(&format!(
                 concat!(
-                    r#"<div class="topbar__actions">"#,
+                    r#"<div class="topbar__status">"#,
                     r#"<span class="badge badge-info">Live</span>"#,
                     r#"<span class="badge badge-warning">Pending</span>"#,
+                    r#"</div><div class="topbar__actions">"#,
                     r#"<a class="btn btn--secondary" href="/preview">Preview</a>"#,
                     r#"<button class="btn btn--secondary" type="button" data-action="dup">{plus}Duplicate</button>"#,
                     r#"<button class="btn btn--primary" type="submit">Publish</button>"#,
@@ -630,11 +642,11 @@ mod tests {
         assert!(!s.contains("Ctrl K"));
     }
 
-    /// A topbar that declares only a status still renders the actions row
-    /// (the Database page's backend badge); one that declares nothing has
-    /// no empty row.
+    /// A topbar that declares only a status renders the status slot and no
+    /// actions row (the Database page's backend badge); one that declares
+    /// nothing has neither.
     #[test]
-    fn the_actions_row_renders_for_any_slot_and_only_then() {
+    fn each_slot_renders_only_when_declared() {
         let only_status = Topbar {
             status: vec![HeaderStatus::status("active")],
             show_palette: false,
@@ -642,9 +654,9 @@ mod tests {
         }
         .render()
         .into_string();
-        assert!(
-            only_status.contains(r#"<div class="topbar__actions"><span class="badge badge-success">Active</span></div>"#),
-            "{only_status}"
+        assert_eq!(
+            only_status,
+            r#"<header class="topbar"><div class="topbar__heading"></div><div class="topbar__status"><span class="badge badge-success">Active</span></div></header>"#,
         );
         let nothing = Topbar {
             crumbs: vec![Crumb {
@@ -656,5 +668,6 @@ mod tests {
         .render()
         .into_string();
         assert!(!nothing.contains("topbar__actions"), "{nothing}");
+        assert!(!nothing.contains("topbar__status"), "{nothing}");
     }
 }

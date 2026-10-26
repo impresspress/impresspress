@@ -148,8 +148,13 @@
 .chat-messages { flex: 1; overflow-y: auto; padding: var(--space-4) var(--space-6); }
 .chat-composer { border-top: 1px solid var(--border-light); padding: var(--space-4); background: var(--surface-1); }
 .chat-rail { background: var(--surface-3); border-left: 1px solid var(--border-light); overflow-y: auto; padding: var(--space-4); }
+/* The rail comes before the conversation in the source (the toolbar's
+   reading order), so where it is a column on the right it is placed
+   there. */
 @container chat (min-width: 60rem) {
 	.page--chat:has(> .chat-rail) { grid-template-columns: 280px minmax(0, 1fr) 320px; }
+	.page--chat:has(> .chat-rail) > .chat-main { grid-column: 2; grid-row: 1; }
+	.page--chat > .chat-rail { grid-column: 3; grid-row: 1; }
 }
 /* The rail as a toolbar: above the conversation, as wide as it. */
 @container chat (max-width: 59.99rem) {
@@ -176,7 +181,6 @@
 	.page--chat[data-chat-focus="conversation"]:has(> .chat-rail) {
 		grid-template-rows: auto minmax(0, 1fr);
 	}
-	.page--chat > .chat-rail { order: -1; }
 	.chat-threads { border-right: none; }
 	.chat-messages { padding: var(--space-4); }
 }
