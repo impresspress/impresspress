@@ -34,13 +34,12 @@ const PRIMARY: &str = "btn--primary";
 /// The classes that draw a card-level surface on the page background. Rule 2
 /// of the layout: none of them sits inside a `.card`. Kept complete against
 /// the stylesheets by `ui::tests::card_level_covers_every_framed_surface`:
-/// every class a stylesheet draws as a framed white surface is here or is
-/// named there as not card-level.
-pub const CARD_LEVEL: [&str; 14] = [
+/// every class a stylesheet draws as a framed surface (any background, a
+/// solid border and a radius) is here or is named there as not card-level.
+pub const CARD_LEVEL: [&str; 17] = [
     "card",
     "stat",
     "empty",
-    "chat-panes",
     "data-table",
     "page--chat",
     "block-card",
@@ -51,6 +50,10 @@ pub const CARD_LEVEL: [&str; 14] = [
     "form-tabs",
     "account-nav",
     "login-container",
+    "callout",
+    "detail-meta",
+    "dev-step",
+    "var-warning-banner",
 ];
 
 /// The `.btn--primary` elements a reader can see, in document order.
@@ -715,7 +718,7 @@ mod tests {
     fn surfaces_directly_on_the_page_are_fine() {
         let html = r#"<div class="card"><div class="card__body">x</div></div>
             <div class="stat">1</div><div class="empty">none</div>
-            <div class="chat-panes"></div><table class="data-table"></table>"#;
+            <div class="page--chat"></div><table class="data-table"></table>"#;
         assert!(card_level_inside_card(html).is_empty());
     }
 
@@ -725,7 +728,7 @@ mod tests {
             <div class="card">inner</div>
             <div class="stat">1</div>
             <div class="empty">none</div>
-            <div class="chat-panes">c</div>
+            <div class="page--chat">c</div>
             <table class="data-table"><tr><td>t</td></tr></table>
         </div></section>"#;
         assert_eq!(
@@ -734,7 +737,7 @@ mod tests {
                 r#"div.card "inner""#,
                 r#"div.stat "1""#,
                 r#"div.empty "none""#,
-                r#"div.chat-panes "c""#,
+                r#"div.page--chat "c""#,
                 r#"table.data-table "t""#,
             ]
         );

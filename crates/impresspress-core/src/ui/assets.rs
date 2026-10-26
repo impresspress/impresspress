@@ -2386,23 +2386,32 @@ mod tests {
 
     /// A token (`--text-sm`, `--caps`) is defined once, in `tokens.css`'s
     /// `:root`, which is where the case and size guards resolve it from. A
-    /// custom property declared in any other rule (`.x { --text-sm: 11px }`)
-    /// would change what `var(--text-sm)` draws under that rule while the
-    /// guards still read the `:root` value.
+    /// custom property declared in any other rule (`.x { --text-sm: 11px }`),
+    /// or in a `:root` of any other sheet (a block's `:root { --text-sm: 11px
+    /// }`, which the bundle reads after the tokens), would change what
+    /// `var(--text-sm)` draws while the guards still read the token sheet's
+    /// value. Read per source file, so the sheet is known.
     #[cfg(feature = "embed-assets")]
     #[test]
     fn tokens_are_defined_only_in_the_token_sheet() {
         let mut wrong = Vec::new();
-        for (sheet, css) in all_stylesheets() {
-            for (selector, body) in css_leaf_blocks(&css) {
+        let mut defined = 0;
+        for sheet in crate::test_support::source_scan::stylesheets() {
+            for (selector, body) in css_leaf_blocks(&sheet.text) {
                 let declares = body
                     .split(';')
                     .any(|decl| decl.trim_start().starts_with("--"));
-                if declares && selector.trim() != ":root" {
-                    wrong.push(format!("{sheet}: {selector}"));
+                if !declares {
+                    continue;
+                }
+                if selector.trim() == ":root" && sheet.rel == "ui/styles/tokens.css" {
+                    defined += 1;
+                } else {
+                    wrong.push(format!("{}: {selector}", sheet.rel));
                 }
             }
         }
+        assert!(defined > 0, "no tokens found in ui/styles/tokens.css");
         assert!(
             wrong.is_empty(),
             "custom properties declared outside tokens.css's :root:\n{}",
