@@ -187,8 +187,16 @@ test.describe('an hx-confirm, keyboard only', () => {
         // list's empty state, which says the list is empty: focus goes
         // there, not to the page body.
         for (const label of [labels[0], labels[2]]) {
-          await page.getByRole('button', { name: `Delete ${label}` }).focus();
-          await page.keyboard.press('Enter');
+          // The button is in the table the last answer swapped in. htmx
+          // wires a swapped-in control in its settle step; under a settle
+          // delay (htmx's default is 20ms) a key pressed at once lands on a
+          // button that does nothing yet, so press again until it asks.
+          const del = page.getByRole('button', { name: `Delete ${label}` });
+          await expect(async () => {
+            await del.focus();
+            await page.keyboard.press('Enter');
+            await expect(page.getByRole('alertdialog', { name: 'Delete button', exact: true })).toBeVisible({ timeout: 500 });
+          }).toPass();
           const asked = await asking(page, 'Delete button', `Delete the ${label} button?`, 'danger');
           await page.keyboard.press('Tab');
           await page.keyboard.press('Enter');
