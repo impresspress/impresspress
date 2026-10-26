@@ -527,6 +527,9 @@ test.describe("products manager Stripe catalog actions", () => {
     await expect(page.locator("[data-checkout-presets]")).toContainText(
       "Archived",
     );
+    // The archived preset keeps its row but loses its buttons, and no other
+    // row has one: focus goes to the list, not to the page body.
+    await expect(page.locator("[data-checkout-presets]")).toBeFocused();
 
     expect(bodies).toEqual([
       {

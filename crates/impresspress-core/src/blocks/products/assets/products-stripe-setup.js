@@ -117,6 +117,8 @@ async function loadStripeWebhookEvents(){
 }
 async function replayStripeWebhookEvent(id,button){
   if(!(await window.impresspressConfirm({question:'Replay this Stripe webhook through the normal validation pipeline?',label:'Replay webhook',tone:'primary',opener:button})))return;
+  // The list is drawn again once the replay lands, the button with it.
+  var keep=window.impresspressKeepFocus(button,document.getElementById('stripe-webhook-events'));
   var error=document.getElementById('stripe-webhook-error');
   button.disabled=true;button.textContent='Replaying…';error.hidden=true;
   try{
@@ -124,6 +126,7 @@ async function replayStripeWebhookEvent(id,button){
     var data={};try{data=await response.json()}catch(_){}
     if(!response.ok)throw new Error(data.message||'Could not replay the webhook event.');
     await loadStripeWebhookEvents();
+    keep.restore();
   }catch(err){error.textContent=err.message||'Could not replay the webhook event.';error.hidden=false;button.disabled=false;button.textContent='Replay'}
 }
 function renderStripeProviderOperations(data){

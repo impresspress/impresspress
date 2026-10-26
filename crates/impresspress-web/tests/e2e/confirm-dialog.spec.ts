@@ -182,6 +182,22 @@ test.describe('an hx-confirm, keyboard only', () => {
             }),
           )
           .toEqual({ label: `Delete ${labels[2]}`, at, inTable: true });
+
+        // The rest go too. When the last row is deleted the answer is the
+        // list's empty state, which says the list is empty: focus goes
+        // there, not to the page body.
+        for (const label of [labels[0], labels[2]]) {
+          await page.getByRole('button', { name: `Delete ${label}` }).focus();
+          await page.keyboard.press('Enter');
+          const asked = await asking(page, 'Delete button', `Delete the ${label} button?`, 'danger');
+          await page.keyboard.press('Tab');
+          await page.keyboard.press('Enter');
+          await expect(asked).toBeHidden();
+          await expect(page.locator('#buttons-table tr', { hasText: label })).toHaveCount(0);
+        }
+        if ((await page.locator('#buttons-table tbody tr').count()) === 0) {
+          await expect(page.locator('#buttons-table .empty')).toBeFocused();
+        }
       } finally {
         await page.goto('/b/userportal/admin/buttons', { waitUntil: 'networkidle' });
         for (const label of [labels[0], labels[2]]) {
