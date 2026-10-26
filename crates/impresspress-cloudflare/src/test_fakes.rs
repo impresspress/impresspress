@@ -327,30 +327,52 @@ impl StorageService for FoldersOnly {
 pub(crate) type Log = Rc<RefCell<Vec<String>>>;
 
 /// The executable `UPDATE` of admin's migration 009, exactly as the migration
-/// runner hands it to D1: the one raw statement [`BlockSettingsD1`] gives a
-/// meaning to.
+/// runner hands it to D1 (one of the file's
+/// `migration_helper::executable_statements`; 009 is frozen, so the runner
+/// sends them one at a time): the one raw statement [`BlockSettingsD1`]
+/// gives a meaning to.
 pub(crate) fn admin_009_clear_statement() -> String {
-    use impresspress_core::blocks::admin::migrations::{
-        migration_files, BLOCK_SETTINGS_CLEAR_BLESSED_HASH,
+    use impresspress_core::{
+        blocks::admin::migrations::{migration_files, BLOCK_SETTINGS_CLEAR_BLESSED_HASH},
+        migration_helper::executable_statements,
     };
     let (_, sql) = migration_files("sqlite")
         .iter()
         .find(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
         .expect("009 is wired into admin's SQLite list");
-    let at = sql
-        .find("UPDATE impresspress__admin__block_settings")
-        .expect("009 updates block_settings");
-    sql[at..].trim().trim_end_matches(';').to_string()
+    executable_statements(sql)
+        .into_iter()
+        .find(|statement| statement.starts_with("UPDATE impresspress__admin__block_settings"))
+        .expect("009 updates block_settings")
+}
+
+/// The `current_hash` a deployment from before the per-file ledger recorded
+/// for admin once it had applied 001-008: the list 009 is pending on, which
+/// the runner adopts (`migration_helper`, "Databases from before the
+/// ledger").
+pub(crate) fn admin_list_before_009() -> String {
+    use impresspress_core::{
+        blocks::admin::migrations::{migration_files, BLOCK_SETTINGS_CLEAR_BLESSED_HASH},
+        migration_helper::migration_set_hash,
+    };
+    let all = migration_files("sqlite");
+    let at = all
+        .iter()
+        .position(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
+        .expect("009 is wired into admin's SQLite list");
+    migration_set_hash(&all[..at])
 }
 
 /// A D1 stand-in for a database an earlier deploy migrated: it holds
 /// `block_settings` rows in memory, answers reads of that table with them
 /// (honouring equality filters and a limit), applies typed writes to them, and
 /// carries out admin 009's `UPDATE` (see [`admin_009_clear_statement`]) by
-/// emptying every row's `blessed_hash`. Every other raw statement is accepted
-/// and changes nothing. A created row takes the column's default, an empty
-/// `blessed_hash`. Reads of any other table find nothing and writes to one
-/// are only logged. Every raw statement and typed write is logged.
+/// emptying every row's `blessed_hash`. Every other raw statement, and every
+/// raw transaction (the migration ledger's rows), is accepted and changes
+/// nothing. A created row takes the column's default, an empty
+/// `blessed_hash`. Reads of any other table — the ledger's among them — find
+/// nothing and writes to one are only logged. Every raw statement, raw
+/// transaction and typed write is logged.
 pub(crate) struct BlockSettingsD1 {
     pub(crate) log: Log,
     pub(crate) rows: RefCell<Vec<Record>>,
@@ -521,9 +543,10 @@ impl DatabaseService for BlockSettingsD1 {
 
     async fn exec_raw_transaction(
         &self,
-        _statements: &[wafer_core::interfaces::database::service::RawStatement],
+        statements: &[wafer_core::interfaces::database::service::RawStatement],
     ) -> Result<Vec<i64>, wafer_core::interfaces::database::service::TransactionError> {
-        unused().map_err(wafer_core::interfaces::database::service::TransactionError::whole)
+        self.note(format!("d1 tx {} statements", statements.len()));
+        Ok(vec![1; statements.len()])
     }
 
     async fn create_many(

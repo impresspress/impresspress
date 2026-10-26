@@ -268,10 +268,11 @@ pub async fn build_native_runtime(
 ) -> anyhow::Result<Wafer> {
     // Apply admin's pending migrations pre-wafer: the variables /
     // block_settings tables they create are read below to build the runtime.
-    // The same list, hash and `block_settings` row admin's `Init` uses, so
-    // `Init` finds it applied — and an unchanged list is not run again.
+    // The same list, ledger, hash and `block_settings` row admin's `Init`
+    // uses, so `Init` finds it applied — and no applied file runs again.
     impresspress_core::migration_helper::apply_pending_via_service(
         &database,
+        impresspress_core::migration_helper::backend_named(&infra.db_type),
         impresspress_core::blocks::admin::ADMIN_BLOCK_ID,
         impresspress_core::blocks::admin::migrations::migration_files(&infra.db_type),
     )

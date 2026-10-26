@@ -123,6 +123,10 @@ const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
 //   'open'    the database could not be read at all (sql.js would not load,
 //             OPFS was unavailable, the file's read failed), so nothing was
 //             learned about it;
+//   'migration' the database was read and its migration ledger disagrees
+//             with this bundle (an applied migration edited, a database a
+//             newer bundle migrated): the code's refusal, which erasing would
+//             only hide;
 //   'request' a started runtime died on a request.
 // Each is recovered from as any failure that keeps the data is: one restart,
 // then the stopped screen with the cause, which for 'build' says to rebuild.
@@ -435,9 +439,9 @@ function reported(cause, stage, id, runtime) {
 // failure must be the runtime's `initialize()` on the data it read (stage
 // `initialize`), the one failure that can mean the stored data is not what
 // this build can use. A module that could not be loaded, a database that
-// could not be read at all (`open`), a request the runtime died on and a
-// probe that ran out of time are not evidence of that, and the wipe cannot be
-// undone. (sw.js states the same
+// could not be read at all (`open`), a migration the runtime refused
+// (`migration`), a request the runtime died on and a probe that ran out of
+// time are not evidence of that, and the wipe cannot be undone. (sw.js states the same
 // rule as `recoveryErases`, to word its 503.)
 function erasesFor(failure) {
     return OPFS_WIPE_ON_RECOVERY && failure.stage === STAGE_INITIALIZE;

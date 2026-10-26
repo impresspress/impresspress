@@ -3,13 +3,15 @@
 //! native boot applies a block's list with
 //! (`migration_helper::apply_pending_via_service`).
 //!
-//! The database is the one an upgrade meets: admin's schema, auth's 001–015,
-//! and accounts whose role is the inline column — one of them already holding
-//! the same role as a grant, one with a role no system seeds (`editor`) and
-//! one with an empty role. After the upgrade every account holds exactly its
-//! non-empty role as a grant, under its own name, and the column is gone;
-//! the next change to the auth list re-runs the whole of it, 016 included,
-//! and changes nothing.
+//! The database is the one an upgrade meets: admin's schema, auth's 001–015
+//! recorded as auth's list by the runner from before the per-file ledger, and
+//! accounts whose role is the inline column — one of them already holding the
+//! same role as a grant, one with a role no system seeds (`editor`) and one
+//! with an empty role. The upgrade adopts 001–015 and runs 016. After it every
+//! account holds exactly its non-empty role as a grant, under its own name,
+//! and the column is gone; the next change to the auth list runs only its new
+//! file, and the legacy replay's re-run of the whole list, 016 included,
+//! changes nothing either.
 //!
 //! Why each statement of 016 is shaped as it is: the 016 note on
 //! `blocks::auth::migrations::ROLES_ARE_GRANTS`.
@@ -30,8 +32,14 @@ use impresspress_core::{
             repo::users,
         },
     },
-    migration_helper::{apply_ddl_via_service, apply_pending_via_service, MigrationFile},
-    platform_state::user_roles,
+    migration_helper::{
+        apply_ddl_via_service, apply_pending_via_service, backend_named, migration_set_hash,
+        MigrationFile,
+    },
+    platform_state::{
+        block_settings::{self, BlockSettingsPatch},
+        user_roles,
+    },
 };
 use serde_json::{json, Value};
 use wafer_core::interfaces::database::service::DatabaseService;
@@ -114,6 +122,17 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
     apply_ddl_via_service(&db, &sql_of(&before_016))
         .await
         .expect("auth's 001-015 apply");
+    // ...and the record the runner from before the ledger stamped after them.
+    block_settings::upsert_fields_via_service(
+        &db,
+        auth::AUTH_BLOCK_ID,
+        BlockSettingsPatch {
+            current_hash: Some(migration_set_hash(&before_016)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("record auth's 001-015");
 
     seed_account(&db, "u1", "admin").await;
     seed_account(&db, "u2", "user").await;
@@ -134,7 +153,7 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
         .await
         .expect("seed u3's grant");
 
-    apply_pending_via_service(&db, auth::AUTH_BLOCK_ID, &all)
+    apply_pending_via_service(&db, backend_named(dialect), auth::AUTH_BLOCK_ID, &all)
         .await
         .expect("auth's list, 016 included, applies to an upgraded database");
 
@@ -186,17 +205,23 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
     );
     assert!(columns.iter().any(|c| c == "email"), "{columns:?}");
 
-    // The next change to the auth list re-runs it whole, 016 included: the
-    // ADD puts the column back empty, the copy finds nothing, the DROP
-    // removes it again.
+    // The next change to the auth list runs only its new file.
     let mut next = all.clone();
     next.push((
         "999_next_auth_change",
-        "-- Any new file moves the hash, so the whole list re-runs.",
+        "-- A new file runs alone; 016 is recorded and never runs again.",
     ));
-    apply_pending_via_service(&db, auth::AUTH_BLOCK_ID, &next)
+    apply_pending_via_service(&db, backend_named(dialect), auth::AUTH_BLOCK_ID, &next)
         .await
-        .expect("a later change re-runs the auth list, 016 included");
+        .expect("a later change applies");
+    assert_eq!(grants(&db).await, after, "nothing is copied again");
+
+    // The legacy replay re-runs the frozen list whole, 016 included: the ADD
+    // puts the column back empty, the copy finds nothing, the DROP removes it
+    // again.
+    apply_ddl_via_service(&db, &sql_of(&all))
+        .await
+        .expect("the replay re-runs the auth list, 016 included");
     assert_eq!(grants(&db).await, after, "the re-run copies nothing");
     let columns = db
         .schema_columns(users::TABLE)
@@ -206,13 +231,20 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
 }
 
 /// A database created after 016: admin's list, then auth's whole list, then
-/// a re-run of it. 001 creates the column and 016 drops it again.
+/// the legacy replay's re-run of it. 001 creates the column, and 016 — whose
+/// leading `ADD COLUMN` the ledger runner leaves out, 001's column being
+/// there — drops it again.
 async fn applies_fresh(db: Arc<dyn DatabaseService>, dialect: &str) {
     let (_, all) = auth_lists(dialect);
-    apply_ddl_via_service(&db, &admin::migrations::ddl_files(dialect))
-        .await
-        .expect("admin's list applies first");
-    apply_pending_via_service(&db, auth::AUTH_BLOCK_ID, &all)
+    apply_pending_via_service(
+        &db,
+        backend_named(dialect),
+        admin::ADMIN_BLOCK_ID,
+        admin::migrations::migration_files(dialect),
+    )
+    .await
+    .expect("admin's list applies first");
+    apply_pending_via_service(&db, backend_named(dialect), auth::AUTH_BLOCK_ID, &all)
         .await
         .expect("auth's list applies to a fresh database");
     apply_ddl_via_service(&db, &sql_of(&all))

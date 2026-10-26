@@ -742,8 +742,10 @@ mod boot_hook_tests {
     /// [`CfDeployBootHooks::seed_and_load`] reads and seeds `block_settings`
     /// through the same service, and `/_deploy/prepare`'s closing
     /// `block_settings::load` reads it once more. The database is one an
-    /// older version migrated: three blessed rows, and KV already holding
-    /// them as that version cached them.
+    /// older version migrated: three blessed rows — admin's recording its
+    /// 001-008, from before the per-file ledger, so its `Init` adopts those
+    /// and runs 009 — and KV already holding them as that version cached
+    /// them.
     ///
     /// Asserted on the value KV holds at the end, which is what the older
     /// version reads, not on which step wrote it: the record's write drops the
@@ -756,14 +758,20 @@ mod boot_hook_tests {
         use impresspress_core::{blocks::admin::ADMIN_BLOCK_ID, platform_state::block_settings};
 
         use crate::test_fakes::{
-            blessed_row, deploy_admin_runtime, BlockSettingsD1, Log, MemoryKv,
+            admin_list_before_009, blessed_row, deploy_admin_runtime, BlockSettingsD1, Log,
+            MemoryKv,
         };
 
         const ALL_ROWS_KEY: &str = "cfg:v1:block_settings:__all__";
         const OLD_ADMIN: &str = "admin-list-blessed-by-an-old-build";
 
         let rows = vec![
-            blessed_row("bs_admin", ADMIN_BLOCK_ID, OLD_ADMIN, OLD_ADMIN),
+            blessed_row(
+                "bs_admin",
+                ADMIN_BLOCK_ID,
+                &admin_list_before_009(),
+                OLD_ADMIN,
+            ),
             blessed_row(
                 "bs_products",
                 "impresspress/products",
@@ -789,7 +797,7 @@ mod boot_hook_tests {
                 },
             ));
 
-        let wafer = deploy_admin_runtime(db.clone(), OLD_ADMIN).await;
+        let wafer = deploy_admin_runtime(db.clone(), &admin_list_before_009()).await;
         wafer
             .init_block(ADMIN_BLOCK_ID)
             .await

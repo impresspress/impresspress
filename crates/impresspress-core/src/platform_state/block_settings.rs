@@ -460,7 +460,8 @@ pub async fn set_enabled(
 /// (`enabled = true`) when absent and preserving every column the patch
 /// leaves unset otherwise.
 ///
-/// Shared by `migration_helper::record_applied` (the migration hash column),
+/// Shared by `migration_helper::apply_pending`'s stamp (the migration hash
+/// column),
 /// `admin::settings::seed_defaults` (`seed_defaults_hash`) and
 /// [`set_enabled`], so every writer goes through the same
 /// single-row-per-block primitive.

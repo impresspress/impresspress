@@ -6,10 +6,13 @@
 //!
 //! - **Upgraded**: migrated by a build from before #145, whose `001` created
 //!   the column, then by a later build that recorded newer lists without
-//!   touching it. Rows still hold the hashes the old build blessed; 009 must
-//!   empty every one of them.
+//!   touching it — admin's own last record being its 001-008 list, from
+//!   before the per-file ledger. Rows still hold the hashes the old build
+//!   blessed; the upgrade adopts 001-008 and runs 009, which must empty every
+//!   one of them.
 //! - **Fresh**: created since #145 removed the column from `001`, so it never
-//!   had one. 009 must apply here too, and replay over what it built.
+//!   had one. 009 must apply here too, and replay over what it built (the
+//!   legacy replay's untracked loop).
 //!
 //! The SQLite tests run everywhere. The PostgreSQL one needs a server, so it
 //! is `#[ignore]`d; CI's `test-postgres` job runs it with
@@ -24,14 +27,19 @@ use impresspress_core::{
         ADMIN_BLOCK_ID,
     },
     migration_helper::{
-        apply_ddl_via_service, apply_pending_via_service, migration_set_hash, MigrationFile,
+        apply_ddl_via_service, apply_pending_via_service, backend_named, migration_set_hash,
+        MigrationFile,
     },
     platform_state::block_settings::TABLE,
 };
 use wafer_core::interfaces::database::service::DatabaseService;
 
-/// The hash an old build blessed for admin and also recorded as applied.
+/// The hash an old build blessed for admin.
 const OLD_ADMIN: &str = "admin-list-blessed-by-an-old-build";
+
+/// Stands for admin's recorded list in [`ROWS`]: the seed writes the hash of
+/// admin's 001-008 instead, the list the upgraded database last applied.
+const ADMIN_001_008: &str = "admin's 001-008";
 
 /// The blocks an upgraded database holds rows for: `(block, current_hash,
 /// blessed_hash)`. Products is the live incident's shape — a newer build
@@ -39,7 +47,7 @@ const OLD_ADMIN: &str = "admin-list-blessed-by-an-old-build";
 /// its record, which is the one whose re-application signs everyone out.
 /// Files was never blessed.
 const ROWS: &[(&str, &str, &str)] = &[
-    (ADMIN_BLOCK_ID, OLD_ADMIN, OLD_ADMIN),
+    (ADMIN_BLOCK_ID, ADMIN_001_008, OLD_ADMIN),
     (
         "impresspress/products",
         "products-list-main",
@@ -96,8 +104,9 @@ async fn rows(db: &Arc<dyn DatabaseService>) -> HashMap<String, (String, String)
         .collect()
 }
 
-/// An upgraded database: 001-008 applied, the column an old build's `001`
-/// created, and rows the old build blessed. 009 empties every row's
+/// An upgraded database: 001-008 applied and recorded as admin's list, the
+/// column an old build's `001` created, and rows the old build blessed. The
+/// upgrade adopts 001-008 and runs 009, which empties every row's
 /// `blessed_hash`, leaves every other block's record alone, and records
 /// admin's list.
 async fn clears_every_row(db: Arc<dyn DatabaseService>, dialect: &str) {
@@ -118,6 +127,11 @@ async fn clears_every_row(db: Arc<dyn DatabaseService>, dialect: &str) {
         data.insert("id".to_string(), serde_json::json!(format!("bs_{i}")));
         data.insert("block_name".to_string(), serde_json::json!(block));
         data.insert("enabled".to_string(), serde_json::json!(1));
+        let current = if *current == ADMIN_001_008 {
+            migration_set_hash(before_009)
+        } else {
+            (*current).to_string()
+        };
         data.insert("current_hash".to_string(), serde_json::json!(current));
         data.insert("blessed_hash".to_string(), serde_json::json!(blessed));
         data.insert(
@@ -131,7 +145,7 @@ async fn clears_every_row(db: Arc<dyn DatabaseService>, dialect: &str) {
         db.create(TABLE, data).await.expect("seed a blessed row");
     }
 
-    apply_pending_via_service(&db, ADMIN_BLOCK_ID, all)
+    apply_pending_via_service(&db, backend_named(dialect), ADMIN_BLOCK_ID, all)
         .await
         .expect("admin's list, 009 included, applies to an upgraded database");
 
@@ -151,18 +165,18 @@ async fn clears_every_row(db: Arc<dyn DatabaseService>, dialect: &str) {
         );
     }
 
-    // The next change to admin's list re-runs it whole, 009 included.
+    // The legacy replay re-runs admin's frozen list whole, 009 included.
     apply_ddl_via_service(&db, &sql_of(all))
         .await
         .expect("admin's list replays over an upgraded database");
 }
 
 /// A database created since #145: no `blessed_hash` column until 009 adds it.
-/// The whole list applies, the column is there and empty, and the list
-/// replays over what it built.
+/// The whole list applies, the column is there and empty, and the legacy
+/// replay's untracked loop runs the list again over what it built.
 async fn applies_fresh(db: Arc<dyn DatabaseService>, dialect: &str) {
     let (_, all) = admin_lists(dialect);
-    apply_pending_via_service(&db, ADMIN_BLOCK_ID, all)
+    apply_pending_via_service(&db, backend_named(dialect), ADMIN_BLOCK_ID, all)
         .await
         .expect("admin's list, 009 included, applies to a fresh database");
     let after = rows(&db).await;

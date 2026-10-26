@@ -351,7 +351,10 @@ impl AuthService for AuthServiceImpl {
         // service `init` needs an `AuthError` return shape, not the
         // `WaferError` that `migration_helper::lifecycle_init` produces — so
         // this calls the shared `apply_migrations` directly with the block's
-        // single-source migration consts. Its error already names the block.
+        // single-source migration consts. Its error already names the block,
+        // and goes back as the `WaferError` `lifecycle_init` would have made,
+        // code included: a refusal stays `FailedPrecondition`, an unavailable
+        // database `Unavailable`, so the runtime retries only what may clear.
         crate::migration_helper::apply_migrations(
             ctx,
             "wafer-run/auth",
@@ -359,7 +362,7 @@ impl AuthService for AuthServiceImpl {
             super::migrations::POSTGRES_MIGRATIONS,
         )
         .await
-        .map_err(AuthError::Internal)?;
+        .map_err(|e| AuthError::Backend(e.to_wafer_error()))?;
         let cfg = super::config::AuthConfig::from_ctx(ctx)
             .await
             .map_err(|e| backend_error(e, "auth init: config"))?;

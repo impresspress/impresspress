@@ -159,7 +159,7 @@ let poisoned = false;
 // see `runtimeStopped`.
 let poisonReason = '';
 // WHERE it failed — `STAGE_LOAD`, `STAGE_BUILD`, `STAGE_OPEN`,
-// `STAGE_INITIALIZE` or `STAGE_REQUEST` —
+// `STAGE_MIGRATION`, `STAGE_INITIALIZE` or `STAGE_REQUEST` —
 // stated by the code that caught the failure and sent beside the cause on
 // every road to `loader.js` (the message, the Cache Storage entry, the 503).
 // It is what the loader's recovery decides on, so it is a field of its own:
@@ -195,6 +195,18 @@ const STAGE_BUILD = 'build';
 // recovery: erasing is for data that was read and found unusable, and this
 // data was not looked at.
 const STAGE_OPEN = 'open';
+// The runtime's `initialize()` read the database and refused to migrate it,
+// because its migration ledger and this bundle disagree: a migration this
+// bundle ships edited after the database applied it, a database a newer
+// bundle migrated, a ledger edited by hand. `initialize()` rejects with an
+// `Error` named `MigrationRefused` for those, and only for them
+// (impresspress-browser's `boot::MIGRATION_REFUSED`). Says nothing against
+// the data — the refusal is the code's, against the record of what ran — so
+// no recovery erases for it, even in a build rendered to erase on recovery:
+// a database started afresh would run the edited migration cleanly and hide
+// the error. A migration statement that fails on the data is not this stage
+// but `STAGE_INITIALIZE`.
+const STAGE_MIGRATION = 'migration';
 // The runtime's `initialize()` failed after the database was read: opening
 // it (bytes that are not a database), migrating it, importing the seed. The
 // one failure that can mean the stored data is not what this build can use.
@@ -364,9 +376,15 @@ async function ensureInitialized() {
         try {
             await initialize({ exportShell: EXPORT_SHELL, bypass: BYPASS_RULES, pageEngines: PAGE_ENGINES });
         } catch (e) {
-            // Decided on the error's `name`, which `dbInit` sets, never on its
-            // message: see `STAGE_OPEN`.
-            const stage = e && e.name === 'DatabaseUnreadable' ? STAGE_OPEN : STAGE_INITIALIZE;
+            // Decided on the error's `name`, which `dbInit` and the migration
+            // runner set, never on its message: see `STAGE_OPEN` and
+            // `STAGE_MIGRATION`.
+            const stage =
+                e && e.name === 'DatabaseUnreadable'
+                    ? STAGE_OPEN
+                    : e && e.name === 'MigrationRefused'
+                      ? STAGE_MIGRATION
+                      : STAGE_INITIALIZE;
             await selfDestruct(`runtime initialize() failed: ${e}`, stage, true);
             throw e;
         }
@@ -788,7 +806,8 @@ async function beingReset(request) {
  * data this browser stores for the app. The same rule as `erasesFor` there:
  * the build allows it, and the failure was the runtime's `initialize()` on
  * data it read (`STAGE_INITIALIZE`) — never a database it could not read
- * (`STAGE_OPEN`), nor any other stage.
+ * (`STAGE_OPEN`), nor a migration it refused (`STAGE_MIGRATION`), nor any
+ * other stage.
  */
 function recoveryErases() {
     return OPFS_WIPE_ON_RECOVERY && poisonStage === STAGE_INITIALIZE;

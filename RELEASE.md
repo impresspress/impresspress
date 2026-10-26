@@ -19,6 +19,100 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Migrations: recorded per file; a release runs only the files it adds
+
+**Do not deploy this release on its own.** It refuses a database whose
+migration record is from before this release and matches no list it ships
+(below); the legacy replay that upgrades those ships in the next migration
+release. Deploy the two together.
+
+**What changes.**
+
+- What a database has applied is recorded per file, in
+  `impresspress__admin__applied_migrations`: the block, the file, the hash of
+  its statements, when, and whether it ran or was adopted. A release runs
+  only the files that table does not record. The table is created by the
+  runner the first time a block migrates.
+- Adding a migration no longer re-runs a block's earlier ones, so it signs
+  nobody out and needs no one-off D1 budget: a new file costs its own
+  statements and one more for its record.
+- A file added after this release runs in one transaction with its record:
+  all of it applies, or none of it does. On Cloudflare that is one D1
+  `batch()`. The files every block shipped up to this release (the
+  "frozen" files) run as they always have — one statement at a time, a
+  duplicate `ADD COLUMN` taken as already applied — and are recorded once
+  they have all run. A frozen file that fails part-way stays unrecorded and
+  is run again from its start next time, which each is written to survive.
+- A settled deployment reads nothing new: a block whose recorded list matches
+  the build's returns before touching the database, as before.
+
+**Never edit a shipped migration's statements.** A build whose copy of an
+applied file has a different hash refuses, naming the block, the file and
+both hashes: a native server refuses to start; a Cloudflare deploy fails
+before promotion, and the live version keeps serving; a browser bundle
+refuses admin's list with an error named `MigrationRefused`, which the boot
+shell reports without erasing anything, even in a build that erases on
+recovery, and any other block's list by failing that block alone. Put the
+change in a new file. `migration-content-hashes.txt` in `impresspress-core`
+records every shipped file's hash, and a test fails at PR time when one
+moves. Comment lines are not hashed, but leave them alone too until the
+legacy replay is gone: a database from before this release is matched by the
+hash of its files' whole text.
+
+**Upgrading a database from before this release.** Each block's first
+migrating run after the upgrade decides from what the block recorded:
+
+- **Nothing recorded:** a fresh block; every file runs.
+- **A list this release starts with** (the release before this one, or an
+  older one that only added files since): those files are recorded as
+  `adopted` without running, and the files after them run. A deployment that
+  deployed or booted the previous release runs nothing.
+- **Anything else** — a list in which a file has since been edited, or
+  `applying`, left by a run that crashed before the 2026-10-07 native
+  auto-migration release: the record proves nothing about which text ran.
+  This release refuses that block, saying it needs the legacy replay. Most
+  long-lived deployments are in this class for at least one block (17
+  shipped files were edited since July), which is why this release does not
+  ship alone.
+
+**Rollback.**
+
+- **Native:** an older binary that records migrations per file refuses to
+  start ("migrated by a newer build", naming the files it does not ship). A
+  binary from before this release ignores the record and re-runs its own
+  list; a later upgrade trusts the record, so whatever that old list changed
+  stays.
+- **Cloudflare:** `wrangler rollback`, or promoting an older version, serves:
+  the request path never plans migrations, it logs `schema drift` and runs
+  on the schema it finds. Redeploying an older build through
+  `impresspress deploy` runs its prepare: one that records per file fails the
+  deploy as "migrated by a newer build" and the current version keeps
+  serving; one from before this release re-runs its list, as natively.
+- **Browser:** an older bundle that records per file refuses admin's list
+  and stops without erasing; one from before this release re-runs its list.
+- **Remedy for "migrated by a newer build":** downgrading across migrations
+  is not supported. Run the newer build again, or restore a backup taken
+  before the upgrade. Deleting ledger rows is not a remedy: the next newer
+  build would run those files again, or refuse the record as having a gap.
+
+**Tracking lost.** A block whose `block_settings` row was lost on its own
+recovers: its files are still recorded, nothing runs, and the row is written
+again. If both its row and its ledger rows are gone while its schema is
+still there, its frozen files run again over that schema (which they
+survive) and are recorded; a file added after this release that meets the
+existing schema refuses as "its tracking was lost". Restore
+`impresspress__admin__block_settings` and
+`impresspress__admin__applied_migrations` from a backup taken before the
+loss, or recreate the database.
+
+**Older entries this makes false** say so where they stand: the JWT
+blocklist entry's whole-list cost, the "a revoked device stays revoked"
+entry's "D1 budget of 1000", the 016
+entry's "Cloudflare: this deploy needs a D1 budget of 1000", the 009
+entry's "the next deploy of this build re-runs admin's list", the native
+auto-migration entry's "Recovery" and "Auth caveat", and the browser entry's
+"any edit to the auth migration SQL still re-runs the auth set".
+
 ### Auth: the JWT blocklist is retired
 
 **What changes.** Logout and revoking the device you are on no longer write
@@ -42,6 +136,8 @@ to the auth migration list re-runs the whole list at the D1 budget of 1000
 (see the 016 entry). The drop waits until migrations are recorded per file.
 Until then the table keeps whatever rows it had; nothing reads them, they
 name tokens rather than hold them, and they stay out of every data export.
+*Since "Migrations: recorded per file"* (above), adding an auth migration
+runs only that file, so dropping the table no longer costs the whole list.
 
 **Deploying this release** adds no migration, re-runs nothing and signs
 nobody out.
@@ -142,6 +238,8 @@ longer drops it, so device rows survive, as refresh tokens already do.
 - **Cloudflare: this deploy needs a D1 budget of 1000,** for the same reason
   as the 016 upgrade below. Re-running the auth list is 60 statements for
   001–016, more than a budget of 50.
+  *Since "Migrations: recorded per file"* (above), a later auth migration runs
+  only its own file.
 
 Access tokens already issued still work until they expire, as before; ending
 them at revocation is a separate change.
@@ -247,6 +345,8 @@ day-to-day traffic can redeploy with it afterwards: that deploy re-runs
 nothing, because every migration list's hash then matches. Until migrations
 are recorded per file rather than per list, any later change to the auth
 list costs the whole list again.
+*Since "Migrations: recorded per file"* (above), they are: a later change to
+the auth list costs only its new file.
 
 **API change.** `GET /b/admin/api/users` no longer returns `role` on each
 user. Read `roles`, which lists every role the account holds — the same list
@@ -464,6 +564,11 @@ first traffic while the deploy is applying 009 can read the rows from before
 009 ran (D1 mid-deploy, or a stale KV copy in another location) and bless a
 block other than admin again; nothing then re-runs 009 until admin's list
 next changes.
+*Since "Migrations: recorded per file"* (above), the next deploy does not
+re-run admin's list after such a rollback: 009 is recorded as applied and
+never runs again, so rows an older version blessed after it ran stay blessed.
+Keeping traffic off an older version during a deploy is then the only
+protection.
 
 **Who has to act.** Nobody. The guarantee that a still-serving older version
 cannot change the schema holds only between versions on the same migration
@@ -616,6 +721,10 @@ unknown-argument error.
 **Recovery.** Fix the cause and start again: the failed list re-runs from its
 first file. To roll back instead, start the previous binary; it re-runs its
 own list.
+*Since "Migrations: recorded per file"* (above): a failed boot runs again
+from the file that failed, not from the list's first; and a previous binary
+that records migrations per file refuses to start on a database a newer one
+migrated. Only a binary from before that release re-runs its own list.
 
 **Auth caveat.** Any change to auth's migration list re-runs it on the first
 boot that applies it. When this was written, that was said to sign every user
@@ -623,6 +732,8 @@ out. It did not: refresh tokens had survived a re-run since the 015 release,
 and the device list that migration 012 emptied refilled as devices refreshed.
 Since the release "a revoked device stays revoked, even mid-refresh", 012 no
 longer empties it either, so a re-run signs nobody out.
+*Since "Migrations: recorded per file"* (above), a change to auth's list
+runs only its new files.
 
 ### Browser builds: request log defaults to errors only
 
@@ -922,6 +1033,8 @@ like a native one started with `--run-migrations`: loading a new bundle is its
 deploy, so a changed migration applies once, with the same consequences it has
 anywhere else: any edit to the auth migration SQL still re-runs the auth set
 and signs every user out, once.
+*Since "Migrations: recorded per file"* (above), a new migration runs only
+its own file, and an edit to an applied one is refused rather than re-run.
 
 ### wafer-run fa059808: password pepper, statement-budget codes, error headers
 

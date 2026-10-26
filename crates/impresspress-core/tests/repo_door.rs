@@ -60,6 +60,11 @@ const TABLES: &[(&str, &str, &str)] = &[
         "crate::platform_state::block_settings::TABLE",
     ),
     (
+        "applied_migrations",
+        "impresspress__admin__applied_migrations",
+        "crate::platform_state::applied_migrations::TABLE",
+    ),
+    (
         "wrap_grants",
         "impresspress__admin__wrap_grants",
         "crate::platform_state::wrap_grants::TABLE",
@@ -359,6 +364,10 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
     (
         "block_settings",
         &["platform_state/block_settings.rs", "cache_key.rs"],
+    ),
+    (
+        "applied_migrations",
+        &["platform_state/applied_migrations.rs"],
     ),
     (
         "wrap_grants",
@@ -763,6 +772,10 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
         &[
             "cache_key.rs",
             "config_generation.rs",
+            // the migration runner's refusals name the table an operator
+            // restores, and its tests delete a row as fixture setup (a
+            // `block_settings` row lost on its own)
+            "migration_helper.rs",
             "blocks/admin/mod.rs",
             // names the table only to aim the fault injector
             // (`FailingDbOpContext`) at it in the toggle handler's tests
@@ -772,6 +785,20 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // the table its database site reads or writes, so the denial
             // lands on the query under test.
             "blocks/admin/error_mapping_tests.rs",
+        ],
+    ),
+    (
+        "applied_migrations",
+        &[
+            // `BlockInfo::collections(..)` / `grants(..)` are advisory
+            // declarations for WRAP and the admin database explorer
+            "blocks/admin/mod.rs",
+            // the export's exclusion bookkeeping: listed, never read
+            "blocks/dev/data_snapshot.rs",
+            // the migration runner's refusals name the table an operator
+            // restores; its tests edit a ledger row by hand as fixture setup
+            // and check that no migration file names the table
+            "migration_helper.rs",
         ],
     ),
     (

@@ -1,9 +1,9 @@
 //! Admin block migrations. Applied from the block's `Init` lifecycle via
 //! [`crate::migration_helper::lifecycle_init`].
 //!
-//! SQL files are embedded with `include_str!`. Backend dispatch + concat +
-//! the `current_hash` / `IMPRESSPRESS_RUN_MIGRATIONS` gate
-//! all live in [`crate::migration_helper::apply_migrations`]. Earlier
+//! SQL files are embedded with `include_str!`. Backend dispatch, the
+//! per-file ledger and the `current_hash` / `IMPRESSPRESS_RUN_MIGRATIONS`
+//! gate all live in [`crate::migration_helper::apply_migrations`]. Earlier
 //! versions of this module called `db::ddl` directly in a loop, bypassing
 //! the gate and re-running every DDL on every cold isolate (~2,800 D1
 //! queries/day on wafer.run — the measurement that motivated the gate).
@@ -24,12 +24,13 @@ const SQL_001_POSTGRES: &str = include_str!("001_admin_schema.postgres.sql");
 // the paragraph above instead; it is the whole of what that pointer was
 // standing in for.
 //
-// The .sql files are deliberately NOT edited to say so. A shipped migration
-// is hash-addressed over its whole text, comments included, so retouching a
-// `--` line re-runs admin's whole list on the next deploy or boot of every
-// deployment that already applied it. See
-// `crate::migration_helper`'s "A shipped .sql file is immutable, comments
-// included", which prescribes exactly this note. It is also why
+// The .sql files are deliberately NOT edited to say so. Every database that
+// applied a shipped migration records the hash of its statements, and a
+// database from before the per-file ledger is matched by the hash of its
+// files' whole text, comments included, so retouching a `--` line would turn
+// every such deployment's adoption into the legacy replay. See
+// `crate::migration_helper`'s "A shipped file's statements are immutable",
+// which prescribes exactly this note. It is also why
 // `scripts/check-doc-pointers.sh` skips `migrations/*.sql` — a guard cannot
 // ask for an edit the runtime punishes. This file is not skipped.
 const SQL_002_SQLITE: &str = include_str!("002_variables_block_column.sqlite.sql");
@@ -85,11 +86,14 @@ const SQL_003_POSTGRES: &str = include_str!("003_block_settings_seed_hash.postgr
 //
 // Where it runs: the first native boot, Cloudflare deploy (`/_deploy/init`)
 // or browser boot of a build that carries it — each is a build that applies
-// pending migrations, and admin's list is pending because its hash changed.
+// pending migrations, and 004 is pending where the database has not
+// recorded it.
 //
-// Re-runnable, as every migration must be: the gate re-runs the whole list
-// from 001 whenever its hash changes. Once the index exists the `DELETE`
-// finds nothing and the `CREATE UNIQUE INDEX IF NOT EXISTS` is a no-op.
+// Re-runnable, as every frozen migration must be (`migration_helper`'s
+// "Frozen files"): a frozen file that failed part-way runs again from its
+// start, and the legacy replay runs admin's frozen list once more. Once the
+// index exists the `DELETE` finds nothing and the `CREATE UNIQUE INDEX IF NOT
+// EXISTS` is a no-op.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -114,8 +118,9 @@ const SQL_004_POSTGRES: &str = include_str!("004_user_roles_unique.postgres.sql"
 // now refuses.
 //
 // Re-runnable, like the rest of admin's set (see 004's note): a second
-// `ADD COLUMN` is swallowed as a duplicate column by both migration runners,
-// and once no row holds `write = 2` the `UPDATE` matches nothing.
+// `ADD COLUMN` is swallowed as a duplicate column by the statement loop
+// frozen files run through, and once no row holds `write = 2` the `UPDATE`
+// matches nothing.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -132,7 +137,8 @@ const SQL_005_POSTGRES: &str = include_str!("005_wrap_grants_append_column.postg
 // before this migration keep their old status text with no duration.
 //
 // Re-runnable, like the rest of admin's set: a second `ADD COLUMN` is
-// swallowed as a duplicate column by both migration runners.
+// swallowed as a duplicate column by the statement loop frozen files run
+// through.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -157,8 +163,8 @@ const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.po
 // diagnostics, on deployments with no production users yet.
 //
 // Re-runnable: once no row holds an action name, every statement matches
-// nothing, so a later re-run of admin's list (any new admin migration causes
-// one) is a scan of `method` that changes nothing.
+// nothing, so a later re-run of admin's frozen list (the legacy replay) is a
+// scan of `method` that changes nothing.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -175,10 +181,10 @@ const SQL_007_POSTGRES: &str = include_str!("007_request_logs_http_method.postgr
 // value — the segment after `/b/`, up to the next `/` — and leaves every other
 // path (`/`, the unmatched-route label) at `''`.
 //
-// Re-runnable, as a later re-run of admin's list needs: a second
-// `ADD COLUMN` is swallowed as a duplicate column by every migration runner,
-// the `UPDATE` only touches `/b/` rows still at `''`, and the index is
-// `IF NOT EXISTS`.
+// Re-runnable, as a later re-run of admin's frozen list needs: a second
+// `ADD COLUMN` is swallowed as a duplicate column by the statement loop
+// frozen files run through, the `UPDATE` only touches `/b/` rows still at
+// `''`, and the index is `IF NOT EXISTS`.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -225,9 +231,11 @@ const SQL_008_POSTGRES: &str = include_str!("008_request_logs_block.postgres.sql
 // `UPDATE` straight to D1 and invalidates nothing. Two later steps of the
 // deploy funnel bring the key in line with D1, and either alone would:
 //
-// - admin's own `record_applied`, which `migration_helper::apply_pending`
-//   runs right after the list, is a typed write to this table, and drops the
-//   key (`cache_key::invalidate_keys` emits the all-rows key for it);
+// - admin's stamp of its list, which `migration_helper::apply_pending`
+//   writes once 009 has run and its ledger row is in (the ledger row is a raw
+//   insert into a table the cache never holds), is a typed write to this
+//   table, and drops the key (`cache_key::invalidate_keys` emits the all-rows
+//   key for it);
 // - the funnel reads the table back through the cache in read-through mode —
 //   `CfDeployBootHooks`' `block_settings::load_and_seed` right after admin's
 //   `Init` (`builder::boot` step 4), and `/_deploy/prepare`'s closing
@@ -241,21 +249,21 @@ const SQL_008_POSTGRES: &str = include_str!("008_request_logs_block.postgres.sql
 // the outcome: after admin's `Init` and the seed step, the cached table has
 // every `blessed_hash` empty.
 //
-// What it does not do: it changes admin's list hash, so the next deploy or
-// boot re-runs admin's 001-009 (re-runnable, see 004's note). It protects
-// against an old version only once a build carrying it has applied it — a
-// live old version serving before that keeps re-applying. A rollback with
-// migrations to a pre-#145 version re-blesses rows, but its own re-run of
-// admin's list rewrites admin's `current_hash`, so the next roll-forward
-// re-runs admin's list and this file empties them again. One narrow case
-// escapes that: an old version whose cold build reads the rows from before
-// 009 ran (D1 mid-prepare, or a colo's KV copy, which is eventually
-// consistent) can re-bless a non-admin block after 009 has run, and admin's
-// record, still this build's, does not make 009 run again. Keeping traffic
-// off the old version during a deploy closes it.
+// What it does not do: it protects against an old version only once a build
+// carrying it has applied it — a live old version serving before that keeps
+// re-applying. A rollback with migrations to a pre-#145 version re-blesses
+// rows, and since the per-file ledger a roll-forward finds 009 recorded and
+// does not run it again, so those rows stay blessed. So does a row an old
+// version re-blesses after 009 ran because its cold build read the rows from
+// before (D1 mid-prepare, or a colo's KV copy, which is eventually
+// consistent). Keeping traffic off the old version during a deploy is what
+// closes both.
 //
-// Re-runnable: the `ADD COLUMN` is a duplicate after the first run and the
-// `UPDATE` matches no row. Covered on both dialects by
+// Re-runnable: the `ADD COLUMN` is a duplicate after the first run — and on
+// a database created before #145, whose old 001 made the column, on the
+// first run too, which is why 009 relies on the frozen-file loop
+// (`migration_helper`'s "Frozen files") — and the `UPDATE` matches no row.
+// Covered on both dialects by
 // `impresspress-native/tests/admin_blessed_hash.rs`.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
@@ -332,7 +340,9 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 /// table every other block's gate upserts into) in their fixtures —
 /// test-fixture setup is an explicit exception to the no-raw-migration-runner
 /// rule (CLAUDE.md).
-pub async fn apply(ctx: &dyn wafer_run::context::Context) -> Result<(), String> {
+pub async fn apply(
+    ctx: &dyn wafer_run::context::Context,
+) -> Result<(), crate::migration_helper::MigrationError> {
     crate::migration_helper::apply_migrations(
         ctx,
         "impresspress/admin",
@@ -637,49 +647,68 @@ mod variables_block_column_tests {
         assert_eq!(idx.len(), 1, "expected the block index to exist");
     }
 
-    /// 001 alone, then rows, then the shipped list the way an upgrading
-    /// deployment's first migrating boot applies it: the backfill in 002 is
-    /// what populates `block`, not anything the test runs itself.
+    /// A deployment from before the per-file ledger that applied 001 alone
+    /// and recorded that list's hash, then rows, then the shipped list the
+    /// way an upgrading deployment's first migrating boot applies it: 001 is
+    /// adopted, and the backfill in 002 is what populates `block`, not
+    /// anything the test runs itself.
+    async fn upgrade_from_001(ctx: &mut TestContext) {
+        migration_helper::apply_ddl_via_service(
+            &ctx.database_service(),
+            &up_to_002(false)
+                .iter()
+                .map(|(_, sql)| *sql)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("001 applies");
+        seed_pre_002(ctx).await;
+        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({
+                ADMIN: { "migration": {
+                    "current_hash": migration_helper::migration_set_hash(up_to_002(false))
+                } }
+            })
+            .to_string(),
+        );
+        migration_helper::apply_migrations(ctx, ADMIN, SQLITE_MIGRATIONS, &[])
+            .await
+            .expect("002 applies to a database holding variables");
+    }
+
     #[tokio::test]
     async fn migration_002_backfills_block_on_rows_written_before_it() {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, up_to_002(false), &[])
-            .await
-            .expect("001 applies");
-        seed_pre_002(&ctx).await;
-
-        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
-            .await
-            .expect("002 applies to a database holding variables");
+        upgrade_from_001(&mut ctx).await;
 
         assert_backfilled(&ctx).await;
     }
 
-    /// The gate re-runs the whole concatenated list from 001 whenever its
-    /// hash changes — here, a deployment that stopped at 002 upgrading to the
-    /// full list. 002's `ADD COLUMN` then meets a column that already exists
-    /// and its backfill meets rows it already filled; both must pass through
-    /// without failing the batch or disturbing a derived value.
+    /// 002 is in the frozen set the legacy replay runs once more over a
+    /// database it may already have run on. Its `ADD COLUMN` then meets a
+    /// column that already exists and its backfill meets rows it already
+    /// filled; both must pass through the replay's untracked statement loop
+    /// without failing it or disturbing a derived value.
     #[tokio::test]
     async fn migration_002_survives_a_re_run_of_the_whole_list() {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, up_to_002(false), &[])
-            .await
-            .expect("001 applies");
-        seed_pre_002(&ctx).await;
-        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, ADMIN, up_to_002(true), &[])
-            .await
-            .expect("001-002 apply");
+        upgrade_from_001(&mut ctx).await;
 
-        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
-            .await
-            .expect("re-running 001-002 inside the full list succeeds");
+        migration_helper::apply_ddl_via_service(
+            &ctx.database_service(),
+            &SQLITE_MIGRATIONS
+                .iter()
+                .map(|(_, sql)| *sql)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("re-running the whole list succeeds");
 
         assert_backfilled(&ctx).await;
     }

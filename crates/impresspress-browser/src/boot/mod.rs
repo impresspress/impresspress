@@ -210,8 +210,15 @@ impl BrowserServices {
     /// admin found no state on every boot and re-ran all of its migrations
     /// over a database it had already migrated. `load` never writes, and on a
     /// fresh profile — no table yet — it answers empty settings.
+    ///
+    /// Admin's own pending migrations are applied first, here, through
+    /// [`apply_admin_migrations`] — admin's migration, not a hand-written
+    /// schema — so that a database whose migration ledger disagrees with this
+    /// bundle stops the boot by name, before anything reads or seeds it. Its
+    /// `Init` then finds the list applied.
     pub async fn builder(&self) -> Result<ImpresspressBuilder, JsValue> {
         let db = crate::make_database_service();
+        apply_admin_migrations(&db).await?;
         let initial_block_settings = impresspress_core::platform_state::block_settings::load(&db)
             .await
             .map_err(|e| JsValue::from_str(&format!("load block settings: {e}")))?;
@@ -328,6 +335,47 @@ impl BrowserServices {
     }
 }
 
+/// The `name` of the `Error` a browser build rejects with when admin's
+/// migration ledger and this bundle disagree
+/// (`impresspress_core::migration_helper::Refusal`): an edited migration, a
+/// database a newer bundle migrated, a ledger edited by hand. `sw.js` keys
+/// its non-erasing `migration` stage on it (`STAGE_MIGRATION` in
+/// `impresspress-bundle`'s `sw.js.tmpl`): the refusal is about the code
+/// against the record, not about the data, and a wipe would hide the very
+/// error it reports. A migration statement that fails on the data stays an
+/// ordinary error, which `sw.js` reports as its `initialize` stage.
+pub const MIGRATION_REFUSED: &str = "MigrationRefused";
+
+/// Apply admin's pending migrations straight through the database service,
+/// before the runtime exists — the native server's pre-build step, here so
+/// that a refusal reaches `initialize()`'s caller as an error named
+/// [`MIGRATION_REFUSED`]. A refusal of any other block's list fails that
+/// block's `Init`, which a browser runtime survives (`InitPolicy::Tolerant`),
+/// so it never stops the boot and never erases anything.
+async fn apply_admin_migrations(
+    db: &std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+) -> Result<(), JsValue> {
+    use impresspress_core::{blocks::admin, migration_helper};
+
+    migration_helper::apply_pending_via_service(
+        db,
+        wafer_sql_utils::Backend::Sqlite,
+        admin::ADMIN_BLOCK_ID,
+        admin::migrations::migration_files("sqlite"),
+    )
+    .await
+    .map_err(|e| {
+        let message = format!("apply the admin migrations: {e}");
+        if e.refusal().is_some() {
+            let error = js_sys::Error::new(&message);
+            error.set_name(MIGRATION_REFUSED);
+            error.into()
+        } else {
+            JsValue::from_str(&message)
+        }
+    })
+}
+
 /// The config both surfaces start every browser build from: the block settings
 /// read back from the database (`block_settings_json`), the migration consent
 /// and the request-log policy.
@@ -344,8 +392,8 @@ fn infrastructure_config(block_settings_json: String) -> builder::RuntimeConfig 
         // could ever apply a changed migration, so without it a database
         // created by an older bundle would log "schema drift" and keep its
         // old schema for good. The gate still skips a block whose recorded
-        // hash matches the code, so a migration runs once per change, not
-        // once per boot.
+        // hash matches the code, and the migration ledger runs only files it
+        // does not record, so a migration runs once, not once per boot.
         .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1")
         // A browser build is one person's local instance, and its database
         // persists by exporting the WHOLE file on every flush: a

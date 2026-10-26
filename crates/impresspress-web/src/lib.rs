@@ -145,7 +145,9 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
 
     // The error passes through as it is: `sw.js` reads its `name` to tell a
     // database that could not be read (`DatabaseUnreadable`, its stage
-    // `open`) from one that was read and failed (`initialize`).
+    // `open`) from one that was read and failed (`initialize`). The same
+    // holds for `factory.build` below: a migration the runtime refused is an
+    // `Error` named `MigrationRefused` (its stage `migration`).
     impresspress_browser::db_init().await?;
 
     let factory = RuntimeFactory::new(
@@ -309,5 +311,58 @@ mod initialize_tests {
         let name = js_sys::Reflect::get(&err, &"name".into()).expect("an Error");
         assert_eq!(name.as_string().as_deref(), Some("DatabaseUnreadable"));
         assert!(!impresspress_browser::is_initialized());
+    }
+
+    /// **The worker sees a refused migration by name.** A database whose
+    /// migration ledger records an admin file this bundle does not ship — one
+    /// a newer bundle migrated — is refused, and `sw.js` reports an
+    /// `initialize()` rejection named `MigrationRefused` as its non-erasing
+    /// stage `migration`; so the rejection must reach it as that error, not
+    /// re-wrapped or turned into text, and the database must be left as it
+    /// was.
+    #[wasm_bindgen_test]
+    async fn a_refused_migration_rejects_initialize_by_name() {
+        use impresspress_core::{
+            blocks::admin::ADMIN_BLOCK_ID,
+            migration_helper::backend_named,
+            platform_state::applied_migrations::{self, AppliedMigration, Origin},
+        };
+
+        let db: std::sync::Arc<dyn DatabaseService> = std::sync::Arc::new(fresh_db().await);
+        let sqlite = backend_named("sqlite");
+        db.exec_raw(
+            &applied_migrations::create_table_sql(sqlite).expect("the ledger's schema"),
+            &[],
+        )
+        .await
+        .expect("create the ledger");
+        let newer = AppliedMigration::new(
+            ADMIN_BLOCK_ID,
+            "999_from_a_newer_bundle",
+            "a-newer-bundles-hash",
+            Origin::Ran,
+        );
+        db.exec_raw_transaction(&[applied_migrations::insert_statement(&newer, sqlite)])
+            .await
+            .expect("record the newer bundle's file");
+
+        let err = initialize(JsValue::UNDEFINED)
+            .await
+            .expect_err("a database ahead of the bundle fails initialize()");
+
+        let name = js_sys::Reflect::get(&err, &"name".into()).expect("an Error");
+        assert_eq!(
+            name.as_string().as_deref(),
+            Some(impresspress_browser::boot::MIGRATION_REFUSED)
+        );
+        assert!(!impresspress_browser::is_initialized());
+        let rows = applied_migrations::list_for_block_via_service(&db, ADMIN_BLOCK_ID)
+            .await
+            .expect("read the ledger");
+        assert_eq!(
+            rows,
+            vec![newer],
+            "the refusal ran nothing and recorded nothing"
+        );
     }
 }

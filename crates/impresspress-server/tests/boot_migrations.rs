@@ -1,13 +1,14 @@
 //! A native boot applies the database's pending block migrations before it
 //! serves, applies nothing that is already applied, refuses to start when a
-//! migration fails, and lets only one of two processes booting together
-//! apply a list.
+//! migration fails or when the database's migration ledger and the build
+//! disagree, adopts what a database from before the ledger proves it ran, and
+//! lets only one of two processes booting together apply a list.
 //!
 //! Each boot here is `start_native` — what `impresspress serve` runs — over a
 //! fresh `DatabaseService` on the same database, as a restarted or a second
 //! process would open it, with a consumer block whose migration list the test
-//! chooses. Its `002` inserts a row, so the number of rows is the number of
-//! times the list really ran.
+//! chooses. Its `002` and `003` insert a row naming themselves, so the rows
+//! are the number of times each really ran.
 //!
 //! The SQLite tests run everywhere. The PostgreSQL one needs a server, so it
 //! is `#[ignore]`d; CI's `test-postgres` job runs it with
@@ -16,7 +17,10 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use impresspress_core::migration_helper::{self, MigrationFile};
+use impresspress_core::{
+    migration_helper::{self, MigrationFile},
+    platform_state::applied_migrations::{self, Origin},
+};
 use impresspress_native::{InfraConfig, ListenerEnv};
 use impresspress_server::{start_native, AppHooks};
 use wafer_core::interfaces::database::service::DatabaseService;
@@ -39,6 +43,25 @@ const V2: &[MigrationFile<'static>] = &[
     (
         "002_count_runs",
         "INSERT INTO test__migrating__runs (file) VALUES ('002');",
+    ),
+];
+
+/// A build after `V2`: `003` is pending on a database `V2` built.
+const V3: &[MigrationFile<'static>] = &[
+    V1[0],
+    V2[1],
+    (
+        "003_count_runs",
+        "INSERT INTO test__migrating__runs (file) VALUES ('003');",
+    ),
+];
+
+/// `V2` with its applied `002` edited: a statement changed, not a comment.
+const V2_EDITED: &[MigrationFile<'static>] = &[
+    V1[0],
+    (
+        "002_count_runs",
+        "INSERT INTO test__migrating__runs (file) VALUES ('002-edited');",
     ),
 ];
 
@@ -207,12 +230,81 @@ async fn assert_serves(port: u16) {
 
 /// How many times `002` has run against the database.
 async fn runs(database: &Database) -> i64 {
+    runs_of(database, "002").await
+}
+
+/// How many times the file that inserts `file` has run against the database.
+async fn runs_of(database: &Database, file: &str) -> i64 {
     database
         .open()
         .await
-        .count(RUNS, &[])
+        .count(
+            RUNS,
+            &[wafer_block::db::Filter {
+                field: "file".into(),
+                operator: wafer_block::db::FilterOp::Equal,
+                value: serde_json::json!(file),
+            }],
+        )
         .await
         .expect("count the runs")
+}
+
+/// What the ledger records for `block`, as `(file, origin)` in file order.
+async fn ledger(database: &Database, block: &str) -> Vec<(String, Origin)> {
+    let mut rows: Vec<(String, Origin)> =
+        applied_migrations::list_for_block_via_service(&database.open().await, block)
+            .await
+            .expect("read the ledger")
+            .into_iter()
+            .map(|row| (row.file_name, row.origin))
+            .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+fn recorded(rows: &[(&str, Origin)]) -> Vec<(String, Origin)> {
+    rows.iter()
+        .map(|(file, origin)| ((*file).to_string(), *origin))
+        .collect()
+}
+
+/// Whether the ledger table exists. Test-fixture inspection of the schema.
+async fn ledger_exists(database: &Database) -> bool {
+    database
+        .open()
+        .await
+        .schema_table_exists(applied_migrations::TABLE)
+        .await
+        .expect("probe the ledger table")
+}
+
+/// Turn the database into one a build from before the per-file ledger left:
+/// the same schema and `block_settings` records, and no ledger. Test-fixture
+/// setup.
+async fn forget_the_ledger(database: &Database) {
+    database
+        .open()
+        .await
+        .exec_raw(&format!("DROP TABLE {}", applied_migrations::TABLE), &[])
+        .await
+        .expect("drop the ledger");
+}
+
+/// Boot `files`, require that the boot is refused, and return the reason.
+async fn refused(
+    database: &Database,
+    storage_root: &str,
+    files: &'static [MigrationFile<'static>],
+) -> String {
+    let Boot { port, result } = boot(database, storage_root, files).await;
+    let error = format!("{:#}", result.err().expect("the boot is refused"));
+    assert!(error.contains("refusing to start"), "{error}");
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "a refused boot binds nothing"
+    );
+    error
 }
 
 /// The hash the database records as applied for `block`.
@@ -243,10 +335,102 @@ async fn upgrade_applies_once(database: &Database, storage_root: &str) {
         applied(database, BLOCK).await,
         migration_helper::migration_set_hash(V2)
     );
+    assert_eq!(
+        ledger(database, BLOCK).await,
+        recorded(&[("001_runs", Origin::Ran), ("002_count_runs", Origin::Ran)])
+    );
 
     let unchanged = boot_and_serve(database, storage_root, V2).await;
     unchanged.shutdown().await;
     assert_eq!(runs(database).await, 1, "an applied list is not run again");
+}
+
+/// A boot whose every block is settled reads no ledger: each block's record
+/// answers from the snapshot. With the ledger table gone, such a boot starts
+/// and nothing creates it again.
+async fn a_settled_boot_reads_no_ledger(database: &Database, storage_root: &str) {
+    boot_and_serve(database, storage_root, V2)
+        .await
+        .shutdown()
+        .await;
+    forget_the_ledger(database).await;
+    boot_and_serve(database, storage_root, V2)
+        .await
+        .shutdown()
+        .await;
+    assert!(
+        !ledger_exists(database).await,
+        "no block of a settled boot looked at the ledger"
+    );
+}
+
+/// An applied migration whose statements this build ships edited refuses
+/// the boot, naming the block, the file and both hashes; nothing runs.
+async fn an_edited_migration_refuses_the_boot(database: &Database, storage_root: &str) {
+    boot_and_serve(database, storage_root, V2)
+        .await
+        .shutdown()
+        .await;
+    let error = refused(database, storage_root, V2_EDITED).await;
+    assert!(
+        error.contains(&format!(
+            "{BLOCK}: migration `002_count_runs` was applied with content hash"
+        )),
+        "{error}"
+    );
+    assert!(
+        error.contains(&migration_helper::content_hash(V2[1].1))
+            && error.contains(&migration_helper::content_hash(V2_EDITED[1].1)),
+        "{error}"
+    );
+    assert_eq!(runs_of(database, "002-edited").await, 0);
+    assert_eq!(runs(database).await, 1);
+}
+
+/// A build older than the database — one file fewer — refuses the boot as
+/// "database ahead", naming the file it does not ship.
+async fn an_older_build_refuses_the_boot(database: &Database, storage_root: &str) {
+    boot_and_serve(database, storage_root, V2)
+        .await
+        .shutdown()
+        .await;
+    let error = refused(database, storage_root, V1).await;
+    assert!(error.contains("migrated by a newer build"), "{error}");
+    assert!(error.contains("002_count_runs"), "{error}");
+    assert_eq!(
+        applied(database, BLOCK).await,
+        migration_helper::migration_set_hash(V2),
+        "the refused boot recorded nothing"
+    );
+}
+
+/// A database from before the ledger, whose block recorded `V2`, boots a
+/// build shipping `V3`: `V2`'s files are adopted without running, and only
+/// `003` runs.
+async fn a_pre_ledger_database_adopts(database: &Database, storage_root: &str) {
+    boot_and_serve(database, storage_root, V2)
+        .await
+        .shutdown()
+        .await;
+    forget_the_ledger(database).await;
+    boot_and_serve(database, storage_root, V3)
+        .await
+        .shutdown()
+        .await;
+    assert_eq!(runs(database).await, 1, "002 was adopted, not run again");
+    assert_eq!(runs_of(database, "003").await, 1, "003 ran once");
+    assert_eq!(
+        ledger(database, BLOCK).await,
+        recorded(&[
+            ("001_runs", Origin::Adopted),
+            ("002_count_runs", Origin::Adopted),
+            ("003_count_runs", Origin::Ran),
+        ])
+    );
+    assert_eq!(
+        applied(database, BLOCK).await,
+        migration_helper::migration_set_hash(V3)
+    );
 }
 
 /// A migration the database refuses stops the boot before anything binds,
@@ -386,19 +570,50 @@ async fn two_processes_booting_together_apply_a_list_once() {
     concurrent_boots_apply_once(&db.database, &db.storage_root).await;
 }
 
-/// Admin's list is applied before the runtime is built, through the same
-/// tracking: a boot whose record is up to date leaves admin's schema alone,
-/// and a boot whose record is stale applies the list and records its hash.
-/// What a run leaves behind is an index admin's `002` creates, dropped here
-/// in between: only a boot that runs the list puts it back.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_admin_list_is_applied_only_when_pending() {
+async fn a_settled_boot_never_reads_the_ledger() {
+    let db = sqlite();
+    a_settled_boot_reads_no_ledger(&db.database, &db.storage_root).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edited_applied_migration_refuses_the_boot() {
+    let db = sqlite();
+    an_edited_migration_refuses_the_boot(&db.database, &db.storage_root).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_older_than_the_database_refuses_the_boot() {
+    let db = sqlite();
+    an_older_build_refuses_the_boot(&db.database, &db.storage_root).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_database_from_before_the_ledger_adopts_what_it_ran() {
+    let db = sqlite();
+    a_pre_ledger_database_adopts(&db.database, &db.storage_root).await;
+}
+
+/// Admin's list is applied before the runtime is built, through the same
+/// ledger and the same record:
+///
+/// - the first boot records each of admin's files;
+/// - a boot whose admin record is up to date runs nothing of it;
+/// - a stale record over a ledger that records every file runs nothing
+///   either, and is stamped again;
+/// - a database from before the ledger whose admin record is its 001-008
+///   adopts those and runs 009 alone.
+///
+/// What a run of 002 leaves behind is an index, dropped here in between:
+/// only a boot that runs 002 puts it back. What a run of 009 does is empty
+/// every `blessed_hash`.
+#[tokio::test(flavor = "multi_thread")]
+async fn admins_pre_build_apply_plans_against_the_ledger() {
     const INDEX: &str = "impresspress__admin__variables_block_idx";
     let db = sqlite();
     let admin = impresspress_core::blocks::admin::ADMIN_BLOCK_ID;
-    let admin_hash = migration_helper::migration_set_hash(
-        impresspress_core::blocks::admin::migrations::migration_files("sqlite"),
-    );
+    let admin_files = impresspress_core::blocks::admin::migrations::migration_files("sqlite");
+    let admin_hash = migration_helper::migration_set_hash(admin_files);
     let index_exists = || async {
         // Test-fixture inspection of the schema.
         !db.database
@@ -420,6 +635,27 @@ async fn the_admin_list_is_applied_only_when_pending() {
             .await
             .expect("drop the index");
     };
+    let record_admin = |hash: String| {
+        let database = db.database.clone();
+        async move {
+            let mut stale = HashMap::new();
+            stale.insert("current_hash".to_string(), serde_json::json!(hash));
+            database
+                .open()
+                .await
+                .update_where_count(
+                    impresspress_core::platform_state::block_settings::TABLE,
+                    &[wafer_block::db::Filter {
+                        field: "block_name".into(),
+                        operator: wafer_block::db::FilterOp::Equal,
+                        value: serde_json::json!(admin),
+                    }],
+                    stale,
+                )
+                .await
+                .expect("record an admin list");
+        }
+    };
 
     boot_and_serve(&db.database, &db.storage_root, V1)
         .await
@@ -427,6 +663,11 @@ async fn the_admin_list_is_applied_only_when_pending() {
         .await;
     assert_eq!(applied(&db.database, admin).await, admin_hash);
     assert!(index_exists().await, "the first boot applied admin's list");
+    let every_file_ran: Vec<(String, Origin)> = admin_files
+        .iter()
+        .map(|(name, _)| ((*name).to_string(), Origin::Ran))
+        .collect();
+    assert_eq!(ledger(&db.database, admin).await, every_file_ran);
 
     drop_index().await;
     boot_and_serve(&db.database, &db.storage_root, V1)
@@ -438,11 +679,28 @@ async fn the_admin_list_is_applied_only_when_pending() {
         "a boot whose admin record is up to date does not run admin's list"
     );
 
-    let mut stale = HashMap::new();
-    stale.insert(
-        "current_hash".to_string(),
-        serde_json::json!("an-older-list"),
+    record_admin("an-older-list".to_string()).await;
+    boot_and_serve(&db.database, &db.storage_root, V1)
+        .await
+        .shutdown()
+        .await;
+    assert!(
+        !index_exists().await,
+        "a stale record over a full ledger runs nothing of admin's list"
     );
+    assert_eq!(
+        applied(&db.database, admin).await,
+        admin_hash,
+        "and is stamped again"
+    );
+
+    // A database from before the ledger, whose admin record is 001-008, with
+    // a row an old build blessed.
+    forget_the_ledger(&db.database).await;
+    let before_009 = &admin_files[..admin_files.len() - 1];
+    record_admin(migration_helper::migration_set_hash(before_009)).await;
+    let mut blessed = HashMap::new();
+    blessed.insert("blessed_hash".to_string(), serde_json::json!("blessed"));
     db.database
         .open()
         .await
@@ -451,20 +709,41 @@ async fn the_admin_list_is_applied_only_when_pending() {
             &[wafer_block::db::Filter {
                 field: "block_name".into(),
                 operator: wafer_block::db::FilterOp::Equal,
-                value: serde_json::json!(admin),
+                value: serde_json::json!(BLOCK),
             }],
-            stale,
+            blessed,
         )
         .await
-        .expect("record an older admin list");
+        .expect("bless a row");
     boot_and_serve(&db.database, &db.storage_root, V1)
         .await
         .shutdown()
         .await;
-    assert!(
-        index_exists().await,
-        "a stale admin record makes the boot run admin's list"
-    );
+    assert!(!index_exists().await, "001-008 were adopted, not run");
+    let mut adopted: Vec<(String, Origin)> = before_009
+        .iter()
+        .map(|(name, _)| ((*name).to_string(), Origin::Adopted))
+        .collect();
+    adopted.push((
+        admin_files[admin_files.len() - 1].0.to_string(),
+        Origin::Ran,
+    ));
+    assert_eq!(ledger(&db.database, admin).await, adopted);
+    let blessed_left = db
+        .database
+        .open()
+        .await
+        .count(
+            impresspress_core::platform_state::block_settings::TABLE,
+            &[wafer_block::db::Filter {
+                field: "blessed_hash".into(),
+                operator: wafer_block::db::FilterOp::NotEqual,
+                value: serde_json::json!(""),
+            }],
+        )
+        .await
+        .expect("count blessed rows");
+    assert_eq!(blessed_left, 0, "009 ran and emptied every blessed_hash");
     assert_eq!(applied(&db.database, admin).await, admin_hash);
 }
 
@@ -479,7 +758,15 @@ async fn the_same_holds_on_postgres() {
         .expect("connect to PostgreSQL");
     let storage = tempfile::tempdir().expect("tempdir");
     let storage_root = storage.path().to_str().expect("utf-8 path").to_string();
-    for scenario in ["upgrade", "failure", "concurrent"] {
+    for scenario in [
+        "upgrade",
+        "failure",
+        "concurrent",
+        "settled",
+        "edited",
+        "older",
+        "adopt",
+    ] {
         let name = format!("impresspress_boot_migrations_{scenario}");
         // Test-fixture setup: a database per scenario, created fresh.
         admin
@@ -512,7 +799,11 @@ async fn the_same_holds_on_postgres() {
                     .await;
                 failure_refuses_the_boot(&database, &storage_root).await;
             }
-            _ => concurrent_boots_apply_once(&database, &storage_root).await,
+            "concurrent" => concurrent_boots_apply_once(&database, &storage_root).await,
+            "settled" => a_settled_boot_reads_no_ledger(&database, &storage_root).await,
+            "edited" => an_edited_migration_refuses_the_boot(&database, &storage_root).await,
+            "older" => an_older_build_refuses_the_boot(&database, &storage_root).await,
+            _ => a_pre_ledger_database_adopts(&database, &storage_root).await,
         }
     }
 }

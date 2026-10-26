@@ -488,9 +488,10 @@ mod strict_upgrade_tests {
     ///
     /// An unguarded `UPDATE … SET deleted_at = NULL` raises `UNIQUE
     /// constraint failed` there, and that is fatal rather than tolerated:
-    /// `migration_helper::apply_pending` forgives only a duplicate
-    /// `ALTER … ADD COLUMN`, so the error propagates, `write_state` never
-    /// stamps the hash, and every later boot re-runs and re-fails. On
+    /// the statement loop a frozen migration runs through forgives only a
+    /// duplicate `ALTER … ADD COLUMN`, so the error propagates, the file is
+    /// never recorded as applied, and every later boot runs it again and
+    /// fails again. On
     /// Cloudflare `builder::InitPolicy::Strict` turns a block Init failure
     /// into `Err`, and `IMPRESSPRESS_RUN_MIGRATIONS` is baked into the
     /// deployment — so every request 500s until someone hand-edits D1.
@@ -642,8 +643,9 @@ mod strict_upgrade_tests {
     /// Stripe's `canceled`, the only spelling `SubscriptionStatus` still
     /// decodes. Every other status is left exactly as it was.
     ///
-    /// The block re-applies its WHOLE migration set whenever the combined hash
-    /// changes, so the second half replays every file over the migrated rows:
+    /// The legacy replay re-applies the block's WHOLE frozen migration set
+    /// over a deployment whose record from before the per-file ledger proves
+    /// nothing, so the second half replays every file over the migrated rows:
     /// nothing is dropped, and the rewrite has nothing left to match.
     #[tokio::test]
     async fn a_stored_cancelled_subscription_is_rewritten_to_canceled_by_022() {
@@ -760,8 +762,8 @@ mod strict_upgrade_tests {
     /// carries. A row already upper-case is left as it was.
     ///
     /// The second half replays every file over the migrated rows, as the
-    /// block does whenever the combined hash changes: nothing is dropped and
-    /// the rewrite has nothing left to match.
+    /// legacy replay does: nothing is dropped and the rewrite has nothing left
+    /// to match.
     #[tokio::test]
     async fn stored_product_and_order_currencies_are_upper_cased_by_023() {
         let db: Arc<dyn DatabaseService> =

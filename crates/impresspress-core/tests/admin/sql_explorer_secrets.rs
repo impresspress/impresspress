@@ -877,6 +877,11 @@ fn deliberately_readable_tables_stay_readable() {
             "impresspress__admin__block_settings",
             "per-block enable flag plus migration-state digests",
         ),
+        (
+            "impresspress__admin__applied_migrations",
+            "the per-file migration ledger: file names, when, and digests of \
+             the migration files' statements",
+        ),
     ] {
         assert!(
             !refused.contains(table),
