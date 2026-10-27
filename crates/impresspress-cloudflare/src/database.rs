@@ -1030,7 +1030,7 @@ fn db_err(e: worker::Error) -> DatabaseError {
 
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
-    /// A D1 prepared statement, seen through the one method worker 0.7.5
+    /// A D1 prepared statement, seen through the one method worker 0.8.7
     /// binds without its argument: `raw(options)`. Only
     /// `{ columnNames: true }` makes D1 answer the result's column names.
     #[wasm_bindgen(extends = js_sys::Object)]

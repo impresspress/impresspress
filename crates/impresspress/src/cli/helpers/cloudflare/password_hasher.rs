@@ -190,7 +190,9 @@ pub fn manifest(source: &PasswordCrateSource) -> Result<String> {
     release.insert("opt-level".into(), Value::Integer(3));
     release.insert("lto".into(), Value::Boolean(true));
     release.insert("codegen-units".into(), Value::Integer(1));
-    release.insert("strip".into(), Value::Boolean(true));
+    // No `strip`: `build::worker_build_command` sets it for every Worker
+    // build (`build::WORKER_BUILD_STRIP_ENV` says why), and the function
+    // names are removed after the build.
     release.insert("panic".into(), Value::String("abort".into()));
     let mut profile = toml::map::Map::new();
     profile.insert("release".into(), Value::Table(release));
@@ -234,15 +236,13 @@ pub fn stage(repo_root: &Path, metadata: &Metadata) -> Result<PathBuf> {
 }
 
 /// Stage and cross-compile the hasher Worker to
-/// `target/impresspress-password-hasher/build/worker/shim.mjs`, the `main` of
+/// `target/impresspress-password-hasher/build/index.js`, the `main` of
 /// the config [`super::wrangler::generate_password_hasher`] writes.
 pub async fn build(repo_root: &Path) -> Result<PathBuf> {
     let metadata = consumer_metadata(repo_root).await?;
     let dir = stage(repo_root, &metadata)?;
     super::build::ensure_worker_build_installed().await?;
-    let status = Command::new("worker-build")
-        .current_dir(&dir)
-        .args(["--no-default-features", "--features", "target-cloudflare"])
+    let status = super::build::worker_build_command(&dir)
         .status()
         .await
         .context("run worker-build for the password-hasher Worker")?;
@@ -252,7 +252,9 @@ pub async fn build(repo_root: &Path) -> Result<PathBuf> {
             status.code()
         );
     }
-    Ok(dir.join("build/index_bg.wasm"))
+    let wasm = dir.join("build/index_bg.wasm");
+    super::build::strip_name_section(&wasm)?;
+    Ok(wasm)
 }
 
 /// Refuse to put a main Worker version in front of a hasher that lacks the

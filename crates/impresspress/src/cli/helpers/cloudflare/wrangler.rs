@@ -17,7 +17,7 @@ pub use impresspress_core::{
 
 use super::{
     assets::{resolve_asset_base_url, ReleaseManifest},
-    build::WORKER_BUILD_VERSION,
+    build::{WORKER_BUILD_STRIP_ENV, WORKER_BUILD_VERSION},
     entry::{stage_entry_module, ENTRY_MODULE_FILE},
     prepared::{
         ApplicationArtifactIdentity, PreparedModule, PREPARED_MODULE_DIR, PREPARED_SHIM_FILE,
@@ -128,7 +128,7 @@ pub const PASSWORD_HASHER_CONFIG_FILE: &str = "wrangler-password-hasher.toml";
 /// The hasher Worker's entry module, relative to the directory its config is
 /// written to: the output of `worker-build` in the crate
 /// [`super::password_hasher`] stages.
-const PASSWORD_HASHER_MAIN: &str = "../impresspress-password-hasher/build/worker/shim.mjs";
+const PASSWORD_HASHER_MAIN: &str = "../impresspress-password-hasher/build/index.js";
 
 /// The tag of the one Durable Object migration: the hasher's class, created
 /// SQLite-backed (the only kind the Workers Free plan offers). Migrations are
@@ -805,25 +805,28 @@ fn base_toml(cfg: &CloudflareConfig, role: ConfigRole) -> toml::Value {
     let mut build = toml::map::Map::new();
     // Pinned to an exact version (`WORKER_BUILD_VERSION`, shared with the
     // local `impresspress build --target cloudflare` path in
-    // `build::ensure_worker_build_installed`) — worker-build 0.8.x rejects
-    // consumers using `worker < 0.8` (hard version check) and changed its
-    // output layout from `build/worker/shim.mjs` (which the entry module
-    // `main` names imports; see `super::entry`)
-    // to `build/index.js`. Until we upgrade the `worker` crate, lock the
-    // toolchain to this exact version for both the local build and the
-    // wrangler-driven rebuild during deploy.
+    // `build::ensure_worker_build_installed`), so the CLI's build and the
+    // one Wrangler runs from this developer config (`wrangler dev`; deploys
+    // upload through a config without this hook) use the identical
+    // toolchain, the one whose output (`build/index.js`, which the entry
+    // module `main` names imports; see `super::entry`) and shim the tests
+    // pin. It runs with the same `strip` override as
+    // `build::worker_build_command`, without which worker-build 0.8 cannot
+    // build a `strip = true` profile; unlike the CLI's build it keeps the
+    // function-names section, which only costs size in a local build.
     //
     // The `command -v ... && [ ... ] ||` guard skips `cargo install`
     // outright when the pinned version is already on `PATH` (e.g. a build
     // environment that persists `~/.cargo/bin` across runs), instead of
     // reinstalling unconditionally on every build.
+    let (strip_key, strip_value) = WORKER_BUILD_STRIP_ENV;
     build.insert(
         "command".into(),
         Value::String(format!(
             "((command -v worker-build >/dev/null 2>&1 && \
              [ \"$(worker-build --version)\" = \"{WORKER_BUILD_VERSION}\" ]) || \
              cargo install worker-build --version \"={WORKER_BUILD_VERSION}\" --quiet) && \
-             worker-build --no-default-features \
+             {strip_key}={strip_value} worker-build --no-default-features \
              --features target-cloudflare"
         )),
     );

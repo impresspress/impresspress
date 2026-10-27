@@ -7,14 +7,20 @@
 //!
 //! - the runtime never ran the Worker's JavaScript: no `ip-entry` line;
 //! - the JavaScript ran and created the Rust `fetch` future, but the executor
-//!   never polled it (js-sys 0.3.99's task queue stranded by the kill, which
+//!   never polled it (stock js-sys's task queue stranded by the kill, which
 //!   the js-sys the workspace `Cargo.toml` patches in no longer allows):
 //!   `ip-entry` and no `ip-poll`, on a wasm id that has served traced
 //!   requests before;
-//! - worker-build's shim re-instantiated the Wasm module after a
-//!   `WebAssembly.RuntimeError`: the `ip-entry` of the first request the new
-//!   instance serves carries a new wasm id and the next generation, whether or
-//!   not that request is ever polled;
+//! - the Wasm module was re-instantiated, by either of worker 0.8's two reset
+//!   paths: worker-build's shim (after a `WebAssembly.RuntimeError` or a Rust
+//!   panic; it logs `Reinitializing Wasm application`) or wasm-bindgen's call
+//!   guard (after an exception other than a wrapped JS one escaped an export
+//!   call, unless the shim's reset ran first and consumed it; it logs
+//!   nothing).
+//!   The `ip-entry` of the first request the new instance serves carries a
+//!   new wasm id, the next generation and a higher `wbi`, whether or not that
+//!   request is ever polled, so those fields, not the log line, are the
+//!   signal;
 //! - the shadow stack ran out after a series of kills (each kill skips the
 //!   epilogues that restore `__stack_pointer`): the stack figure on both lines
 //!   falls kill by kill, then a trap and a reset.
@@ -46,7 +52,8 @@
 //!   draws its wasm id, which happens on the first traced request it serves
 //!   (in the probe, or in [`on_first_poll`] when there is no entry module). A
 //!   JS value survives `__wbg_reset_state`, so `generation - 1` is how many
-//!   times the shim reset this isolate's instance before that request.
+//!   times this isolate's instance was reset, by either path, before that
+//!   request.
 //! - **seq**: the entry module's per-isolate request number. It reaches Rust
 //!   through a `WeakMap` keyed by the request object, which is the same JS
 //!   object the shim hands to the Rust `fetch`; a single "current request"

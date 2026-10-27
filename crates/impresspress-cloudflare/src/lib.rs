@@ -2069,7 +2069,7 @@ mod executor_trace_wiring_tests {
 /// Every future in this Worker — each request's `fetch` future
 /// (`#[event(fetch)]` drives it with `future_to_promise`), every
 /// `ctx.wait_until` task, every spawned producer — is polled by js-sys's one
-/// per-instance task queue. Stock js-sys 0.3.99 queues ONE
+/// per-instance task queue. Stock js-sys 0.3.106 queues ONE
 /// `queueMicrotask(run_all)` per batch and remembers it in
 /// `QueueState::is_scheduled`, which only `run_all` itself clears.
 ///
@@ -2095,9 +2095,9 @@ mod executor_trace_wiring_tests {
 ///
 /// The test drops one `queueMicrotask` call, as the termination does, then
 /// starts a request the way the `fetch` export does, and asserts the request
-/// still gets a microtask of its own. It fails on stock js-sys 0.3.99 and
+/// still gets a microtask of its own. It fails on stock js-sys 0.3.106 and
 /// passes on the patched one. wasm-bindgen-test drives the whole run from one
-/// `future_to_promise` (`wasm-bindgen-test-0.3.72/src/rt/mod.rs:435`), so this
+/// `future_to_promise` (`wasm-bindgen-test-0.3.79/src/rt/mod.rs:435`), so this
 /// body is itself polled inside `run_all`, which has just cleared
 /// `is_scheduled`: the test's first wake is the one that queues the
 /// executor's next microtask, and the hook loses it — the stranded

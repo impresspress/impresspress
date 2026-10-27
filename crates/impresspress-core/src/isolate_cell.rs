@@ -32,23 +32,28 @@
 //! with almost no recorded CPU, because the victim request had barely
 //! started.
 //!
-//! What becomes of the instance after that is up to worker-build's JS shim,
-//! not this crate. The shim registers a Rust panic hook (worker's
-//! `setPanicHook`) that marks the instance critical, and its next call into
-//! the instance re-instantiates the wasm module (`__wbg_reset_state`): fresh
-//! linear memory, the stranded cell and every cached runtime gone. That is
-//! the code's account. No reset on Cloudflare has been confirmed by a trace,
-//! but the 2026-10-15 analytics have failing rows whose memory figures look
-//! like re-instantiated instances. A trap inside a poll that is not a Rust
-//! panic reaches the same mark only through the shim's global `error`
-//! listener (polls run in later microtasks, outside the `try` around each
-//! handler call), and whether Workers delivers such a trap there is not
-//! known. So one stranded borrow costs at least one more failed request, and
-//! then either the instance is replaced, losing its cached runtime, or every
-//! request that touches the cell fails for as long as it is not.
+//! What becomes of the instance after that is up to worker-build's JS shim
+//! and wasm-bindgen's glue, not this crate. Under worker 0.8 two paths
+//! re-instantiate the wasm module (`__wbg_reset_state`: fresh linear memory,
+//! the stranded cell and every cached runtime gone):
+//! - worker's panic hook (`init.rs`) sets `__worker_init_state.criticalError`
+//!   for a Rust panic, which a stranded borrow is, and the shim's next call
+//!   into the instance resets it first (`checkReinitialize`);
+//! - wasm-bindgen's call guard, which worker-build 0.8 compiles in
+//!   (`--force-enable-abort-handler`): every call from JS into the wasm, a
+//!   poll of the executor's `run_all` closure included, is wrapped, so a trap
+//!   that escapes one schedules a reset, and the next such call runs it.
+//!
+//! That is the code's account. No reset on Cloudflare has been confirmed by a
+//! trace, but the 2026-10-15 analytics have failing rows whose memory figures
+//! look like re-instantiated instances. So one stranded borrow costs at least
+//! one more failed request, the one that traps, and then the instance is
+//! replaced, losing its cached runtime. A request Cloudflare stops for a CPU
+//! limit throws nothing, so neither path sees the stop itself: what it
+//! strands stays stranded until a later request traps on it.
 //!
 //! The executor that polls every request was the other isolate-wide state a
-//! hard stop could strand: js-sys 0.3.99's task queue, which the workspace
+//! hard stop could strand: js-sys's task queue, which the workspace
 //! `Cargo.toml` patches (its `[patch.crates-io]` entry says why).
 //!
 //! # The rule

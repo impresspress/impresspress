@@ -661,7 +661,7 @@ jobs:
   # wasm-pack collects 0 tests from it — so this drives the same
   # wasm-bindgen-test-runner directly through cargo. The runner is part of
   # wasm-bindgen-cli and its version must match the `wasm-bindgen` crate
-  # (0.2.122, pinned in Cargo.lock) or it refuses to run the module.
+  # (0.2.129, pinned in Cargo.lock) or it refuses to run the module.
   # These are pure-logic tests (in-memory KV/DB doubles, no worker::Env, no
   # real fetch), so Node is enough; no browser install needed.
   cloudflare-wasm-test:
@@ -712,7 +712,7 @@ jobs:
 
       - name: Install wasm-bindgen-test-runner
         if: steps.cloudflare-changes.outputs.skip != 'true'
-        run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
 
       - name: Run impresspress-cloudflare wasm tests (Node)
         if: steps.cloudflare-changes.outputs.skip != 'true'

@@ -190,13 +190,14 @@ impl ReadyRuntime {
 // stranded `RefCell` traps the next request that touches it inside `poll`,
 // leaving a response promise that is never settled. Cloudflare reports that
 // as "your Worker's code had hung and would never generate a response", at
-// ~zero recorded CPU. Whether the wasm instance is then re-instantiated, the
-// cached runtime with it, is up to worker-build's shim: its panic hook marks
-// the instance for that. No reset on Cloudflare has been confirmed by a
-// trace, but the 2026-10-15 analytics have failing rows whose memory figures
-// look like re-instantiated instances. The
-// executor's own task queue was the other isolate-wide state a hard stop
-// could strand; the workspace `Cargo.toml` patches js-sys for it.
+// ~zero recorded CPU. The wasm instance is then re-instantiated, the cached
+// runtime with it, by worker 0.8's panic hook and worker-build's shim, or by
+// wasm-bindgen's call guard (`impresspress_core::isolate_cell` has both
+// paths). No reset on Cloudflare has been confirmed by a trace, but the
+// 2026-10-15 analytics have failing rows whose memory figures look like
+// re-instantiated instances. The executor's own task queue was the other
+// isolate-wide state a hard stop could strand; the workspace `Cargo.toml`
+// patches js-sys for it.
 // `IsolateCell` has no borrow flag to strand; the worst an interrupted holder
 // can do is drop the cached value, which is indistinguishable from a cold
 // isolate and self-heals. See `impresspress_core::isolate_cell`.
