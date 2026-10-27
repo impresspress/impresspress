@@ -31,8 +31,10 @@ workspace `Cargo.toml`.
 
 - **A second reset path.** worker-build 0.8 compiles in wasm-bindgen's call
   guard: an exception that escapes any call into the wasm, a trap inside a
-  poll included, makes the next call re-instantiate the module (a JS
-  exception that only passes through the Rust code is exempt). It logs
+  poll included, makes the next call re-instantiate the module. Only an
+  error the Rust code throws itself (a wrapped JS exception) is exempt; a JS
+  exception from an imported function the Rust code does not catch becomes
+  a "Critical error" and resets the instance too. It logs
   nothing; worker-build's shim still logs `Reinitializing Wasm application`
   for its own resets. A CPU kill throws nothing, so neither path sees one,
   and the fork stays.
