@@ -1127,10 +1127,10 @@ async fn the_same_holds_on_postgres() {
         "older",
         "adopt",
         "refuse",
-        "from-main",
-        "first-016-009",
-        "before-10-07",
-        "after-10-07",
+        "from_main",
+        "first_016_009",
+        "before_10_07",
+        "after_10_07",
         "unsupported",
     ] {
         let name = format!("impresspress_boot_migrations_{scenario}");
@@ -1169,7 +1169,7 @@ async fn the_same_holds_on_postgres() {
             "older" => an_older_build_refuses_the_boot(&database, &storage_root).await,
             "adopt" => a_pre_ledger_database_adopts(&database, &storage_root).await,
             "refuse" => a_pre_ledger_record_the_table_refuses(&database, &storage_root).await,
-            "from-main" => {
+            "from_main" => {
                 a_database_from_main_runs_only_what_it_lacks(
                     &database,
                     &storage_root,
@@ -1177,7 +1177,7 @@ async fn the_same_holds_on_postgres() {
                 )
                 .await
             }
-            "first-016-009" => {
+            "first_016_009" => {
                 a_database_that_ran_the_first_016_and_009_runs_009_only(
                     &database,
                     &storage_root,
@@ -1185,12 +1185,12 @@ async fn the_same_holds_on_postgres() {
                 )
                 .await
             }
-            "before-10-07" | "after-10-07" => {
+            "before_10_07" | "after_10_07" => {
                 both_populations_of_admins_record_lose_blessed_hash(
                     &database,
                     &storage_root,
                     Backend::Postgres,
-                    scenario == "before-10-07",
+                    scenario == "before_10_07",
                 )
                 .await
             }
