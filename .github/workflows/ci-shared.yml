@@ -407,7 +407,8 @@ jobs:
   # which dials a closed port (1, not the service's) and needs the connect to
   # fail.
   #
-  # The service container is for the replay and native-boot steps below,
+  # The service container is for the migration-history and native-boot steps
+  # below,
   # which need a real server and this job's postgres-feature build.
   #
   # impresspress-native is built alongside impresspress-core because it holds
@@ -448,25 +449,27 @@ jobs:
       - name: Run tests with the postgres feature
         run: cargo test --locked -p impresspress-core -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres
 
-      # A block re-runs its WHOLE migration set whenever its joined SQL's hash
-      # moves, so every block's `.postgres.sql` set must apply to an empty
-      # database and then apply again over what it built. The test globs the
-      # sets off disk per block (no hand-kept list) and runs them through
-      # `apply_ddl_via_service`, the runner that shares its statement loop
-      # with the gated boot path. It is `#[ignore]`d in the run above because
-      # it needs this server; it refuses a database that is not empty.
-      - name: Every block's PostgreSQL migrations apply fresh, then replay
+      # The PostgreSQL lane of the migration history tests
+      # (`impresspress-core`'s `tests/migration_history.rs` is the SQLite
+      # one): every block's list applies to an empty database, each file one
+      # transaction; and every state each block's PostgreSQL list was in on
+      # main before the per-file ledger, rebuilt with the runner of the time
+      # and upgraded through today's, does what its history entry says.
+      # `#[ignore]`d in the run above because it needs this server; it
+      # creates a database of its own per case.
+      - name: Every block's PostgreSQL migration history upgrades as recorded
         env:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
-        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test postgres_migration_replay -- --ignored --nocapture
+        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test postgres_migration_history -- --ignored --nocapture
 
       # A native boot over PostgreSQL applies a pending migration once and
       # serves, refuses to start when one fails, and lets only one of two
-      # processes booting together apply a list — `start_native`, the boot
-      # `impresspress serve` runs, end to end. The test creates a database of
-      # its own per scenario from this server, so it leaves the replay
-      # step's database alone; the SQLite half of the same file runs in the
-      # main test job.
+      # processes booting together apply a list; databases built at states
+      # main had boot and run only what their records lack, and admin's 009
+      # leaves no `blessed_hash` column in either population — `start_native`,
+      # the boot `impresspress serve` runs, end to end. The test creates a
+      # database of its own per scenario from this server; the SQLite half
+      # of the same file runs in the main test job.
       - name: A native boot over PostgreSQL applies pending migrations
         env:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
@@ -480,20 +483,11 @@ jobs:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
         run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test migration_lock -- --ignored --nocapture
 
-      # Admin's migration 009 empties `blessed_hash` on every block_settings
-      # row of a database an older build migrated, and applies to one created
-      # since that never had the column. The SQLite half runs in the step
-      # above; this is the PostgreSQL half. It creates a database of its own
-      # per scenario, so it leaves the replay step's database alone.
-      - name: Admin migration 009 empties every blessed_hash on PostgreSQL
-        env:
-          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
-        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test admin_blessed_hash -- --ignored --nocapture
-
       # Auth migration 016 copies every inline `users.role` into a
-      # `user_roles` grant and drops the column, and the auth list re-runs
-      # cleanly over it. The SQLite half runs in the step above; this is the
-      # PostgreSQL half. It creates a database of its own per scenario.
+      # `user_roles` grant and drops the column, on a database recorded by
+      # the runner before the ledger; one that ran 016's first text adopts
+      # it. The SQLite half runs in the step above; this is the PostgreSQL
+      # half. It creates a database of its own per scenario.
       - name: Auth migration 016 makes every role a grant on PostgreSQL
         env:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
@@ -1916,8 +1910,8 @@ jobs:
 
       # Every block that ships a `.postgres.sql` belongs in this loop. A
       # dialect file nothing executes is a typo waiting to brick a Postgres
-      # deployment for good: the error aborts the batch, `apply_if_blessed`
-      # never stamps the hash, and every later boot re-runs and re-fails.
+      # deployment for good: the file's transaction rolls back, nothing is
+      # recorded, and every later boot runs it again and fails again.
       #
       # The block set is a GLOB and must stay one. A hand-written list of
       # block names makes the sentence above a claim rather than a fact: a
@@ -1966,9 +1960,9 @@ jobs:
       # 005's partial unique slug index (`slug <> '' AND deleted_at IS NULL`),
       # so while one existed another product was free to take its slug —
       # and the repair pulls it back into the index against that slug. A
-      # unique violation there aborts the whole migration (only a duplicate
-      # ADD COLUMN is tolerated), leaving the hash unstamped so every later
-      # boot re-runs and re-fails; on Cloudflare that is a 500 per request.
+      # unique violation there rolls the file back, leaving it unrecorded so
+      # every later boot runs it again and fails again; on Cloudflare that is
+      # a failed deploy.
       # `slug_collision_cannot_fail_020` pins the guard on SQLite — this pins
       # the same behaviour on real PostgreSQL. 020 already ran above against
       # an empty table and is re-runnable.
@@ -1982,14 +1976,11 @@ jobs:
       # 022 rewrites the platform subscription's British `cancelled` to
       # Stripe's `canceled`, the only spelling `SubscriptionStatus` decodes.
       # `a_stored_cancelled_subscription_is_rewritten_to_canceled_by_022` pins
-      # it on SQLite; this pins it on real PostgreSQL, twice over, because the
-      # block replays its whole migration set whenever the combined hash moves.
+      # it on SQLite; this pins it on real PostgreSQL.
       - name: Migration 022 canonicalises the subscription status spelling
         run: |
           psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__products__subscriptions (id, user_id, status, created_at, updated_at) VALUES ('sub_british', 'user_british', 'cancelled', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('sub_stripe', 'user_stripe', 'canceled', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('sub_active', 'user_active', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-          for pass in 1 2; do
-            psql --set ON_ERROR_STOP=1 --file crates/impresspress-core/src/blocks/products/migrations/022_canonical_subscription_status.postgres.sql
-          done
+          psql --set ON_ERROR_STOP=1 --file crates/impresspress-core/src/blocks/products/migrations/022_canonical_subscription_status.postgres.sql
           test "$(psql --tuples-only --no-align --command "SELECT string_agg(id || '=' || status, ',' ORDER BY id) FROM impresspress__products__subscriptions")" = "sub_active=active,sub_british=canceled,sub_stripe=canceled"
 
       # Admin 004 collapses repeated `(user_id, role)` grants onto the earliest
@@ -2037,43 +2028,15 @@ jobs:
           test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'boundary_in'")" = "2026-06-13T05:43:03Z"
           test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'boundary_before'")" = "2027-05-14T05:43:02Z"
 
-      # Files 004 adds `objects.claim_id` and 005 `objects.blob_key`. Shipping
-      # either changes the hash of the files block's joined SQL, so an
-      # upgrading deployment re-runs EVERY files migration over its live rows.
-      # This replays the whole set over what the steps above left (the dated
-      # share links included) plus stored objects (one naming its blob, one
-      # from before 004 and 005) and a reservation in flight, and requires
-      # every row of every files table to come back byte-identical — no link
-      # re-dated, no bucket or object deleted, no claim or blob key cleared.
-      # `replay_tests` in `blocks/files/migrations` pins the same on SQLite.
-      - name: Files migrations replay over live rows without changing them
-        run: |
-          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_name = 'impresspress__files__objects' AND column_name = 'claim_id'")" -eq 1
-          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_name = 'impresspress__files__objects' AND column_name = 'blob_key'")" -eq 1
-          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__files__buckets (id, name, public, created_by, created_at, updated_at) VALUES ('b_photos', 'photos', FALSE, 'alice', '2026-04-20T10:00:00Z', '2026-04-20T10:00:00Z')"
-          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__files__objects (id, bucket, key, size, content_type, status, uploaded_by, uploaded_at, claim_id, blob_key, created_at, updated_at) VALUES ('o_stored', 'photos', 'a.png', 8, 'image/png', 'complete', 'alice', '2026-09-01T00:00:00Z', 'claim-stored', 'claim-stored~a.png', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'), ('o_legacy', 'photos', 'b.png', 4, 'image/png', 'complete', 'alice', '2026-01-01T00:00:00Z', NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('o_flight', 'photos', 'c.png', 2, 'image/png', 'pending', 'alice', '2026-09-24T00:00:00Z', 'claim-flight', 'claim-flight~c.png', '2026-09-24T00:00:00Z', '2026-09-24T00:00:00Z')"
-          snapshot() {
-            for table in buckets objects views cloud_shares cloud_access_logs cloud_quotas; do
-              psql --tuples-only --no-align --set ON_ERROR_STOP=1 --command "SELECT coalesce(md5(string_agg(t::text, '|' ORDER BY t.id)), 'empty') FROM impresspress__files__${table} t"
-            done
-          }
-          before="$(snapshot)"
-          for migration in crates/impresspress-core/src/blocks/files/migrations/*.postgres.sql; do
-            echo "replaying ${migration}"
-            psql --set ON_ERROR_STOP=1 --file "${migration}"
-          done
-          after="$(snapshot)"
-          echo "before: ${before}"
-          echo "after:  ${after}"
-          test "${before}" = "${after}"
-
       # Auth 015 respells readable UTC API-key expiries and revokes the keys
       # whose expiry `repo::parse_iso` cannot read. The line between the two
       # is drawn by hand in each dialect, so each dialect is run against the
       # same cases: `015_api_key_expiry_canonical.cases.tsv`, which
       # `api_key_expiry_tests` holds to `parse_iso` itself and to the SQLite
-      # dialect. Every row is seeded, the file is run twice (auth migrations
-      # re-run as a set, so the cases must hold after both passes), and any row
+      # dialect. Every row is seeded, the file is run twice (the runner from
+      # before the per-file ledger re-ran auth's list whenever it changed, and
+      # `migration-history.toml` declares 015 `rerun_safe` on that basis), and
+      # any row
       # whose expiry or revocation differs from its case is printed before
       # the count fails the step. 015 already ran above against an empty
       # table.
@@ -2094,6 +2057,34 @@ jobs:
             psql --set ON_ERROR_STOP=1 --command "SELECT c.stored, c.after, c.outcome, k.expires_at, k.revoked_at FROM auth_015_cases c JOIN wafer_run__auth__api_keys k ON k.id = c.stored WHERE k.expires_at IS DISTINCT FROM c.after OR (coalesce(k.revoked_at, '') <> '') <> (c.outcome = 'revoked')"
             test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM auth_015_cases c JOIN wafer_run__auth__api_keys k ON k.id = c.stored WHERE k.expires_at IS NOT DISTINCT FROM c.after AND (coalesce(k.revoked_at, '') <> '') = (c.outcome = 'revoked')")" -eq "$(grep -vc '^#' "${CASES}")"
           done
+
+  # The pre-ledger migration history (`impresspress-core`'s
+  # `src/migration_history/`, its fixtures under `migrations/history/`) is
+  # generated from main's git history by `examples/migration-history.rs`
+  # and checked in. `--check` regenerates it and fails on any difference,
+  # and — until main carries the table — fails if main changed a block's
+  # migrations after the commit the table was derived through, which a
+  # database could then hold a state of that the table does not name. The
+  # generator reads main's history, so the checkout is full on both
+  # callers.
+  migration-history:
+    name: Migration history is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: migration-history
+
+      - name: The checked-in migration history is what main's history generates
+        run: cargo run --locked -p impresspress-core --example migration-history -- --repo . --base origin/main --check
 
   # The job lives in `audit.yml` because it also runs weekly on its own
   # schedule; see that file.
@@ -2196,6 +2187,7 @@ jobs:
       - products-browser
       - product-examples
       - postgres-migrations
+      - migration-history
       - audit
       - sdk
     runs-on: ubuntu-latest

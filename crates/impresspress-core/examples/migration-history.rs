@@ -32,11 +32,16 @@
 //! byte-exact, to `src/blocks/<block>/migrations/history/<basename>.<sha8>.<dialect>.sql`,
 //! so `migration_history_tests` can rebuild each state.
 //!
-//! `--check` regenerates in memory and fails on any difference. It also
-//! fails unless no commit between the recorded `--until` and the merge-base
-//! of `--base` and `HEAD` touches a block's migrations: a state main reached
-//! after the table was derived would have no entry, and a database in it
-//! would be refused as unknown. Regenerate on rebase.
+//! `--check` regenerates in memory and fails on any difference. Until main
+//! carries the table (the ledger's own PR), it also fails unless no commit
+//! between the recorded `--until` and the merge-base of `--base` and `HEAD`
+//! touches a block's migrations: a state main reached after the table was
+//! derived and before the ledger shipped would have no entry, and a
+//! database in it would be refused as unknown. Regenerate on rebase. Once
+//! the merge-base carries the table with the same `--until`, every later
+//! state is a ledger-era state and only the regeneration is compared (a
+//! later edit to a live file's comments, say, needs its old text pinned as
+//! a fixture).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -689,6 +694,16 @@ fn run() -> Result<(), String> {
     git(&repo, &["merge-base", "--is-ancestor", &until, &merge_base]).map_err(|_| {
         format!("the table was derived through {until}, which is not an ancestor of {merge_base}")
     })?;
+    // Once main carries the table derived through `until`, the ledger has
+    // been live on main since, and every state main reached after `until` is
+    // a ledger-era state: the window below only matters while the table is
+    // not on main yet (the ledger's own PR).
+    let on_base = git_text(
+        &repo,
+        &["show", &format!("{merge_base}:{CRATE_DIR}/src/migration_history/mod.rs")],
+    )
+    .ok()
+    .is_some_and(|text| text.contains(&format!("pub const DERIVED_THROUGH: &str = \"{until}\";")));
     let range = format!("{until}..{merge_base}");
     let moved = git_text(
         &repo,
@@ -700,7 +715,7 @@ fn run() -> Result<(), String> {
             &format!(":(glob){CRATE_DIR}/src/blocks/*/migrations/*.sql"),
         ],
     )?;
-    if !moved.trim().is_empty() {
+    if !on_base && !moved.trim().is_empty() {
         return Err(format!(
             "main changed migrations after the table was derived ({until}); regenerate with \
              --until {merge_base}:\n{moved}"
