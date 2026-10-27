@@ -2868,8 +2868,10 @@ mod tests {
     ///
     /// A `.` opens a class at a maud "new selector position": the very start
     /// of the block, or after whitespace, `{`, `}` or `;`. It continues a
-    /// chain right after a class just read. And it follows an element name or
-    /// id (`section`, `div#main`) that itself starts at such a position.
+    /// chain right after a class just read, or right after a class splice
+    /// (`div.(variant).card`, whose spliced class is a Rust expression and
+    /// is not read). And it follows an element name or id (`section`,
+    /// `div#main`) that itself starts at such a position.
     ///
     /// What is not markup is skipped by where it sits. A Rust expression is
     /// inside a splice (`(item.card)`, `[cond]`), so nothing is read inside
@@ -2905,12 +2907,21 @@ mod tests {
         let mut control = Control::No;
         // Where the last class read ended, so a `.` there continues a chain.
         let mut chain_end: Option<usize> = None;
+        // The depth a class splice (`div.(x).card`) opened at: the chain
+        // carries on after its closing paren.
+        let mut class_splice: Option<usize> = None;
         let mut i = 0;
         while i < masked.len() {
             let c = masked[i];
             match c {
                 '(' | '[' => depth += 1,
-                ')' | ']' => depth = depth.saturating_sub(1),
+                ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    if c == ')' && class_splice == Some(depth) {
+                        class_splice = None;
+                        chain_end = Some(i + 1);
+                    }
+                }
                 '@' if depth == 0 => {
                     let word: String = masked[i + 1..]
                         .iter()
@@ -2955,6 +2966,13 @@ mod tests {
                         .iter()
                         .all(|ch| !ch.is_ascii_uppercase() && *ch != '_')
             };
+            if opens && masked.get(i + 1) == Some(&'(') {
+                // A class whose name is a Rust expression (`.(x)`): nothing
+                // to read inside it, but a `.` after it continues the chain.
+                class_splice = Some(depth);
+                i += 1;
+                continue;
+            }
             if !opens || !masked.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
                 i += 1;
                 continue;
@@ -3454,6 +3472,7 @@ mod tests {
     /// Writes of a builder's class that are not a second writer, each with
     /// its exact count and why. The count is exact, so a new write beside a
     /// listed one fails, and an entry no source needs any more fails too.
+    /// Files are named as [`core_rel`] names them.
     const NOT_A_SECOND_WRITER: &[(&str, &str, usize, &str)] = &[
         (
             "blocks/products/stripe.rs",
@@ -3462,7 +3481,7 @@ mod tests {
             "Stripe's `payment_method_types[]` value, sent to Stripe, not a class",
         ),
         (
-            "crates/impresspress-core/src/blocks/products/assets/storefront.js",
+            "blocks/products/assets/storefront.js",
             "card",
             1,
             "the storefront's own card, inside its shadow root and styled by its own \
@@ -3642,7 +3661,8 @@ mod tests {
     /// The class names a string literal writes, in each spelling a class
     /// reaches the page by:
     /// - every token of a `class` attribute it holds (`class="card"`,
-    ///   `class=\"card {x}\"`, `class='card'`);
+    ///   `class=\"card {x}\"`, `class='card'`, and HTML's unquoted
+    ///   `class=card`);
     /// - every token of a literal that is itself a class list
     ///   (`"card card--flush"`, `" empty-note"`). That is what a maud
     ///   `class="…"`, a `class={ "…" }` fragment, `.classes("…")`, a `const`
@@ -3683,8 +3703,15 @@ mod tests {
         // A literal whose last token is cut off by its end (`'btn btn--'`):
         // the next part is carried by a `+`.
         let ends_open = content.ends_with("--") || content.ends_with("__");
-        let attr =
-            ATTR.get_or_init(|| regex::Regex::new(r#"class\s*=\s*\\?["']([^"'\\]*)"#).unwrap());
+        // Quoted (`class="card"`, `class=\"card\"`, `class='card'`) or, as
+        // HTML allows, unquoted (`<div class=card>`): one token, up to a
+        // space, `>` or the end.
+        let attr = ATTR.get_or_init(|| {
+            regex::Regex::new(
+                r#"class\s*=\s*(?:\\?["']([^"'\\]*)|([a-z][a-z0-9_-]*\x01?[a-z0-9_-]*))"#,
+            )
+            .unwrap()
+        });
         let word =
             WORD.get_or_init(|| regex::Regex::new(r"^[a-z][a-z0-9_-]*\x01?[a-z0-9_-]*$").unwrap());
         let class_name = |token: &str| -> String {
@@ -3696,7 +3723,9 @@ mod tests {
         let mut out: Vec<String> = attr
             .captures_iter(&content)
             .flat_map(|caps| {
-                caps[1]
+                caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .map_or("", |m| m.as_str())
                     .split_whitespace()
                     .filter(|t| !t.is_empty() && *t != "\u{1}")
                     .map(&class_name)
@@ -3905,6 +3934,11 @@ mod tests {
             (r#"html! { section.card { } }"#, "card"),
             (r#"html! { div#main.card__body { } }"#, "card__body"),
             (r#"html! { span.badge.empty-note { } }"#, "empty-note"),
+            // A class after a class splice.
+            (r#"html! { div.(variant).card { } }"#, "card"),
+            (r#"html! { div .x.(variant).card__body { } }"#, "card__body"),
+            // An unquoted attribute value in markup a string holds.
+            (r#"PreEscaped("<div class=card>")"#, "card"),
             // A Rust `format!` class string.
             (
                 r#"html! { div class=(format!("card {}", extra)) {} }"#,
@@ -3984,6 +4018,12 @@ mod tests {
             ("b.className = `btn btn--${kind}`;", "btn--…"),
             ("el.className = ['card', x].join(' ');", "card"),
             ("b.className = 'btn btn--primary is-busy';", "btn--primary"),
+            // HTML's unquoted attribute value, in markup a script builds.
+            ("host.innerHTML = '<section class=card>' + body;", "card"),
+            (
+                "host.innerHTML = `<p class=empty-note>${t}</p>`;",
+                "empty-note",
+            ),
         ] {
             assert!(js(src).iter().any(|c| c == class), "{src}: {:?}", js(src));
         }
@@ -4024,6 +4064,16 @@ mod tests {
     /// Tests and test-only modules are not production and are not read;
     /// [`NOT_A_SECOND_WRITER`] names, with exact counts, the two literals
     /// that spell a class name without writing that class.
+    /// A script's path as the tables beside these guards name every file:
+    /// from `crates/impresspress-core/src/` when it is in this crate (as the
+    /// Rust and CSS walkers name theirs), else from the repository root.
+    fn core_rel(rel: String) -> String {
+        match rel.strip_prefix("crates/impresspress-core/src/") {
+            Some(inside) => inside.to_string(),
+            None => rel,
+        }
+    }
+
     #[test]
     fn only_the_builder_writes_its_classes() {
         let mut found: std::collections::BTreeMap<(String, String), Vec<usize>> =
@@ -4037,7 +4087,12 @@ mod tests {
                 crate::test_support::source_scan::shipped_scripts()
                     .into_iter()
                     .filter(|file| !crate::test_support::source_scan::is_vendored_bundle(file))
-                    .map(|file| (file.rel, script_class_writes(&file.text, &defined))),
+                    .map(|file| {
+                        (
+                            core_rel(file.rel),
+                            script_class_writes(&file.text, &defined),
+                        )
+                    }),
             );
         for (rel, writes) in sources {
             for (line, class) in writes {
@@ -4078,10 +4133,15 @@ mod tests {
         );
     }
 
-    /// Classes a stylesheet draws as a framed white surface that are not a
-    /// card-level surface, each with why: a control, or a popover that
-    /// floats above the page rather than sitting on it.
+    /// Classes a stylesheet draws as a framed surface that are not a
+    /// card-level surface, each with why: a control, a popover that floats
+    /// above the page rather than sitting on it, or a code sample.
     const NOT_CARD_LEVEL: &[(&str, &str)] = &[
+        ("btn-oauth", "a sign-in button"),
+        (
+            "db-sql__input",
+            "the SQL explorer's code textarea, a form control",
+        ),
         ("form-input", "a form control"),
         ("form-select", "a form control"),
         ("form-textarea", "a form control"),
@@ -4093,54 +4153,79 @@ mod tests {
         ("palette__panel", "the command palette, a popover"),
         ("profile-menu", "the sidebar's profile menu, a popover"),
         ("row-menu", "a row's action menu, a popover"),
+        (
+            "products-code-block",
+            "a value to copy (a webhook URL), set as code the way a `code` chip is",
+        ),
     ];
 
     /// `test_support::dom::CARD_LEVEL` is complete: every class a
-    /// stylesheet draws as a framed white surface (a `--surface-1` or white
-    /// background, a solid border and a radius, on that class alone) is
-    /// card-level, so `no_card_level_surface_inside_a_card` sees it, or is
-    /// named in [`NOT_CARD_LEVEL`]. A new surface class has to be put in one
-    /// of the two, and an entry no stylesheet draws any more is stale.
+    /// stylesheet draws as a framed surface is card-level, so
+    /// `no_card_level_surface_inside_a_card` sees it, or is named in
+    /// [`NOT_CARD_LEVEL`]. A new surface class has to be put in one of the
+    /// two, and an entry in either that no stylesheet frames any more is
+    /// stale.
+    ///
+    /// A class draws a framed surface when the rules that name it alone
+    /// (`.x`, `tag.x`), taken together, give it all three of: a background
+    /// of any colour (white, a grey, a tint, a `color-mix`), a solid border
+    /// (the `border` shorthand, or `border-style`), and a radius. Each may
+    /// come from a different rule, in any sheet or at-rule.
     #[test]
     fn card_level_covers_every_framed_surface() {
-        let mut framed: std::collections::BTreeSet<String> = Default::default();
+        #[derive(Default)]
+        struct Frame {
+            surface: bool,
+            bordered: bool,
+            rounded: bool,
+        }
+        let mut seen: std::collections::BTreeMap<String, Frame> = Default::default();
         for sheet in crate::test_support::source_scan::stylesheets() {
             for (selector, body) in super::test_support::css_rules(&strip_css_comments(&sheet.text))
             {
-                let decl = |prop: &str| {
-                    body.split(';')
-                        .filter_map(|d| d.split_once(':'))
-                        .find(|(p, _)| p.trim() == prop)
-                        .map(|(_, v)| v.trim().to_ascii_lowercase())
-                };
+                let decls: Vec<(String, String)> = body
+                    .split(';')
+                    .filter_map(|d| d.split_once(':'))
+                    .map(|(p, v)| (p.trim().to_string(), v.trim().to_ascii_lowercase()))
+                    .collect();
+                let decl = |prop: &str| decls.iter().rev().find(|(p, _)| p == prop).map(|(_, v)| v);
                 let surface = ["background", "background-color"].iter().any(|p| {
                     decl(p).is_some_and(|v| {
-                        matches!(
+                        !matches!(
                             v.as_str(),
-                            "var(--surface-1)" | "white" | "#fff" | "#ffffff"
+                            "none" | "transparent" | "inherit" | "initial" | "unset"
                         )
                     })
                 });
-                let bordered = decl("border").is_some_and(|v| v.contains("solid"));
-                let rounded = decl("border-radius").is_some();
-                if !(surface && bordered && rounded) {
+                let bordered = decl("border").is_some_and(|v| v.contains("solid"))
+                    || decl("border-style").is_some_and(|v| v.contains("solid"));
+                let rounded = decl("border-radius").is_some_and(|v| v != "0" && v != "0px");
+                if !(surface || bordered || rounded) {
                     continue;
                 }
                 for part in selector.split(',').map(str::trim) {
                     // `.x` or `tag.x`: the class alone draws it.
-                    let class = part.split_once('.');
-                    if let Some((tag, class)) = class {
-                        if tag.chars().all(|c| c.is_ascii_lowercase())
-                            && class
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                        {
-                            framed.insert(class.to_string());
-                        }
+                    let Some((tag, class)) = part.split_once('.') else {
+                        continue;
+                    };
+                    if tag.chars().all(|c| c.is_ascii_lowercase())
+                        && class
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    {
+                        let frame = seen.entry(class.to_string()).or_default();
+                        frame.surface |= surface;
+                        frame.bordered |= bordered;
+                        frame.rounded |= rounded;
                     }
                 }
             }
         }
+        let framed: std::collections::BTreeSet<String> = seen
+            .into_iter()
+            .filter(|(_, f)| f.surface && f.bordered && f.rounded)
+            .map(|(class, _)| class)
+            .collect();
         assert!(
             framed.contains("card") && framed.contains("stat"),
             "{framed:?}"
@@ -4159,6 +4244,13 @@ mod tests {
         for (class, _) in NOT_CARD_LEVEL {
             if !framed.contains(*class) {
                 wrong.push(format!("NOT_CARD_LEVEL .{class} is stale"));
+            }
+        }
+        for class in card_level {
+            if !framed.contains(class) {
+                wrong.push(format!(
+                    "CARD_LEVEL .{class} is stale: no stylesheet frames it"
+                ));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -4259,7 +4351,8 @@ mod tests {
     /// second set of token values and nothing else; the files below still
     /// spell some colours out ([`colour_literals`] says what counts). A
     /// count may only go down (lower it, or delete the entry at zero), and a
-    /// file not listed may spell none.
+    /// file not listed may spell none. Files are named as [`core_rel`] names
+    /// them.
     const COLOUR_LITERALS: &[(&str, usize, &str)] = &[
         (
             "blocks/email.rs",
@@ -4267,7 +4360,7 @@ mod tests {
             "an email's inline styles: mail clients take no stylesheet",
         ),
         (
-            "crates/impresspress-core/src/blocks/products/assets/storefront.js",
+            "blocks/products/assets/storefront.js",
             11,
             "the storefront's own stylesheet, inside its shadow root on a seller's site",
         ),
@@ -4309,7 +4402,7 @@ mod tests {
         (
             "ui/styles/components/form.css",
             11,
-            "the field greys that predate the tokens, and the focus ring's shadow",
+            "the field greys that predate the tokens, the error border's #ef4444, and the focus ring's shadow",
         ),
         (
             "ui/styles/components/modal.css",
@@ -4344,7 +4437,7 @@ mod tests {
         (
             "ui/styles/layouts/shell.css",
             11,
-            "the sidebar's whites (out of scope) and the profile menu's surface",
+            "the sidebar's whites (out of scope), the avatar whites, the profile menu's surface and its danger hover tint, and the drawer overlay",
         ),
     ];
 
@@ -4621,7 +4714,7 @@ mod tests {
                 scan::shipped_scripts()
                     .into_iter()
                     .filter(|file| !scan::is_vendored_bundle(file))
-                    .map(|file| (file.rel, string_literals(&file.text, false))),
+                    .map(|file| (core_rel(file.rel), string_literals(&file.text, false))),
             );
         for (rel, strings) in literals {
             let count: usize = strings.iter().map(|(_, s)| colour_literals(s, false)).sum();

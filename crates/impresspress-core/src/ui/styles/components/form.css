@@ -256,10 +256,13 @@
    it, which otherwise sat flush against the button. */
 .products-form-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-5); }
 .products-status-stack { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
-.products-advanced { margin-top: var(--space-4); border: 1px solid var(--border-color); border-radius: 12px; background: color-mix(in srgb, var(--surface-1) 97%, var(--border-color) 3%); }
-.products-advanced > summary { cursor: pointer; padding: var(--space-3) var(--space-4); font-weight: 650; list-style-position: inside; }
-.products-advanced[open] > summary { border-bottom: 1px solid var(--border-color); }
-.products-advanced__body { padding: var(--space-4); }
+/* An optional part of a products form, folded away (`details`). It sits in
+   a card (a wizard step, the product's details), so it is a section set off
+   by a rule, not a box of its own: a framed box there would be a card in a
+   card (layout rule 2). */
+.products-advanced { margin-top: var(--space-4); border-top: 1px solid var(--border-color); }
+.products-advanced > summary { cursor: pointer; padding: var(--space-3) 0; font-weight: 650; list-style-position: inside; }
+.products-advanced__body { padding: var(--space-2) 0 0; }
 .products-plain-details { margin-top: var(--space-3); }
 .products-plain-details > summary { cursor: pointer; color: var(--text-muted); font-size: var(--text-sm); font-weight: 600; }
 /* What a disclosure unfolds is mostly provider ids and event names: each

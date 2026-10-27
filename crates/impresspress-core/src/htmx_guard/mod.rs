@@ -769,8 +769,8 @@ async fn every_page_has_at_most_one_visible_primary() {
     assert!(checked > 50, "only {checked} pages were checked");
 }
 
-/// Design rule 2: nothing card-level (`.card`, `.stat`, `.empty`,
-/// `.chat-panes`, `.data-table`) sits inside a `.card`, except a
+/// Design rule 2: nothing card-level (`test_support::dom::CARD_LEVEL`:
+/// `.card`, `.stat`, `.empty`, `.data-table`, …) sits inside a `.card`, except a
 /// `.data-table` whose closest card is flush
 /// (`test_support::dom::card_level_inside_card`). Over every page and
 /// fragment the crawl renders: a fragment lands in a page, and brings its
