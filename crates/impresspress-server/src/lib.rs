@@ -222,9 +222,9 @@ async fn build_and_boot(
     //     the variables table) run before any other block's Init writes to
     //     block_settings via migration_helper. Without it, HashMap key-
     //     iteration order could put another block first, hit a hard
-    //     'no such table' error (impresspress #182 made write_state propagate
-    //     strictly), skip auth's bootstrap, and surface as a login 401 on the
-    //     freshly-booted server in CI E2E.
+    //     'no such table' error (impresspress #182 made the record's write
+    //     propagate strictly), skip auth's bootstrap, and surface as a login
+    //     401 on the freshly-booted server in CI E2E.
     //
     //     `start_native` then runs the Start lifecycle and binds the HTTP
     //     socket — the steps `boot` deliberately omits because the stateless
@@ -523,8 +523,8 @@ pub fn password_peppers_from_env(
 /// failed its `Init` binds nothing; any other block that failed is unusable
 /// until the process restarts, because a failed `Init` stays failed. The error
 /// lists every block that failed with its own error, which for a migration
-/// names the file and the statement the database refused; the next boot
-/// re-runs that block's list.
+/// names the file and the statement the database refused; the failed file
+/// rolled back and stays unrecorded, so the next boot runs it again.
 ///
 /// `build_native_runtime` reads the admin-created grants from the platform
 /// database and hands them to `ImpresspressBuilder::wrap_grants` before

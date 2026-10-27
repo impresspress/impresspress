@@ -700,7 +700,10 @@ fn run() -> Result<(), String> {
     // not on main yet (the ledger's own PR).
     let on_base = git_text(
         &repo,
-        &["show", &format!("{merge_base}:{CRATE_DIR}/src/migration_history/mod.rs")],
+        &[
+            "show",
+            &format!("{merge_base}:{CRATE_DIR}/src/migration_history/mod.rs"),
+        ],
     )
     .ok()
     .is_some_and(|text| text.contains(&format!("pub const DERIVED_THROUGH: &str = \"{until}\";")));
