@@ -1288,22 +1288,20 @@ mod tests {
     }
 }
 
-/// Admin's migration 009 empties `blessed_hash` on every `block_settings` row
-/// by a raw `UPDATE`, and a raw statement reaches D1 through
-/// [`KvCachedD1DatabaseService::exec_raw`] (or `exec_raw_transaction`, for a
-/// file applied as one transaction), which invalidates nothing. Two later
-/// steps of the deploy funnel bring `cfg:v1:block_settings:__all__` — the
-/// cached whole table an older version's cold build reads — in line with D1:
-/// the typed write `migration_helper::apply_pending` makes once every pending
-/// file is applied and recorded in the migration ledger, when it stamps the
-/// list as applied, drops the key; and the funnel's read-through
-/// `block_settings` reads after admin's `Init` rewrite it from D1
-/// (`boot_hooks`'s
-/// `the_deploy_funnel_leaves_the_all_rows_key_holding_the_cleared_rows` holds
-/// the value that results). This module holds the first: the stamp follows
-/// the file and its ledger row, and its write drops the key. The ledger row
-/// itself is a raw insert into a table the cache never holds, and drops
-/// nothing.
+/// Admin's migration 009 rebuilds `block_settings` without `blessed_hash`
+/// in one raw transaction, and a raw transaction reaches D1 through
+/// [`KvCachedD1DatabaseService::exec_raw_transaction`], which invalidates
+/// nothing. Two later steps of the deploy funnel bring
+/// `cfg:v1:block_settings:__all__` — the cached whole table every version's
+/// cold build reads — in line with D1: the typed write
+/// `migration_helper::apply_pending` makes once every pending file is
+/// applied and recorded in the migration ledger, when it stamps the list as
+/// applied, drops the key; and the funnel's read-through `block_settings`
+/// reads after admin's `Init` rewrite it from D1 (`boot_hooks`'s
+/// `the_deploy_funnel_leaves_the_all_rows_key_holding_d1_s_rows` holds the
+/// value that results). This module holds the first: the stamp follows the
+/// file's transaction (its ledger row inside it), and its write drops the
+/// key.
 #[cfg(test)]
 mod admin_migration_009_tests {
     use std::{collections::HashMap, rc::Rc, sync::Arc};
@@ -1313,7 +1311,7 @@ mod admin_migration_009_tests {
 
     use super::{CacheMode, KvCachedD1DatabaseService};
     use crate::test_fakes::{
-        admin_009_clear_statement, admin_list_before_009, blessed_row, deploy_admin_runtime,
+        admin_009_transaction_len, admin_record_before_009, deploy_admin_runtime, settings_row,
         BlockSettingsD1, Log, MemoryKv,
     };
 
@@ -1322,31 +1320,29 @@ mod admin_migration_009_tests {
     /// rather than derived, because the old version reads this exact key.
     const ALL_ROWS_KEY: &str = "cfg:v1:block_settings:__all__";
 
-    const OLD_BLESSING: &str = "admin-list-blessed-by-an-old-build";
-
     /// **Admin's `Init`, applying 009, stamps admin's list right after 009's
-    /// `UPDATE` reached D1 and 009's ledger row was written, and that stamp
-    /// drops the all-rows key.** The wiring is the deploy funnel's
-    /// (`/_deploy/prepare` and `/_deploy/init`): the KV row cache in front of
-    /// D1, reading through, with the per-write config stamp off, and
-    /// `IMPRESSPRESS_RUN_MIGRATIONS` set. Admin's row records 001-008 from
-    /// before the ledger, so the runner adopts those and runs 009, as on
-    /// every deployment that applied 001-008 and nothing since.
+    /// transaction reached D1, and that stamp drops the all-rows key.** The
+    /// wiring is the deploy funnel's (`/_deploy/prepare` and
+    /// `/_deploy/init`): the KV row cache in front of D1, reading through,
+    /// with the per-write config stamp off, and `IMPRESSPRESS_RUN_MIGRATIONS`
+    /// set. Admin's row records main's 2026-10-07 list from before the
+    /// ledger, so the runner adopts 001-008 from the history table and runs
+    /// 009, as on every deployment last migrated between 2026-10-07 and the
+    /// ledger release.
     ///
     /// Fails if `apply_pending` stamps the list before running it, if anything
-    /// but the file's ledger row reaches D1 between the file and the stamp, or
-    /// if the stamp stops being a typed write the row cache invalidates on.
+    /// reaches D1 between 009's transaction and the stamp, or if the stamp
+    /// stops being a typed write the row cache invalidates on.
     #[wasm_bindgen_test]
     async fn applying_admins_list_drops_the_all_rows_key_after_009() {
         let log = Log::default();
         let db = KvCachedD1DatabaseService::with_mode(
             Arc::new(BlockSettingsD1::new(
                 Rc::clone(&log),
-                vec![blessed_row(
+                vec![settings_row(
                     "bs_admin",
                     ADMIN_BLOCK_ID,
-                    &admin_list_before_009(),
-                    OLD_BLESSING,
+                    admin_record_before_009(),
                 )],
             )),
             Arc::new(MemoryKv::new(Rc::clone(&log), HashMap::new())),
@@ -1356,7 +1352,7 @@ mod admin_migration_009_tests {
             },
         );
 
-        let wafer = deploy_admin_runtime(Arc::new(db), &admin_list_before_009()).await;
+        let wafer = deploy_admin_runtime(Arc::new(db), admin_record_before_009()).await;
 
         wafer
             .init_block(ADMIN_BLOCK_ID)
@@ -1364,35 +1360,28 @@ mod admin_migration_009_tests {
             .expect("admin's Init applies its list");
 
         let log = log.borrow();
-        let clear = format!("d1 exec {}", admin_009_clear_statement());
-        let cleared_at = log
+        let file = format!("d1 tx {} statements", admin_009_transaction_len());
+        let applied_at = log
             .iter()
-            .position(|entry| *entry == clear)
-            .unwrap_or_else(|| panic!("009's UPDATE reached D1: {log:#?}"));
+            .position(|entry| *entry == file)
+            .unwrap_or_else(|| panic!("009's transaction reached D1: {log:#?}"));
         // Admin's `Init` goes on to seed, and a seed that stamps its hash
         // writes `block_settings` too — on a deployment whose seed is
         // unchanged it does not. So the claim is about the writes that come
-        // first: the next thing to reach D1 is 009's ledger row, the one
-        // after it the stamp of the list, and the all-rows key leaves KV
-        // before anything else reaches D1.
-        let after = &log[cleared_at + 1..];
+        // first: the next thing to reach D1 is the stamp of the list, and the
+        // all-rows key leaves KV before anything else reaches D1.
+        let after = &log[applied_at + 1..];
         let d1_at = |from: usize| {
             after[from..]
                 .iter()
                 .position(|entry| entry.starts_with("d1 "))
                 .map(|at| from + at)
         };
-        let ledger_at = d1_at(0).unwrap_or_else(|| panic!("a write follows 009: {log:#?}"));
-        assert_eq!(
-            after[ledger_at], "d1 tx 1 statements",
-            "the first write after 009 is its ledger row: {log:#?}"
-        );
-        let record_at =
-            d1_at(ledger_at + 1).unwrap_or_else(|| panic!("a stamp follows 009: {log:#?}"));
+        let record_at = d1_at(0).unwrap_or_else(|| panic!("a stamp follows 009: {log:#?}"));
         assert_eq!(
             after[record_at],
             format!("d1 update {}/bs_admin", block_settings::TABLE),
-            "the write after 009's ledger row stamps admin's list: {log:#?}"
+            "the write after 009's transaction stamps admin's list: {log:#?}"
         );
         let next_d1 = d1_at(record_at + 1).unwrap_or(after.len());
         assert!(

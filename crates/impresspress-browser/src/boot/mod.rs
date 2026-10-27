@@ -211,14 +211,15 @@ impl BrowserServices {
     /// over a database it had already migrated. `load` never writes, and on a
     /// fresh profile — no table yet — it answers empty settings.
     ///
-    /// Admin's own pending migrations are applied first, here, through
-    /// [`apply_admin_migrations`] — admin's migration, not a hand-written
-    /// schema — so that a database whose migration ledger disagrees with this
-    /// bundle stops the boot by name, before anything reads or seeds it. Its
-    /// `Init` then finds the list applied.
+    /// Every block's pending migrations are applied first, here, admin's
+    /// first, through [`apply_block_migrations`] — the blocks' migrations,
+    /// not a hand-written schema — so that a database whose migration record
+    /// disagrees with this bundle stops the boot by name, whichever block it
+    /// is, before anything reads or seeds it. Each block's `Init` then finds
+    /// its list applied.
     pub async fn builder(&self) -> Result<ImpresspressBuilder, JsValue> {
         let db = crate::make_database_service();
-        apply_admin_migrations(&db).await?;
+        apply_block_migrations(&db).await?;
         let initial_block_settings = impresspress_core::platform_state::block_settings::load(&db)
             .await
             .map_err(|e| JsValue::from_str(&format!("load block settings: {e}")))?;
@@ -335,45 +336,56 @@ impl BrowserServices {
     }
 }
 
-/// The `name` of the `Error` a browser build rejects with when admin's
-/// migration ledger and this bundle disagree
+/// The `name` of the `Error` a browser build rejects with when a block's
+/// migration record and this bundle disagree
 /// (`impresspress_core::migration_helper::Refusal`): an edited migration, a
-/// database a newer bundle migrated, a ledger edited by hand. `sw.js` keys
-/// its non-erasing `migration` stage on it (`STAGE_MIGRATION` in
+/// database a newer bundle migrated, a record the history table marks
+/// unsupported or does not know, a schema that drifted. `sw.js` keys its
+/// non-erasing `migration` stage on it (`STAGE_MIGRATION` in
 /// `impresspress-bundle`'s `sw.js.tmpl`): the refusal is about the code
 /// against the record, not about the data, and a wipe would hide the very
-/// error it reports. A migration statement that fails on the data stays an
-/// ordinary error, which `sw.js` reports as its `initialize` stage.
+/// error it reports.
 pub const MIGRATION_REFUSED: &str = "MigrationRefused";
 
-/// Apply admin's pending migrations straight through the database service,
-/// before the runtime exists — the native server's pre-build step, here so
-/// that a refusal reaches `initialize()`'s caller as an error named
-/// [`MIGRATION_REFUSED`]. A refusal of any other block's list fails that
-/// block's `Init`, which a browser runtime survives (`InitPolicy::Tolerant`),
-/// so it never stops the boot and never erases anything.
-async fn apply_admin_migrations(
+/// Apply every block's pending migrations
+/// (`impresspress_core::blocks::all_block_migrations`, admin first) straight
+/// through the database service, before the runtime exists — the native
+/// server's pre-build step for admin, here for every block, so that any
+/// block's refusal reaches `initialize()`'s caller as an error named
+/// [`MIGRATION_REFUSED`] instead of failing that block's `Init`, which a
+/// browser runtime would survive (`InitPolicy::Tolerant`) half-migrated. The
+/// first failure stops the pass.
+///
+/// Any other failure — a file whose statements fail on the data, a database
+/// that cannot be read — is a plain error, which `sw.js` reports as its
+/// `initialize` stage ([`migration_error`]).
+async fn apply_block_migrations(
     db: &std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
 ) -> Result<(), JsValue> {
-    use impresspress_core::{blocks::admin, migration_helper};
+    use impresspress_core::migration_helper;
 
-    migration_helper::apply_pending_via_service(
-        db,
-        wafer_sql_utils::Backend::Sqlite,
-        admin::ADMIN_BLOCK_ID,
-        admin::migrations::migration_files("sqlite"),
-    )
-    .await
-    .map_err(|e| {
-        let message = format!("apply the admin migrations: {e}");
-        if e.refusal().is_some() {
-            let error = js_sys::Error::new(&message);
-            error.set_name(MIGRATION_REFUSED);
-            error.into()
-        } else {
-            JsValue::from_str(&message)
-        }
-    })
+    let backend = wafer_sql_utils::Backend::Sqlite;
+    for migrations in impresspress_core::blocks::all_block_migrations() {
+        let (files, history) = migrations.for_backend(backend);
+        migration_helper::apply_pending_via_service(db, backend, migrations.block, files, history)
+            .await
+            .map_err(|e| migration_error(&e))?;
+    }
+    Ok(())
+}
+
+/// The error `initialize()` rejects with for a block's migration failure: a
+/// `js_sys::Error` named [`MIGRATION_REFUSED`] for a refusal, a plain string
+/// for anything else.
+fn migration_error(e: &impresspress_core::migration_helper::MigrationError) -> JsValue {
+    let message = format!("apply the {} migrations: {e}", e.block());
+    if e.refusal().is_some() {
+        let error = js_sys::Error::new(&message);
+        error.set_name(MIGRATION_REFUSED);
+        error.into()
+    } else {
+        JsValue::from_str(&message)
+    }
 }
 
 /// The config both surfaces start every browser build from: the block settings

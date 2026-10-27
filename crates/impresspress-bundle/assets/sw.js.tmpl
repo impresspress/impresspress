@@ -196,9 +196,12 @@ const STAGE_BUILD = 'build';
 // data was not looked at.
 const STAGE_OPEN = 'open';
 // The runtime's `initialize()` read the database and refused to migrate it,
-// because its migration ledger and this bundle disagree: a migration this
+// because its migration record and this bundle disagree: a migration this
 // bundle ships edited after the database applied it, a database a newer
-// bundle migrated, a ledger edited by hand. `initialize()` rejects with an
+// bundle migrated, a ledger edited by hand, a record from before the ledger
+// that the history table marks unsupported or does not know (any block's:
+// the runtime applies every block's migrations before it builds), a schema
+// that drifted. `initialize()` rejects with an
 // `Error` named `MigrationRefused` for those, and only for them
 // (impresspress-browser's `boot::MIGRATION_REFUSED`). Says nothing against
 // the data — the refusal is the code's, against the record of what ran — so

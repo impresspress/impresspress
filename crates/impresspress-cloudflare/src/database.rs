@@ -433,11 +433,10 @@ impl DbExec for D1DatabaseService {
     /// makes an isolate-lifetime cache sound here:
     ///
     /// - **Migrations** reach `DatabaseService::exec_raw` — the
-    ///   `database.ddl` host op (a frozen migration's statements, the ledger's
-    ///   `CREATE TABLE`) and `migration_helper::apply_ddl_via_service` end
-    ///   there — or `DatabaseService::exec_raw_transaction`, through the
-    ///   `database.ddl_transaction` host op (a migration file added after the
-    ///   ledger, and the ledger's rows). The KV decorator forwards both, and
+    ///   `database.ddl` host op (the ledger's `CREATE TABLE`) — or
+    ///   `DatabaseService::exec_raw_transaction`, through the
+    ///   `database.ddl_transaction` host op (every migration file, with its
+    ///   ledger row). The KV decorator forwards both, and
     ///   the shared [`DbExec::exec_raw`] and `DbExec::exec_raw_transaction`
     ///   clear the whole cache after statements they cannot attribute to a
     ///   table. (The admin SQL explorer is not a writer:

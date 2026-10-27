@@ -217,12 +217,15 @@ test('the same failure in a default build restarts and keeps the data', async ()
 // fetched is a network blip or a deploy in progress, a runtime compiled for
 // another sandbox mode than its worker is a build defect found before
 // `initialize()` opened anything, a database that could not be read was never
-// looked at, and a runtime that died on a request had started on that data. Nor does a stage this script does
+// looked at, a migration the runtime refused is the code's verdict against
+// the record of what ran, and a runtime that died on a request had started on
+// that data. Nor does a stage this script does
 // not know, or none at all (a worker from before stages existed).
 for (const [name, stage] of [
   ['the wasm module could not be loaded (`load`)', 'load'],
   ['the runtime was compiled for another sandbox mode (`build`)', 'build'],
   ['the database could not be read (`open`)', 'open'],
+  ['the runtime refused a migration (`migration`)', 'migration'],
   ['a started runtime died on a request (`request`)', 'request'],
   ['the worker gave no stage', undefined],
   ['the worker gave a stage this build does not know', 'INITIALIZE'],
@@ -417,6 +420,9 @@ for (const { spent, stage, wipe, tried, offer, label, erases } of [
   { spent: 'restarted', stage: 'load', wipe: true, tried: RESTART_FAILED, offer: OFFER_KEEPS, label: 'Try again', erases: false },
   { spent: 'restarted', stage: 'build', wipe: true, tried: RESTART_FAILED, offer: OFFER_KEEPS, label: 'Try again', erases: false },
   { spent: 'restarted', stage: 'open', wipe: true, tried: RESTART_FAILED, offer: OFFER_KEEPS, label: 'Try again', erases: false },
+  // A refused migration: the cause and "Reset" are shown, and nothing is
+  // erased unless the person resets.
+  { spent: 'restarted', stage: 'migration', wipe: true, tried: RESTART_FAILED, offer: OFFER_KEEPS, label: 'Try again', erases: false },
   { spent: 'restarted', stage: 'initialize', wipe: false, tried: RESTART_FAILED, offer: OFFER_KEEPS, label: 'Try again', erases: false },
   { spent: 'restarted', stage: 'initialize', wipe: true, tried: RESTART_FAILED, offer: OFFER_ERASES, label: 'Erase local data and try again', erases: true },
   { spent: 'erased', stage: 'initialize', wipe: true, tried: ERASE_FAILED, offer: OFFER_ERASES, label: 'Erase local data and try again', erases: true },

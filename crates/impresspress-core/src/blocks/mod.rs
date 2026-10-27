@@ -295,31 +295,30 @@ pub(crate) fn embedding_grant(serving_block: &str) -> wafer_run::ResourceGrant {
 /// the constant the block's own `lifecycle(Init)` applies, so the two cannot
 /// disagree.
 pub fn all_block_migrations() -> Vec<&'static crate::migration_helper::BlockMigrations> {
-    let mut all = vec![
+    vec![
         &admin::migrations::MIGRATIONS,
         &auth::migrations::MIGRATIONS,
-    ];
-    #[cfg(feature = "site-runtime")]
-    all.push(&dev::migrations::MIGRATIONS);
-    #[cfg(feature = "block-files")]
-    all.push(&files::migrations::MIGRATIONS);
-    #[cfg(feature = "block-legalpages")]
-    all.push(&legalpages::migrations::MIGRATIONS);
-    #[cfg(feature = "block-llm")]
-    all.push(&llm::migrations::MIGRATIONS);
-    #[cfg(feature = "block-messages")]
-    all.push(&messages::migrations::MIGRATIONS);
-    #[cfg(feature = "block-products")]
-    all.push(&products::migrations::MIGRATIONS);
-    #[cfg(feature = "block-signal")]
-    all.push(&signal::migrations::MIGRATIONS);
-    #[cfg(feature = "block-tickets")]
-    all.push(&tickets::migrations::MIGRATIONS);
-    #[cfg(feature = "block-userportal")]
-    all.push(&userportal::migrations::MIGRATIONS);
-    #[cfg(feature = "block-vector")]
-    all.push(&vector::migrations::MIGRATIONS);
-    all
+        #[cfg(feature = "site-runtime")]
+        &dev::migrations::MIGRATIONS,
+        #[cfg(feature = "block-files")]
+        &files::migrations::MIGRATIONS,
+        #[cfg(feature = "block-legalpages")]
+        &legalpages::migrations::MIGRATIONS,
+        #[cfg(feature = "block-llm")]
+        &llm::migrations::MIGRATIONS,
+        #[cfg(feature = "block-messages")]
+        &messages::migrations::MIGRATIONS,
+        #[cfg(feature = "block-products")]
+        &products::migrations::MIGRATIONS,
+        #[cfg(feature = "block-signal")]
+        &signal::migrations::MIGRATIONS,
+        #[cfg(feature = "block-tickets")]
+        &tickets::migrations::MIGRATIONS,
+        #[cfg(feature = "block-userportal")]
+        &userportal::migrations::MIGRATIONS,
+        #[cfg(feature = "block-vector")]
+        &vector::migrations::MIGRATIONS,
+    ]
 }
 
 /// Register the admin feature block with the WAFER runtime.

@@ -2719,6 +2719,7 @@ dependencies = [
  "wafer-block-crypto",
  "wafer-core",
  "wafer-run",
+ "wafer-sql-utils",
 ]
 
 [[package]]

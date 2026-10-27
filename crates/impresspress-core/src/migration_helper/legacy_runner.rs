@@ -10,7 +10,9 @@
 //! wants the old runner's stamp writes `block_settings.current_hash` itself.
 //!
 //! It is the one place that tolerance survives. It is compiled only for
-//! tests and the `test-support` feature, never into a deployment, and
+//! tests and the `migration-fixtures` feature (which `test-support` turns
+//! on, and the browser's wasm tests turn on alone), never into a deployment,
+//! and
 //! `migration_helper`'s `no_deployed_module_names_the_legacy_runner` fails if
 //! a non-test module names it.
 

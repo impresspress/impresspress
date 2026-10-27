@@ -315,7 +315,9 @@ mod initialize_tests {
 
     /// **The worker sees a refused migration by name.** A database whose
     /// migration ledger records an admin file this bundle does not ship — one
-    /// a newer bundle migrated — is refused, and `sw.js` reports an
+    /// a newer bundle migrated — is refused by the pre-build pass over every
+    /// block's migrations (`impresspress_browser::boot`'s
+    /// `pre_ledger_migrations` tests cover the history's refusals), and `sw.js` reports an
     /// `initialize()` rejection named `MigrationRefused` as its non-erasing
     /// stage `migration`; so the rejection must reach it as that error, not
     /// re-wrapped or turned into text, and the database must be left as it
@@ -325,7 +327,7 @@ mod initialize_tests {
         use impresspress_core::{
             blocks::admin::ADMIN_BLOCK_ID,
             migration_helper::backend_named,
-            platform_state::applied_migrations::{self, AppliedMigration, Origin},
+            platform_state::applied_migrations::{self, AppliedMigration},
         };
 
         let db: std::sync::Arc<dyn DatabaseService> = std::sync::Arc::new(fresh_db().await);
@@ -336,11 +338,10 @@ mod initialize_tests {
         )
         .await
         .expect("create the ledger");
-        let newer = AppliedMigration::new(
+        let newer = AppliedMigration::ran(
             ADMIN_BLOCK_ID,
             "999_from_a_newer_bundle",
             "a-newer-bundles-hash",
-            Origin::Ran,
         );
         db.exec_raw_transaction(&[applied_migrations::insert_statement(&newer, sqlite)])
             .await

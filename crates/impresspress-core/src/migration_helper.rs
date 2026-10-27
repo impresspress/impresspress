@@ -195,8 +195,9 @@ use crate::{
 // `from_config_json` would do on every `apply_pending` call.
 
 /// The migration runner from before the ledger, reproduced for test fixtures
-/// that rebuild a historical database. Never compiled into a deployment.
-#[cfg(any(test, feature = "test-support"))]
+/// that rebuild a historical database. Never compiled into a deployment: it
+/// is behind `migration-fixtures`, which only test builds enable.
+#[cfg(any(test, feature = "migration-fixtures"))]
 pub mod legacy_runner;
 
 /// Config key a runtime build carries, as `"1"`, when it applies pending
@@ -2482,12 +2483,82 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         );
     }
 
+    /// The registry the browser applies before it builds a runtime
+    /// (`crate::blocks::all_block_migrations`) and each block's own `Init`
+    /// apply the same constant: every block directory that declares
+    /// migrations is in the registry's source, every block's non-test
+    /// `lifecycle_init` / `apply_migrations` call names its own `MIGRATIONS`,
+    /// and every entry this build compiles in is listed once, under a name
+    /// whose last segment is the directory it lives in, admin first.
+    #[test]
+    fn the_registry_and_each_blocks_init_apply_the_same_migrations() {
+        let blocks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/blocks");
+        let registry_source = std::fs::read_to_string(blocks.join("mod.rs")).expect("read");
+        let mut dirs = Vec::new();
+        for entry in std::fs::read_dir(&blocks).expect("read blocks") {
+            let dir = entry.expect("entry").path();
+            if dir.join("migrations/mod.rs").is_file() {
+                dirs.push(dir.file_name().expect("name").to_string_lossy().to_string());
+            }
+        }
+        assert!(dirs.len() >= 12, "{dirs:?}");
+        for dir in &dirs {
+            assert!(
+                registry_source.contains(&format!("&{dir}::migrations::MIGRATIONS,")),
+                "{dir} declares migrations but is not in all_block_migrations"
+            );
+            let mut stack = vec![blocks.join(dir)];
+            while let Some(path) = stack.pop() {
+                if path.is_dir() {
+                    for entry in std::fs::read_dir(&path).expect("read") {
+                        stack.push(entry.expect("entry").path());
+                    }
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read");
+                let deployed = text
+                    .find("#[cfg(test)]")
+                    .map_or(text.as_str(), |at| &text[..at]);
+                for call in ["lifecycle_init(", "apply_migrations("] {
+                    for (at, _) in deployed.match_indices(call) {
+                        if deployed[..at].ends_with("fn ") {
+                            continue;
+                        }
+                        let args = &deployed[at..];
+                        let args = &args[..args.find(';').unwrap_or(args.len())];
+                        assert!(
+                            args.contains("MIGRATIONS"),
+                            "{}: `{call}` applies something other than the block's MIGRATIONS: {args}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+        let registry = crate::blocks::all_block_migrations();
+        assert_eq!(registry[0].block, crate::blocks::admin::ADMIN_BLOCK_ID);
+        let names: std::collections::BTreeSet<&str> = registry.iter().map(|m| m.block).collect();
+        assert_eq!(names.len(), registry.len(), "a block is listed twice");
+        for migrations in &registry {
+            let dir = crate::test_support::migration_history::block_dir(migrations);
+            assert!(
+                dirs.iter().any(|d| d == dir),
+                "{} lives in no {dir}/",
+                migrations.block
+            );
+        }
+    }
+
     /// The runner from before the ledger is a test fixture: no code compiled
     /// into a deployment names it. Its tolerance of a duplicate `ADD COLUMN`
     /// must never reach a deployed runner again. A module may name it only
     /// below its first `#[cfg(test)]` (where every module keeps its tests);
     /// the three files listed are its declaration, itself, and the history
-    /// tests' engine, all behind `cfg(any(test, feature = "test-support"))`.
+    /// tests' engine, all behind test-only features (`migration-fixtures`,
+    /// `test-support`).
     #[test]
     fn no_deployed_module_names_the_legacy_runner() {
         let allowed = [

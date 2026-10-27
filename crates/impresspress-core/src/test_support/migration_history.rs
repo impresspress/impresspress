@@ -189,6 +189,29 @@ pub fn state(
     }
 }
 
+/// The list hash of the entry of `migrations`' `backend` history first seen
+/// at main commit `commit` (its short SHA, as `first_seen` ends): the way to
+/// name one state in both dialects, whose hashes differ.
+pub fn hash_at(
+    migrations: &BlockMigrations,
+    backend: Backend,
+    commit: &str,
+) -> Result<&'static str, String> {
+    migrations
+        .for_backend(backend)
+        .1
+        .iter()
+        .find(|s| s.first_seen.ends_with(commit))
+        .map(|s| s.list_hash)
+        .ok_or_else(|| {
+            format!(
+                "{} has no {} state first seen at {commit}",
+                migrations.block,
+                dialect(backend)
+            )
+        })
+}
+
 /// What the runner from before the ledger left after applying `short`'s
 /// list: its files run with that runner, and its hash stamped as `block`'s
 /// record. Admin's tables (which hold the record) must already exist,

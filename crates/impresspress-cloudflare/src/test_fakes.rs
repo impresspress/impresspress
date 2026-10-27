@@ -326,53 +326,41 @@ impl StorageService for FoldersOnly {
 /// test can say which came first: a statement reaching D1 or a KV write.
 pub(crate) type Log = Rc<RefCell<Vec<String>>>;
 
-/// The executable `UPDATE` of admin's migration 009, exactly as the migration
-/// runner hands it to D1 (one of the file's
-/// `migration_helper::executable_statements`; 009 is frozen, so the runner
-/// sends them one at a time): the one raw statement [`BlockSettingsD1`]
-/// gives a meaning to.
-pub(crate) fn admin_009_clear_statement() -> String {
+/// The `current_hash` a deployment from before the per-file ledger recorded
+/// for admin on main's 2026-10-07 list (`84c038a6`, 001-008): the history
+/// table adopts those eight files, and 009 is pending
+/// (`impresspress_core::migration_history::admin`).
+pub(crate) fn admin_record_before_009() -> &'static str {
+    impresspress_core::migration_history::admin::SQLITE
+        .iter()
+        .find(|state| state.first_seen.ends_with("dd4fd96c"))
+        .expect("admin's 2026-10-07 state is in the history")
+        .list_hash
+}
+
+/// How many statements admin 009's transaction sends: its executable
+/// statements and its ledger row.
+pub(crate) fn admin_009_transaction_len() -> usize {
     use impresspress_core::{
-        blocks::admin::migrations::{migration_files, BLOCK_SETTINGS_CLEAR_BLESSED_HASH},
+        blocks::admin::migrations::{BLOCK_SETTINGS_CLEAR_BLESSED_HASH, MIGRATIONS},
         migration_helper::executable_statements,
     };
-    let (_, sql) = migration_files("sqlite")
+    let (_, sql) = MIGRATIONS
+        .sqlite
         .iter()
         .find(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
         .expect("009 is wired into admin's SQLite list");
-    executable_statements(sql)
-        .into_iter()
-        .find(|statement| statement.starts_with("UPDATE impresspress__admin__block_settings"))
-        .expect("009 updates block_settings")
-}
-
-/// The `current_hash` a deployment from before the per-file ledger recorded
-/// for admin once it had applied 001-008: the list 009 is pending on, which
-/// the runner adopts (`migration_helper`, "Databases from before the
-/// ledger").
-pub(crate) fn admin_list_before_009() -> String {
-    use impresspress_core::{
-        blocks::admin::migrations::{migration_files, BLOCK_SETTINGS_CLEAR_BLESSED_HASH},
-        migration_helper::migration_set_hash,
-    };
-    let all = migration_files("sqlite");
-    let at = all
-        .iter()
-        .position(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
-        .expect("009 is wired into admin's SQLite list");
-    migration_set_hash(&all[..at])
+    executable_statements(sql).len() + 1
 }
 
 /// A D1 stand-in for a database an earlier deploy migrated: it holds
 /// `block_settings` rows in memory, answers reads of that table with them
-/// (honouring equality filters and a limit), applies typed writes to them, and
-/// carries out admin 009's `UPDATE` (see [`admin_009_clear_statement`]) by
-/// emptying every row's `blessed_hash`. Every other raw statement, and every
-/// raw transaction (the migration ledger's rows), is accepted and changes
-/// nothing. A created row takes the column's default, an empty
-/// `blessed_hash`. Reads of any other table — the ledger's among them — find
-/// nothing and writes to one are only logged. Every raw statement, raw
-/// transaction and typed write is logged.
+/// (honouring equality filters and a limit) and applies typed writes to them.
+/// Every raw statement and raw transaction (a migration file and its ledger
+/// row, the ledger's adoption) is accepted, logged, and changes nothing: the
+/// fake models the order in which things reach D1, not what DDL does. Reads
+/// of any other table — the ledger's among them — find nothing and writes to
+/// one are only logged.
 pub(crate) struct BlockSettingsD1 {
     pub(crate) log: Log,
     pub(crate) rows: RefCell<Vec<Record>>,
@@ -446,12 +434,6 @@ impl DatabaseService for BlockSettingsD1 {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
         self.note(format!("d1 create {collection}"));
-        let mut data = data;
-        if collection == block_settings_table() {
-            // The column's default, as the table declares it.
-            data.entry("blessed_hash".to_string())
-                .or_insert_with(|| serde_json::json!(""));
-        }
         let mut rows = self.rows.borrow_mut();
         let record = Record {
             id: data
@@ -526,18 +508,6 @@ impl DatabaseService for BlockSettingsD1 {
         _args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         self.note(format!("d1 exec {query}"));
-        if query == admin_009_clear_statement() {
-            let mut cleared = 0;
-            for row in self.rows.borrow_mut().iter_mut() {
-                if let Some(blessed) = row.data.get_mut("blessed_hash") {
-                    if blessed != "" {
-                        *blessed = serde_json::json!("");
-                        cleared += 1;
-                    }
-                }
-            }
-            return Ok(cleared);
-        }
         Ok(0)
     }
 
@@ -735,14 +705,12 @@ pub(crate) async fn deploy_admin_runtime(
     wafer
 }
 
-/// A `block_settings` row as a pre-#145 build left it: `current_hash` and
-/// `blessed_hash` as given.
-pub(crate) fn blessed_row(id: &str, block: &str, current: &str, blessed: &str) -> Record {
+/// A `block_settings` row with `current_hash` as given.
+pub(crate) fn settings_row(id: &str, block: &str, current: &str) -> Record {
     let mut data = HashMap::new();
     data.insert("block_name".to_string(), serde_json::json!(block));
     data.insert("enabled".to_string(), serde_json::json!(1));
     data.insert("current_hash".to_string(), serde_json::json!(current));
-    data.insert("blessed_hash".to_string(), serde_json::json!(blessed));
     data.insert("seed_defaults_hash".to_string(), serde_json::json!(""));
     data.insert(
         "created_at".to_string(),

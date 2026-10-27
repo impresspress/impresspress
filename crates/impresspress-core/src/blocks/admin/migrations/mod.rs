@@ -24,15 +24,16 @@ const SQL_001_POSTGRES: &str = include_str!("001_admin_schema.postgres.sql");
 // the paragraph above instead; it is the whole of what that pointer was
 // standing in for.
 //
-// The .sql files are deliberately NOT edited to say so. Every database that
-// applied a shipped migration records the hash of its statements, and a
-// database from before the per-file ledger is matched by the hash of its
-// files' whole text, comments included, so retouching a `--` line would turn
-// every such deployment's adoption into the legacy replay. See
-// `crate::migration_helper`'s "A shipped file's statements are immutable",
-// which prescribes exactly this note. It is also why
-// `scripts/check-doc-pointers.sh` skips `migrations/*.sql` — a guard cannot
-// ask for an edit the runtime punishes. This file is not skipped.
+// The .sql files are not edited to say so here. A comment edit leaves the
+// file's ledger content hash alone (comments are not statements), but it
+// moves the whole-text hash a database from before the ledger recorded, so
+// every history state naming that text needs its old text pinned as a
+// fixture (`examples/migration-history.rs --write` copies it, and
+// `tests/migration_history.rs` says which state needs one). That is its own
+// change, with its own review of the regenerated table. See
+// `crate::migration_helper`'s "A shipped file's statements are immutable".
+// It is also why `scripts/check-doc-pointers.sh` skips `migrations/*.sql`.
+// This file is not skipped.
 const SQL_002_SQLITE: &str = include_str!("002_variables_block_column.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_002_POSTGRES: &str = include_str!("002_variables_block_column.postgres.sql");
@@ -89,11 +90,11 @@ const SQL_003_POSTGRES: &str = include_str!("003_block_settings_seed_hash.postgr
 // pending migrations, and 004 is pending where the database has not
 // recorded it.
 //
-// Re-runnable, as every frozen migration must be (`migration_helper`'s
-// "Frozen files"): a frozen file that failed part-way runs again from its
-// start, and the legacy replay runs admin's frozen list once more. Once the
-// index exists the `DELETE` finds nothing and the `CREATE UNIQUE INDEX IF NOT
-// EXISTS` is a no-op.
+// The ledger runs it once, in one transaction. It was written to be re-run,
+// because the runner before the ledger re-ran admin's whole list whenever it
+// changed: once the index exists the `DELETE` finds nothing and the `CREATE
+// UNIQUE INDEX IF NOT EXISTS` is a no-op. The history table's verdicts for
+// the lists that re-ran it rest on that.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -117,10 +118,10 @@ const SQL_004_POSTGRES: &str = include_str!("004_user_roles_unique.postgres.sql"
 // by hand (the admin SQL explorer), so none is left in a spelling the codec
 // now refuses.
 //
-// Re-runnable, like the rest of admin's set (see 004's note): a second
-// `ADD COLUMN` is swallowed as a duplicate column by the statement loop
-// frozen files run through, and once no row holds `write = 2` the `UPDATE`
-// matches nothing.
+// The ledger runs it once, in one transaction. Before the ledger it was
+// re-run with the rest of admin's list (see 004's note): the old runner took
+// the second `ADD COLUMN`'s duplicate-column error as applied, and once no
+// row holds `write = 2` the `UPDATE` matches nothing.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -136,9 +137,9 @@ const SQL_005_POSTGRES: &str = include_str!("005_wrap_grants_append_column.postg
 // before it reached a backend took no measurable time, and rows written
 // before this migration keep their old status text with no duration.
 //
-// Re-runnable, like the rest of admin's set: a second `ADD COLUMN` is
-// swallowed as a duplicate column by the statement loop frozen files run
-// through.
+// The ledger runs it once, in one transaction. Before the ledger the old
+// runner re-ran it with admin's list and took the second `ADD COLUMN`'s
+// duplicate-column error as applied.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -162,9 +163,10 @@ const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.po
 // says which, so those rows are deleted rather than guessed at. They are
 // diagnostics, on deployments with no production users yet.
 //
-// Re-runnable: once no row holds an action name, every statement matches
-// nothing, so a later re-run of admin's frozen list (the legacy replay) is a
-// scan of `method` that changes nothing.
+// The ledger runs it once, in one transaction. Before the ledger it was
+// re-run with admin's list: once no row holds an action name, every
+// statement matches nothing, so a re-run is a scan of `method` that changes
+// nothing.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -181,10 +183,10 @@ const SQL_007_POSTGRES: &str = include_str!("007_request_logs_http_method.postgr
 // value — the segment after `/b/`, up to the next `/` — and leaves every other
 // path (`/`, the unmatched-route label) at `''`.
 //
-// Re-runnable, as a later re-run of admin's frozen list needs: a second
-// `ADD COLUMN` is swallowed as a duplicate column by the statement loop
-// frozen files run through, the `UPDATE` only touches `/b/` rows still at
-// `''`, and the index is `IF NOT EXISTS`.
+// The ledger runs it once, in one transaction. Before the ledger it was
+// re-run with admin's list: the old runner took the second `ADD COLUMN`'s
+// duplicate-column error as applied, the `UPDATE` only touches `/b/` rows
+// still at `''`, and the index is `IF NOT EXISTS`.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -192,79 +194,54 @@ const SQL_008_SQLITE: &str = include_str!("008_request_logs_block.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_008_POSTGRES: &str = include_str!("008_request_logs_block.postgres.sql");
 
-// 009 empties `block_settings.blessed_hash` on every row, so a build from
-// before the column was retired that is still serving reports schema drift
-// instead of silently re-applying its own migrations.
+// 009 retires `block_settings.blessed_hash`: every database ends with no
+// such column, whichever `001` built the table.
 //
 // Builds before #145 gated a pending list with `should_apply = is_fresh ||
 // run_requested || blessed_hash == code_hash`, and on success wrote
-// `current_hash = blessed_hash = code_hash`. This build neither reads nor
-// writes the column, so it kept the value the last pre-#145 deploy left. On
-// Cloudflare the version being replaced keeps serving until the new one is
-// promoted — and for good when a deploy fails — and once this build has
-// recorded a list of its own, the old version's next cold build re-applies
-// its whole list for every block whose stale `blessed_hash` still equals its
-// own code hash: it overwrites the new version's `current_hash` records,
-// bumps the KV config-version stamp (which leaves the candidate's prepared
-// plan stale mid-deploy) and re-runs old data repairs; had auth's list
-// changed, it would drop the refresh-token and session tables and sign every
-// user out. That happens once per divergence when the re-apply succeeds (it
-// re-records the block), and on every cold build while it keeps failing part
-// way, as products' did at the D1 statement budget. With the column empty,
-// the same old gate finds `blessed_hash != code_hash`, logs `schema drift;
-// redeploy with --run-migrations` and boots on the schema it finds.
+// `current_hash = blessed_hash = code_hash`. #145 removed the column from
+// `001` and stopped reading or writing it, so two populations share admin's
+// 2026-10-07 record (`84c038a6` on SQLite): databases created before #145,
+// whose `001` made the column and kept it, and databases created since,
+// which never had it. No record tells them apart, so the file's result must
+// not depend on which it meets:
 //
-// Every row, not one block's: any block whose list a pre-#145 version ships
-// is exposed. The column is emptied, not dropped: the old `write_state`
-// names it in its upsert, so without it the old version's every `Init` would
-// fail. It is added where it is missing, because #145 removed it from 001: a
-// database created since never had it, and an `UPDATE` naming it would fail
-// there. On SQLite/D1 that `ADD COLUMN` is swallowed as a duplicate column
-// where the column exists; the PostgreSQL file says `ADD COLUMN IF NOT
-// EXISTS`. Every database ends with the same schema, holding a column
-// nothing in this build reads.
+// - **SQLite / D1** rebuild the table from the columns every database has,
+//   copied by name: create `_v2` with today's columns, copy the rows, drop
+//   the old table with whatever column it held, rename `_v2`, recreate the
+//   unique index on `block_name`. Five statements, one transaction (on D1,
+//   one `db.batch()`).
+// - **PostgreSQL** says `DROP COLUMN IF EXISTS`. The `IF EXISTS` is
+//   declarative, for the same two populations, not a tolerated error.
 //
-// **How the cleared rows reach the old version's KV row cache.** The old
-// version reads its migration state from `cfg:v1:block_settings:__all__`,
-// the cached whole table (24 h TTL, not version-scoped). On Cloudflare
-// `db::ddl` reaches `KvCachedD1DatabaseService::exec_raw`, which passes this
-// `UPDATE` straight to D1 and invalidates nothing. Two later steps of the
-// deploy funnel bring the key in line with D1, and either alone would:
+// The file as first shipped (2026-10-15, `56ab1250`) added the column where
+// it was missing and emptied it, relying on the old runner's tolerance of a
+// duplicate `ADD COLUMN`, which no transaction can give. The ledger release
+// replaced its text before any database recorded it in a ledger; a database
+// that ran the first text (`0f4bad57`) is marked by the history table as not
+// having applied 009, so today's text runs there too and drops the column.
+// The basename stays: it is the file's key in the ledger.
 //
-// - admin's stamp of its list, which `migration_helper::apply_pending`
-//   writes once 009 has run and its ledger row is in (the ledger row is a raw
-//   insert into a table the cache never holds), is a typed write to this
-//   table, and drops the key (`cache_key::invalidate_keys` emits the all-rows
-//   key for it);
-// - the funnel reads the table back through the cache in read-through mode —
-//   `CfDeployBootHooks`' `block_settings::load_and_seed` right after admin's
-//   `Init` (`builder::boot` step 4), and `/_deploy/prepare`'s closing
-//   `block_settings::load` — and each read rewrites the key from D1 whenever
-//   it differs.
+// What the column was for: with it emptied, a pre-#145 version still serving
+// (a Cloudflare version not yet replaced, or a rollback) found `blessed_hash
+// != code_hash` and reported drift instead of re-applying its whole list.
+// Dropped, that version's `Init` fails instead (its upsert names the
+// column), which stops it the same way. No deployment runs a pre-#145
+// version, so this costs no live case.
 //
-// `kv_cached_db`'s
-// `admin_migration_009_tests::applying_admins_list_drops_the_all_rows_key_after_009`
-// holds the first; `boot_hooks`'
-// `the_deploy_funnel_leaves_the_all_rows_key_holding_the_cleared_rows` holds
-// the outcome: after admin's `Init` and the seed step, the cached table has
-// every `blessed_hash` empty.
+// **How the rebuilt table reaches the KV row cache on Cloudflare.** A
+// version's migration state is read from `cfg:v1:block_settings:__all__`, the
+// cached whole table (24 h TTL, not version-scoped). The rebuild is raw DDL
+// that invalidates nothing, but admin's stamp of its list, which
+// `migration_helper::apply_pending` writes once 009 and its ledger row are
+// in, is a typed write to this table and drops the key
+// (`cache_key::invalidate_keys` emits the all-rows key for it); the deploy
+// funnel's later reads through the cache rewrite it from D1. `kv_cached_db`'s
+// `admin_migration_009_tests` holds the first.
 //
-// What it does not do: it protects against an old version only once a build
-// carrying it has applied it — a live old version serving before that keeps
-// re-applying. A rollback with migrations to a pre-#145 version re-blesses
-// rows, and since the per-file ledger a roll-forward finds 009 recorded and
-// does not run it again, so those rows stay blessed. So does a row an old
-// version re-blesses after 009 ran because its cold build read the rows from
-// before (D1 mid-prepare, or a colo's KV copy, which is eventually
-// consistent). Keeping traffic off the old version during a deploy is what
-// closes both.
-//
-// Re-runnable: the `ADD COLUMN` is a duplicate after the first run — and on
-// a database created before #145, whose old 001 made the column, on the
-// first run too, which is why 009 relies on the frozen-file loop
-// (`migration_helper`'s "Frozen files") — and the `UPDATE` matches no row.
-// Covered on both dialects by
-// `impresspress-native/tests/admin_blessed_hash.rs`.
+// Covered on both dialects by `impresspress-server/tests/boot_migrations.rs`
+// (both populations, and the first text's database, through a native boot),
+// and by the history convergence tests.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -295,7 +272,7 @@ pub(crate) const REQUEST_LOGS_HTTP_METHOD: &str = "007_request_logs_http_method"
 /// reason.
 pub(crate) const REQUEST_LOGS_BLOCK: &str = "008_request_logs_block";
 
-/// Basename of the `blessed_hash` clear, named once so the migration list and
+/// Basename of the `blessed_hash` retirement, named once so the migration list and
 /// the tests that slice it — here and in other crates — cannot drift apart.
 pub const BLOCK_SETTINGS_CLEAR_BLESSED_HASH: &str = "009_block_settings_clear_blessed_hash";
 
