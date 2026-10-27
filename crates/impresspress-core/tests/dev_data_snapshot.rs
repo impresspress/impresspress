@@ -61,7 +61,8 @@ const LINE_ITEMS_TABLE: &str = "impresspress__products__line_items";
 // ---------------------------------------------------------------------------
 
 /// Every table name created by a `CREATE TABLE [IF NOT EXISTS] <name>`
-/// statement anywhere under the three blocks' own migration directories —
+/// statement anywhere under the three blocks' own migration directories,
+/// less any renamed away by `ALTER TABLE <name> RENAME TO …` —
 /// the ground truth of what tables actually exist, read straight off the
 /// `.sql` files rather than off any Rust-side declaration of them.
 ///
@@ -109,6 +110,23 @@ fn tables_created_in_migrations() -> BTreeSet<String> {
                     path.display()
                 );
                 tables.insert(name);
+            }
+            // A table created only to be renamed (admin 009 rebuilds
+            // `block_settings` as `…_v2`, then renames it back) never exists
+            // once its file has run.
+            let words: Vec<&str> = sql
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .flat_map(str::split_whitespace)
+                .collect();
+            for at in 0..words.len().saturating_sub(4) {
+                if words[at].eq_ignore_ascii_case("ALTER")
+                    && words[at + 1].eq_ignore_ascii_case("TABLE")
+                    && words[at + 3].eq_ignore_ascii_case("RENAME")
+                    && words[at + 4].eq_ignore_ascii_case("TO")
+                {
+                    tables.remove(words[at + 2]);
+                }
             }
         }
     }

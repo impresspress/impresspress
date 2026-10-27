@@ -118,7 +118,8 @@ async fn every_block_applies_fresh_atomically_on_postgres() {
     );
 }
 
-/// The crossing record's lines for `dialect`.
+/// The crossing record's lines for `dialect`, for the blocks this build
+/// compiles in.
 fn recorded_crossing(dialect: &str) -> BTreeSet<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../impresspress-core/migration-history-crossing.txt");
@@ -127,6 +128,12 @@ fn recorded_crossing(dialect: &str) -> BTreeSet<String> {
         .lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .filter(|l| l.split(' ').nth(1) == Some(dialect))
+        // Only the blocks this build compiles in: a block behind a feature
+        // that is off has no states to cross here.
+        .filter(|l| {
+            let block = l.split(' ').next().unwrap_or_default();
+            history::blocks().iter().any(|m| m.block == block)
+        })
         .map(str::to_string)
         .collect()
 }

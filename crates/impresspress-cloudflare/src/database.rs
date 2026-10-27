@@ -711,6 +711,13 @@ impl DbExec for D1DatabaseService {
     /// this adapter cannot say which one failed and does not guess. The
     /// classified code and D1's own message are kept.
     ///
+    /// The checks after `batch()` resolves — the result count, each
+    /// statement's success flag, the decoding of its result — report a
+    /// failure on a batch D1 has already committed. Such an error leaves the
+    /// outcome unknown, as [`TransactionError`] says: a caller re-reads its
+    /// own state (the migration runner re-reads its ledger) rather than
+    /// taking the error as a rollback.
+    ///
     /// Decoded positionally, as [`run_batch`](DbExec::run_batch) is: a
     /// [`TxOp::Execute`] yields `meta().changes`, as
     /// [`run_execute`](DbExec::run_execute) does, and a [`TxOp::Returning`]

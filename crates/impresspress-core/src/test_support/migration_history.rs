@@ -657,7 +657,9 @@ fn value_for(table: &Table, table_name: &str, column: &Column, backend: Backend)
 
 /// Insert one row into every table of `schema` except the ledger and
 /// `skip`, parents before children, naming only the columns each table has
-/// and leaving every column with a default (or nullable) to it.
+/// and leaving every column with a default (or nullable) to it. A table that
+/// already holds rows (its migrations seeded it) is not added to; its rows
+/// are what must survive.
 pub async fn seed(
     db: &Arc<dyn DatabaseService>,
     backend: Backend,
@@ -693,6 +695,30 @@ pub async fn seed(
     let mut seeded = Vec::new();
     for name in order {
         let table = &schema.tables[name];
+        // A table its migrations already filled (a singleton whose `CHECK`
+        // admits only the row they inserted) keeps that row as the one to
+        // find again: a second row could not be added.
+        let held = rows(
+            db,
+            &format!("SELECT count(*) AS n FROM {}", quote(name)),
+            &[],
+        )
+        .await
+        .map_err(|e| format!("count {name}: {e}"))?
+        .first()
+        .and_then(|r| r.get("n"))
+        .and_then(|n| {
+            n.as_i64()
+                .or_else(|| n.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0);
+        if held > 0 {
+            seeded.push(Seeded {
+                table: name.clone(),
+                key: None,
+            });
+            continue;
+        }
         let mut columns = Vec::new();
         let mut literals = Vec::new();
         let mut key = None;
@@ -713,11 +739,11 @@ pub async fn seed(
                     None if !column.not_null => continue,
                     None => value_for(table, name, column, backend),
                 }
-            } else if column.primary_key && rowid_alias {
-                continue;
-            } else if column.primary_key && column.default.is_some() {
-                continue;
-            } else if !column.primary_key && (column.default.is_some() || !column.not_null) {
+            } else if (column.primary_key && (rowid_alias || column.default.is_some()))
+                || (!column.primary_key && (column.default.is_some() || !column.not_null))
+            {
+                // The database fills it: a rowid alias, a defaulted column, or
+                // a nullable one left NULL.
                 continue;
             } else {
                 value_for(table, name, column, backend)
