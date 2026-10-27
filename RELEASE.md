@@ -21,75 +21,115 @@ what it did happens on every native boot.
 
 ### Migrations: recorded per file; a release runs only the files it adds
 
-**Do not deploy this release on its own.** It refuses a database whose
-migration record is from before this release and matches no list it ships
-(below); the legacy replay that upgrades those ships in the next migration
-release. Deploy the two together.
-
 **What changes.**
 
 - What a database has applied is recorded per file, in
   `impresspress__admin__applied_migrations`: the block, the file, the hash of
-  its statements, when, and whether it ran or was adopted. A release runs
-  only the files that table does not record. The table is created by the
-  runner the first time a block migrates.
+  its statements, when, whether it ran or was adopted, and for an adopted
+  file the record it was adopted from. A release runs only the files that
+  table does not record. The table is created by the runner the first time a
+  block migrates.
+- **Every file runs in one transaction with its record**, on every backend:
+  all of it applies, or none of it does, and a file that fails stays
+  unrecorded and is run again, whole, next time. On Cloudflare that is one
+  D1 `batch()`. Nothing is tolerated: a statement that fails fails its file.
 - Adding a migration no longer re-runs a block's earlier ones, so it signs
   nobody out and needs no one-off D1 budget: a new file costs its own
   statements and one more for its record.
-- A file added after this release runs in one transaction with its record:
-  all of it applies, or none of it does. On Cloudflare that is one D1
-  `batch()`. The files every block shipped up to this release (the
-  "frozen" files) run as they always have — one statement at a time, a
-  duplicate `ADD COLUMN` taken as already applied — and are recorded once
-  they have all run. A frozen file that fails part-way stays unrecorded and
-  is run again from its start next time, which each is written to survive.
 - A settled deployment reads nothing new: a block whose recorded list matches
   the build's returns before touching the database, as before.
+- The browser applies every block's pending migrations before it builds its
+  runtime (the native server does so for admin's), so any block's refusal
+  stops the boot by name.
+
+**Two shipped files change in this release, before any record exists.**
+Both had been written for the old runner, which re-ran whole lists and took
+a duplicate `ADD COLUMN` as applied; neither can run as one transaction as
+shipped. No database records a hash for either yet, so this is the one
+moment they can change.
+
+- **Auth 016** loses its leading `ADD COLUMN role`, which recreated the
+  column for a re-run and was a duplicate on every database 016 had not run
+  on, a fresh one included. It is now the copy into `user_roles` and the
+  `DROP COLUMN`. A database that ran the old text has the same result and is
+  adopted (below); nothing runs for it.
+- **Admin 009** retires `block_settings.blessed_hash` instead of emptying it.
+  Databases created before 2026-10-07 have the column and ones created since
+  do not, under the same record, so the file must not depend on which it
+  meets: on SQLite and D1 it rebuilds the table from the columns every
+  database has, copied by name (five statements, one transaction); on
+  PostgreSQL it is `DROP COLUMN IF EXISTS`. Every database ends with no
+  `blessed_hash` column and every row's other values as they were. A
+  database that ran the old text (which added and emptied the column) runs
+  the new one too, and the column goes.
 
 **Never edit a shipped migration's statements.** A build whose copy of an
 applied file has a different hash refuses, naming the block, the file and
-both hashes: a native server refuses to start; a Cloudflare deploy fails
-before promotion, and the live version keeps serving; a browser bundle
-refuses admin's list with an error named `MigrationRefused`, which the boot
-shell reports without erasing anything, even in a build that erases on
-recovery, and any other block's list by failing that block alone. Put the
-change in a new file. `migration-content-hashes.txt` in `impresspress-core`
-records every shipped file's hash, and a test fails at PR time when one
-moves. Comment lines are not hashed, but leave them alone too until the
-legacy replay is gone: a database from before this release is matched by the
-hash of its files' whole text.
+both hashes. Put the change in a new file. `migration-content-hashes.txt` in
+`impresspress-core` records every shipped file's hash, and a test fails at
+PR time when one moves. Comment lines are not hashed, but a database from
+before this release is matched by the hash of its files' whole text, so a
+comment edit needs the history table regenerated (below) and its diff
+reviewed.
 
 **Upgrading a database from before this release.** Each block's first
 migrating run after the upgrade decides from what the block recorded:
 
 - **Nothing recorded:** a fresh block; every file runs.
-- **A list this release starts with** (the release before this one, or an
-  older one that only added files since): those files are recorded as
-  `adopted` without running, and the files after them run. A deployment that
-  deployed or booted the previous release runs nothing.
-- **Anything else** — a list in which a file has since been edited, or
-  `applying`, left by a run that crashed before the 2026-10-07 native
-  auto-migration release: the record proves nothing about which text ran.
-  This release refuses that block, saying it needs the legacy replay. Most
-  long-lived deployments are in this class for at least one block (17
-  shipped files were edited since July), which is why this release does not
-  ship alone.
+- **A list main carried** (every one since 2026-07-13, the exceptions below
+  aside): it is looked up in the reviewed history table
+  (`impresspress_core::migration_history`, generated from main's git
+  history), which names the files that list had applied. Those are recorded
+  as `adopted` without running, and the rest run. In practice: every such
+  deployment runs admin's 009 (its first text is not counted as applied);
+  one last migrated before 2026-10-22 also runs auth's 016; and any block
+  further behind runs the files it lacks.
+- **Unsupported, refused by name with nothing changed:** any list from
+  before 2026-07-13 (tables were `solobase__*`); auth before 2026-09-06
+  (its sessions table predates 012); products before 2026-07-21 (001's
+  bodies were corrected); dev's 2026-10-03 first text; signal's 2026-09-13
+  first text; admin's 2026-10-06 first 007; on PostgreSQL, legalpages' 002
+  and products' 015 first texts. The message names the block, the stored
+  hash, the state's date and the reason.
+- **Unknown, refused by name with nothing changed:** a record main never
+  carried — `applying` (left by a run that crashed before 2026-10-07), a
+  branch build's list, a corrupt row.
+- **Drifted:** a file that meets a column a typed write already created (a
+  browser profile that wrote with newer code before it migrated, possible
+  where strict schema is off) is refused as drifted, its file rolled back.
+
+**Remedy for a refusal.** Nothing is ever erased by the runner.
+
+- **Native:** the server refuses to start with the message. Restore a backup
+  taken before the upgrade, or recreate the database.
+- **Cloudflare:** `/_deploy/prepare` fails, the deploy stops before
+  promotion and the current version keeps serving; the message is in the
+  deploy report. Remedy as native.
+- **Browser:** `initialize()` rejects with an error named
+  `MigrationRefused`; the boot shell shows the cause and **Reset local data
+  and reload**, which erases only when the person chooses it, even in a
+  build that erases on recovery.
 
 **Rollback.**
 
 - **Native:** an older binary that records migrations per file refuses to
   start ("migrated by a newer build", naming the files it does not ship). A
   binary from before this release ignores the record and re-runs its own
-  list; a later upgrade trusts the record, so whatever that old list changed
-  stays.
+  list over the schema it finds: its old 016 fails its `DROP COLUMN role`
+  on a database that already dropped it, and its old 009 adds
+  `blessed_hash` back, so such a rollback fails on auth and is not
+  supported.
 - **Cloudflare:** `wrangler rollback`, or promoting an older version, serves:
   the request path never plans migrations, it logs `schema drift` and runs
-  on the schema it finds. Redeploying an older build through
-  `impresspress deploy` runs its prepare: one that records per file fails the
-  deploy as "migrated by a newer build" and the current version keeps
-  serving; one from before this release re-runs its list, as natively.
-- **Browser:** an older bundle that records per file refuses admin's list
-  and stops without erasing; one from before this release re-runs its list.
+  on the schema it finds. A version from before 2026-10-07 fails its
+  `Init` without `blessed_hash` (its upsert names the column). Redeploying an
+  older build through `impresspress deploy` runs its prepare: one that
+  records per file fails the deploy as "migrated by a newer build" and the
+  current version keeps serving; one from before this release re-runs its
+  list, as natively.
+- **Browser:** an older bundle that records per file refuses and stops
+  without erasing; one from before this release re-runs its list, as
+  natively.
 - **Remedy for "migrated by a newer build":** downgrading across migrations
   is not supported. Run the newer build again, or restore a backup taken
   before the upgrade. Deleting ledger rows is not a remedy: the next newer
@@ -98,18 +138,23 @@ migrating run after the upgrade decides from what the block recorded:
 **Tracking lost.** A block whose `block_settings` row was lost on its own
 recovers: its files are still recorded, nothing runs, and the row is written
 again. If both its row and its ledger rows are gone while its schema is
-still there, its frozen files run again over that schema (which they
-survive) and are recorded; a file added after this release that meets the
-existing schema refuses as "its tracking was lost". Restore
+still there, the block looks fresh, its first file meets the existing schema
+and is refused as "its tracking was lost", rolled back. Restore
 `impresspress__admin__block_settings` and
 `impresspress__admin__applied_migrations` from a backup taken before the
 loss, or recreate the database.
 
+**Cloudflare budget.** A fresh database's `/_deploy/prepare` sends 454
+statements for its migrations (counted by a test that keeps it within half
+of the default budget of 1000). Leave
+`[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
+fresh install.
+
 **Older entries this makes false** say so where they stand: the JWT
 blocklist entry's whole-list cost, the "a revoked device stays revoked"
-entry's "D1 budget of 1000", the 016
-entry's "Cloudflare: this deploy needs a D1 budget of 1000", the 009
-entry's "the next deploy of this build re-runs admin's list", the native
+entry's "D1 budget of 1000", the 016 entry's "Cloudflare: this deploy needs
+a D1 budget of 1000" and its 016 text, the 009 entry (the column is now
+dropped, not emptied, and the next deploy re-runs nothing), the native
 auto-migration entry's "Recovery" and "Auth caveat", and the browser entry's
 "any edit to the auth migration SQL still re-runs the auth set".
 
@@ -356,6 +401,10 @@ its session carries. The `@impresspress/sdk` types are regenerated without it.
 release (version 1) is refused on import: its users rows carry the dropped
 column. Export the sandbox again from a build that has applied 016.
 
+*Since "Migrations: recorded per file"* (above), 016 no longer opens with
+`ADD COLUMN role`: it is the copy and the `DROP COLUMN`, one transaction. A
+database that ran the earlier text is adopted and runs nothing.
+
 **Database support.** 016 needs `ALTER TABLE … DROP COLUMN`: SQLite 3.35 or
 later, which the native server, the browser build and Cloudflare D1 all are,
 or any supported PostgreSQL.
@@ -564,11 +613,11 @@ first traffic while the deploy is applying 009 can read the rows from before
 009 ran (D1 mid-deploy, or a stale KV copy in another location) and bless a
 block other than admin again; nothing then re-runs 009 until admin's list
 next changes.
-*Since "Migrations: recorded per file"* (above), the next deploy does not
-re-run admin's list after such a rollback: 009 is recorded as applied and
-never runs again, so rows an older version blessed after it ran stay blessed.
-Keeping traffic off an older version during a deploy is then the only
-protection.
+*Since "Migrations: recorded per file"* (above), 009 is a different file:
+it drops `blessed_hash` instead of emptying it (a table rebuild on SQLite and
+D1), so a version from before 2026-10-07 can no longer write the column at
+all — its `Init` fails instead of re-applying. 009 is recorded once applied
+and never runs again.
 
 **Who has to act.** Nobody. The guarantee that a still-serving older version
 cannot change the schema holds only between versions on the same migration

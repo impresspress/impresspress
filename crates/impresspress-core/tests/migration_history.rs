@@ -154,6 +154,11 @@ async fn every_block_applies_fresh_atomically() {
     );
 
     let sent = statements + files + counting.other_calls.load(Ordering::SeqCst);
+    println!(
+        "a fresh install sends {sent}: {statements} file statements, {files} ledger rows, {} \
+         other calls",
+        sent - statements - files
+    );
     let limit = impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
     assert!(
         sent <= limit / 2,
