@@ -1,9 +1,10 @@
-# What a database that reached a supported migration state from an OLDER
-# state ends as, after the per-file ledger upgrades it — recorded, not
-# judged. `migration_history_tests` (SQLite: tests/migration_history.rs;
-# PostgreSQL: impresspress-native's tests/postgres_migration_history.rs)
-# rebuilds each case with the runner from before the ledger and compares the
-# upgraded schema with a fresh install's; a line that moves fails the test.
+# What a database that reached a supported migration state from a state
+# before its block's horizon ends as, after the per-file ledger upgrades it —
+# recorded, not judged. `migration_history_tests` (SQLite:
+# tests/migration_history.rs; PostgreSQL: impresspress-native's
+# tests/postgres_migration_history.rs) rebuilds each case with the runner
+# from before the ledger and compares the upgraded schema with a fresh
+# install's; a line that moves fails the test.
 #
 # `<block> <dialect> <state> <path> <outcome>`, where the path is
 #   every-state            every state of the block from its first, in order;
@@ -14,12 +15,15 @@
 #   converges   the schema equals a fresh install's;
 #   residue     it has everything a fresh install has, and the listed extras
 #               (tables and columns nothing reads any more);
-#   diverges    it lacks what is listed: such a database is upgraded, but is
-#               not what a fresh install is. RELEASE.md names these cases;
-#               the remedy is to recreate the database.
+#   diverges    it lacks what is listed: such a database is adopted and
+#               upgraded, but is not what a fresh install is. RELEASE.md's
+#               ledger entry names these cases under "Upgraded but not equal
+#               to a fresh install", with their remedy;
+#   refused     today's runner refuses it by name and changes nothing.
 #
-# A state upgraded straight from its own list (no older origin) must
-# converge, and is asserted, not recorded.
+# Not recorded, because asserted: a state upgraded straight from its own
+# list, and every supported state reached through every supported state
+# from its block's horizon, must converge and keep every seeded value.
 impresspress/admin postgres 0d9a72d9 every-state residue table suppers_ai__admin__audit_logs; table suppers_ai__admin__block_settings; table suppers_ai__admin__permissions; table suppers_ai__admin__request_logs; table suppers_ai__admin__roles; table suppers_ai__admin__storage_access_logs; table suppers_ai__admin__user_roles; table suppers_ai__admin__variables; table suppers_ai__admin__wrap_grants
 impresspress/admin postgres 0d9a72d9 from-first residue table suppers_ai__admin__audit_logs; table suppers_ai__admin__block_settings; table suppers_ai__admin__permissions; table suppers_ai__admin__request_logs; table suppers_ai__admin__roles; table suppers_ai__admin__storage_access_logs; table suppers_ai__admin__user_roles; table suppers_ai__admin__variables; table suppers_ai__admin__wrap_grants
 impresspress/admin postgres 0d9a72d9 from-last-unsupported residue table suppers_ai__admin__audit_logs; table suppers_ai__admin__block_settings; table suppers_ai__admin__permissions; table suppers_ai__admin__request_logs; table suppers_ai__admin__roles; table suppers_ai__admin__storage_access_logs; table suppers_ai__admin__user_roles; table suppers_ai__admin__variables; table suppers_ai__admin__wrap_grants

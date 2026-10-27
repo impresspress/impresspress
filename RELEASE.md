@@ -34,8 +34,12 @@ what it did happens on every native boot.
   unrecorded and is run again, whole, next time. On Cloudflare that is one
   D1 `batch()`. Nothing is tolerated: a statement that fails fails its file.
 - Adding a migration no longer re-runs a block's earlier ones, so it signs
-  nobody out and needs no one-off D1 budget: a new file costs its own
-  statements and one more for its record.
+  nobody out and needs no one-off D1 budget. A migrating run of a block costs
+  the pending files' statements, one ledger row per file, and the block's
+  own few calls (creating the ledger table if missing, reading the ledger,
+  writing the record); the first run of a block from before this release
+  also writes one `adopted` row per file its record names, in one
+  transaction.
 - A settled deployment reads nothing new: a block whose recorded list matches
   the build's returns before touching the database, as before.
 - The browser applies every block's pending migrations before it builds its
@@ -94,6 +98,28 @@ migrating run after the upgrade decides from what the block recorded:
 - **Unknown, refused by name with nothing changed:** a record main never
   carried — `applying` (left by a run that crashed before 2026-10-07), a
   branch build's list, a corrupt row.
+- **Upgraded but not equal to a fresh install.** A database that reached a
+  supported list straight from one before its block's horizon carries that
+  list's record over a schema the list never fully built. The runner decides
+  from the record alone, and these databases share their record with
+  databases that are whole, so they are adopted with the gap
+  (`migration-history-crossing.txt` records each case):
+  - **auth, the one that breaks sign-in:** a browser profile last opened on
+    an auth list from before 2026-09-06 and next opened on 2026-10-22's list
+    or later (`e73b4cc2`; PostgreSQL `43907ff1`) keeps the sessions table
+    keyed on the access token. It is adopted, nothing runs, and no device can
+    stay signed in on it.
+  - files, messages, legalpages and vector databases created before
+    2026-07-13 lack indexes their `001` names (the names were taken by the
+    `solobase__` tables then). Queries are slower; nothing fails.
+  - a signal database created on signal's 2026-09-13 first text and next
+    migrated on today's list lacks `rooms.id` and `rooms.updated_at`. Writes
+    to rooms fail where strict schema is on (Cloudflare).
+  - on PostgreSQL, a products database from before 2026-07-21 keeps
+    `disputes.livemode` in an older declaration.
+  The remedy is to recreate the database. In the browser these profiles
+  start, so the boot shell's **Reset** is not offered: clear the site's data
+  in the browser's settings.
 - **Drifted:** a file that meets a column a typed write already created (a
   browser profile that wrote with newer code before it migrated, possible
   where strict schema is off) is refused as drifted, its file rolled back.
@@ -109,6 +135,14 @@ migrating run after the upgrade decides from what the block recorded:
   `MigrationRefused`; the boot shell shows the cause and **Reset local data
   and reload**, which erases only when the person chooses it, even in a
   build that erases on recovery.
+
+A migration that **fails** rather than being refused — a statement the
+database rejects on the data it holds — is the ordinary error it always was:
+the file rolls back and runs again next time. In the browser it is the
+`initialize` stage, and a build rendered to erase on recovery (the demo, with
+`OPFS_WIPE_ON_RECOVERY`) erases the local database and starts afresh, by
+design; every block's list now runs before the runtime is built, so this
+applies to every block, not only admin.
 
 **Rollback.**
 

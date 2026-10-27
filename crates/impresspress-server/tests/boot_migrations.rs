@@ -968,9 +968,9 @@ async fn a_database_that_ran_the_first_016_and_009_runs_009_only(
 /// before that day, whose `001` created `blessed_hash` (built on the
 /// 2026-10-06 list, then migrated by the 2026-10-07 build, which kept the
 /// table), and one created on it, whose `001` did not. Both hold a row an
-/// old build blessed for a block this build does not register. The boot
-/// ends both with no `blessed_hash` column and every row's other values as
-/// they were.
+/// old build blessed for a block this build does not register, disabled. The
+/// boot ends both with no `blessed_hash` column and every row's other values
+/// as they were, `enabled = 0` included.
 async fn both_populations_of_admins_record_lose_blessed_hash(
     database: &Database,
     storage_root: &str,
@@ -994,7 +994,8 @@ async fn both_populations_of_admins_record_lose_blessed_hash(
         "block_name".to_string(),
         serde_json::json!("test/unregistered"),
     );
-    row.insert("enabled".to_string(), serde_json::json!(1));
+    // Disabled, so a rebuild that copied `enabled` wrong would show.
+    row.insert("enabled".to_string(), serde_json::json!(0));
     row.insert("current_hash".to_string(), serde_json::json!("its-list"));
     row.insert(
         "seed_defaults_hash".to_string(),
@@ -1039,6 +1040,11 @@ async fn both_populations_of_admins_record_lose_blessed_hash(
     ] {
         assert_eq!(kept.data[column], serde_json::json!(value), "{column}");
     }
+    let enabled = &kept.data["enabled"];
+    assert!(
+        enabled == &serde_json::json!(0) || enabled == &serde_json::json!(false),
+        "the row stays disabled: {enabled}"
+    );
     let admin_files = admin_m.for_backend(backend).0.len();
     assert_eq!(
         ledger_from(database, admin_m.block).await,

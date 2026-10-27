@@ -1295,10 +1295,14 @@ fn split_statements(sql: &str) -> Vec<&str> {
 /// own error envelopes and we only care that the canonical phrase appears.
 /// It picks which named refusal a file that is not recorded is reported as
 /// ([`Refusal::TrackingLost`], [`Refusal::DriftedSchema`]); it never decides
-/// whether a file applied.
+/// whether a file applied. Only the column case: a table or index that
+/// already exists is an ordinary failure.
 fn is_duplicate_column_error(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
-    lower.contains("duplicate column name") || lower.contains("already exists")
+    lower.contains("duplicate column name")
+        || (lower.contains("column \"")
+            && lower.contains("\" of relation \"")
+            && lower.contains("already exists"))
 }
 
 #[cfg(test)]
@@ -1996,6 +2000,20 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
             "nothing is half-applied"
         );
         assert!(ledger_rows(&ctx).await.is_empty());
+    }
+
+    /// A table that already exists is not a column that already exists: on
+    /// an adopted block it is an ordinary failure, not a drifted schema.
+    #[test]
+    fn only_a_duplicate_column_reads_as_one() {
+        assert!(is_duplicate_column_error("duplicate column name: extra"));
+        assert!(is_duplicate_column_error(
+            r#"error returned from database: column "extra" of relation "t" already exists"#
+        ));
+        assert!(!is_duplicate_column_error(
+            "table impresspress__admin__block_settings_v2 already exists"
+        ));
+        assert!(!is_duplicate_column_error(r#"relation "t" already exists"#));
     }
 
     /// A history entry for the test block: `files` as the list a database

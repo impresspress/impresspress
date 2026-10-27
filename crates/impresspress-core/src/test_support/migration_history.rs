@@ -603,6 +603,16 @@ pub struct Comparison {
 // Seed
 // ---------------------------------------------------------------------------
 
+/// The columns a migration file rewrites on purpose, as `(block, file,
+/// table.column, why)`: a seeded value there may change when the upgrade
+/// runs that file, and nowhere else.
+const REWRITES: &[(&str, &str, &str, &str)] = &[(
+    "wafer-run/auth",
+    "014_clear_provider_access_tokens",
+    "wafer_run__auth__provider_links.access_token",
+    "014 empties every stored provider token",
+)];
+
 /// One row seeded into one table: how to find it again.
 #[derive(Debug, Clone)]
 pub struct Seeded {
@@ -610,6 +620,9 @@ pub struct Seeded {
     /// `(column, value)` of the row's primary key, when it has one the seed
     /// chose; otherwise the row is found by counting.
     pub key: Option<(String, Value)>,
+    /// Every value the seed wrote, by column: after the upgrade, each column
+    /// that still exists must hold it.
+    pub values: Vec<(String, Value)>,
 }
 
 fn literal(value: &Value) -> String {
@@ -716,11 +729,13 @@ pub async fn seed(
             seeded.push(Seeded {
                 table: name.clone(),
                 key: None,
+                values: Vec::new(),
             });
             continue;
         }
         let mut columns = Vec::new();
         let mut literals = Vec::new();
+        let mut written = Vec::new();
         let mut key = None;
         let rowid_alias = backend == Backend::Sqlite
             && table.columns.iter().filter(|c| c.primary_key).count() == 1
@@ -754,6 +769,7 @@ pub async fn seed(
             values.insert((name.clone(), column.name.clone()), value.clone());
             columns.push(quote(&column.name));
             literals.push(literal(&value));
+            written.push((column.name.clone(), value));
         }
         let sql = if columns.is_empty() {
             match backend {
@@ -776,46 +792,64 @@ pub async fn seed(
         seeded.push(Seeded {
             table: name.clone(),
             key,
+            values: written,
         });
     }
     Ok(seeded)
 }
 
-/// The seeded rows that are gone.
+/// The seeded rows that are gone or changed: `table` when the row is gone,
+/// `table.column` when a column that still exists holds another value.
 pub async fn lost(db: &Arc<dyn DatabaseService>, seeded: &[Seeded]) -> Result<Vec<String>, String> {
     let mut gone = Vec::new();
     for row in seeded {
-        let (sql, args) = match &row.key {
-            Some((column, value)) => (
-                format!(
-                    "SELECT count(*) AS n FROM {} WHERE {} = {}",
-                    quote(&row.table),
-                    quote(column),
-                    literal(value)
-                ),
-                Vec::new(),
+        let sql = match &row.key {
+            Some((column, value)) => format!(
+                "SELECT * FROM {} WHERE {} = {}",
+                quote(&row.table),
+                quote(column),
+                literal(value)
             ),
-            None => (
-                format!("SELECT count(*) AS n FROM {}", quote(&row.table)),
-                Vec::new(),
-            ),
+            None => format!("SELECT * FROM {}", quote(&row.table)),
         };
-        let n = match rows(db, &sql, &args).await {
-            Ok(found) => found
-                .first()
-                .and_then(|r| r.get("n"))
-                .and_then(|n| {
-                    n.as_i64()
-                        .or_else(|| n.as_str().and_then(|s| s.parse().ok()))
-                })
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
-        if n == 0 {
+        let found = rows(db, &sql, &[]).await.unwrap_or_default();
+        let Some(now) = found.first() else {
             gone.push(row.table.clone());
+            continue;
+        };
+        for (column, value) in &row.values {
+            if let Some(stored) = now.get(column) {
+                if !same_value(stored, value) {
+                    gone.push(format!("{}.{column}: {value} became {stored}", row.table));
+                }
+            }
         }
     }
     Ok(gone)
+}
+
+/// Whether a value read back equals the one written, across the shapes the
+/// backends return a value in (an integer as a number or as text, a boolean
+/// as `TRUE` or `1`, a `TIMESTAMPTZ` as the same instant in another
+/// spelling).
+fn same_value(stored: &Value, written: &Value) -> bool {
+    let instant = |v: &Value| {
+        v.as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    };
+    if let (Some(a), Some(b)) = (instant(stored), instant(written)) {
+        return a == b;
+    }
+    let text = |v: &Value| match v {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        Value::Number(n) => n
+            .as_f64()
+            .filter(|f| f.fract() == 0.0)
+            .map_or_else(|| n.to_string(), |f| format!("{}", f as i64)),
+        other => other.to_string(),
+    };
+    text(stored) == text(written)
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +865,8 @@ pub enum Outcome {
     Residue(Vec<String>),
     /// It lacks something, or the upgrade or the old runner failed.
     Diverges(String),
+    /// Today's runner refused it by name, changing nothing.
+    Refused(String),
 }
 
 impl std::fmt::Display for Outcome {
@@ -839,6 +875,7 @@ impl std::fmt::Display for Outcome {
             Self::Converges => write!(f, "converges"),
             Self::Residue(extra) => write!(f, "residue {}", extra.join("; ")),
             Self::Diverges(why) => write!(f, "diverges {why}"),
+            Self::Refused(why) => write!(f, "refused {why}"),
         }
     }
 }
@@ -884,17 +921,35 @@ pub async fn case(
     };
     let seeded = seed(db, backend, &before, &admin_tables).await?;
     if let Err(e) = upgrade(db, backend, migrations).await {
-        return Ok((
-            Outcome::Diverges(format!("the upgrade failed: {e}")),
-            CaseReport::default(),
-        ));
+        let outcome = match e.refusal() {
+            Some(refusal) => Outcome::Refused(refusal.to_string()),
+            None => Outcome::Diverges(format!("the upgrade failed: {e}")),
+        };
+        return Ok((outcome, CaseReport::default()));
     }
     let after = Schema::read(db, backend).await?;
     let comparison = after.compare(fresh);
+    let ledger = ledger(db, migrations.block).await?;
+    let ran = |file: &str| {
+        ledger
+            .iter()
+            .any(|row| row.file_name == file && row.origin == applied_migrations::Origin::Ran)
+    };
+    let lost = lost(db, &seeded)
+        .await?
+        .into_iter()
+        .filter(|change| {
+            !REWRITES.iter().any(|(block, file, column, _)| {
+                *block == migrations.block
+                    && ran(file)
+                    && change.starts_with(&format!("{column}: "))
+            })
+        })
+        .collect();
     let report = CaseReport {
-        ledger: ledger(db, migrations.block).await?,
+        ledger,
         current_hash: current_hash(db, migrations.block).await?,
-        lost: lost(db, &seeded).await?,
+        lost,
     };
     let outcome = if !comparison.missing.is_empty() {
         Outcome::Diverges(comparison.missing.join("; "))
@@ -1002,14 +1057,18 @@ pub struct StatesReport {
 ///
 /// - **supported, direct** (path i): the state's own list run by the old
 ///   runner, stamped, seeded, upgraded. It must converge, every seeded row
-///   must survive, the ledger must hold the `Applied` files as `adopted`
+///   must survive with every value it was written with, the ledger must hold the `Applied` files as `adopted`
 ///   from the state's hash and the rest as `ran` (nothing, for today's own
 ///   list, which takes the fast path), and `current_hash` must be today's;
+/// - **supported, from its horizon** — every supported state from the
+///   block's horizon in order up to this one (path ii, the chain a database
+///   created at the horizon and migrated at each later visit took): it must
+///   converge and keep its rows, as path i;
 /// - **supported, from an older state** — every state from the block's
-///   first in order up to this one (path ii), and jumps straight to this one
-///   from the block's first state and from the newest state before its
-///   horizon (path iii): the outcome is recorded as a crossing line,
-///   converging or not;
+///   first in order up to this one, and jumps straight to this one from the
+///   block's first state and from the newest state before its horizon (path
+///   iii): the outcome — converges, residue, diverges or refused — is
+///   recorded as a crossing line;
 /// - **unsupported**: stamped and run, it must be refused as
 ///   `UnsupportedState`, record nothing and leave the record unchanged.
 pub async fn check_states(backend: Backend, new_db: NewDatabase<'_>) -> StatesReport {
@@ -1057,7 +1116,7 @@ async fn check_block(
                 }
                 if !case_report.lost.is_empty() {
                     report.problems.push(format!(
-                        "{block} {short}: seeded rows lost in {:?}",
+                        "{block} {short}: seeded rows lost or changed in {:?}",
                         case_report.lost
                     ));
                 }
@@ -1101,6 +1160,33 @@ async fn check_block(
                     report.problems.push(format!(
                         "{block} {short}: ledger {got:?}, expected {expected:?}"
                     ));
+                }
+
+                // Path ii from the block's horizon: every supported state in
+                // order up to this one, as a database created at the horizon
+                // and migrated at each later visit. Asserted: it must
+                // converge and keep its rows.
+                if let Some(horizon) = first_supported.filter(|&h| h < at) {
+                    let db = new_db().await;
+                    let (chain, chain_report) = case(
+                        &db,
+                        backend,
+                        migrations,
+                        &resolved[horizon..=at],
+                        state,
+                        &fresh,
+                    )
+                    .await?;
+                    if chain != Outcome::Converges {
+                        report
+                            .problems
+                            .push(format!("{block} {short} from its horizon: {chain}"));
+                    } else if !chain_report.lost.is_empty() {
+                        report.problems.push(format!(
+                            "{block} {short} from its horizon: seeded rows lost or changed in {:?}",
+                            chain_report.lost
+                        ));
+                    }
                 }
 
                 // Paths ii and iii, from the block's first state.
