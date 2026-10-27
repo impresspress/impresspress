@@ -76,6 +76,7 @@ pub mod log_level;
 pub mod log_line;
 pub mod metrics;
 pub mod migration_helper;
+pub mod migration_history;
 pub mod multipart;
 pub mod pipeline;
 pub mod platform_state;

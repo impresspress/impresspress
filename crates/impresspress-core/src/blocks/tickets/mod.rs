@@ -351,10 +351,7 @@ crate::impresspress_feature_block! {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/tickets",
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
+            &migrations::MIGRATIONS)
         .await
     },
 }

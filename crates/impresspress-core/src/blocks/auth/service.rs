@@ -355,14 +355,9 @@ impl AuthService for AuthServiceImpl {
         // and goes back as the `WaferError` `lifecycle_init` would have made,
         // code included: a refusal stays `FailedPrecondition`, an unavailable
         // database `Unavailable`, so the runtime retries only what may clear.
-        crate::migration_helper::apply_migrations(
-            ctx,
-            "wafer-run/auth",
-            super::migrations::SQLITE_MIGRATIONS,
-            super::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await
-        .map_err(|e| AuthError::Backend(e.to_wafer_error()))?;
+        crate::migration_helper::apply_migrations(ctx, &super::migrations::MIGRATIONS)
+            .await
+            .map_err(|e| AuthError::Backend(e.to_wafer_error()))?;
         let cfg = super::config::AuthConfig::from_ctx(ctx)
             .await
             .map_err(|e| backend_error(e, "auth init: config"))?;

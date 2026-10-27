@@ -471,11 +471,6 @@ const CLEARED_COLUMNS: &[(&str, &str, &str)] = &[
         "digest of the seed defaults already applied",
     ),
     (
-        "impresspress__admin__block_settings",
-        "blessed_hash",
-        "retired migration-set digest, emptied by admin migration 009",
-    ),
-    (
         "impresspress__products__checkout_presets",
         "configuration_hash",
         "digest of a saved checkout configuration",
@@ -586,12 +581,18 @@ fn migration_schema() -> BTreeMap<String, BTreeSet<String>> {
 
 /// Apply one migration file's DDL to `schema`.
 ///
-/// Handles the four shapes the migrations use: `DROP TABLE [IF EXISTS] <t>`
+/// Handles the shapes the migrations use: `DROP TABLE [IF EXISTS] <t>`
 /// (which forgets every column, so a following `CREATE TABLE` starts clean),
 /// `CREATE TABLE [IF NOT EXISTS] <t> ( … )` whose body lines are
-/// `<name> <TYPE> …`, and `ALTER TABLE <t> ADD COLUMN [IF NOT EXISTS] <c> …`,
+/// `<name> <TYPE> …`, `ALTER TABLE <t> ADD COLUMN [IF NOT EXISTS] <c> …`,
 /// whose clause may sit on the `ALTER TABLE` line or on the line after it
-/// (admin migration 003 wraps; the products and auth ones do not).
+/// (admin migration 003 wraps; the products and auth ones do not),
+/// `ALTER TABLE <t> DROP COLUMN [IF EXISTS] <c>` (auth 016, admin 009 on
+/// PostgreSQL), `ALTER TABLE <t> RENAME TO <u>`, which moves the columns to
+/// the new name (admin 009 on SQLite rebuilds a table under a temporary name
+/// and renames it back), and `ALTER TABLE <t> ALTER COLUMN …`, which leaves
+/// the set of columns as it is. An `ALTER TABLE` that is none of these fails
+/// the scan rather than being skipped.
 fn apply_sql(sql: &str, path: &std::path::Path, schema: &mut BTreeMap<String, BTreeSet<String>>) {
     let mut current: Option<String> = None;
     let mut altering: Option<String> = None;
@@ -605,20 +606,18 @@ fn apply_sql(sql: &str, path: &std::path::Path, schema: &mut BTreeMap<String, BT
         }
         if let Some(rest) = strip_keyword(line, "ALTER TABLE") {
             let table = identifier(rest);
-            match add_column_name(line) {
-                Some(col) => {
-                    schema.entry(table).or_default().insert(col);
-                }
+            let clause = rest[table.len()..].trim_start();
+            if clause.is_empty() {
                 // The clause wrapped: remember the table for the next line.
-                None => altering = Some(table),
+                altering = Some(table);
+            } else {
+                apply_alter(&table, clause, path, lineno, schema);
             }
             current = None;
             continue;
         }
         if let Some(table) = altering.take() {
-            if let Some(col) = add_column_name(line) {
-                schema.entry(table).or_default().insert(col);
-            }
+            apply_alter(&table, line, path, lineno, schema);
             continue;
         }
         if let Some(rest) = strip_keyword(line, "CREATE TABLE") {
@@ -672,6 +671,35 @@ fn apply_sql(sql: &str, path: &std::path::Path, schema: &mut BTreeMap<String, BT
             lineno + 1,
         );
         schema.entry(table).or_default().insert(name.to_string());
+    }
+}
+
+/// Apply the clause of `ALTER TABLE <table> <clause>` to `schema`.
+fn apply_alter(
+    table: &str,
+    clause: &str,
+    path: &std::path::Path,
+    lineno: usize,
+    schema: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    if let Some(col) = add_column_name(clause) {
+        schema.entry(table.to_string()).or_default().insert(col);
+    } else if let Some(dropped) = strip_keyword(clause, "DROP COLUMN") {
+        let dropped = strip_keyword(dropped, "IF EXISTS").unwrap_or(dropped);
+        if let Some(columns) = schema.get_mut(table) {
+            columns.remove(&identifier(dropped));
+        }
+    } else if let Some(renamed) = strip_keyword(clause, "RENAME TO") {
+        let columns = schema.remove(table).unwrap_or_default();
+        schema.insert(identifier(renamed), columns);
+    } else if strip_keyword(clause, "ALTER COLUMN").is_some() {
+        // A column's type or default changes; the set of columns does not.
+    } else {
+        panic!(
+            "{}:{}: an ALTER TABLE this scan does not model: {clause:?}",
+            path.display(),
+            lineno + 1
+        );
     }
 }
 
@@ -1022,6 +1050,33 @@ fn the_scanner_honours_drop_table() {
     assert!(t.contains("family"), "{t:?}");
     // The drop must forget one table, not the file.
     assert!(schema.get("kept").is_some_and(|c| c.contains("id")));
+}
+
+/// `ALTER TABLE … DROP COLUMN` forgets the column, and `ALTER TABLE … RENAME
+/// TO` moves the table's columns to its new name: the shapes of admin 009's
+/// SQLite rebuild (copy into `_v2` without the column, drop the old table,
+/// rename `_v2` back) and of its PostgreSQL drop.
+#[test]
+fn the_scanner_honours_drop_column_and_rename() {
+    let schema = schema_of(
+        "CREATE TABLE IF NOT EXISTS t (
+            id     TEXT PRIMARY KEY,
+            secret TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE t_v2 (
+            id TEXT PRIMARY KEY
+        );
+        DROP TABLE t;
+        ALTER TABLE t_v2 RENAME TO t;
+        CREATE TABLE u (
+            id    TEXT PRIMARY KEY,
+            token TEXT
+        );
+        ALTER TABLE u DROP COLUMN IF EXISTS token;",
+    );
+    assert_eq!(schema.get("t"), Some(&BTreeSet::from(["id".to_string()])));
+    assert!(!schema.contains_key("t_v2"), "{schema:?}");
+    assert_eq!(schema.get("u"), Some(&BTreeSet::from(["id".to_string()])));
 }
 
 /// And the table it caught, as the tree stands: `sessions` is declared keyed

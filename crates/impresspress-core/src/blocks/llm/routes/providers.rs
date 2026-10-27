@@ -1953,14 +1953,9 @@ mod tests {
             .running_as(crate::blocks::llm::LlmBlock::BLOCK_NAME);
         {
             use crate::blocks::llm::migrations;
-            crate::migration_helper::apply_migrations(
-                &ctx,
-                "impresspress/llm",
-                migrations::SQLITE_MIGRATIONS,
-                migrations::POSTGRES_MIGRATIONS,
-            )
-            .await
-            .expect("apply llm migrations");
+            crate::migration_helper::apply_migrations(&ctx, &migrations::MIGRATIONS)
+                .await
+                .expect("apply llm migrations");
         }
 
         let config_svc = Arc::new(EnvConfigService::new());

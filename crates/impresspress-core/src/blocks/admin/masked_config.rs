@@ -280,6 +280,7 @@ mod tests {
             wafer_sql_utils::Backend::Sqlite,
             ADMIN_BLOCK_ID,
             crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
+            &[],
         )
         .await
         .expect("apply admin migrations");

@@ -7,7 +7,7 @@
 //! # Created by the runner, not by a migration file
 //!
 //! Admin's `001` cannot create it: the ledger has to exist before admin's
-//! first file can be recorded in it, and a shipped file is never edited. So
+//! first file can be recorded in it, and admin's 001 has shipped. So
 //! the runner sends [`create_table_sql`] — `CREATE TABLE IF NOT EXISTS`, built
 //! with `wafer_sql_utils::ddl` — before it reads the ledger, once for each
 //! block whose migrations it plans. `ensure_schema_table` is not used: D1
@@ -16,8 +16,9 @@
 //! # Who reads and writes it
 //!
 //! Every block reads its own rows, under WRAP, through [`list_for_block`]
-//! (admin grants `read("*", TABLE)`); the native server's pre-build apply
-//! reads admin's through [`list_for_block_via_service`]. Rows are written
+//! (admin grants `read("*", TABLE)`); a pre-build apply (the native server's
+//! of admin's list, the browser's of every list) reads through
+//! [`list_for_block_via_service`]. Rows are written
 //! only inside a migration file's transaction, as the statement
 //! [`insert_statement`] renders, which goes over the `__ddl__` channel with
 //! the file's own statements. That channel already runs any statement, so the
@@ -31,7 +32,8 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp, ListOptions};
 use wafer_core::interfaces::database::service::{
-    col_string, col_text, pk, DatabaseError, DatabaseService, RawStatement, RecordData, Table,
+    col_string, col_text, default_empty, pk, DatabaseError, DatabaseService, RawStatement,
+    RecordData, Table,
 };
 use wafer_run::{context::Context, ErrorCode, WaferError};
 use wafer_sql_utils::Backend;
@@ -44,18 +46,16 @@ use crate::{
 pub const TABLE: &str = "impresspress__admin__applied_migrations";
 
 /// How a row came to be written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Origin {
     /// The runner ran the file's statements, in the transaction that wrote
     /// this row.
     Ran,
     /// Recorded without running: the block's `block_settings.current_hash`,
     /// stamped by a runner from before the ledger only after a whole list had
-    /// run, proved this file ran with exactly today's text.
+    /// run, is a list state whose reviewed history entry says this file is
+    /// applied in it (`migration_helper::HistoricalState`).
     Adopted,
-    /// Run once more by the legacy replay, for a block whose record from
-    /// before the ledger proves nothing about which text ran.
-    Replayed,
 }
 
 impl Origin {
@@ -64,7 +64,6 @@ impl Origin {
         match self {
             Self::Ran => "ran",
             Self::Adopted => "adopted",
-            Self::Replayed => "replayed",
         }
     }
 
@@ -72,7 +71,6 @@ impl Origin {
         match value {
             "ran" => Some(Self::Ran),
             "adopted" => Some(Self::Adopted),
-            "replayed" => Some(Self::Replayed),
             _ => None,
         }
     }
@@ -93,11 +91,42 @@ pub struct AppliedMigration {
     /// RFC 3339.
     pub applied_at: String,
     pub origin: Origin,
+    /// For an [`Origin::Adopted`] row, the pre-ledger list hash
+    /// (`block_settings.current_hash`) it was adopted from; empty for a row
+    /// that ran.
+    pub adopted_from: String,
 }
 
 impl AppliedMigration {
-    /// A row for `file_name` of `block_name`, applied now, with a fresh id.
-    pub fn new(block_name: &str, file_name: &str, content_sha256: &str, origin: Origin) -> Self {
+    /// A row for `file_name` of `block_name`, run now, with a fresh id.
+    pub fn ran(block_name: &str, file_name: &str, content_sha256: &str) -> Self {
+        Self::new(block_name, file_name, content_sha256, Origin::Ran, "")
+    }
+
+    /// A row for `file_name` of `block_name`, adopted now from the pre-ledger
+    /// list hash `adopted_from`, with a fresh id.
+    pub fn adopted(
+        block_name: &str,
+        file_name: &str,
+        content_sha256: &str,
+        adopted_from: &str,
+    ) -> Self {
+        Self::new(
+            block_name,
+            file_name,
+            content_sha256,
+            Origin::Adopted,
+            adopted_from,
+        )
+    }
+
+    fn new(
+        block_name: &str,
+        file_name: &str,
+        content_sha256: &str,
+        origin: Origin,
+        adopted_from: &str,
+    ) -> Self {
         Self {
             id: format!("am_{}", uuid::Uuid::new_v4()),
             block_name: block_name.to_string(),
@@ -105,12 +134,14 @@ impl AppliedMigration {
             content_sha256: content_sha256.to_string(),
             applied_at: crate::util::now_rfc3339(),
             origin,
+            adopted_from: adopted_from.to_string(),
         }
     }
 
-    /// Decode one row. Every column is required: a row the runner cannot read
-    /// is refused rather than skipped, because a skipped row would read as a
-    /// file that never ran, and the runner would run it again.
+    /// Decode one row. Every column but `adopted_from` (empty for a row that
+    /// ran) is required: a row the runner cannot read is refused rather than
+    /// skipped, because a skipped row would read as a file that never ran,
+    /// and the runner would run it again.
     pub fn from_record(id: &str, data: &RecordData) -> Result<Self, String> {
         let field = |name: &str| {
             let value = data.str_field(name);
@@ -121,14 +152,24 @@ impl AppliedMigration {
             }
         };
         let origin = field("origin")?;
+        let origin = Origin::parse(&origin)
+            .ok_or_else(|| format!("{TABLE} row `{id}` has an unknown origin `{origin}`"))?;
+        let adopted_from = data.str_field("adopted_from").to_string();
+        if (origin == Origin::Adopted) == adopted_from.is_empty() {
+            return Err(format!(
+                "{TABLE} row `{id}` is `{}` but its adopted_from is {:?}",
+                origin.as_str(),
+                adopted_from
+            ));
+        }
         Ok(Self {
             id: id.to_string(),
             block_name: field("block_name")?,
             file_name: field("file_name")?,
             content_sha256: field("content_sha256")?,
             applied_at: field("applied_at")?,
-            origin: Origin::parse(&origin)
-                .ok_or_else(|| format!("{TABLE} row `{id}` has an unknown origin `{origin}`"))?,
+            origin,
+            adopted_from,
         })
     }
 
@@ -141,6 +182,7 @@ impl AppliedMigration {
             ("content_sha256".to_string(), json!(self.content_sha256)),
             ("applied_at".to_string(), json!(self.applied_at)),
             ("origin".to_string(), json!(self.origin.as_str())),
+            ("adopted_from".to_string(), json!(self.adopted_from)),
         ])
     }
 }
@@ -157,6 +199,7 @@ fn table() -> Table {
         col_string("content_sha256"),
         col_text("applied_at"),
         col_string("origin"),
+        col_string("adopted_from").def(default_empty()),
     ];
     table.unique_keys = vec![vec!["block_name".to_string(), "file_name".to_string()]];
     table
@@ -249,10 +292,21 @@ mod tests {
     use super::*;
 
     /// The codec: a row reads back as it was written, and a row with an
-    /// unknown origin or a missing column is refused, not skipped.
+    /// unknown origin, a missing column, or an `adopted_from` that does not
+    /// match its origin is refused, not skipped.
     #[test]
     fn a_row_round_trips_and_a_bad_one_is_refused() {
-        let row = AppliedMigration::new("impresspress/probe", "001_a", "abc", Origin::Adopted);
+        let ran = AppliedMigration::ran("impresspress/probe", "002_b", "def");
+        let ran_data: RecordData = ran.to_data().into_iter().collect();
+        assert_eq!(
+            AppliedMigration::from_record(&ran.id, &ran_data),
+            Ok(ran.clone())
+        );
+        let mut ran_with_origin = ran_data;
+        ran_with_origin.insert("adopted_from".into(), json!("0f4bad57"));
+        assert!(AppliedMigration::from_record(&ran.id, &ran_with_origin).is_err());
+
+        let row = AppliedMigration::adopted("impresspress/probe", "001_a", "abc", "0f4bad57");
         let data: RecordData = row.to_data().into_iter().collect();
         assert_eq!(
             AppliedMigration::from_record(&row.id, &data),
@@ -262,6 +316,10 @@ mod tests {
         let mut unknown = data.clone();
         unknown.insert("origin".into(), json!("guessed"));
         assert!(AppliedMigration::from_record(&row.id, &unknown).is_err());
+
+        let mut adopted_from_nothing = data.clone();
+        adopted_from_nothing.insert("adopted_from".into(), json!(""));
+        assert!(AppliedMigration::from_record(&row.id, &adopted_from_nothing).is_err());
 
         let mut missing = data;
         missing.shift_remove("content_sha256");

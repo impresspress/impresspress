@@ -2682,6 +2682,7 @@ dependencies = [
  "wafer-block-sqlite",
  "wafer-core",
  "wafer-run",
+ "wafer-sql-utils",
 ]
 
 [[package]]

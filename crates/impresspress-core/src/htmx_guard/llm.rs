@@ -40,9 +40,7 @@ fn fixture() -> Pin<Box<dyn Future<Output = Fixture>>> {
             |ctx: &crate::test_support::TestContext| ctx.clone().running_as(LlmBlock::BLOCK_NAME);
         crate::migration_helper::apply_migrations(
             &as_llm(&ctx),
-            LlmBlock::BLOCK_NAME,
-            crate::blocks::llm::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::llm::migrations::POSTGRES_MIGRATIONS,
+            &crate::blocks::llm::migrations::MIGRATIONS,
         )
         .await
         .expect("apply llm migrations");

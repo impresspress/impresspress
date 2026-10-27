@@ -331,6 +331,25 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+///
+/// Public because the native server applies it *before* the runtime exists
+/// (it seeds its variables from admin's tables pre-build), through
+/// [`crate::migration_helper::apply_pending_via_service`]; the ledger then
+/// tells admin's `Init` it is applied. Cloudflare and the browser need no
+/// such step on admin's behalf: their seeders run after `init_block(admin)`
+/// (the browser's pre-build pass runs every block's list).
+pub const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: super::ADMIN_BLOCK_ID,
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::admin::SQLITE,
+        postgres_history: crate::migration_history::admin::POSTGRES,
+    };
+
 /// Apply the admin schema through the shared migration-state gate.
 ///
 /// Production no longer calls this: `AdminBlock::lifecycle(Init)` applies the
@@ -343,41 +362,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 pub async fn apply(
     ctx: &dyn wafer_run::context::Context,
 ) -> Result<(), crate::migration_helper::MigrationError> {
-    crate::migration_helper::apply_migrations(
-        ctx,
-        "impresspress/admin",
-        SQLITE_MIGRATIONS,
-        POSTGRES_MIGRATIONS,
-    )
-    .await
-}
-
-/// The admin migration list for the given `db_type`, in apply order — the
-/// very list the block's `lifecycle_init` applies. `"postgres"`
-/// (case-insensitive) selects the postgres dialect; everything else selects
-/// SQLite, matching [`crate::migration_helper::db_backend`].
-///
-/// Exposed so the native server can apply it *before* the runtime exists (it
-/// seeds the JWT secret + block_settings pre-build), through
-/// [`crate::migration_helper::apply_pending_via_service`], which records it
-/// as applied so admin's `Init` then skips it. Cloudflare and browser don't
-/// need this — their seeders run after `init_block(admin)` has applied it.
-pub fn migration_files(db_type: &str) -> &'static [(&'static str, &'static str)] {
-    if db_type.eq_ignore_ascii_case("postgres") {
-        POSTGRES_MIGRATIONS
-    } else {
-        SQLITE_MIGRATIONS
-    }
-}
-
-/// The SQL of [`migration_files`], for test fixtures that build the admin
-/// schema with the untracked
-/// [`crate::migration_helper::apply_ddl_via_service`].
-pub fn ddl_files(db_type: &str) -> Vec<&'static str> {
-    migration_files(db_type)
-        .iter()
-        .map(|(_, sql)| *sql)
-        .collect()
+    crate::migration_helper::apply_migrations(ctx, &MIGRATIONS).await
 }
 
 #[cfg(test)]
@@ -461,7 +446,7 @@ mod user_roles_unique_tests {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, before_004(), &[])
+        migration_helper::apply_pending(&ctx, ADMIN, before_004(), &[])
             .await
             .expect("001-003 apply");
 
@@ -483,7 +468,7 @@ mod user_roles_unique_tests {
         }
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
+        migration_helper::apply_pending(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("004 applies to a database holding repeated grants");
 
@@ -611,7 +596,7 @@ mod variables_block_column_tests {
         let ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
+        migration_helper::apply_pending(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("apply migrations");
 
@@ -647,68 +632,34 @@ mod variables_block_column_tests {
         assert_eq!(idx.len(), 1, "expected the block index to exist");
     }
 
-    /// A deployment from before the per-file ledger that applied 001 alone
-    /// and recorded that list's hash, then rows, then the shipped list the
-    /// way an upgrading deployment's first migrating boot applies it: 001 is
-    /// adopted, and the backfill in 002 is what populates `block`, not
-    /// anything the test runs itself.
-    async fn upgrade_from_001(ctx: &mut TestContext) {
-        migration_helper::apply_ddl_via_service(
-            &ctx.database_service(),
-            &up_to_002(false)
-                .iter()
-                .map(|(_, sql)| *sql)
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .expect("001 applies");
+    /// A deployment that applied 001 alone, then rows, then 002: the
+    /// backfill in 002 is what populates `block`, not anything the test runs
+    /// itself.
+    ///
+    /// No database this build upgrades is at that state: every admin list
+    /// that stopped at 001 is from before 2026-07-13, which the history table
+    /// refuses (`crate::migration_history::admin`), and the ledger runner
+    /// applies admin's list whole. So the deployment is built, and 002 run,
+    /// by the runner from before the ledger
+    /// (`migration_helper::legacy_runner`), which is how 002 met populated
+    /// tables when it shipped.
+    async fn upgrade_from_001(ctx: &TestContext) {
+        let db = ctx.database_service();
+        migration_helper::legacy_runner::apply(&db, up_to_002(false))
+            .await
+            .expect("001 applies");
         seed_pre_002(ctx).await;
-        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        ctx.set_config(
-            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
-            &serde_json::json!({
-                ADMIN: { "migration": {
-                    "current_hash": migration_helper::migration_set_hash(up_to_002(false))
-                } }
-            })
-            .to_string(),
-        );
-        migration_helper::apply_migrations(ctx, ADMIN, SQLITE_MIGRATIONS, &[])
+        migration_helper::legacy_runner::apply(&db, &up_to_002(true)[1..])
             .await
             .expect("002 applies to a database holding variables");
     }
 
     #[tokio::test]
     async fn migration_002_backfills_block_on_rows_written_before_it() {
-        let mut ctx = TestContext::new()
+        let ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        upgrade_from_001(&mut ctx).await;
-
-        assert_backfilled(&ctx).await;
-    }
-
-    /// 002 is in the frozen set the legacy replay runs once more over a
-    /// database it may already have run on. Its `ADD COLUMN` then meets a
-    /// column that already exists and its backfill meets rows it already
-    /// filled; both must pass through the replay's untracked statement loop
-    /// without failing it or disturbing a derived value.
-    #[tokio::test]
-    async fn migration_002_survives_a_re_run_of_the_whole_list() {
-        let mut ctx = TestContext::new()
-            .await
-            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        upgrade_from_001(&mut ctx).await;
-
-        migration_helper::apply_ddl_via_service(
-            &ctx.database_service(),
-            &SQLITE_MIGRATIONS
-                .iter()
-                .map(|(_, sql)| *sql)
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .expect("re-running the whole list succeeds");
+        upgrade_from_001(&ctx).await;
 
         assert_backfilled(&ctx).await;
     }

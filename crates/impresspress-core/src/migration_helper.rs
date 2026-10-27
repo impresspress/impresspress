@@ -1,28 +1,29 @@
 //! Shared migration runner.
 //!
 //! A block's migrations are an ordered list of `.sql` files, each a
-//! [`MigrationFile`] `(basename, sql)` pair. Every block applies its list from
-//! `lifecycle(Init)` through [`lifecycle_init`] (auth's service `init` calls
-//! [`apply_migrations`] directly), which picks the list for the active SQL
-//! dialect and hands it to [`apply_pending`].
+//! [`MigrationFile`] `(basename, sql)` pair, declared together with the
+//! block's [history](HistoricalState) in one [`BlockMigrations`]. Every block
+//! applies its list from `lifecycle(Init)` through [`lifecycle_init`] (auth's
+//! service `init` calls [`apply_migrations`] directly), which picks the list
+//! for the active SQL dialect and hands it to [`apply_pending`].
 //!
 //! # The ledger: one row per applied file
 //!
 //! What a database has applied is recorded per file, in
 //! `impresspress__admin__applied_migrations`
 //! ([`crate::platform_state::applied_migrations`]): the block, the file's
-//! basename, its [`content_hash`] as applied, and how the row came to be
-//! (`ran`, `adopted`, `replayed`). A file added after the ledger shipped is
-//! applied as ONE transaction (`db::ddl_transaction`): its ledger row first,
-//! then its statements. The whole file commits with its row, or nothing of it
-//! does, so a row exists exactly when its file's statements took effect, on
-//! every backend. Files from before the ledger are applied as they were
-//! written to be ("Frozen files", below).
+//! basename, its [`content_hash`] as applied, how the row came to be (`ran`
+//! or `adopted`) and, for an adopted row, the pre-ledger list hash it was
+//! adopted from. **Every file is applied as ONE transaction**
+//! (`db::ddl_transaction`): its ledger row first, then its statements. The
+//! whole file commits with its row, or nothing of it does, so a row exists
+//! exactly when its file's statements took effect, on every backend. No
+//! statement is ever tolerated: a refused statement fails its whole file.
 //!
 //! Beside it, the block's `block_settings.current_hash` keeps the meaning it
 //! always had: the [`migration_set_hash`] of the list this database last had
 //! fully applied. It is the fast path, and it is what a database from before
-//! the ledger is classified by (below).
+//! the ledger is recognised by (below).
 //!
 //! # A run, step by step
 //!
@@ -43,8 +44,7 @@
 //!    - a recorded file follows one that is not recorded (**gap**).
 //! 5. A block with no ledger rows is classified by its `current_hash` (see
 //!    "Databases from before the ledger").
-//! 6. Run each pending file, in order: a file from after the ledger as its
-//!    own transaction, a frozen file as the next section says.
+//! 6. Run each pending file, in order, as its own transaction.
 //! 7. Stamp `current_hash` with the list's hash, through the typed
 //!    `block_settings` write. On Cloudflare that write also drops the KV row
 //!    cache's all-rows key of `block_settings` (`cache_key::invalidate_keys`),
@@ -59,82 +59,77 @@
 //! step 7 alone: the ledger still records every file, nothing is pending, and
 //! the row is stamped again.
 //!
-//! # Frozen files
-//!
-//! A block's files up to its [`FROZEN_THROUGH`] mark — every file it shipped
-//! before the ledger — were written for the runner before it, which ran a
-//! block's whole list again whenever it changed, one statement at a time, and
-//! took a duplicate `ALTER TABLE … ADD COLUMN` as already applied. Some of
-//! them depend on that on their FIRST run, not only on a re-run:
-//!
-//! - auth's 016 opens with `ADD COLUMN role` so that its `DROP COLUMN role`
-//!   can be re-run on SQLite, and 001 creates that column, so on SQLite the
-//!   `ADD` is a duplicate on every database 016 has not run on;
-//! - admin's 009 adds `blessed_hash`, which a database created before #145
-//!   already has (its old 001 created it);
-//! - a native or browser database whose typed writes added a column before
-//!   the migration that adds it shipped (auth's 010 is that list) meets that
-//!   migration's `ADD COLUMN` as a duplicate.
-//!
-//! In one transaction a refused statement fails the whole file, so the
-//! runner applies a frozen file the way it was written to be applied: its
-//! statements one at a time, a duplicate `ADD COLUMN` taken as already
-//! applied, and its ledger row written once they all succeeded. A frozen file
-//! is therefore not atomic: one that fails leaves its earlier statements
-//! applied and is not recorded, and the next run runs it again from its
-//! start, which every frozen file is written to survive (the "re-runnable"
-//! notes in each block's `migrations/mod.rs`). Every file added after the
-//! ledger runs once, in its transaction, and none of that applies to it.
-//!
 //! # A failed file is decided by the ledger, never by its error
 //!
-//! When a file fails — its transaction, or a frozen file's statement or
-//! ledger row — whatever the error, the runner reads the block's ledger once
-//! more:
+//! When a file's transaction fails, whatever the error, the runner reads the
+//! block's ledger once more:
 //!
 //! - **the file is recorded with the same hash:** another migrator applied
 //!   it (the ledger insert is the claim, and the second claim on a file is
 //!   refused with its transaction), or this run's own commit landed although
 //!   the backend reported a failure after it. Continue with the next file.
 //! - **recorded with another hash:** the content-changed refusal.
-//! - **not recorded:** the file was refused. Nothing of a file from after
-//!   the ledger remains; a frozen file's earlier statements do (above). The
-//!   error names the block, the file, the backend's classification, the
-//!   failing statement when the backend says which (D1's `batch()` never
-//!   does) and its message.
+//! - **not recorded:** nothing of the file remains. The error names the
+//!   block, the file, the backend's classification, the failing statement
+//!   when the backend says which (D1's `batch()` never does) and its message.
+//!   When the failure is a column the file adds that already exists, the
+//!   error is a named refusal instead (below).
 //!
-//! Neither the error's text nor the statement index decides anything: a
-//! claim conflict on Postgres names a constraint and on SQLite a table, a D1
-//! error names no statement at all, and only the ledger says whether the file
-//! is applied.
+//! Neither the error's text nor the statement index decides whether a file
+//! applied: a claim conflict on Postgres names a constraint and on SQLite a
+//! table, a D1 error names no statement at all, and only the ledger says
+//! whether the file is recorded. If the re-read itself fails, the error
+//! carries both failures.
 //!
 //! These errors carry the database's own text. They are `Init` errors, for
 //! the deploy report, the boot's refusal and the logs; a block must not copy
 //! one into an HTTP response body.
 //!
+//! # A column that already exists
+//!
+//! A file that is not recorded and failed because a column it adds already
+//! exists is refused by name, whichever block it is, rather than reported as
+//! a plain failure. Nothing of the file remains either way; only the words
+//! and the classification differ, and the classification is what keeps a
+//! browser from erasing its data over it ([`MigrationError::refusal`]):
+//!
+//! - **tracking lost** ([`Refusal::TrackingLost`]): the block had no record
+//!   at all (fresh), yet its schema exists — both its `block_settings` row
+//!   and its ledger rows were lost. The refusal names the state on the first
+//!   attempt; the `CREATE … IF NOT EXISTS` files before the failing one ran
+//!   as no-ops and are recorded, so a later attempt reports the same file as
+//!   [`Refusal::DriftedSchema`]. The remedy is the same.
+//! - **drifted schema** ([`Refusal::DriftedSchema`]): the block was adopted
+//!   or has run files, and a typed write created the column before the
+//!   migration that adds it ran. Native and browser databases run with
+//!   `STRICT_SCHEMA` off, where a write naming a missing column adds it; a
+//!   browser profile created before 2026-09-26 never migrated after its
+//!   creation, so newer code wrote such columns into it. Remedy: recreate the
+//!   database, or restore a backup (a browser's stopped screen offers
+//!   Reset).
+//!
 //! # Databases from before the ledger
 //!
-//! A block with no ledger rows is in exactly one of three classes, decided by
-//! its `current_hash`:
+//! A block with no ledger rows is classified by its `current_hash` against
+//! the block's history ([`HistoricalState`]): a generated, checked-in table
+//! of every list state the block's migrations were ever in on main, derived
+//! from git (`examples/migration-history.rs`, `migration-history.toml`) and
+//! proven by `migration_history_tests`, which rebuilds each state with the
+//! runner from before the ledger, upgrades it through this one, and compares
+//! the schema with a fresh install's.
 //!
 //! - **fresh** (`current_hash` empty): every file runs.
-//! - **adopt** (`current_hash` equals [`migration_set_hash`] of the first `k`
-//!   files, `k >= 1`): files `1..=k` are recorded as `adopted` without
-//!   running, in one transaction, and the rest run. The runner from before
-//!   the ledger stamped a hash only after the whole list it hashed had run,
-//!   so a hash equal to a prefix of today's list proves exactly those files
-//!   ran, with today's text.
-//! - **replay** (any other value, including the literal `applying` a crashed
-//!   run from before #145 left): the hash proves nothing about which text
-//!   ran. That class needs the legacy replay, which ships separately; until
-//!   it does, such a block is refused ([`Refusal::NeedsReplay`]).
+//! - **known, supported** ([`Verdict::Applied`]): the files that state
+//!   already has applied are recorded `adopted` (with `adopted_from`, the
+//!   stored hash) in one transaction, without running, and the rest run.
+//! - **known, unsupported** ([`Verdict::Unsupported`]): refused by name
+//!   ([`Refusal::UnsupportedState`]), with the state's date and the reason.
+//! - **unknown** (any other value: a branch build, the literal `applying` a
+//!   crashed run from before #145 left, a corrupt row): refused by name
+//!   ([`Refusal::UnknownState`]).
 //!
-//! A fresh block whose schema already exists — both its `block_settings` row
-//! and its ledger rows were lost — runs its frozen files again over that
-//! schema, which they are written to survive, and records them. Its first
-//! file from after the ledger that meets the existing schema (typically a
-//! duplicate `ADD COLUMN`) rolls back, and the runner names that state
-//! ([`Refusal::TrackingLost`]) and its remedy instead of the bare duplicate.
+//! Nothing at runtime computes a prefix or probes the schema: the decision
+//! is one lookup of the stored hash in a reviewed table.
 //!
 //! # Which builds apply migrations
 //!
@@ -150,11 +145,12 @@
 //!   The ledger's claim is defence in depth behind that lock.
 //! - **Cloudflare**: the `/_deploy/prepare` / `/_deploy/init` funnel, before
 //!   the new version is promoted. A failure fails the deploy. On D1 a file's
-//!   transaction is one `db.batch()`; a frozen file's statements are one
-//!   query each, and one the statement budget refuses part-way leaves the
-//!   file unrecorded for the next deploy to run again.
+//!   transaction is one `db.batch()`.
 //! - **browser**: every runtime build, because loading a bundle is its
-//!   deploy (`impresspress_browser::boot`'s `BrowserServices::builder`).
+//!   deploy. Every block's list runs before the runtime is built, through
+//!   [`apply_pending_via_service`] over [`crate::blocks::all_block_migrations`]
+//!   (`impresspress_browser::boot`), so that any block's refusal stops the
+//!   boot by name, without erasing anything.
 //!
 //! Cloudflare's request-path builds are the only ones that do not, so step 2
 //! is reached only there, by a version serving before its deploy funnel ran.
@@ -163,20 +159,14 @@
 //!
 //! A file's ledger row holds the [`content_hash`] of the statements that ran,
 //! and step 4 refuses a database whose recorded hash differs from the code's:
-//! the native server refuses to start, a deploy fails, and a browser build
-//! refusing admin's list stops with an error the boot shell reports without
-//! erasing anything (`impresspress_browser::boot::MIGRATION_REFUSED`), while
-//! any other block's refusal fails that block alone. So a change to a
-//! shipped migration goes in a NEW file. [`content_hash`] covers the statements only, so editing a
-//! whole-line `--` comment does not move it.
-//!
-//! Comments are still not free: [`migration_set_hash`] covers the whole text,
-//! and the adopt class matches a database from before the ledger by it, so a
-//! comment edit to a shipped file turns every such database of that block
-//! from adopt into replay. Until the legacy replay is removed, put the
-//! explanation in the block's `migrations/mod.rs` instead, beside the test
-//! that covers the migration. Products' `slug_collision_cannot_fail_020` is
-//! the worked example.
+//! the native server refuses to start, a deploy fails, a browser build stops
+//! with an error its boot shell reports without erasing anything. So a
+//! change to a shipped migration goes in a NEW file
+//! (`migration-content-hashes.txt` records every shipped file's hash, and a
+//! test fails at PR time when one moves). [`content_hash`] covers the
+//! statements only, so editing a whole-line `--` comment does not move it;
+//! it does move the file's [`migration_set_hash`], and the history table's
+//! pinning test then names the fixture the edit has to add.
 //!
 //! The statement splitter handles `;` outside `--` comments. Block comments
 //! `/* ... */` and `;` inside string literals are not supported — the
@@ -196,13 +186,18 @@ use wafer_sql_utils::Backend;
 use crate::{
     features::{BlockSettings, MigrationState, BLOCK_SETTINGS_CONFIG_KEY},
     platform_state::{
-        applied_migrations::{self, AppliedMigration, Origin},
+        applied_migrations::{self, AppliedMigration},
         block_settings::{self, BlockSettingsPatch},
     },
 };
 // NOTE: `BlockSettings::state_for` parses only the requested block's entry
 // out of the JSON map, avoiding the full-map materialization that
 // `from_config_json` would do on every `apply_pending` call.
+
+/// The migration runner from before the ledger, reproduced for test fixtures
+/// that rebuild a historical database. Never compiled into a deployment.
+#[cfg(any(test, feature = "test-support"))]
+pub mod legacy_runner;
 
 /// Config key a runtime build carries, as `"1"`, when it applies pending
 /// migrations: every native boot, Cloudflare's deploy funnel and every
@@ -217,6 +212,65 @@ pub const RUN_MIGRATIONS_KEY: &str = "IMPRESSPRESS_RUN_MIGRATIONS";
 /// `migrations::POSTGRES_MIGRATIONS`. The basename is the file's key in the
 /// ledger, so it never changes once the file has shipped.
 pub type MigrationFile<'a> = (&'a str, &'a str);
+
+/// One list state a block's migrations were in on main before the per-file
+/// ledger: what a database last migrated by that list stores as its
+/// `block_settings.current_hash`, and what this build does with it. Generated
+/// by `examples/migration-history.rs` into `crate::migration_history`; never
+/// written by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoricalState {
+    /// [`migration_set_hash`] of the list.
+    pub list_hash: &'static str,
+    /// The first main commit with this list, as `"<date> <sha8>"`.
+    pub first_seen: &'static str,
+    /// The list's files, in order, as `basename@<sha8 of the whole text>`.
+    pub composition: &'static [&'static str],
+    pub verdict: Verdict,
+}
+
+/// What a database in a [`HistoricalState`] can do under this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Today's files the database already has applied, by basename: a
+    /// non-empty prefix of the current list. They are adopted; the rest run.
+    Applied(&'static [&'static str]),
+    /// Not upgradable; the reason, as shown to the operator.
+    Unsupported(&'static str),
+}
+
+/// A block's migrations, as its `lifecycle(Init)` applies them: the block's
+/// name, each dialect's file list and each dialect's [history](HistoricalState).
+///
+/// One constant per block (`migrations::MIGRATIONS`), handed to
+/// [`lifecycle_init`] and listed in [`crate::blocks::all_block_migrations`],
+/// so the block's own `Init` and the browser's pre-build apply the same
+/// thing. An external consumer's block declares its own, with an empty
+/// history if it has no databases from before the ledger.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockMigrations {
+    pub block: &'static str,
+    pub sqlite: &'static [MigrationFile<'static>],
+    pub postgres: &'static [MigrationFile<'static>],
+    pub sqlite_history: &'static [HistoricalState],
+    pub postgres_history: &'static [HistoricalState],
+}
+
+impl BlockMigrations {
+    /// The files and the history for `backend`'s dialect.
+    pub fn for_backend(
+        &self,
+        backend: Backend,
+    ) -> (
+        &'static [MigrationFile<'static>],
+        &'static [HistoricalState],
+    ) {
+        match backend {
+            Backend::Postgres => (self.postgres, self.postgres_history),
+            Backend::Sqlite => (self.sqlite, self.sqlite_history),
+        }
+    }
+}
 
 /// Shared config var that selects the SQL dialect. `"postgres"`
 /// (case-insensitive) picks the PostgreSQL dialect; anything else (including
@@ -262,39 +316,22 @@ pub fn backend_named(name: &str) -> Backend {
     }
 }
 
-/// Pick the block's migration list for the active SQL dialect
+/// Pick the block's migration list and history for the active SQL dialect
 /// (`WAFER_RUN_SHARED__DATABASE__BACKEND`, read through [`db_backend`]) and
-/// forward it to [`apply_pending`].
-///
-/// ```ignore
-/// pub async fn apply(ctx: &dyn Context) -> Result<(), MigrationError> {
-///     migration_helper::apply_migrations(
-///         ctx,
-///         "impresspress/messages",
-///         migrations::SQLITE_MIGRATIONS,
-///         migrations::POSTGRES_MIGRATIONS,
-///     )
-///     .await
-/// }
-/// ```
-///
-/// Backends other than `"postgres"` (case-insensitive) take `sqlite_files`,
-/// matching the `config::get_default(..., "sqlite")` default every consumer
-/// reads.
+/// forward them to [`apply_pending`].
 pub async fn apply_migrations(
     ctx: &dyn Context,
-    block_name: &str,
-    sqlite_files: &[MigrationFile<'_>],
-    postgres_files: &[MigrationFile<'_>],
+    migrations: &BlockMigrations,
 ) -> Result<(), MigrationError> {
     let backend = db_backend(ctx).await.map_err(|e| {
-        MigrationError::step(block_name, "read the database backend", StepError::from(e))
+        MigrationError::step(
+            migrations.block,
+            "read the database backend",
+            StepError::from(e),
+        )
     })?;
-    let files = match backend {
-        Backend::Postgres => postgres_files,
-        Backend::Sqlite => sqlite_files,
-    };
-    apply_pending(ctx, block_name, files).await
+    let (files, history) = migrations.for_backend(backend);
+    apply_pending(ctx, migrations.block, files, history).await
 }
 
 /// `lifecycle(Init)` body shared by every impresspress feature block: on the
@@ -302,24 +339,18 @@ pub async fn apply_migrations(
 /// a failure into a [`WaferError`] ([`MigrationError::to_wafer_error`]).
 /// Non-`Init` events are a no-op.
 ///
-/// `sqlite_migrations` / `postgres_migrations` are the block's
-/// `migrations::SQLITE_MIGRATIONS` / `migrations::POSTGRES_MIGRATIONS`; the
-/// active dialect is selected inside [`apply_migrations`].
-///
 /// Blocks with extra `Init` work (admin's seed steps, llm's legacy-provider
 /// copy + reload) call this first, then run their extra steps; blocks with no
 /// migrations at all (the embedding wrappers) simply omit `lifecycle`.
 pub async fn lifecycle_init(
     ctx: &dyn Context,
     event: &LifecycleEvent,
-    block_name: &str,
-    sqlite_migrations: &[MigrationFile<'_>],
-    postgres_migrations: &[MigrationFile<'_>],
+    migrations: &BlockMigrations,
 ) -> Result<(), WaferError> {
     if !matches!(event.event_type, LifecycleType::Init) {
         return Ok(());
     }
-    apply_migrations(ctx, block_name, sqlite_migrations, postgres_migrations)
+    apply_migrations(ctx, migrations)
         .await
         .map_err(|e| e.to_wafer_error())
 }
@@ -327,7 +358,8 @@ pub async fn lifecycle_init(
 /// Apply `block_name`'s pending `files` through the block's context, when
 /// this build may apply them (module docs, "A run, step by step"). Returns
 /// at once when `current_hash` in the snapshot's `BlockSettings` matches the
-/// list's hash.
+/// list's hash. `history` is the block's [`HistoricalState`] table for the
+/// dialect of `files`, consulted only for a block with no ledger rows.
 ///
 /// `block_name` is the full block name (e.g. `"impresspress/files"`); every
 /// error names it.
@@ -335,6 +367,7 @@ pub async fn apply_pending(
     ctx: &dyn Context,
     block_name: &str,
     files: &[MigrationFile<'_>],
+    history: &[HistoricalState],
 ) -> Result<(), MigrationError> {
     let code_hash = migration_set_hash(files);
     let state = read_state(ctx, block_name);
@@ -368,7 +401,7 @@ pub async fn apply_pending(
         backend,
         block: block_name,
     }
-    .apply(files, &state.current_hash, &code_hash)
+    .apply(files, history, &state.current_hash, &code_hash)
     .await;
     if let Err(e) = &outcome {
         tracing::warn!(error = %e, "migration failed");
@@ -379,15 +412,16 @@ pub async fn apply_pending(
 /// Apply `block_name`'s pending migrations straight through a
 /// [`DatabaseService`], before the runtime exists.
 ///
-/// The native server's counterpart of [`apply_pending`], for the one list
-/// it must apply pre-build: admin's, whose tables hold the variables and
-/// block settings the server reads to build its runtime. Same ledger, same
-/// plan, same stamp — it reads the block's `block_settings` row, returns
-/// when its `current_hash` matches [`migration_set_hash`], and otherwise
-/// runs the pending files — so the block's own `Init` then finds the list
-/// applied and skips it. A native boot always applies migrations, so there
-/// is no `IMPRESSPRESS_RUN_MIGRATIONS` gate to consult. `backend` is the
-/// dialect `files` are written in, which renders the ledger's own statements.
+/// The counterpart of [`apply_pending`] for a list applied pre-build: the
+/// native server's admin list, whose tables hold the variables and block
+/// settings the server reads to build its runtime, and the browser's every
+/// list. Same ledger, same plan, same history, same stamp — it reads the
+/// block's `block_settings` row, returns when its `current_hash` matches
+/// [`migration_set_hash`], and otherwise runs the pending files — so the
+/// block's own `Init` then finds the list applied and skips it. A boot that
+/// applies a list pre-build always migrates, so there is no
+/// `IMPRESSPRESS_RUN_MIGRATIONS` gate to consult. `backend` is the dialect
+/// `files` are written in, which renders the ledger's own statements.
 ///
 /// The statements go through `db.exec_raw` / `db.exec_raw_transaction` — the
 /// migration-file-runner exception to the no-raw-SQL rule (CLAUDE.md).
@@ -396,6 +430,7 @@ pub async fn apply_pending_via_service(
     backend: Backend,
     block_name: &str,
     files: &[MigrationFile<'_>],
+    history: &[HistoricalState],
 ) -> Result<(), MigrationError> {
     let code_hash = migration_set_hash(files);
     let current_hash = block_settings::load(db)
@@ -418,37 +453,15 @@ pub async fn apply_pending_via_service(
         backend,
         block: block_name,
     }
-    .apply(files, &current_hash, &code_hash)
+    .apply(files, history, &current_hash, &code_hash)
     .await
-}
-
-/// Run migration SQL straight through a [`DatabaseService`], with no
-/// tracking at all: every statement of every file, every time, one at a
-/// time, with a duplicate `ADD COLUMN` treated as already applied.
-///
-/// For test fixtures that build a schema up to a chosen point, and for
-/// tests of the files a legacy replay re-runs over the schema they already
-/// built. A deployment never calls it: it applies migrations through
-/// [`apply_pending`] / [`apply_pending_via_service`], which run each file
-/// once, atomically, and record it.
-pub async fn apply_ddl_via_service(
-    db: &Arc<dyn DatabaseService>,
-    sql_files: &[&str],
-) -> Result<(), String> {
-    for sql in sql_files {
-        let statements = executable_statements(sql);
-        run_statements(&statements, |stmt| db.exec_raw(stmt, &[]))
-            .await
-            .map_err(|failed| format!("ddl failed on `{}`: {}", failed.statement, failed.error))?;
-    }
-    Ok(())
 }
 
 /// The hash that identifies a block's migration list: SHA-256 hex of the
 /// files' SQL joined with `\n`, in order. The basenames take no part in it.
 ///
 /// What `block_settings.current_hash` holds once a list is fully applied,
-/// and what a database from before the ledger is adopted by.
+/// and what a database from before the ledger is recognised by.
 pub fn migration_set_hash(files: &[MigrationFile<'_>]) -> String {
     let joined = files
         .iter()
@@ -464,9 +477,8 @@ pub fn migration_set_hash(files: &[MigrationFile<'_>]) -> String {
 /// statement is normalised: its inner whitespace, literals and trailing
 /// inline comments are kept as written.
 ///
-/// These are exactly the statements the runner sends — in one transaction
-/// for a file added after the ledger, one at a time for a frozen file — and
-/// exactly what [`content_hash`] covers.
+/// These are exactly the statements the runner sends, in one transaction,
+/// and exactly what [`content_hash`] covers.
 pub fn executable_statements(sql: &str) -> Vec<String> {
     split_statements(sql)
         .into_iter()
@@ -496,7 +508,7 @@ pub fn content_hash(sql: &str) -> String {
 
 /// A block's migrations that did not apply. Its `Display` is the error every
 /// runner returns, so a boot that refuses to start, a deploy report and a
-/// browser's console say exactly this. It always names the block.
+/// browser's stopped screen say exactly this. It always names the block.
 #[derive(Debug)]
 pub struct MigrationError {
     block: String,
@@ -507,7 +519,8 @@ pub struct MigrationError {
 
 #[derive(Debug)]
 enum MigrationErrorKind {
-    /// The ledger and the code disagree; nothing ran for the block.
+    /// The ledger, the history and the code disagree with the database;
+    /// nothing of the refused file ran.
     Refused(Refusal),
     /// A file's transaction failed and the ledger does not record the file:
     /// nothing of it remains.
@@ -518,19 +531,19 @@ enum MigrationErrorKind {
         statements: Vec<String>,
         failure: TxFailure,
     },
-    /// A frozen file failed and the ledger does not record it: the
-    /// statements before the failing one stay applied, and the next run runs
-    /// the file again from its start.
-    FrozenFileFailed {
-        file: String,
-        failure: FrozenFailure,
-    },
     /// Reading or writing the migration record itself failed.
     Step { step: String, error: StepError },
+    /// A file's transaction failed, and reading the ledger to decide it
+    /// failed too: whether the file applied is not known.
+    Undecided {
+        file: String,
+        failure: TxFailure,
+        read: StepError,
+    },
 }
 
-/// Why the runner refused a block before running anything for it. Each says
-/// what the operator can do.
+/// Why the runner refused a block. Each names what the operator can do, and
+/// none ran anything of the refused file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// The ledger records `file` with `recorded`, and the code ships it with
@@ -549,9 +562,19 @@ pub enum Refusal {
     /// The block has no migration record at all, yet `file` met a schema that
     /// already exists.
     TrackingLost { file: String, message: String },
-    /// The block's `current_hash` is from before the ledger and matches no
-    /// prefix of today's list.
-    NeedsReplay { current_hash: String },
+    /// The block has a migration record, and `file` adds a column the
+    /// database already has: a typed write created it before the migration
+    /// ran.
+    DriftedSchema { file: String, message: String },
+    /// The block's `current_hash` is a list state from before the ledger that
+    /// this build does not upgrade.
+    UnsupportedState {
+        list_hash: String,
+        first_seen: String,
+        reason: String,
+    },
+    /// The block's `current_hash` is no list state main ever had.
+    UnknownState { list_hash: String },
 }
 
 impl MigrationError {
@@ -572,15 +595,21 @@ impl MigrationError {
         }
     }
 
-    /// The refusal, when the runner refused the block because its ledger and
-    /// the code disagree: an outcome of the code and the stored record, never
-    /// of the data the files would have touched.
+    /// The block the error names.
+    pub fn block(&self) -> &str {
+        &self.block
+    }
+
+    /// The refusal, when the runner refused the block because the database's
+    /// record or schema and the code disagree: an outcome of the code and
+    /// the stored record, never a statement that failed on the data. A
+    /// browser stops on a refusal without erasing anything.
     pub fn refusal(&self) -> Option<&Refusal> {
         match self.kind.as_ref() {
             MigrationErrorKind::Refused(refusal) => Some(refusal),
             MigrationErrorKind::FileFailed { .. }
-            | MigrationErrorKind::FrozenFileFailed { .. }
-            | MigrationErrorKind::Step { .. } => None,
+            | MigrationErrorKind::Step { .. }
+            | MigrationErrorKind::Undecided { .. } => None,
         }
     }
 
@@ -588,28 +617,21 @@ impl MigrationError {
     /// [`Refusal`]; the database's own classification for a file or a step
     /// that failed (`Unavailable` stays `Unavailable`, so the runtime retries
     /// the `Init`; a statement-budget refusal keeps its code and detail
-    /// code); `Internal` otherwise.
+    /// code); for an undecided file, the ledger read's classification.
     pub fn code(&self) -> ErrorCode {
         match self.kind.as_ref() {
             MigrationErrorKind::Refused(_) => ErrorCode::FailedPrecondition,
             MigrationErrorKind::FileFailed { failure, .. } => failure.code,
-            MigrationErrorKind::FrozenFileFailed { failure, .. } => match failure {
-                FrozenFailure::Statement { error, .. } => error.code,
-                FrozenFailure::Record { failure, .. } => failure.code,
-            },
             MigrationErrorKind::Step { error, .. } => error.code,
+            MigrationErrorKind::Undecided { read, .. } => read.code,
         }
     }
 
     fn detail_code(&self) -> Option<&str> {
         match self.kind.as_ref() {
             MigrationErrorKind::FileFailed { failure, .. } => failure.detail_code.as_deref(),
-            MigrationErrorKind::FrozenFileFailed { failure, .. } => match failure {
-                FrozenFailure::Statement { error, .. } => error.detail_code.as_deref(),
-                FrozenFailure::Record { failure, .. } => failure.detail_code.as_deref(),
-            },
             MigrationErrorKind::Step { error, .. } => error.detail_code.as_deref(),
-            MigrationErrorKind::Refused(_) => None,
+            MigrationErrorKind::Refused(_) | MigrationErrorKind::Undecided { .. } => None,
         }
     }
 
@@ -633,23 +655,16 @@ impl std::fmt::Display for MigrationError {
             MigrationErrorKind::Step { step, error } => {
                 write!(f, "{block}: {step}: {}", error.message)
             }
-            MigrationErrorKind::FrozenFileFailed { file, failure } => {
-                let (statement, code, message) = match failure {
-                    FrozenFailure::Statement { statement, error } => {
-                        (statement, error.code, &error.message)
-                    }
-                    FrozenFailure::Record { statement, failure } => {
-                        (statement, failure.code, &failure.message)
-                    }
-                };
-                write!(
-                    f,
-                    "{block}: migration `{file}` failed on `{statement}` ({code:?}): {message}. \
-                     It is from before the per-file ledger and runs one statement at a time: \
-                     the statements before this one stay applied, and the next run runs the \
-                     file again from its start"
-                )
-            }
+            MigrationErrorKind::Undecided {
+                file,
+                failure,
+                read,
+            } => write!(
+                f,
+                "{block}: migration `{file}` reported a failure ({:?}: {}), and reading the \
+                 migration ledger to see whether it applied failed too: {}",
+                failure.code, failure.message, read.message
+            ),
             MigrationErrorKind::FileFailed {
                 file,
                 statements,
@@ -694,6 +709,12 @@ impl std::fmt::Display for MigrationError {
 
 impl std::error::Error for MigrationError {}
 
+/// The first eight hex digits of a hash, as the history table and the
+/// operator see it.
+fn short(hash: &str) -> &str {
+    hash.get(..8).unwrap_or(hash)
+}
+
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -724,19 +745,34 @@ impl std::fmt::Display for Refusal {
             ),
             Self::TrackingLost { file, message } => write!(
                 f,
-                "has no migration record (no block_settings hash, no ledger rows) but its schema \
-                 already exists: its tracking was lost. Migration `{file}` met that schema and \
-                 was rolled back ({message}). Restore {} and {} from a backup taken before the \
-                 loss, or recreate the database",
+                "its tracking was lost: no migration record, but its schema exists. Migration \
+                 `{file}` met that schema and was rolled back ({message}). Restore {} and {} \
+                 from a backup taken before the loss, or recreate the database",
                 block_settings::TABLE,
                 applied_migrations::TABLE
             ),
-            Self::NeedsReplay { current_hash } => write!(
+            Self::DriftedSchema { file, message } => write!(
                 f,
-                "its migration record ({current_hash}) is from before the per-file ledger and \
-                 matches no prefix of this build's list, so it needs the legacy replay, which \
-                 this build does not carry. Nothing was run. Deploy a build that carries the \
-                 replay"
+                "its schema drifted: migration `{file}` adds a column the database already has, \
+                 which a write created before the migration ran ({message}). Nothing of `{file}` \
+                 ran. Recreate the database or restore a backup"
+            ),
+            Self::UnsupportedState {
+                list_hash,
+                first_seen,
+                reason,
+            } => write!(
+                f,
+                "its migration state {} (main, {first_seen}) cannot be upgraded: {reason}. \
+                 Nothing was run. Recreate the database or restore a backup",
+                short(list_hash)
+            ),
+            Self::UnknownState { list_hash } => write!(
+                f,
+                "its migration state {} is no state main ever had (a branch build, an \
+                 interrupted run, or a corrupt record). Nothing was run. Recreate the database \
+                 or restore a backup",
+                short(list_hash)
             ),
         }
     }
@@ -750,12 +786,6 @@ struct StepError {
     code: ErrorCode,
     detail_code: Option<String>,
     message: String,
-}
-
-impl std::fmt::Display for StepError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
 }
 
 impl From<WaferError> for StepError {
@@ -817,8 +847,7 @@ impl From<TransactionError> for TxFailure {
 // ---------------------------------------------------------------------------
 
 /// The database the runner reaches: the block's own context (under WRAP,
-/// every block's `Init`) or the platform service (native's pre-build apply of
-/// admin's list).
+/// every block's `Init`) or the platform service (a pre-build apply).
 enum Db<'a> {
     Ctx(&'a dyn Context),
     Service(&'a Arc<dyn DatabaseService>),
@@ -877,66 +906,51 @@ impl Db<'_> {
     }
 }
 
-/// The last file of each block's list when the per-file ledger shipped: the
-/// block's **frozen** files are that one and every file before it (module
-/// docs, "Frozen files").
-///
-/// Spelled once, here, and never moved: a file added after the ledger is
-/// never frozen. A block that is not listed has no frozen file.
-pub const FROZEN_THROUGH: &[(&str, &str)] = &[
-    (
-        "impresspress/admin",
-        "009_block_settings_clear_blessed_hash",
-    ),
-    ("wafer-run/auth", "016_roles_are_grants"),
-    ("impresspress/dev", "004_seed_llms_text"),
-    ("impresspress/files", "005_object_blob_key"),
-    ("impresspress/legalpages", "002_legalpages_version_numbers"),
-    ("impresspress/llm", "002_provider_max_tokens_field"),
-    ("impresspress/messages", "002_owner_id"),
-    ("impresspress/products", "023_canonical_currency"),
-    ("impresspress/signal", "001_signal_rooms"),
-    ("impresspress/tickets", "001_tickets_schema"),
-    ("impresspress/userportal", "001_userportal_schema"),
-    ("impresspress/vector", "001_vector_schema"),
-];
-
-/// The numeric `NNN` a basename starts with. Every shipped basename has one,
-/// strictly increasing within its block (the guard
-/// `every_migration_ships_in_both_dialects_with_increasing_prefixes`).
-fn sequence_number(basename: &str) -> Option<u32> {
-    basename.split_once('_')?.0.parse().ok()
-}
-
-/// Whether `file` of `block` is frozen: at or before the block's
-/// [`FROZEN_THROUGH`] entry. Compared by sequence number, so a list that
-/// stops before the freeze mark — a test fixture's prefix — is frozen whole,
-/// and a file added after it never is.
-pub fn is_frozen(block: &str, file: &str) -> bool {
-    FROZEN_THROUGH
-        .iter()
-        .find(|(name, _)| *name == block)
-        .and_then(|(_, last)| Some((sequence_number(file)?, sequence_number(last)?)))
-        .is_some_and(|(file, last)| file <= last)
-}
-
 /// How a block with no ledger rows is applied (module docs, "Databases from
 /// before the ledger").
 #[derive(Debug, PartialEq, Eq)]
-enum Class {
+enum Class<'h> {
     Fresh,
-    /// Files `..k` ran with today's text.
+    /// Files `..k` are applied in the historical state.
     Adopt(usize),
-    Replay,
+    Unsupported(&'h HistoricalState, &'static str),
+    Unknown,
 }
 
-fn classify(current_hash: &str, files: &[MigrationFile<'_>]) -> Class {
+/// Look `current_hash` up in `history`. An `Applied` verdict must name a
+/// prefix of `files`; anything else means the table and the list disagree,
+/// which `migration_history_tests` rules out for every shipped block.
+fn classify<'h>(
+    current_hash: &str,
+    files: &[MigrationFile<'_>],
+    history: &'h [HistoricalState],
+) -> Result<Class<'h>, String> {
     if current_hash.is_empty() {
-        return Class::Fresh;
+        return Ok(Class::Fresh);
     }
-    (1..=files.len())
-        .find(|&k| migration_set_hash(&files[..k]) == current_hash)
-        .map_or(Class::Replay, Class::Adopt)
+    let Some(state) = history.iter().find(|state| state.list_hash == current_hash) else {
+        return Ok(Class::Unknown);
+    };
+    match state.verdict {
+        Verdict::Unsupported(reason) => Ok(Class::Unsupported(state, reason)),
+        Verdict::Applied(applied) => {
+            let is_prefix = !applied.is_empty()
+                && applied.len() <= files.len()
+                && applied
+                    .iter()
+                    .zip(files)
+                    .all(|(adopted, (name, _))| adopted == name);
+            if is_prefix {
+                Ok(Class::Adopt(applied.len()))
+            } else {
+                Err(format!(
+                    "the history entry for {} adopts {applied:?}, which is not a prefix of this \
+                     build's list",
+                    short(current_hash)
+                ))
+            }
+        }
+    }
 }
 
 /// Where the code's list resumes against the block's ledger rows: the index
@@ -992,19 +1006,17 @@ impl Ledger<'_> {
     async fn apply(
         &self,
         files: &[MigrationFile<'_>],
+        history: &[HistoricalState],
         current_hash: &str,
         code_hash: &str,
     ) -> Result<(), MigrationError> {
-        let create = applied_migrations::create_table_sql(self.backend).map_err(|message| {
-            self.step_error(
-                "create the migration ledger",
-                StepError {
-                    code: ErrorCode::Internal,
-                    detail_code: None,
-                    message,
-                },
-            )
-        })?;
+        let internal = |message: String| StepError {
+            code: ErrorCode::Internal,
+            detail_code: None,
+            message,
+        };
+        let create = applied_migrations::create_table_sql(self.backend)
+            .map_err(|message| self.step_error("create the migration ledger", internal(message)))?;
         self.db
             .exec(&create)
             .await
@@ -1012,14 +1024,27 @@ impl Ledger<'_> {
 
         let rows = self.read_ledger().await?;
         let (first_pending, fresh) = if rows.is_empty() {
-            match classify(current_hash, files) {
+            let class = classify(current_hash, files, history).map_err(|message| {
+                self.step_error("read its migration history", internal(message))
+            })?;
+            match class {
                 Class::Fresh => (0, true),
-                Class::Adopt(k) => (self.adopt(&files[..k], files).await?, false),
-                Class::Replay => {
+                Class::Adopt(k) => (self.adopt(&files[..k], files, current_hash).await?, false),
+                Class::Unsupported(state, reason) => {
                     return Err(MigrationError::refused(
                         self.block,
-                        Refusal::NeedsReplay {
-                            current_hash: current_hash.to_string(),
+                        Refusal::UnsupportedState {
+                            list_hash: state.list_hash.to_string(),
+                            first_seen: state.first_seen.to_string(),
+                            reason: reason.to_string(),
+                        },
+                    ))
+                }
+                Class::Unknown => {
+                    return Err(MigrationError::refused(
+                        self.block,
+                        Refusal::UnknownState {
+                            list_hash: current_hash.to_string(),
                         },
                     ))
                 }
@@ -1049,6 +1074,26 @@ impl Ledger<'_> {
             .map_err(|e| self.step_error("read the migration ledger", e))
     }
 
+    /// Read the ledger again to decide a failed transaction of `file`; if
+    /// the read fails too, the error carries both failures.
+    async fn reread(
+        &self,
+        file: &str,
+        failure: &TxFailure,
+    ) -> Result<Vec<AppliedMigration>, MigrationError> {
+        self.db
+            .ledger(self.block)
+            .await
+            .map_err(|read| MigrationError {
+                block: self.block.to_string(),
+                kind: Box::new(MigrationErrorKind::Undecided {
+                    file: file.to_string(),
+                    failure: failure.clone(),
+                    read,
+                }),
+            })
+    }
+
     fn plan(
         &self,
         files: &[MigrationFile<'_>],
@@ -1058,44 +1103,45 @@ impl Ledger<'_> {
     }
 
     /// Record `adopted` as applied without running them, in one transaction,
-    /// and return where the list resumes. A failed adoption is decided by the
-    /// ledger, like a failed file: when another migrator's rows now cover the
-    /// adopted files, its record is planned against instead.
+    /// each row naming `adopted_from`, and return where the list resumes. A
+    /// failed adoption is decided by the ledger, like a failed file: when
+    /// another migrator's rows now cover the adopted files, its record is
+    /// planned against instead.
     async fn adopt(
         &self,
         adopted: &[MigrationFile<'_>],
         files: &[MigrationFile<'_>],
+        adopted_from: &str,
     ) -> Result<usize, MigrationError> {
         let statements: Vec<RawStatement> = adopted
             .iter()
-            .map(|&(name, sql)| self.ledger_row(name, sql, Origin::Adopted))
+            .map(|&(name, sql)| {
+                applied_migrations::insert_statement(
+                    &AppliedMigration::adopted(self.block, name, &content_hash(sql), adopted_from),
+                    self.backend,
+                )
+            })
             .collect();
         let Err(failure) = self.db.transaction(&statements).await else {
             return Ok(adopted.len());
         };
-        let rows = self.read_ledger().await?;
+        let file = format!(
+            "{}..{} (adopted)",
+            adopted[0].0,
+            adopted[adopted.len() - 1].0
+        );
+        let rows = self.reread(&file, &failure).await?;
         match self.plan(files, &rows)? {
             first_pending if first_pending >= adopted.len() => Ok(first_pending),
             _ => Err(MigrationError {
                 block: self.block.to_string(),
                 kind: Box::new(MigrationErrorKind::FileFailed {
-                    file: format!(
-                        "{}..{} (adopted)",
-                        adopted[0].0,
-                        adopted[adopted.len() - 1].0
-                    ),
+                    file,
                     statements: statements.into_iter().map(|s| s.query).collect(),
                     failure,
                 }),
             }),
         }
-    }
-
-    fn ledger_row(&self, name: &str, sql: &str, origin: Origin) -> RawStatement {
-        applied_migrations::insert_statement(
-            &AppliedMigration::new(self.block, name, &content_hash(sql), origin),
-            self.backend,
-        )
     }
 
     /// Apply one file as one transaction — its ledger row, then its
@@ -1108,10 +1154,10 @@ impl Ledger<'_> {
         sql: &str,
         fresh: bool,
     ) -> Result<(), MigrationError> {
-        if is_frozen(self.block, name) {
-            return self.run_frozen_file(files, name, sql).await;
-        }
-        let mut statements = vec![self.ledger_row(name, sql, Origin::Ran)];
+        let mut statements = vec![applied_migrations::insert_statement(
+            &AppliedMigration::ran(self.block, name, &content_hash(sql)),
+            self.backend,
+        )];
         statements.extend(
             executable_statements(sql)
                 .into_iter()
@@ -1124,7 +1170,7 @@ impl Ledger<'_> {
             return Ok(());
         };
 
-        let rows = self.read_ledger().await?;
+        let rows = self.reread(name, &failure).await?;
         match rows.iter().find(|row| row.file_name == name) {
             Some(row) if row.content_sha256 == content_hash(sql) => {
                 tracing::info!(
@@ -1146,16 +1192,22 @@ impl Ledger<'_> {
                     shipped: content_hash(sql),
                 },
             )),
-            // Only the wording depends on the message: the file is refused
-            // either way, and nothing of it remains.
-            None if fresh && is_duplicate_column_error(&failure.message) => {
-                Err(MigrationError::refused(
-                    self.block,
+            // The file is refused either way and nothing of it remains; the
+            // message only picks which named refusal says so (module docs,
+            // "A column that already exists").
+            None if is_duplicate_column_error(&failure.message) => {
+                let refusal = if fresh {
                     Refusal::TrackingLost {
                         file: name.to_string(),
                         message: failure.message,
-                    },
-                ))
+                    }
+                } else {
+                    Refusal::DriftedSchema {
+                        file: name.to_string(),
+                        message: failure.message,
+                    }
+                };
+                Err(MigrationError::refused(self.block, refusal))
             }
             None => Err(MigrationError {
                 block: self.block.to_string(),
@@ -1167,123 +1219,6 @@ impl Ledger<'_> {
             }),
         }
     }
-
-    /// Apply one frozen file the way it was written to be applied (module
-    /// docs, "Frozen files"): its statements one at a time through the
-    /// tolerant loop, then its ledger row. A failure of either is decided by
-    /// reading the ledger again, as a failed transaction is.
-    async fn run_frozen_file(
-        &self,
-        files: &[MigrationFile<'_>],
-        name: &str,
-        sql: &str,
-    ) -> Result<(), MigrationError> {
-        let statements = executable_statements(sql);
-        let ran = run_statements(&statements, |statement| self.db.exec(statement)).await;
-        let failure = match ran {
-            Err(failed) => FrozenFailure::Statement {
-                statement: failed.statement,
-                error: failed.error,
-            },
-            Ok(()) => {
-                let row = self.ledger_row(name, sql, Origin::Ran);
-                let Err(failure) = self.db.transaction(std::slice::from_ref(&row)).await else {
-                    return Ok(());
-                };
-                FrozenFailure::Record {
-                    statement: row.query,
-                    failure,
-                }
-            }
-        };
-
-        let rows = self.read_ledger().await?;
-        match rows.iter().find(|row| row.file_name == name) {
-            Some(row) if row.content_sha256 == content_hash(sql) => {
-                tracing::info!(
-                    block = %self.block,
-                    file = %name,
-                    "migration failed here, but the ledger records the file: another \
-                     migrator applied it; continuing"
-                );
-                self.plan(files, &rows).map(drop)
-            }
-            Some(row) => Err(MigrationError::refused(
-                self.block,
-                Refusal::ContentChanged {
-                    file: name.to_string(),
-                    recorded: row.content_sha256.clone(),
-                    shipped: content_hash(sql),
-                },
-            )),
-            None => Err(MigrationError {
-                block: self.block.to_string(),
-                kind: Box::new(MigrationErrorKind::FrozenFileFailed {
-                    file: name.to_string(),
-                    failure,
-                }),
-            }),
-        }
-    }
-}
-
-/// How a frozen file failed: one of its statements, or the ledger row
-/// written after them.
-#[derive(Debug)]
-enum FrozenFailure {
-    Statement {
-        statement: String,
-        error: StepError,
-    },
-    Record {
-        statement: String,
-        failure: TxFailure,
-    },
-}
-
-/// A migration statement the database refused, and why.
-struct FailedStatement<E> {
-    statement: String,
-    error: E,
-}
-
-/// Run a migration file's [`executable_statements`] through `exec`, one at
-/// a time, in order, stopping at the first failure: the loop a frozen file
-/// is applied with, and the untracked [`apply_ddl_via_service`]. `ALTER TABLE ... ADD COLUMN` is non-idempotent on
-/// SQLite/D1, which have no `IF NOT EXISTS` for columns: when an earlier run
-/// already added the column the re-run raises "duplicate column", and that —
-/// only for an `ADD COLUMN` statement — is a benign no-op so the rest of the
-/// file still runs. Every other failure is returned.
-///
-/// A file added after the ledger never runs through it: it runs once, as one
-/// transaction, where a refused statement fails the whole file and nothing
-/// is swallowed.
-async fn run_statements<'a, F, Fut, T, E>(
-    statements: &'a [String],
-    mut exec: F,
-) -> Result<(), FailedStatement<E>>
-where
-    F: FnMut(&'a str) -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
-{
-    for statement in statements {
-        if let Err(error) = exec(statement).await {
-            if is_alter_add_column(statement) && is_duplicate_column_error(&error.to_string()) {
-                tracing::debug!(
-                    stmt = %statement,
-                    err = %error,
-                    "ddl: duplicate column, treating as idempotent no-op",
-                );
-                continue;
-            }
-            return Err(FailedStatement {
-                statement: statement.clone(),
-                error,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// Read the cached `BlockSettings` from the wafer config and look up the
@@ -1349,31 +1284,6 @@ fn split_statements(sql: &str) -> Vec<&str> {
     out
 }
 
-/// `stmt`'s executable text, upper-cased with its whitespace collapsed:
-/// comment lines dropped, so a leading `--` header does not hide its shape.
-fn executable_shape(stmt: &str) -> String {
-    stmt.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with("--"))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// `true` when `stmt`'s first executable token sequence is
-/// `ALTER TABLE … ADD COLUMN`. Case-insensitive, comment-tolerant.
-///
-/// Used to gate the duplicate-column-error tolerance in [`run_statements`]
-/// — the benign duplicate is swallowed on this specific statement shape
-/// only, not on every DDL.
-fn is_alter_add_column(stmt: &str) -> bool {
-    let shape = executable_shape(stmt);
-    shape.starts_with("ALTER TABLE ") && shape.contains(" ADD COLUMN ")
-}
-
 /// `true` when an error message looks like a "column already exists"
 /// failure from any backend we target.
 ///
@@ -1382,9 +1292,9 @@ fn is_alter_add_column(stmt: &str) -> bool {
 ///
 /// Substring match is intentional — backends wrap these strings in their
 /// own error envelopes and we only care that the canonical phrase appears.
-/// It decides what [`run_statements`] swallows, and which words the ledger
-/// runner refuses a fresh block's failed file with
-/// ([`Refusal::TrackingLost`]); it never decides whether a file applied.
+/// It picks which named refusal a file that is not recorded is reported as
+/// ([`Refusal::TrackingLost`], [`Refusal::DriftedSchema`]); it never decides
+/// whether a file applied.
 fn is_duplicate_column_error(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
     lower.contains("duplicate column name") || lower.contains("already exists")
@@ -1393,6 +1303,7 @@ fn is_duplicate_column_error(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform_state::applied_migrations::Origin;
 
     #[test]
     fn sha256_hex_deterministic() {
@@ -1407,20 +1318,6 @@ mod tests {
         let a = sha256_hex("CREATE TABLE foo (id TEXT);");
         let b = sha256_hex("CREATE TABLE bar (id TEXT);");
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn detects_alter_table_add_column_in_all_shapes() {
-        assert!(is_alter_add_column("ALTER TABLE foo ADD COLUMN bar TEXT"));
-        assert!(is_alter_add_column("alter table foo add column bar text"));
-        // Tolerates leading line comments + extra whitespace.
-        assert!(is_alter_add_column(
-            "-- header\n\nALTER TABLE foo\n  ADD COLUMN bar TEXT"
-        ));
-        // Excludes other ALTER variants and unrelated DDL.
-        assert!(!is_alter_add_column("ALTER TABLE foo DROP COLUMN bar"));
-        assert!(!is_alter_add_column("CREATE TABLE foo (id TEXT)"));
-        assert!(!is_alter_add_column("CREATE INDEX bar ON foo (id)"));
     }
 
     #[test]
@@ -1557,8 +1454,8 @@ mod tests {
 
     #[test]
     fn admin_005_splits_into_its_column_and_its_repair() {
-        // The `ADD COLUMN` has to reach the runner on its own, so a re-run's
-        // duplicate-column error is recognised and the `UPDATE` still runs.
+        // The `ADD COLUMN` and the `UPDATE` are two statements of the
+        // file's one transaction.
         for (dialect, sql) in [
             (
                 "sqlite",
@@ -1575,7 +1472,11 @@ mod tests {
                 2,
                 "admin {dialect} migration 005: expected 2 statements, got {stmts:?}"
             );
-            assert!(is_alter_add_column(&stmts[0]), "{dialect}: {}", stmts[0]);
+            assert!(
+                stmts[0].to_ascii_uppercase().starts_with("ALTER TABLE"),
+                "{dialect}: {}",
+                stmts[0]
+            );
         }
     }
 
@@ -1618,32 +1519,6 @@ mod tests {
         }
     }
 
-    /// The tolerance the legacy replay relies on: a frozen file replayed over
-    /// the schema it built meets its own `ADD COLUMN` again, and the
-    /// untracked loop swallows that duplicate. Only that loop does — the
-    /// ledger runner runs a file once, in one transaction, where nothing can
-    /// be swallowed (see `a_fresh_block_whose_schema_exists_is_refused_as_tracking_lost`).
-    #[tokio::test]
-    async fn the_untracked_loop_tolerates_a_duplicate_add_column() {
-        let ctx = crate::test_support::TestContext::with_admin().await;
-        let migration_sql = "\
-            CREATE TABLE IF NOT EXISTS dup_col_test (id TEXT PRIMARY KEY);\n\
-            ALTER TABLE dup_col_test ADD COLUMN name TEXT;\n\
-        ";
-        let db = ctx.database_service();
-        apply_ddl_via_service(&db, &[migration_sql])
-            .await
-            .expect("the first run adds the column");
-        apply_ddl_via_service(&db, &[migration_sql])
-            .await
-            .expect("a re-run meets its own ADD COLUMN, and the duplicate is swallowed");
-        // Any other failure still stops it.
-        let err = apply_ddl_via_service(&db, &["CREATE NONSENSE foo (id TEXT);"])
-            .await
-            .expect_err("a syntax error is not swallowed");
-        assert!(err.contains("CREATE NONSENSE foo"), "{err}");
-    }
-
     /// The pre-build runner keeps the same tracking as the in-runtime one: it
     /// applies a pending list once, records each file, stamps the hash the
     /// block's `Init` will compute, and does nothing on the next boot.
@@ -1657,6 +1532,7 @@ mod tests {
             Backend::Sqlite,
             crate::blocks::admin::ADMIN_BLOCK_ID,
             admin,
+            &[],
         )
         .await
         .expect("admin's list applies to an empty database");
@@ -1668,7 +1544,7 @@ mod tests {
              INSERT INTO pending_runs (id) VALUES ('run');",
         )];
         for _ in 0..2 {
-            apply_pending_via_service(&db, Backend::Sqlite, "test/pending", &files)
+            apply_pending_via_service(&db, Backend::Sqlite, "test/pending", &files, &[])
                 .await
                 .expect("apply the counted list");
         }
@@ -1832,7 +1708,9 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         let ctx = ledger_ctx().await;
         let files = [F1, F2];
         for _ in 0..2 {
-            apply_pending(&ctx, BLOCK, &files).await.expect("apply");
+            apply_pending(&ctx, BLOCK, &files, &[])
+                .await
+                .expect("apply");
         }
         assert_eq!((runs(&ctx, "001").await, runs(&ctx, "002").await), (1, 1));
         assert_eq!(
@@ -1846,10 +1724,10 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
     #[tokio::test]
     async fn a_grown_list_runs_only_the_new_file() {
         let ctx = ledger_ctx().await;
-        apply_pending(&ctx, BLOCK, &[F1, F2])
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
             .await
             .expect("apply v1");
-        apply_pending(&ctx, BLOCK, &[F1, F2, F3])
+        apply_pending(&ctx, BLOCK, &[F1, F2, F3], &[])
             .await
             .expect("apply v2");
         assert_eq!(
@@ -1868,14 +1746,14 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
     #[tokio::test]
     async fn an_edited_applied_file_refuses_and_runs_nothing() {
         let ctx = ledger_ctx().await;
-        apply_pending(&ctx, BLOCK, &[F1, F2])
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
             .await
             .expect("apply v1");
         let edited: MigrationFile<'static> = (
             F2.0,
             "INSERT INTO ledger_runs (file) VALUES ('002-edited');",
         );
-        let err = apply_pending(&ctx, BLOCK, &[F1, edited, F3])
+        let err = apply_pending(&ctx, BLOCK, &[F1, edited, F3], &[])
             .await
             .expect_err("an edited applied file refuses");
         assert_eq!(
@@ -1905,14 +1783,14 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
     #[tokio::test]
     async fn an_applied_files_comment_edit_runs_nothing_and_restamps() {
         let ctx = ledger_ctx().await;
-        apply_pending(&ctx, BLOCK, &[F1, F2])
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
             .await
             .expect("apply v1");
         let commented: MigrationFile<'static> = (
             F2.0,
             "-- Counts a run.\nINSERT INTO ledger_runs (file) VALUES ('002');\n-- The end.\n",
         );
-        apply_pending(&ctx, BLOCK, &[F1, commented])
+        apply_pending(&ctx, BLOCK, &[F1, commented], &[])
             .await
             .expect("a comment edit is not a content change");
         assert_eq!(runs(&ctx, "002").await, 1);
@@ -1927,10 +1805,10 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
     #[tokio::test]
     async fn a_database_ahead_of_the_code_refuses() {
         let ctx = ledger_ctx().await;
-        apply_pending(&ctx, BLOCK, &[F1, F2])
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
             .await
             .expect("apply v2");
-        let err = apply_pending(&ctx, BLOCK, &[F1])
+        let err = apply_pending(&ctx, BLOCK, &[F1], &[])
             .await
             .expect_err("an older list refuses");
         assert_eq!(
@@ -1949,7 +1827,9 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
     #[tokio::test]
     async fn a_gap_in_the_ledger_refuses() {
         let ctx = ledger_ctx().await;
-        apply_pending(&ctx, BLOCK, &[F1, F2]).await.expect("apply");
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
+            .await
+            .expect("apply");
         let first = applied_migrations::list_for_block(&ctx.fixture(), BLOCK)
             .await
             .expect("read the ledger")
@@ -1960,7 +1840,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         db::delete(&ctx.fixture(), applied_migrations::TABLE, &first.id)
             .await
             .expect("delete 001's row");
-        let err = apply_pending(&ctx, BLOCK, &[F1, F2, F3])
+        let err = apply_pending(&ctx, BLOCK, &[F1, F2, F3], &[])
             .await
             .expect_err("a gap refuses");
         assert_eq!(
@@ -1988,7 +1868,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
              INSERT INTO ledger_runs (file) VALUES ('002');\n\
              INSERT INTO ledger_missing (x) VALUES (1);",
         );
-        let err = apply_pending(&ctx, BLOCK, &[F1, broken])
+        let err = apply_pending(&ctx, BLOCK, &[F1, broken], &[])
             .await
             .expect_err("002 fails");
         let text = err.to_string();
@@ -2017,7 +1897,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
             "CREATE TABLE ledger_side (id TEXT);\n\
              INSERT INTO ledger_runs (file) VALUES ('002');",
         );
-        apply_pending(&ctx, BLOCK, &[F1, fixed])
+        apply_pending(&ctx, BLOCK, &[F1, fixed], &[])
             .await
             .expect("the fixed file applies");
         assert_eq!((runs(&ctx, "001").await, runs(&ctx, "002").await), (1, 1));
@@ -2036,7 +1916,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
              INSERT INTO ledger_unique (id) VALUES ('a');\n\
              INSERT INTO ledger_unique (id) VALUES ('a');",
         );
-        let err = apply_pending(&ctx, BLOCK, &[F1, duplicate, F3])
+        let err = apply_pending(&ctx, BLOCK, &[F1, duplicate, F3], &[])
             .await
             .expect_err("a duplicate inside the file fails it");
         assert_eq!(err.code(), ErrorCode::AlreadyExists, "{err}");
@@ -2056,7 +1936,9 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
     #[tokio::test]
     async fn a_lost_block_settings_row_alone_is_restamped_without_running() {
         let ctx = ledger_ctx().await;
-        apply_pending(&ctx, BLOCK, &[F1, F2]).await.expect("apply");
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
+            .await
+            .expect("apply");
         let row = block_settings::list_all(&ctx.fixture())
             .await
             .expect("list")
@@ -2067,7 +1949,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         db::delete(&ctx.fixture(), block_settings::TABLE, &row.id)
             .await
             .expect("delete the row");
-        apply_pending(&ctx, BLOCK, &[F1, F2])
+        apply_pending(&ctx, BLOCK, &[F1, F2], &[])
             .await
             .expect("re-apply");
         assert_eq!((runs(&ctx, "001").await, runs(&ctx, "002").await), (1, 1));
@@ -2083,20 +1965,19 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         let ctx = ledger_ctx().await;
         let db = ctx.database_service();
         // Test-fixture setup: the schema an earlier, since-forgotten run built.
-        apply_ddl_via_service(
-            &db,
-            &["CREATE TABLE ledger_runs (file TEXT NOT NULL);\n\
-               ALTER TABLE ledger_runs ADD COLUMN extra TEXT;"],
-        )
-        .await
-        .expect("build the schema");
+        for statement in [
+            "CREATE TABLE ledger_runs (file TEXT NOT NULL)",
+            "ALTER TABLE ledger_runs ADD COLUMN extra TEXT",
+        ] {
+            db.exec_raw(statement, &[]).await.expect("build the schema");
+        }
         let file: MigrationFile<'static> = (
             "001_schema",
             "CREATE TABLE IF NOT EXISTS ledger_runs (file TEXT NOT NULL);\n\
              CREATE TABLE ledger_side (id TEXT);\n\
              ALTER TABLE ledger_runs ADD COLUMN extra TEXT;",
         );
-        let err = apply_pending(&ctx, BLOCK, &[file])
+        let err = apply_pending(&ctx, BLOCK, &[file], &[])
             .await
             .expect_err("tracking lost refuses");
         match err.refusal() {
@@ -2116,21 +1997,37 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         assert!(ledger_rows(&ctx).await.is_empty());
     }
 
-    /// A database from before the ledger whose hash is today's first file:
-    /// that file is recorded `adopted` without running, and the rest run.
-    #[tokio::test]
-    async fn a_pre_ledger_block_adopts_the_prefix_its_hash_proves() {
-        for k in [1, 2] {
-            let files = [F1, F2, F3];
-            let ctx = ledger_ctx_with_hash(&migration_set_hash(&files[..k])).await;
-            // What the runner from before the ledger left: the first `k` files
-            // ran, and their list's hash was stamped.
-            let sql: Vec<&str> = files[..k].iter().map(|(_, sql)| *sql).collect();
-            apply_ddl_via_service(&ctx.database_service(), &sql)
-                .await
-                .expect("the pre-ledger run");
+    /// A history entry for the test block: `files` as the list a database
+    /// from before the ledger last applied, with `verdict`.
+    fn state(files: &[MigrationFile<'_>], verdict: Verdict) -> HistoricalState {
+        HistoricalState {
+            list_hash: Box::leak(migration_set_hash(files).into_boxed_str()),
+            first_seen: "2026-10-01 0123abcd",
+            composition: &[],
+            verdict,
+        }
+    }
 
-            apply_pending(&ctx, BLOCK, &files)
+    /// The old runner's database for `files`: each statement run as it was,
+    /// then the list's hash stamped by the caller's snapshot.
+    async fn pre_ledger(ctx: &TestContext, files: &[MigrationFile<'_>]) {
+        legacy_runner::apply(&ctx.database_service(), files)
+            .await
+            .expect("the pre-ledger run");
+    }
+
+    /// A database from before the ledger whose record its history entry
+    /// says has the first `k` files applied: those are recorded `adopted`,
+    /// from that record, without running, and the rest run.
+    #[tokio::test]
+    async fn a_known_pre_ledger_state_adopts_the_files_its_entry_names() {
+        for (k, applied) in [(1, &["001_runs"][..]), (2, &["001_runs", "002_more"][..])] {
+            let files = [F1, F2, F3];
+            let history = [state(&files[..k], Verdict::Applied(applied))];
+            let ctx = ledger_ctx_with_hash(history[0].list_hash).await;
+            pre_ledger(&ctx, &files[..k]).await;
+
+            apply_pending(&ctx, BLOCK, &files, &history)
                 .await
                 .expect("adopt and run");
 
@@ -2143,108 +2040,111 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
                 .map(|(i, (name, _))| (*name, if i < k { Origin::Adopted } else { Origin::Ran }))
                 .collect();
             assert_eq!(ledger_rows(&ctx).await, owned(&expected), "k = {k}");
+            let adopted_from: Vec<String> =
+                applied_migrations::list_for_block(&ctx.fixture(), BLOCK)
+                    .await
+                    .expect("ledger")
+                    .into_iter()
+                    .filter(|row| row.origin == Origin::Adopted)
+                    .map(|row| row.adopted_from)
+                    .collect();
+            assert_eq!(adopted_from, vec![history[0].list_hash.to_string(); k]);
             assert_eq!(stamped(&ctx).await, Some(migration_set_hash(&files)));
         }
     }
 
-    /// A hash from before the ledger that matches no prefix — an edited file
-    /// was applied, a corrupt value, or the `applying` sentinel a crashed run
-    /// from before #145 left — needs the legacy replay, which this build does
-    /// not carry: refused, with nothing run or recorded.
+    /// A pre-ledger record whose entry is unsupported is refused by name,
+    /// with the entry's date and reason; nothing runs or is recorded.
     #[tokio::test]
-    async fn an_unmatched_pre_ledger_hash_is_refused_until_the_replay_ships() {
+    async fn an_unsupported_pre_ledger_state_is_refused_by_name() {
+        let files = [F1, F2];
+        let history = [state(
+            &files[..1],
+            Verdict::Unsupported("its 001 was edited after it shipped"),
+        )];
+        let ctx = ledger_ctx_with_hash(history[0].list_hash).await;
+        let err = apply_pending(&ctx, BLOCK, &files, &history)
+            .await
+            .expect_err("refused");
+        assert_eq!(
+            err.refusal(),
+            Some(&Refusal::UnsupportedState {
+                list_hash: history[0].list_hash.to_string(),
+                first_seen: "2026-10-01 0123abcd".to_string(),
+                reason: "its 001 was edited after it shipped".to_string(),
+            })
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("cannot be upgraded: its 001 was edited after it shipped"),
+            "{text}"
+        );
+        assert!(text.contains(&history[0].list_hash[..8]), "{text}");
+        assert_eq!(err.code(), ErrorCode::FailedPrecondition);
+        assert!(!table_exists(&ctx, "ledger_runs").await, "nothing ran");
+        assert!(ledger_rows(&ctx).await.is_empty(), "nothing recorded");
+    }
+
+    /// A record no entry names — the `applying` a run that crashed before
+    /// #145 left, a branch build's hash — is refused by name: no prefix is
+    /// guessed, nothing runs.
+    #[tokio::test]
+    async fn an_unknown_pre_ledger_state_is_refused_by_name() {
         for current in ["applying", "an-older-list"] {
+            let history = [state(&[F1], Verdict::Applied(&["001_runs"]))];
             let ctx = ledger_ctx_with_hash(current).await;
-            let err = apply_pending(&ctx, BLOCK, &[F1, F2])
+            let err = apply_pending(&ctx, BLOCK, &[F1, F2], &history)
                 .await
                 .expect_err("refused");
             assert_eq!(
                 err.refusal(),
-                Some(&Refusal::NeedsReplay {
-                    current_hash: current.to_string()
+                Some(&Refusal::UnknownState {
+                    list_hash: current.to_string()
                 })
             );
-            assert!(err.to_string().contains("needs the legacy replay"), "{err}");
             assert!(!table_exists(&ctx, "ledger_runs").await, "nothing ran");
             assert!(ledger_rows(&ctx).await.is_empty(), "nothing recorded");
         }
     }
 
-    /// Frozen files run as they were written to: auth's whole list applies to
-    /// a fresh database although its 016 opens with an `ADD COLUMN` that
-    /// 001's column makes a duplicate there, and every file is recorded with
-    /// its content hash.
+    /// A block that adopted (or ran) files and then meets a column a typed
+    /// write already created — a browser profile that never migrated while
+    /// newer code wrote into it — is refused by name as drifted; the file
+    /// rolls back whole and is not recorded.
     #[tokio::test]
-    async fn a_fresh_blocks_frozen_files_run_as_written_and_are_recorded() {
-        let ctx = TestContext::with_auth().await;
-        let rows = applied_migrations::list_for_block_via_service(
-            &ctx.database_service(),
-            crate::blocks::auth::AUTH_BLOCK_ID,
+    async fn a_column_a_write_created_before_its_migration_is_refused_as_drifted() {
+        let files = [F1, F2];
+        let history = [state(&files[..1], Verdict::Applied(&["001_runs"]))];
+        let ctx = ledger_ctx_with_hash(history[0].list_hash).await;
+        pre_ledger(&ctx, &files[..1]).await;
+        // Test-fixture setup: the column a typed write added lazily.
+        db::ddl(
+            &ctx.fixture(),
+            "ALTER TABLE ledger_runs ADD COLUMN drifted TEXT",
         )
         .await
-        .expect("read the ledger");
-        let auth = crate::blocks::auth::migrations::SQLITE_MIGRATIONS;
-        assert_eq!(rows.len(), auth.len(), "{rows:?}");
-        for (name, sql) in auth {
-            let row = rows
-                .iter()
-                .find(|row| row.file_name == *name)
-                .unwrap_or_else(|| panic!("{name} is recorded"));
-            assert_eq!(row.origin, Origin::Ran);
-            assert_eq!(row.content_sha256, content_hash(sql));
+        .expect("the lazy column");
+        let adds: MigrationFile<'static> = (
+            "002_more",
+            "CREATE TABLE ledger_side (id TEXT);\n\
+             ALTER TABLE ledger_runs ADD COLUMN drifted TEXT;",
+        );
+        let err = apply_pending(&ctx, BLOCK, &[F1, adds], &history)
+            .await
+            .expect_err("refused");
+        match err.refusal() {
+            Some(Refusal::DriftedSchema { file, .. }) => assert_eq!(file, "002_more"),
+            other => panic!("expected DriftedSchema, got {other:?}: {err}"),
         }
-        // A frozen file is recorded only once every statement of it ran, so
-        // 016's row says its copy and its `DROP COLUMN` ran too.
-    }
-
-    /// A frozen file that fails part-way is not atomic: the statements before
-    /// the failing one stay applied, the file is not recorded, the error
-    /// says so, and the next run runs it again from its start.
-    #[tokio::test]
-    async fn a_failed_frozen_file_stays_unrecorded_and_runs_again_from_its_start() {
-        // A block with a freeze mark, and a file at it: frozen.
-        const FROZEN_BLOCK: &str = "impresspress/signal";
-        assert!(is_frozen(FROZEN_BLOCK, "001_frozen"));
-        let ctx = TestContext::with_admin().await.running_as(FROZEN_BLOCK);
-        let broken: MigrationFile<'static> = (
-            "001_frozen",
-            "CREATE TABLE IF NOT EXISTS frozen_side (id TEXT);\n\
-             INSERT INTO frozen_missing (x) VALUES (1);",
-        );
-        let err = apply_pending(&ctx, FROZEN_BLOCK, &[broken])
-            .await
-            .expect_err("the second statement fails");
-        let text = err.to_string();
+        assert!(err.to_string().contains("its schema drifted"), "{err}");
         assert!(
-            text.starts_with(&format!(
-                "{FROZEN_BLOCK}: migration `001_frozen` failed on `INSERT INTO frozen_missing (x) \
-                 VALUES (1)`"
-            )) && text.contains("the statements before this one stay applied"),
-            "{text}"
+            !table_exists(&ctx, "ledger_side").await,
+            "nothing of 002 remains"
         );
-        assert!(
-            table_exists(&ctx, "frozen_side").await,
-            "not atomic: the first stays"
+        assert_eq!(
+            ledger_rows(&ctx).await,
+            owned(&[("001_runs", Origin::Adopted)])
         );
-        let recorded = applied_migrations::list_for_block(&ctx.fixture(), FROZEN_BLOCK)
-            .await
-            .expect("read the ledger");
-        assert!(recorded.is_empty(), "{recorded:?}");
-
-        let fixed: MigrationFile<'static> = (
-            "001_frozen",
-            "CREATE TABLE IF NOT EXISTS frozen_side (id TEXT);\n\
-             CREATE TABLE IF NOT EXISTS frozen_missing (x INTEGER);\n\
-             INSERT INTO frozen_missing (x) VALUES (1);",
-        );
-        apply_pending(&ctx, FROZEN_BLOCK, &[fixed])
-            .await
-            .expect("the whole file runs again");
-        let recorded = applied_migrations::list_for_block(&ctx.fixture(), FROZEN_BLOCK)
-            .await
-            .expect("read the ledger");
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].content_sha256, content_hash(fixed.1));
     }
 
     // -----------------------------------------------------------------------
@@ -2357,15 +2257,16 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
             Backend::Sqlite,
             ADMIN,
             crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
+            &[],
         )
         .await
         .expect("admin's schema");
-        apply_pending_via_service(&sqlite, Backend::Sqlite, BLOCK, &[F1, F2])
+        apply_pending_via_service(&sqlite, Backend::Sqlite, BLOCK, &[F1, F2], &[])
             .await
             .expect("apply v1");
         let racing = RacingDb::new(Arc::clone(&sqlite), None);
         let db: Arc<dyn DatabaseService> = racing.clone();
-        apply_pending_via_service(&db, Backend::Sqlite, BLOCK, &[F1, F2, F3])
+        apply_pending_via_service(&db, Backend::Sqlite, BLOCK, &[F1, F2, F3], &[])
             .await
             .expect("apply v2");
         assert_eq!(racing.transactions(), 1, "only 003 was sent");
@@ -2385,19 +2286,20 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
             Backend::Sqlite,
             ADMIN,
             crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
+            &[],
         )
         .await
         .expect("admin's schema");
-        apply_pending_via_service(&sqlite, Backend::Sqlite, BLOCK, &[F1])
+        apply_pending_via_service(&sqlite, Backend::Sqlite, BLOCK, &[F1], &[])
             .await
             .expect("apply v1");
         let claim = applied_migrations::insert_statement(
-            &AppliedMigration::new(BLOCK, F2.0, &content_hash(F2.1), Origin::Ran),
+            &AppliedMigration::ran(BLOCK, F2.0, &content_hash(F2.1)),
             Backend::Sqlite,
         );
         let racing = RacingDb::new(Arc::clone(&sqlite), Some(claim));
         let db: Arc<dyn DatabaseService> = racing.clone();
-        apply_pending_via_service(&db, Backend::Sqlite, BLOCK, &[F1, F2, F3])
+        apply_pending_via_service(&db, Backend::Sqlite, BLOCK, &[F1, F2, F3], &[])
             .await
             .expect("the conflict is read from the ledger and the run continues");
         let count = |file: &'static str| {
@@ -2521,35 +2423,6 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         }
     }
 
-    /// The most executable statements a file added after the ledger may
-    /// have. Such a file is admitted against the per-invocation statement
-    /// budget whole — its statements plus its ledger row — so a file that
-    /// needs more than one invocation can give can never be deployed. Half
-    /// of fullapp-test's budget of 50, the line the fresh-install guard below
-    /// uses. Frozen files stay as they shipped (products' 005 has 95).
-    const NEW_FILE_STATEMENT_CAP: usize = 25;
-
-    #[test]
-    fn no_file_after_the_freeze_exceeds_the_statement_cap() {
-        let over: Vec<String> = shipped_migrations()
-            .into_iter()
-            .filter(|file| file.dialect == "sqlite")
-            .filter(|file| {
-                let (directory, basename) = file.key.split_once('/').expect("block/basename");
-                !is_frozen(block_of(directory), basename)
-            })
-            .filter_map(|file| {
-                let count = executable_statements(&file.sql).len();
-                (count > NEW_FILE_STATEMENT_CAP).then(|| format!("{} ({count})", file.key))
-            })
-            .collect();
-        assert!(
-            over.is_empty(),
-            "migration files over {NEW_FILE_STATEMENT_CAP} statements: {over:?} — split the \
-             change into more files"
-        );
-    }
-
     /// The content hash of every shipped migration, per dialect, as
     /// `migration-content-hashes.txt` (next to this crate's `Cargo.toml`)
     /// records it. A shipped file is immutable: a database that applied it
@@ -2593,52 +2466,6 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         );
     }
 
-    /// The block name a migrations directory belongs to, from
-    /// [`FROZEN_THROUGH`]: the entry whose name ends in `/<directory>`.
-    fn block_of(directory: &str) -> &'static str {
-        let matching: Vec<&str> = FROZEN_THROUGH
-            .iter()
-            .map(|(block, _)| *block)
-            .filter(|block| block.rsplit_once('/').map(|(_, dir)| dir) == Some(directory))
-            .collect();
-        assert_eq!(
-            matching.len(),
-            1,
-            "src/blocks/{directory}/migrations needs exactly one FROZEN_THROUGH entry: {matching:?}"
-        );
-        matching[0]
-    }
-
-    /// Every block that ships migrations has its freeze mark, and the mark
-    /// names a file it ships.
-    #[test]
-    fn every_block_has_a_freeze_mark_naming_a_shipped_file() {
-        let shipped = shipped_migrations();
-        for (block, last) in FROZEN_THROUGH {
-            let directory = block.rsplit_once('/').expect("org/block").1;
-            assert!(
-                shipped
-                    .iter()
-                    .any(|file| file.key == format!("{directory}/{last}")),
-                "{block}'s freeze mark {last} is not a shipped file"
-            );
-        }
-        for file in &shipped {
-            block_of(file.key.split_once('/').expect("block/basename").0);
-        }
-    }
-
-    /// A block's freeze mark covers its files up to and including the mark,
-    /// a prefix of its list stopping short of it, and nothing after it; an
-    /// unlisted block has no frozen file.
-    #[test]
-    fn frozen_is_at_or_before_the_freeze_mark() {
-        assert!(is_frozen("wafer-run/auth", "001_auth_schema"));
-        assert!(is_frozen("wafer-run/auth", "016_roles_are_grants"));
-        assert!(!is_frozen("wafer-run/auth", "017_anything_later"));
-        assert!(!is_frozen("test/ledger", "001_runs"));
-    }
-
     /// No migration file names the ledger: its rows are the runner's record
     /// of what ran, written only with the file they record, and a file that
     /// wrote one could claim another file without running it.
@@ -2655,48 +2482,54 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         );
     }
 
-    /// `/_deploy/prepare` applies every block's pending migrations in ONE
-    /// Worker invocation, so on a fresh database the statements of every
-    /// SQLite migration file the crate ships, each file's ledger row
-    /// included, have to fit well inside D1's per-invocation query limit
-    /// ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]), with the funnel's seeds,
-    /// migration stamps and config reads in what is left. Half the limit is
-    /// that line.
-    ///
-    /// Read from the files rather than the blocks' `SQLITE_MIGRATIONS`
-    /// constants so the count covers every block whatever features this test
-    /// is built with. If this fails, the funnel has to apply migrations over
-    /// more than one invocation before the migration that crossed the line
-    /// ships; raising the threshold would only move where a first deploy
-    /// breaks.
-    ///
-    /// A guard: it passes on the shipped migrations by design, and fails only
-    /// when they grow past the line.
-    ///
-    /// [`D1_QUERIES_PER_INVOCATION_DEFAULT`]: crate::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT
+    /// The runner from before the ledger is a test fixture: no code compiled
+    /// into a deployment names it. Its tolerance of a duplicate `ADD COLUMN`
+    /// must never reach a deployed runner again. A module may name it only
+    /// below its first `#[cfg(test)]` (where every module keeps its tests);
+    /// the three files listed are its declaration, itself, and the history
+    /// tests' engine, all behind `cfg(any(test, feature = "test-support"))`.
     #[test]
-    fn a_fresh_databases_migrations_fit_half_of_one_d1_invocation() {
-        let mut per_block: std::collections::BTreeMap<String, usize> = Default::default();
-        for file in shipped_migrations()
-            .iter()
-            .filter(|file| file.dialect == "sqlite")
-        {
-            let block = file
-                .key
-                .split_once('/')
-                .expect("block/basename")
-                .0
-                .to_string();
-            // The file's statements, and its ledger row.
-            *per_block.entry(block).or_default() += executable_statements(&file.sql).len() + 1;
+    fn no_deployed_module_names_the_legacy_runner() {
+        let allowed = [
+            // its declaration, behind `cfg(any(test, feature = "test-support"))`
+            "migration_helper.rs",
+            "migration_helper/legacy_runner.rs",
+            // the history tests' engine, itself test-support only
+            "test_support/migration_history.rs",
+        ];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut naming = Vec::new();
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&src)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if allowed.contains(&relative.as_str()) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read");
+                let deployed = text
+                    .find("#[cfg(test)]")
+                    .map_or(text.as_str(), |at| &text[..at]);
+                if deployed.contains("legacy_runner") {
+                    naming.push(relative);
+                }
+            }
         }
-        let total: usize = per_block.values().sum();
-        let limit = crate::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
         assert!(
-            total <= limit / 2,
-            "a fresh database's migrations are {total} statements, more than half of the \
-             {limit} D1 queries `/_deploy/prepare` may run in its one invocation: \
-             {per_block:?}"
+            naming.is_empty(),
+            "modules naming the legacy runner: {naming:?}"
         );
     }
 }

@@ -73,15 +73,16 @@ pub(crate) const API_KEY_EXPIRY_CANONICAL: &str = "015_api_key_expiry_canonical"
 /// roles are its grant rows, which account creation writes in the account's
 /// own batch (`repo::users::insert_with_ops`).
 ///
-/// - **Re-runnable.** When it shipped, every change to this list re-ran it in
-///   full, and the legacy replay may still, so the file opens with an
-///   `ADD COLUMN` that recreates the column empty before the copy and the
-///   `DROP` (SQLite has no `DROP COLUMN IF EXISTS`). On a database that still
-///   has 001's column — every SQLite database 016 has not run on, a fresh one
-///   included — the `ADD` is a duplicate, which the frozen-file statement loop
-///   tolerates for an `ADD COLUMN` alone (`migration_helper`'s "Frozen
-///   files": in one transaction it would fail the file); on a re-run the copy
-///   finds nothing to copy. PostgreSQL says `IF [NOT] EXISTS` on both.
+/// - **Runs once.** The ledger records it, and nothing runs it again. As it
+///   shipped (until the ledger release), it opened with an `ADD COLUMN` that
+///   recreated the column empty, so that the runner of the time, which re-ran
+///   the whole list on every change and tolerated a duplicate `ADD COLUMN`,
+///   could re-run it; that `ADD` was a duplicate on every database 016 had
+///   not run on, a fresh one included, so it could not apply as one
+///   transaction. The ledger release removed it: the file is now its copy
+///   and its `DROP`, and applies atomically from empty. A database that ran
+///   the old text is adopted from the history table
+///   (`crate::migration_history`), which pins both texts.
 /// - **The `NOT EXISTS`** skips an account that already holds the grant, and
 ///   so also covers a browser install created before admin's 004 built the
 ///   `(user_id, role)` unique index.
@@ -172,6 +173,18 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
 #[cfg(not(feature = "postgres"))]
 pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+pub const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: super::AUTH_BLOCK_ID,
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::auth::SQLITE,
+        postgres_history: crate::migration_history::auth::POSTGRES,
+    };
+
 /// Apply the auth schema through the shared migration-state gate.
 ///
 /// Production no longer calls this: the framework auth service applies these
@@ -184,13 +197,7 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 pub async fn apply(
     ctx: &dyn wafer_run::context::Context,
 ) -> Result<(), crate::migration_helper::MigrationError> {
-    crate::migration_helper::apply_migrations(
-        ctx,
-        "wafer-run/auth",
-        SQLITE_MIGRATIONS,
-        POSTGRES_MIGRATIONS,
-    )
-    .await
+    crate::migration_helper::apply_migrations(ctx, &MIGRATIONS).await
 }
 
 #[cfg(test)]
@@ -215,18 +222,16 @@ mod strict_upgrade_tests {
     use wafer_block_sqlite::service::SQLiteDatabaseService;
     use wafer_core::interfaces::database::service::DatabaseService;
 
-    use super::{SQLITE_MIGRATIONS, SQL_010_SQLITE};
-    use crate::migration_helper::apply_ddl_via_service;
+    use super::SQLITE_MIGRATIONS;
+    use crate::{blocks::auth::AUTH_BLOCK_ID, test_support::migrate_sqlite};
 
-    /// SQL of every auth migration BEFORE 010 — the pre-upgrade on-disk
-    /// schema. `take_while`, not a filter: every file before 010 is the
+    /// Where 010 sits: every auth file before it is the pre-upgrade on-disk
     /// schema 010 upgrades, and only those.
-    fn base_migrations_sql() -> Vec<&'static str> {
+    fn at_010() -> usize {
         SQLITE_MIGRATIONS
             .iter()
-            .take_while(|(name, _)| *name != "010_strict_schema_columns")
-            .map(|(_, sql)| *sql)
-            .collect()
+            .position(|(name, _)| *name == "010_strict_schema_columns")
+            .expect("010 is wired")
     }
 
     async fn has_column(db: &Arc<dyn DatabaseService>, table: &str, column: &str) -> bool {
@@ -243,7 +248,7 @@ mod strict_upgrade_tests {
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
 
         // 1. Pre-upgrade schema: base auth tables WITHOUT the 010 columns.
-        apply_ddl_via_service(&db, &base_migrations_sql())
+        migrate_sqlite(&db, AUTH_BLOCK_ID, &SQLITE_MIGRATIONS[..at_010()])
             .await
             .expect("apply base (pre-010) migrations");
 
@@ -290,8 +295,9 @@ mod strict_upgrade_tests {
         .await
         .expect("seed pre-existing credential (old schema, no updated_at)");
 
-        // 3. Apply the 010 ALTER migration (the fix) against the existing tables.
-        apply_ddl_via_service(&db, &[SQL_010_SQLITE])
+        // 3. Apply the 010 ALTER migration (the fix) against the existing
+        //    tables, as the upgrade's ledger run does.
+        migrate_sqlite(&db, AUTH_BLOCK_ID, &SQLITE_MIGRATIONS[..=at_010()])
             .await
             .expect("apply 010 ALTER migration");
 
@@ -358,10 +364,9 @@ mod strict_upgrade_tests {
 
 #[cfg(test)]
 mod provider_token_clearing_tests {
-    //! `014_clear_provider_access_tokens` on the path a live database took
-    //! when it shipped: link rows already holding provider tokens, then the
-    //! upgrade re-ran every auth migration because the SQL hash changed —
-    //! the path the legacy replay still takes.
+    //! `014_clear_provider_access_tokens` on the path a live database takes
+    //! through it: link rows already holding provider tokens, then the
+    //! upgrade's ledger run applies 014 and on.
 
     use std::sync::Arc;
 
@@ -370,19 +375,7 @@ mod provider_token_clearing_tests {
     use wafer_core::interfaces::database::service::DatabaseService;
 
     use super::SQLITE_MIGRATIONS;
-    use crate::migration_helper::apply_ddl_via_service;
-
-    fn migrations_before_014() -> Vec<&'static str> {
-        SQLITE_MIGRATIONS
-            .iter()
-            .take_while(|(name, _)| *name != "014_clear_provider_access_tokens")
-            .map(|(_, sql)| *sql)
-            .collect()
-    }
-
-    fn all_migrations() -> Vec<&'static str> {
-        SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect()
-    }
+    use crate::{blocks::auth::AUTH_BLOCK_ID, test_support::migrate_sqlite};
 
     async fn stored_tokens(db: &Arc<dyn DatabaseService>) -> Vec<String> {
         db.query_raw(
@@ -403,21 +396,16 @@ mod provider_token_clearing_tests {
     }
 
     #[tokio::test]
-    async fn the_upgrade_clears_stored_provider_tokens_and_re_runs_cleanly() {
+    async fn the_upgrade_clears_stored_provider_tokens() {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        let before = migrations_before_014();
-        assert_eq!(
-            SQLITE_MIGRATIONS[before.len()].0,
-            "014_clear_provider_access_tokens",
-            "precondition: 014 is in the list, and `before` stops right at it"
-        );
-        // Admin's schema first, as every boot applies it: 016 copies roles
-        // into admin's `user_roles` (the 016 note on `ROLES_ARE_GRANTS`).
-        apply_ddl_via_service(&db, &crate::blocks::admin::migrations::ddl_files("sqlite"))
-            .await
-            .expect("apply admin's schema");
-        apply_ddl_via_service(&db, &before)
+        let before = SQLITE_MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "014_clear_provider_access_tokens")
+            .expect("014 is wired");
+        // Admin's list first, as every boot applies it: 016 copies roles into
+        // admin's `user_roles` (the 016 note on `ROLES_ARE_GRANTS`).
+        migrate_sqlite(&db, AUTH_BLOCK_ID, &SQLITE_MIGRATIONS[..before])
             .await
             .expect("apply the pre-014 schema");
 
@@ -449,16 +437,10 @@ mod provider_token_clearing_tests {
             "precondition: the rows hold tokens"
         );
 
-        // The upgrade: the hash changed, so every auth migration ran again.
-        apply_ddl_via_service(&db, &all_migrations())
+        // The upgrade: the ledger runs 014 and on.
+        migrate_sqlite(&db, AUTH_BLOCK_ID, SQLITE_MIGRATIONS)
             .await
-            .expect("the upgrade re-run succeeds");
-        assert_eq!(stored_tokens(&db).await, vec!["", ""]);
-
-        // And a second re-run (the legacy replay) does not fail.
-        apply_ddl_via_service(&db, &all_migrations())
-            .await
-            .expect("a second re-run succeeds");
+            .expect("the upgrade succeeds");
         assert_eq!(stored_tokens(&db).await, vec!["", ""]);
     }
 }
@@ -473,13 +455,13 @@ mod roles_are_grants_tests {
 
     use wafer_block_sqlite::service::SQLiteDatabaseService;
     use wafer_core::interfaces::database::service::DatabaseService;
+    use wafer_sql_utils::Backend;
 
     use super::SQLITE_MIGRATIONS;
-    use crate::migration_helper::apply_ddl_via_service;
-
-    fn auth_list() -> Vec<&'static str> {
-        SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect()
-    }
+    use crate::{
+        blocks::auth::AUTH_BLOCK_ID, migration_helper::apply_pending_via_service,
+        test_support::migrate_sqlite,
+    };
 
     /// 016 writes admin's `user_roles`, so the auth list applies only where
     /// admin's schema already exists — which every boot guarantees by
@@ -489,24 +471,25 @@ mod roles_are_grants_tests {
     async fn the_auth_list_needs_admins_schema() {
         let bare: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        let err = apply_ddl_via_service(&bare, &auth_list())
-            .await
-            .expect_err("the auth list cannot apply before admin's");
-        assert!(
-            err.contains("INSERT INTO impresspress__admin__user_roles")
-                && err.contains("no such table: impresspress__admin__user_roles"),
-            "it is 016's copy that needs admin's table: {err}"
-        );
-
-        let ordered: Arc<dyn DatabaseService> =
-            Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        apply_ddl_via_service(
-            &ordered,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+        let err = apply_pending_via_service(
+            &bare,
+            Backend::Sqlite,
+            AUTH_BLOCK_ID,
+            SQLITE_MIGRATIONS,
+            &[],
         )
         .await
-        .expect("admin's list applies first");
-        apply_ddl_via_service(&ordered, &auth_list())
+        .expect_err("the auth list cannot apply before admin's")
+        .to_string();
+        assert!(
+            err.contains("no such table: impresspress__admin__"),
+            "it is admin's tables the auth list needs: {err}"
+        );
+
+        // `migrate_sqlite` applies admin's whole list first, as boot does.
+        let ordered: Arc<dyn DatabaseService> =
+            Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
+        migrate_sqlite(&ordered, AUTH_BLOCK_ID, SQLITE_MIGRATIONS)
             .await
             .expect("after admin's, the auth list applies");
     }
@@ -523,7 +506,7 @@ mod api_key_expiry_tests {
     //! column one format, and a key whose expiry names no instant visibly
     //! revoked rather than quietly inert.
     //!
-    //! Driven through `apply_migrations` — the path a migrating deploy or
+    //! Driven through `apply_pending` — the path a migrating deploy or
     //! boot takes — over a database whose auth list stops before the repair,
     //! and read back through `repo::api_keys`, so what is asserted is what
     //! the block sees.
@@ -558,7 +541,7 @@ mod api_key_expiry_tests {
         let mut ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
-        migration_helper::apply_migrations(
+        migration_helper::apply_pending(
             &ctx,
             crate::blocks::auth::AUTH_BLOCK_ID,
             before_the_repair(),
@@ -574,7 +557,7 @@ mod api_key_expiry_tests {
     /// The upgrade: the shipped list, whose pending files are the repair and
     /// what follows it.
     async fn apply_the_repair(ctx: &TestContext) {
-        migration_helper::apply_migrations(
+        migration_helper::apply_pending(
             ctx,
             crate::blocks::auth::AUTH_BLOCK_ID,
             SQLITE_MIGRATIONS,
@@ -851,11 +834,12 @@ mod api_key_expiry_tests {
         assert!(!fraction.is_revoked());
     }
 
-    /// The repair is in the frozen set a legacy replay runs once more over a
-    /// database it may already have repaired, so a second pass must change
-    /// nothing — in particular it must not push the revoked row's expiry
-    /// forward again. The second pass is the replay's untracked statement
-    /// loop.
+    /// Before the ledger, the runner re-ran every file whenever the list
+    /// changed, so a database that kept upgrading ran this repair more than
+    /// once: `migration-history.toml` declares it `rerun_safe`, and the
+    /// history's verdicts for those states rest on that. Pinned here with the
+    /// runner from before the ledger: a second pass changes nothing — in
+    /// particular it does not push the revoked row's expiry forward again.
     #[tokio::test]
     async fn a_second_pass_changes_nothing() {
         let ctx = upgrading_deployment().await;
@@ -869,173 +853,16 @@ mod api_key_expiry_tests {
             .iter()
             .find(|(name, _)| *name == API_KEY_EXPIRY_CANONICAL)
             .expect("the repair is wired");
-        migration_helper::apply_ddl_via_service(&ctx.database_service(), &[repair])
-            .await
-            .expect("replay the repair");
+        migration_helper::legacy_runner::apply(
+            &ctx.database_service(),
+            &[(API_KEY_EXPIRY_CANONICAL, repair)],
+        )
+        .await
+        .expect("the old runner's second pass");
 
         assert_eq!(
             (row(&ctx, &broken).await, row(&ctx, &utc).await),
             after_first
-        );
-    }
-}
-
-#[cfg(test)]
-mod re_run_survival_tests {
-    //! What a full re-run of the auth set does to live rows.
-    //!
-    //! The runner from before the per-file ledger re-ran the whole set
-    //! whenever ANY auth migration's SQL changed, and the legacy replay runs
-    //! the frozen set once more over a database whose record from that era
-    //! proves nothing (`migration_helper`, "Databases from before the
-    //! ledger"). So every statement in the set may run again on a database
-    //! full of real rows. A `DROP TABLE` in that set is not a one-time
-    //! upgrade step — it is a delete that fires on that re-run.
-    //!
-    //! Seeded and read back through the repo doors, and re-run with the
-    //! replay's untracked statement loop (`apply_ddl_via_service`), so what is
-    //! asserted is what the block sees after it.
-
-    use super::SQLITE_MIGRATIONS;
-    use crate::{
-        blocks::auth::repo::{
-            sessions::{self, NewSession},
-            tokens,
-        },
-        migration_helper,
-        test_support::TestContext,
-    };
-
-    async fn upgrading_deployment() -> TestContext {
-        let ctx = TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
-        ctx.seed_auth_user("u1").await;
-        ctx
-    }
-
-    async fn re_run_the_whole_set(ctx: &TestContext) {
-        let sql: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        migration_helper::apply_ddl_via_service(&ctx.database_service(), &sql)
-            .await
-            .expect("re-apply the auth schema");
-    }
-
-    /// `004_refresh_tokens` opened with `DROP TABLE IF EXISTS
-    /// wafer_run__auth__tokens`. `auth_ui::api::refresh` refuses a token
-    /// whose row is gone, so adding any auth migration logged every
-    /// signed-in user out within one access-token lifetime — on an upgrade
-    /// that never mentioned tokens.
-    #[tokio::test]
-    async fn refresh_tokens_survive_a_full_re_run() {
-        let ctx = upgrading_deployment().await;
-        tokens::insert(
-            &ctx,
-            "u1",
-            "raw-refresh-token",
-            "fam-1",
-            0,
-            "2099-01-01T00:00:00Z",
-        )
-        .await
-        .expect("seed the refresh token");
-
-        re_run_the_whole_set(&ctx).await;
-
-        let row = tokens::find_by_token(&ctx, "raw-refresh-token")
-            .await
-            .expect("the tokens table must still be readable");
-        assert!(
-            row.is_some(),
-            "a live refresh token must survive an auth schema change"
-        );
-    }
-
-    /// `012_sessions_family` used to open with `DROP TABLE IF EXISTS
-    /// wafer_run__auth__sessions`. A row there is a login family's liveness
-    /// (`repo::sessions`): a refresh whose family has no row is refused, and
-    /// nothing re-creates one. So that drop signed every device out on every
-    /// later auth schema change. The family-keyed layout now lives in 001 and
-    /// no file drops it.
-    #[tokio::test]
-    async fn session_rows_survive_a_full_re_run() {
-        let ctx = upgrading_deployment().await;
-        sessions::insert(
-            &ctx,
-            NewSession {
-                family: "fam-1".into(),
-                user_id: "u1".into(),
-                auth_method: "password".into(),
-                expires_at: "2099-01-01T00:00:00Z".into(),
-            },
-        )
-        .await
-        .expect("seed the device row");
-        assert_eq!(sessions::list_for_user(&ctx, "u1").await.unwrap().len(), 1);
-
-        re_run_the_whole_set(&ctx).await;
-
-        assert_eq!(
-            sessions::list_for_user(&ctx, "u1").await.unwrap().len(),
-            1,
-            "a device row must survive an auth schema change"
-        );
-    }
-
-    /// The outcome the two survival tests above add up to, through the real
-    /// handlers: a device signed in before a full re-run of the auth set
-    /// still refreshes after it.
-    #[tokio::test]
-    async fn a_signed_in_device_still_refreshes_after_a_full_re_run() {
-        use crate::{
-            blocks::{
-                auth::repo::users::InitialRole,
-                auth_ui::api::{login, refresh},
-            },
-            test_support::{json_post_msg, output_json},
-        };
-
-        let mut ctx = TestContext::with_auth_and_crypto().await;
-        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        ctx.seed_account(
-            "rerun@example.com",
-            "correct-horse-battery",
-            InitialRole::User,
-        )
-        .await;
-        let body =
-            |v: serde_json::Value| wafer_run::InputStream::from_bytes(v.to_string().into_bytes());
-        let signed_in = output_json(
-            login::handle(
-                &ctx,
-                &json_post_msg("/b/auth/api/login"),
-                body(serde_json::json!({
-                    "email": "rerun@example.com",
-                    "password": "correct-horse-battery",
-                })),
-            )
-            .await,
-        )
-        .await;
-        let token = signed_in["refresh_token"]
-            .as_str()
-            .unwrap_or_else(|| panic!("the sign-in succeeds: {signed_in}"))
-            .to_string();
-
-        re_run_the_whole_set(&ctx.clone().running_as(crate::blocks::auth::AUTH_BLOCK_ID)).await;
-
-        let refreshed = output_json(
-            refresh::handle(
-                &ctx,
-                &json_post_msg("/b/auth/api/refresh"),
-                body(serde_json::json!({ "refresh_token": token })),
-            )
-            .await,
-        )
-        .await;
-        assert!(
-            refreshed["refresh_token"].is_string(),
-            "an auth schema change signs nobody out: {refreshed}"
         );
     }
 }

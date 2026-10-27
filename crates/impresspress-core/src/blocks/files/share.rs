@@ -208,7 +208,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        super::test_support::{routed, seed_legacy_object, share_ctx, share_ctx_over, upload_msg},
+        super::test_support::{
+            routed, seed_legacy_object, share_ctx, share_ctx_before, share_ctx_over, upload_msg,
+        },
         *,
     };
     use crate::{
@@ -342,14 +344,13 @@ mod tests {
     /// modal's expiry never reached the handler). Reading that token as the
     /// opaque string it now is would make every such link permanently live,
     /// so the block's `003_legacy_share_token_expiry` migration writes the
-    /// expiry the JWT used to impose. This runs the shipped migration's
-    /// statements over the row and then drives the real handler. The fixture
-    /// is built at today's schema, so the statements run through the untracked
-    /// loop (`apply_ddl_via_service`); that the ledger runner applies the
-    /// repair on an upgrading deployment is `legacy_share_expiry_tests`'.
+    /// expiry the JWT used to impose. This builds the files schema up to the
+    /// repair, seeds the row, applies the shipped list through the real
+    /// runner (which runs the repair) and then drives the real handler.
     #[tokio::test]
     async fn a_legacy_jwt_share_link_stays_dead_after_its_thirty_days() {
-        let ctx = share_ctx("photos", "alice").await;
+        use super::super::migrations::{LEGACY_SHARE_TOKEN_EXPIRY, SQLITE_MIGRATIONS};
+        let ctx = share_ctx_before("photos", "alice", LEGACY_SHARE_TOKEN_EXPIRY).await;
         seed_legacy_object(
             &ctx,
             "photos",
@@ -382,13 +383,16 @@ mod tests {
             "precondition: a legacy UI-created share carries no expiry"
         );
 
-        let (_, repair) = super::super::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .find(|(name, _)| *name == super::super::migrations::LEGACY_SHARE_TOKEN_EXPIRY)
-            .expect("the repair must be a shipped migration");
-        crate::migration_helper::apply_ddl_via_service(&ctx.database_service(), &[repair])
-            .await
-            .expect("apply the legacy-expiry repair");
+        // The upgrade: the shipped list, whose pending files are the repair
+        // and what follows it.
+        crate::migration_helper::apply_pending(
+            &ctx,
+            super::super::FilesBlock::BLOCK_NAME,
+            SQLITE_MIGRATIONS,
+            &[],
+        )
+        .await
+        .expect("apply the legacy-expiry repair");
 
         assert!(
             output_is_error(direct_access(&ctx, LEGACY_TOKEN).await, "PermissionDenied").await,

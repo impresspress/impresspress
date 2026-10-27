@@ -284,6 +284,44 @@ pub(crate) fn embedding_grant(serving_block: &str) -> wafer_run::ResourceGrant {
     .typed(wafer_run::ResourceType::Embedding)
 }
 
+/// Every block's migrations compiled into this build, in the order a boot
+/// applies them: admin first (its tables hold every block's migration state,
+/// and auth's 016 writes admin's `user_roles`), then auth, then the rest by
+/// name, as `Wafer::block_names()` orders them.
+///
+/// The browser applies all of them before it builds a runtime
+/// (`impresspress_browser::boot`), so that a refusal of any block stops the
+/// boot by name rather than failing that block's `Init` alone. Each entry is
+/// the constant the block's own `lifecycle(Init)` applies, so the two cannot
+/// disagree.
+pub fn all_block_migrations() -> Vec<&'static crate::migration_helper::BlockMigrations> {
+    let mut all = vec![
+        &admin::migrations::MIGRATIONS,
+        &auth::migrations::MIGRATIONS,
+    ];
+    #[cfg(feature = "site-runtime")]
+    all.push(&dev::migrations::MIGRATIONS);
+    #[cfg(feature = "block-files")]
+    all.push(&files::migrations::MIGRATIONS);
+    #[cfg(feature = "block-legalpages")]
+    all.push(&legalpages::migrations::MIGRATIONS);
+    #[cfg(feature = "block-llm")]
+    all.push(&llm::migrations::MIGRATIONS);
+    #[cfg(feature = "block-messages")]
+    all.push(&messages::migrations::MIGRATIONS);
+    #[cfg(feature = "block-products")]
+    all.push(&products::migrations::MIGRATIONS);
+    #[cfg(feature = "block-signal")]
+    all.push(&signal::migrations::MIGRATIONS);
+    #[cfg(feature = "block-tickets")]
+    all.push(&tickets::migrations::MIGRATIONS);
+    #[cfg(feature = "block-userportal")]
+    all.push(&userportal::migrations::MIGRATIONS);
+    #[cfg(feature = "block-vector")]
+    all.push(&vector::migrations::MIGRATIONS);
+    all
+}
+
 /// Register the admin feature block with the WAFER runtime.
 ///
 /// `AdminBlock` is not in the feature-block manifest because its production

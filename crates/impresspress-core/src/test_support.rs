@@ -37,6 +37,7 @@ mod dispatch;
 pub mod dom;
 #[cfg(test)]
 pub mod htmx;
+pub mod migration_history;
 #[cfg(test)]
 mod parity_tests;
 pub mod source_scan;
@@ -57,6 +58,35 @@ use wafer_run::{
 };
 
 use crate::routing::ExtraRoute;
+
+/// `files` — a block's SQLite list, or the prefix of it a database at some
+/// point of the block's history had — applied to `db` through the real
+/// runner: each file one transaction, recorded in the ledger, the list's hash
+/// stamped. A later call with a longer list runs only the files the ledger
+/// lacks, as a deployment's upgrade does. For a block other than admin,
+/// admin's whole list is applied first: its `block_settings` holds the stamp.
+///
+/// Test-fixture setup for unit tests that build a database at an earlier
+/// point (seed rows the next file must carry, then apply it) without a
+/// `TestContext`.
+pub async fn migrate_sqlite(
+    db: &Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+    block: &str,
+    files: &[crate::migration_helper::MigrationFile<'_>],
+) -> Result<(), crate::migration_helper::MigrationError> {
+    use crate::{blocks::admin, migration_helper::apply_pending_via_service};
+    if block != admin::ADMIN_BLOCK_ID {
+        apply_pending_via_service(
+            db,
+            wafer_sql_utils::Backend::Sqlite,
+            admin::ADMIN_BLOCK_ID,
+            admin::migrations::SQLITE_MIGRATIONS,
+            &[],
+        )
+        .await?;
+    }
+    apply_pending_via_service(db, wafer_sql_utils::Backend::Sqlite, block, files, &[]).await
+}
 
 /// Minimal test context backed by a real in-memory SQLite database.
 ///
@@ -481,29 +511,21 @@ impl TestContext {
 
     /// Apply one block's migrations into this fixture through the same gated
     /// path the runtime uses ([`crate::migration_helper::apply_migrations`]),
-    /// sourcing the SQL from the block's single-source `SQLITE_MIGRATIONS` /
-    /// `POSTGRES_MIGRATIONS` consts.
+    /// with the block's own `migrations::MIGRATIONS`.
     ///
     /// Replaces the per-block `migrations::apply()` wrappers (deleted when the
     /// `impresspress_feature_block!` macro folded each block's `lifecycle(Init)`
     /// into `migration_helper::lifecycle_init`). Test-fixture setup is an
     /// explicit exception to the no-raw-migration-runner rule; it mirrors the
     /// production gate exactly so fixtures exercise the real schema.
-    async fn apply_block_migrations(
-        &self,
-        block_name: &str,
-        sqlite: &[(&str, &str)],
-        postgres: &[(&str, &str)],
-    ) {
+    async fn apply_block_migrations(&self, migrations: &crate::migration_helper::BlockMigrations) {
         // In the block's own frame, as its `lifecycle(Init)` runs them.
         crate::migration_helper::apply_migrations(
-            &self.fixture().running_as(block_name),
-            block_name,
-            sqlite,
-            postgres,
+            &self.fixture().running_as(migrations.block),
+            migrations,
         )
         .await
-        .unwrap_or_else(|e| panic!("apply {block_name} migrations in test fixture: {e}"));
+        .unwrap_or_else(|e| panic!("apply {} migrations in test fixture: {e}", migrations.block));
     }
 
     /// Build a `TestContext` with admin + auth block migrations applied.
@@ -558,12 +580,8 @@ impl TestContext {
     /// (`CREATE TABLE IF NOT EXISTS`) but re-registering a block is not
     /// something either constructor needs to redo here.
     pub async fn with_auth_added(self) -> Self {
-        self.apply_block_migrations(
-            "wafer-run/auth",
-            crate::blocks::auth::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::auth::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        self.apply_block_migrations(&crate::blocks::auth::migrations::MIGRATIONS)
+            .await;
         self
     }
 
@@ -656,12 +674,8 @@ impl TestContext {
     /// Also installs the production config block over the new `variables`
     /// table ([`Self::install_config_block`]), as every target's builder does.
     pub async fn with_admin_added(mut self) -> Self {
-        self.apply_block_migrations(
-            "impresspress/admin",
-            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::admin::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        self.apply_block_migrations(&crate::blocks::admin::migrations::MIGRATIONS)
+            .await;
         self.install_config_block();
         self
     }
@@ -681,12 +695,8 @@ impl TestContext {
     #[cfg(feature = "block-files")]
     pub async fn with_files() -> Self {
         let ctx = Self::with_auth().await;
-        ctx.apply_block_migrations(
-            "impresspress/files",
-            crate::blocks::files::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::files::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::files::migrations::MIGRATIONS)
+            .await;
         ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME)
     }
 
@@ -696,12 +706,8 @@ impl TestContext {
     #[cfg(feature = "block-userportal")]
     pub async fn with_userportal() -> Self {
         let ctx = Self::with_auth().await;
-        ctx.apply_block_migrations(
-            "impresspress/userportal",
-            crate::blocks::userportal::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::userportal::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::userportal::migrations::MIGRATIONS)
+            .await;
         ctx.running_as("impresspress/userportal")
     }
 
@@ -711,12 +717,8 @@ impl TestContext {
     #[cfg(feature = "block-tickets")]
     pub async fn with_tickets() -> Self {
         let mut ctx = Self::with_auth().await;
-        ctx.apply_block_migrations(
-            "impresspress/tickets",
-            crate::blocks::tickets::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::tickets::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::tickets::migrations::MIGRATIONS)
+            .await;
         ctx.register_block(
             "impresspress/tickets",
             Arc::new(crate::blocks::tickets::TicketsBlock::new()),
@@ -758,12 +760,8 @@ impl TestContext {
     #[cfg(feature = "block-vector")]
     pub async fn with_vector() -> Self {
         let ctx = Self::with_auth().await;
-        ctx.apply_block_migrations(
-            "impresspress/vector",
-            crate::blocks::vector::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::vector::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::vector::migrations::MIGRATIONS)
+            .await;
         ctx.running_as("impresspress/vector")
     }
 
@@ -778,12 +776,8 @@ impl TestContext {
     #[cfg(feature = "block-llm")]
     pub async fn with_llm() -> Self {
         let ctx = Self::with_admin().await;
-        ctx.apply_block_migrations(
-            "impresspress/llm",
-            crate::blocks::llm::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::llm::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::llm::migrations::MIGRATIONS)
+            .await;
         ctx.running_as("impresspress/llm")
     }
 
@@ -799,12 +793,8 @@ impl TestContext {
     #[cfg(feature = "block-products")]
     pub async fn with_products() -> Self {
         let mut ctx = Self::with_admin().await;
-        ctx.apply_block_migrations(
-            "impresspress/products",
-            crate::blocks::products::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::products::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::products::migrations::MIGRATIONS)
+            .await;
         // Register the real block so `registered_blocks()` reports it — the
         // context IS a products deployment (its migrations just ran). Nav
         // rendering gates the Products sidebar item on this signal.
@@ -826,12 +816,8 @@ impl TestContext {
     #[cfg(feature = "block-signal")]
     pub async fn with_signal() -> Self {
         let ctx = Self::with_admin().await;
-        ctx.apply_block_migrations(
-            "impresspress/signal",
-            crate::blocks::signal::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::signal::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        ctx.apply_block_migrations(&crate::blocks::signal::migrations::MIGRATIONS)
+            .await;
         ctx.running_as("impresspress/signal")
     }
 
@@ -1002,12 +988,8 @@ impl TestContext {
     ) -> Self {
         use crate::blocks::dev;
 
-        self.apply_block_migrations(
-            dev::BLOCK_NAME,
-            dev::migrations::SQLITE_MIGRATIONS,
-            dev::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await;
+        self.apply_block_migrations(&dev::migrations::MIGRATIONS)
+            .await;
         self.dev_shared = Some(shared);
         self.register_block(dev::BLOCK_NAME, Arc::new(block));
         // The workspace store (blobs + `workspace.json`) lives in storage,

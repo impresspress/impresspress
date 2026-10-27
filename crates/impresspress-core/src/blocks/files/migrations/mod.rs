@@ -163,6 +163,18 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = POSTGRES_MIGRATION_FILES
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+pub(crate) const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: super::FILES_BLOCK_ID,
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::files::SQLITE,
+        postgres_history: crate::migration_history::files::POSTGRES,
+    };
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -187,7 +199,7 @@ mod tests {
         let mut ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        crate::migration_helper::apply_migrations(
+        crate::migration_helper::apply_pending(
             &ctx,
             "impresspress/files",
             &SQLITE_MIGRATIONS[..1],
@@ -216,14 +228,9 @@ mod tests {
         }
 
         ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
-        crate::migration_helper::apply_migrations(
-            &ctx,
-            "impresspress/files",
-            SQLITE_MIGRATIONS,
-            &[],
-        )
-        .await
-        .expect("002 applies to a database holding a duplicate");
+        crate::migration_helper::apply_pending(&ctx, "impresspress/files", SQLITE_MIGRATIONS, &[])
+            .await
+            .expect("002 applies to a database holding a duplicate");
 
         assert!(
             repo::buckets::find_owned(&ctx, "assets", "alice")
@@ -249,152 +256,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod replay_tests {
-    //! What re-running this block's migrations does to a live deployment.
-    //!
-    //! The runner from before the per-file ledger hashed the JOINED text of
-    //! every file, so shipping any new migration — 004 included — re-ran 001
-    //! onwards on the next deploy or boot, over whatever the tables held, and
-    //! the legacy replay runs the frozen set once more over a deployment
-    //! whose record from that era proves nothing. When auth's 004 still
-    //! dropped the refresh-token table, that re-run signed every user out;
-    //! nothing here may do the equivalent to share links, buckets or uploads.
-
-    use serde_json::json;
-    use wafer_core::clients::database::RecordData;
-
-    use super::SQLITE_MIGRATIONS;
-    use crate::{blocks::files::repo, migration_helper, test_support::TestContext};
-
-    /// Every row of every table the files block owns, each column as stored,
-    /// by table and id.
-    async fn every_row(ctx: &TestContext) -> Vec<(&'static str, String, RecordData)> {
-        let tables = [
-            ("buckets", repo::buckets::raw_rows(ctx).await),
-            ("objects", repo::objects::raw_rows(ctx).await),
-            ("views", repo::views::raw_rows(ctx).await),
-            ("shares", repo::shares::raw_rows(ctx).await),
-            ("access_logs", repo::shares::raw_access_log_rows(ctx).await),
-            ("quotas", repo::quota::raw_rows(ctx).await),
-        ];
-        let mut rows = Vec::new();
-        for (table, records) in tables {
-            let mut records = records.unwrap_or_else(|e| panic!("read {table}: {e}"));
-            records.sort_by(|a, b| a.id.cmp(&b.id));
-            rows.extend(records.into_iter().map(|r| (table, r.id, r.data)));
-        }
-        rows
-    }
-
-    /// Replaying every files migration over a deployment's live rows changes
-    /// none of them: no share link gains, loses or moves an expiry, no bucket
-    /// or object row is deleted, and a reservation keeps its `claim_id`.
-    ///
-    /// A guard, not a regression test — it passes before 004 and 005 as
-    /// after. It exists because the legacy replay runs this frozen set once
-    /// more over a deployment whose record from before the per-file ledger
-    /// proves nothing (`migration_helper`, "Databases from before the
-    /// ledger"), and a statement that is not safe to replay (a `DROP`, an
-    /// unguarded `UPDATE`) has to fail here rather than there. The replay is
-    /// the untracked statement loop it runs with.
-    #[tokio::test]
-    async fn replaying_every_files_migration_leaves_live_rows_alone() {
-        let ctx = TestContext::with_files().await;
-
-        repo::buckets::insert(&ctx, "photos", false, "alice")
-            .await
-            .expect("a bucket");
-        for (id, token, expires_at) in [
-            // A legacy link 003 already dated, and a current one.
-            (
-                "legacy",
-                "eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoic2hhcmUifQ.sig",
-                "2027-04-20T10:00:00Z",
-            ),
-            (
-                "opaque",
-                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-                "2026-12-01T00:00:00Z",
-            ),
-        ] {
-            repo::shares::seed(
-                &ctx,
-                crate::util::json_map(json!({
-                    "id": id,
-                    "token": token,
-                    "bucket": "photos",
-                    "key": "a.png",
-                    "created_by": "alice",
-                    "expires_at": expires_at,
-                    "access_count": 3,
-                    "created_at": "2026-04-20T10:00:00Z",
-                })),
-            )
-            .await
-            .expect("a share");
-        }
-        let stored = repo::objects::reserve_upload(
-            &ctx,
-            "photos",
-            "a.png",
-            8,
-            "image/png",
-            "alice",
-            &crate::blocks::files::models::QuotaConfig::effective_default(),
-        )
-        .await
-        .expect("reserve");
-        assert_eq!(
-            repo::objects::mark_complete(&ctx, &stored)
-                .await
-                .expect("a stored object"),
-            repo::objects::Completion::Completed
-        );
-        repo::objects::reserve_upload(
-            &ctx,
-            "photos",
-            "b.png",
-            4,
-            "image/png",
-            "alice",
-            &crate::blocks::files::models::QuotaConfig::effective_default(),
-        )
-        .await
-        .expect("an upload in flight");
-        repo::views::insert(&ctx, "photos", "a.png", "alice")
-            .await
-            .expect("a view");
-        repo::quota::upsert_for_user(
-            &ctx,
-            "alice",
-            crate::util::json_map(json!({
-                "max_storage_bytes": 5_000,
-            })),
-        )
-        .await
-        .expect("a quota override");
-        let before = every_row(&ctx).await;
-
-        let sql: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        migration_helper::apply_ddl_via_service(&ctx.database_service(), &sql)
-            .await
-            .expect("the whole set replays over live rows");
-
-        assert_eq!(every_row(&ctx).await, before);
-        assert!(
-            before.iter().any(|(table, _, row)| *table == "objects"
-                && row.get("claim_id").is_some_and(|c| c.is_string())),
-            "the replay was checked over rows that carry a claim"
-        );
-        assert!(
-            before.iter().any(|(table, _, row)| *table == "objects"
-                && row.get("blob_key").is_some_and(|c| c.is_string())),
-            "the replay was checked over rows that name their blob"
-        );
-    }
-}
-
-#[cfg(test)]
 mod legacy_share_expiry_tests {
     //! What `003_legacy_share_token_expiry` does to the rows of a deployment
     //! upgraded into the opaque-token scheme.
@@ -406,7 +267,7 @@ mod legacy_share_expiry_tests {
     //! used to impose. The end-to-end half — the repaired row refused by
     //! `share::handle_direct_access` — lives beside that handler.
     //!
-    //! The repair is driven through `apply_migrations`, the path an upgrading
+    //! The repair is driven through `apply_pending`, the path an upgrading
     //! deployment's first migrating boot or deploy takes, over a database
     //! whose files list stops before it, and the rows are read back through
     //! `repo::shares`, so what is asserted is what the block sees.
@@ -448,7 +309,7 @@ mod legacy_share_expiry_tests {
         let mut ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        migration_helper::apply_migrations(
+        migration_helper::apply_pending(
             &ctx,
             crate::blocks::files::FilesBlock::BLOCK_NAME,
             before_the_repair(),
@@ -463,7 +324,7 @@ mod legacy_share_expiry_tests {
     /// The upgrade: the shipped list, whose pending files are the repair and
     /// what follows it.
     async fn apply_the_repair(ctx: &TestContext) {
-        migration_helper::apply_migrations(
+        migration_helper::apply_pending(
             ctx,
             crate::blocks::files::FilesBlock::BLOCK_NAME,
             SQLITE_MIGRATIONS,
@@ -672,10 +533,11 @@ mod legacy_share_expiry_tests {
 
     /// Running the repair's statements a second time moves nothing.
     ///
-    /// The repair is in the frozen set the legacy replay runs once more over
-    /// a database it may already have repaired. The second pass is that
-    /// replay's untracked statement loop: the ledger runner would run the
-    /// file once and never again.
+    /// Before the ledger, the runner re-ran every file whenever the list
+    /// changed, so a deployment that kept upgrading ran this repair more than
+    /// once: `migration-history.toml` declares it `rerun_safe`, and the
+    /// history's verdicts for those states rest on that. The second pass is
+    /// the runner from before the ledger; today's runs the file once.
     #[tokio::test]
     async fn the_repair_is_idempotent() {
         let ctx = upgrading_deployment().await;
@@ -691,9 +553,12 @@ mod legacy_share_expiry_tests {
             .iter()
             .find(|(name, _)| *name == LEGACY_SHARE_TOKEN_EXPIRY)
             .expect("the repair is wired");
-        migration_helper::apply_ddl_via_service(&ctx.database_service(), &[repair])
-            .await
-            .expect("replay the repair");
+        migration_helper::legacy_runner::apply(
+            &ctx.database_service(),
+            &[(LEGACY_SHARE_TOKEN_EXPIRY, repair)],
+        )
+        .await
+        .expect("the old runner's second pass");
 
         assert_eq!(
             (
