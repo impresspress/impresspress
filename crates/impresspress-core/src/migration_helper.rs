@@ -2010,9 +2010,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         assert!(is_duplicate_column_error(
             r#"error returned from database: column "extra" of relation "t" already exists"#
         ));
-        assert!(!is_duplicate_column_error(
-            "table impresspress__admin__block_settings_v2 already exists"
-        ));
+        assert!(!is_duplicate_column_error("table t_v2 already exists"));
         assert!(!is_duplicate_column_error(r#"relation "t" already exists"#));
     }
 
