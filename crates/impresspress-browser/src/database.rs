@@ -117,13 +117,7 @@ use crate::{bridge, db_codec};
 /// boot hook precisely because they are interchangeable. STRICT_SCHEMA is a
 /// property of that database, so a per-instance field would let two handles
 /// disagree about the same schema.
-///
-/// This crate's own tests start strict, as every `TestContext` does in
-/// `impresspress-core`: a fixture has to declare the columns its writes name,
-/// so the suite proves this backend's paths under the behaviour every target
-/// is moving to. A build of the crate (the browser runtime) starts off until
-/// the database block's `Init` says otherwise.
-static STRICT_SCHEMA: AtomicBool = AtomicBool::new(cfg!(test));
+static STRICT_SCHEMA: AtomicBool = AtomicBool::new(false);
 
 /// Memoized table-exists / column-list / primary-key facts for the one
 /// sql.js database, returned by [`DbExec::schema_cache`].
@@ -1138,10 +1132,19 @@ export function installMemoryOpfs() {
         pub fn fail_next_opfs_read(name: &str);
     }
 
-    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it.
+    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it, with
+    /// strict schema on, as every `TestContext` in `impresspress-core` runs:
+    /// a fixture has to declare the columns its writes name. Set here, per
+    /// fixture, because the flag is one process-wide static that a booted
+    /// runtime's database `Init` sets too (off, without the key), so a value
+    /// left by an earlier test would make this one's mode depend on order.
     pub async fn fresh_db() -> BrowserDatabaseService {
         install_memory_opfs();
         crate::db_init().await.expect("sql.js loads");
+        wafer_core::interfaces::database::service::DatabaseService::set_strict_schema(
+            &BrowserDatabaseService,
+            true,
+        );
         BrowserDatabaseService
     }
 }
@@ -1163,7 +1166,7 @@ mod sql_js_conformance {
     use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::test_support::fresh_db;
+    use super::{test_support::fresh_db, BrowserDatabaseService};
 
     fn row(id: &str, name: Option<&str>) -> HashMap<String, serde_json::Value> {
         let mut row = HashMap::from([("id".to_string(), serde_json::json!(id))]);
@@ -1171,6 +1174,31 @@ mod sql_js_conformance {
             row.insert("name".to_string(), serde_json::json!(name));
         }
         row
+    }
+
+    /// **A fixture database runs strict schema whatever ran before it.** A
+    /// booted runtime's database `Init` turns the process-wide flag off (this
+    /// target has no key for it), so `fresh_db` turns it on for its own
+    /// fixture: a write naming a column the table does not declare fails,
+    /// rather than adding it.
+    #[wasm_bindgen_test]
+    async fn a_fresh_database_runs_strict_schema_after_anything_turned_it_off() {
+        DatabaseService::set_strict_schema(&BrowserDatabaseService, false);
+        let svc = fresh_db().await;
+        svc.exec_raw(
+            "CREATE TABLE sql_js_strict_t (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)",
+            &[],
+        )
+        .await
+        .expect("create table");
+        let mut data = HashMap::new();
+        data.insert(
+            "column_no_migration_declares".to_string(),
+            serde_json::json!("x"),
+        );
+        svc.create("sql_js_strict_t", data)
+            .await
+            .expect_err("an undeclared column is refused, not added");
     }
 
     #[wasm_bindgen_test]
@@ -1357,7 +1385,9 @@ mod strict_schema_policy {
         // and not of a handle. `impresspress-web` holds a second handle for
         // its boot hook.
         assert!(DbExec::strict_schema(&BrowserDatabaseService));
-        // Left on: every other test of this crate runs strict.
+
+        DatabaseService::set_strict_schema(&svc, false);
+        assert!(!DbExec::strict_schema(&svc));
     }
 }
 

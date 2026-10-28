@@ -1,16 +1,17 @@
 -- Declare `updated_at` on the three dev tables that lacked it. The host
 -- stamps `updated_at` on every typed write, and the dev repo updates all
--- three, so without the column each write would fail under strict schema.
+-- three, so without the column each write fails where strict schema is on.
 --
 -- Two populations run this file under one recorded list: a database whose
 -- tables match 001-004 exactly, and a browser database whose writes already
--- created `updated_at` lazily (before strict schema was the only behaviour).
--- A plain `ADD COLUMN` would fail on the second, so each table is rebuilt
--- from the columns every database has, copied by name, and the old table is
--- dropped with whatever undeclared column it held. `updated_at` is filled
--- from the row's own data (`created_at`, `imported_at` for the seed record),
--- so the result does not depend on the population. No foreign key references
--- these tables, and the indexes the old tables carried are recreated.
+-- created `updated_at` lazily (the browser runs without strict schema until
+-- it is on everywhere). A plain `ADD COLUMN` would fail on the second, so
+-- each table is rebuilt from the columns every database has, copied by name,
+-- and the old table is dropped with whatever undeclared column it held.
+-- `updated_at` is filled from the row's own data (`created_at`,
+-- `imported_at` for the seed record), so the result does not depend on the
+-- population. No foreign key references these tables, and the indexes the
+-- old tables carried are recreated.
 
 CREATE TABLE impresspress__dev__generations_v2 (
     id                  TEXT PRIMARY KEY,

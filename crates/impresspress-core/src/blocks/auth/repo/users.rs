@@ -16,6 +16,13 @@ use crate::util::{daily_grouped, to_wire_filters, RecordExt};
 
 pub const TABLE: &str = "wafer_run__auth__users";
 
+/// The column holding the SHA-256 hex of an account's outstanding
+/// password-reset token (auth 017), or `""` once spent.
+pub const RESET_TOKEN: &str = "reset_token";
+
+/// The column holding that token's absolute expiry, ISO-8601 (auth 017).
+pub const RESET_TOKEN_EXPIRES: &str = "reset_token_expires";
+
 /// Column, JWT-claim, and cache-key name for the per-user auth-version
 /// counter (P2c: CODE_REVIEW_2026-07-16, "Access JWTs outlive account and
 /// role changes"). Kept as a single constant so the users-table column
@@ -519,10 +526,10 @@ pub async fn find_by_reset_token(
 
     use crate::util::RecordExt;
 
-    match db::get_by_field(ctx, TABLE, "reset_token", json!(token_hash)).await {
+    match db::get_by_field(ctx, TABLE, RESET_TOKEN, json!(token_hash)).await {
         Ok(rec) => Ok(Some(ResetTokenUser {
             id: rec.id.clone(),
-            reset_token_expires: rec.str_field("reset_token_expires").to_string(),
+            reset_token_expires: rec.str_field(RESET_TOKEN_EXPIRES).to_string(),
         })),
         Err(e) if e.code == ErrorCode::NotFound => Ok(None),
         Err(e) => Err(db_failed("find by reset_token", e)),
@@ -538,8 +545,8 @@ pub async fn set_reset_token(
     expires_at: &str,
 ) -> Result<(), WaferError> {
     let mut data = std::collections::HashMap::new();
-    data.insert("reset_token".to_string(), json!(token_hash));
-    data.insert("reset_token_expires".to_string(), json!(expires_at));
+    data.insert(RESET_TOKEN.to_string(), json!(token_hash));
+    data.insert(RESET_TOKEN_EXPIRES.to_string(), json!(expires_at));
     data.insert("updated_at".to_string(), json!(now_iso()));
     db::update(ctx, TABLE, user_id, data)
         .await
@@ -567,14 +574,14 @@ pub async fn take_reset_token(
             value: json!(user_id),
         },
         Filter {
-            field: "reset_token".into(),
+            field: RESET_TOKEN.into(),
             operator: FilterOp::Equal,
             value: json!(token_hash),
         },
     ];
     let mut data = HashMap::new();
-    data.insert("reset_token".to_string(), json!(""));
-    data.insert("reset_token_expires".to_string(), json!(""));
+    data.insert(RESET_TOKEN.to_string(), json!(""));
+    data.insert(RESET_TOKEN_EXPIRES.to_string(), json!(""));
     data.insert("updated_at".to_string(), json!(now_iso()));
     let n = db::update_by_filters_count(ctx, TABLE, filters, data)
         .await
@@ -602,14 +609,14 @@ pub async fn restore_reset_token(
             value: json!(user_id),
         },
         Filter {
-            field: "reset_token".into(),
+            field: RESET_TOKEN.into(),
             operator: FilterOp::Equal,
             value: json!(""),
         },
     ];
     let mut data = HashMap::new();
-    data.insert("reset_token".to_string(), json!(token_hash));
-    data.insert("reset_token_expires".to_string(), json!(expires_at));
+    data.insert(RESET_TOKEN.to_string(), json!(token_hash));
+    data.insert(RESET_TOKEN_EXPIRES.to_string(), json!(expires_at));
     data.insert("updated_at".to_string(), json!(now_iso()));
     let n = db::update_by_filters_count(ctx, TABLE, filters, data)
         .await

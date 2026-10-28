@@ -128,9 +128,10 @@
 //!   name and recreated — auth 017 does this for `users`, which six
 //!   cascading foreign keys reference, so it cannot be rebuilt.
 //!
-//! Every column current code writes is declared by a migration (the test
-//! suites run strict schema, so a write naming an undeclared column fails
-//! them).
+//! The test fixtures run strict schema (`TestContext`, and the browser
+//! crate's fixture databases), so a write path a test exercises fails that
+//! test if it names a column no migration declares. A write path no strict
+//! test reaches is not covered by that.
 //!
 //! # Databases from before the ledger
 //!

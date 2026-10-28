@@ -739,11 +739,12 @@ async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
     )
     .await;
     assert!(report.ok, "a strict boot must succeed: {report:?}");
-    let users = impresspress_core::blocks::auth::repo::users::TABLE;
+    use impresspress_core::blocks::auth::repo::users;
+    let table = users::TABLE;
     // Test-fixture setup: an account, by raw SQL naming its NOT NULL columns.
     db.exec_raw(
         &format!(
-            "INSERT INTO {users} (id, email, display_name, created_at, updated_at) \
+            "INSERT INTO {table} (id, email, display_name, created_at, updated_at) \
              VALUES ('u1', 'u1@example.com', 'u1', '2026-10-01T00:00:00Z', \
              '2026-10-01T00:00:00Z')"
         ),
@@ -754,25 +755,25 @@ async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
 
     // What `repo::users::set_reset_token` writes.
     let mut stored = HashMap::new();
-    stored.insert("reset_token".to_string(), serde_json::json!("digest"));
+    stored.insert(users::RESET_TOKEN.to_string(), serde_json::json!("digest"));
     stored.insert(
-        "reset_token_expires".to_string(),
+        users::RESET_TOKEN_EXPIRES.to_string(),
         serde_json::json!("2026-10-01T01:00:00Z"),
     );
-    db.update(users, "u1", stored)
+    db.update(table, "u1", stored)
         .await
         .expect("a reset token is stored under strict schema");
     // What `find_by_reset_token` reads, and `take_reset_token` writes.
     let by_token = |value: &str| {
         vec![wafer_block::db::Filter {
-            field: "reset_token".into(),
+            field: users::RESET_TOKEN.into(),
             operator: wafer_block::db::FilterOp::Equal,
             value: serde_json::json!(value),
         }]
     };
     let found = db
         .list(
-            users,
+            table,
             &wafer_block::db::ListOptions {
                 filters: by_token("digest"),
                 ..Default::default()
@@ -782,10 +783,13 @@ async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
         .expect("an account is found by its reset token");
     assert_eq!(found.records.len(), 1);
     let mut spent = HashMap::new();
-    spent.insert("reset_token".to_string(), serde_json::json!(""));
-    spent.insert("reset_token_expires".to_string(), serde_json::json!(""));
+    spent.insert(users::RESET_TOKEN.to_string(), serde_json::json!(""));
+    spent.insert(
+        users::RESET_TOKEN_EXPIRES.to_string(),
+        serde_json::json!(""),
+    );
     assert_eq!(
-        db.update_where_count(users, &by_token("digest"), spent)
+        db.update_where_count(table, &by_token("digest"), spent)
             .await
             .expect("a reset token is spent under strict schema"),
         1

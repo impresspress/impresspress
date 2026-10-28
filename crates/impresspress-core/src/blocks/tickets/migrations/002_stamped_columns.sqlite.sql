@@ -3,18 +3,18 @@
 -- create. `events` and `analyses` are created and have their expiry updated
 -- (`updated_at`); the maintenance singleton is updated (`updated_at`) and
 -- keeps a nullable `created_at`, which no production path writes (001 seeds
--- the row).
+-- the row). Without them these writes fail where strict schema is on.
 --
 -- Two populations run this file under one recorded list: a database whose
 -- tables match 001 exactly, and a native or browser database whose writes
--- already created some of these columns lazily (before strict schema was the
--- only behaviour). A plain `ADD COLUMN` would fail on the second, so each
--- table is rebuilt from the columns every database has, copied by name, and
--- the old table is dropped with whatever undeclared column it held. The new
--- columns are filled from the row's own data (`created_at`; the
--- maintenance row's `last_pruned_at`, and no `created_at`), so the result
--- does not depend on the population. No foreign key references these tables,
--- and the indexes the old tables carried are recreated.
+-- already created some of these columns lazily, while strict schema was off
+-- there. A plain `ADD COLUMN` would fail on the second, so each table is
+-- rebuilt from the columns every database has, copied by name, and the old
+-- table is dropped with whatever undeclared column it held. The new columns
+-- are filled from the row's own data (`created_at`; the maintenance row's
+-- `last_pruned_at`, and no `created_at`), so the result does not depend on
+-- the population. No foreign key references these tables, and the indexes
+-- the old tables carried are recreated.
 
 CREATE TABLE impresspress__tickets__events_v2 (
     id              TEXT PRIMARY KEY,

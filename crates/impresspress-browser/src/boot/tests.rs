@@ -508,11 +508,12 @@ mod pre_ledger_migrations {
         apply_block_migrations(&db)
             .await
             .unwrap_or_else(|e| panic!("every block's list applies: {e:?}"));
-        let users = impresspress_core::blocks::auth::repo::users::TABLE;
+        use impresspress_core::blocks::auth::repo::users;
+        let table = users::TABLE;
         // Test-fixture setup: an account, naming its NOT NULL columns.
         db.exec_raw(
             &format!(
-                "INSERT INTO {users} (id, email, display_name, created_at, updated_at) \
+                "INSERT INTO {table} (id, email, display_name, created_at, updated_at) \
                  VALUES ('u1', 'u1@example.com', 'u1', '2026-10-01T00:00:00Z', \
                  '2026-10-01T00:00:00Z')"
             ),
@@ -522,24 +523,24 @@ mod pre_ledger_migrations {
         .expect("seed an account");
 
         let mut stored = std::collections::HashMap::new();
-        stored.insert("reset_token".to_string(), serde_json::json!("digest"));
+        stored.insert(users::RESET_TOKEN.to_string(), serde_json::json!("digest"));
         stored.insert(
-            "reset_token_expires".to_string(),
+            users::RESET_TOKEN_EXPIRES.to_string(),
             serde_json::json!("2026-10-01T01:00:00Z"),
         );
-        db.update(users, "u1", stored)
+        db.update(table, "u1", stored)
             .await
             .expect("a reset token is stored");
         let by_token = |value: &str| {
             vec![wafer_block::db::Filter {
-                field: "reset_token".into(),
+                field: users::RESET_TOKEN.into(),
                 operator: wafer_block::db::FilterOp::Equal,
                 value: serde_json::json!(value),
             }]
         };
         let found = db
             .list(
-                users,
+                table,
                 &wafer_block::db::ListOptions {
                     filters: by_token("digest"),
                     ..Default::default()
@@ -549,10 +550,13 @@ mod pre_ledger_migrations {
             .expect("the account is found by its token");
         assert_eq!(found.records.len(), 1);
         let mut spent = std::collections::HashMap::new();
-        spent.insert("reset_token".to_string(), serde_json::json!(""));
-        spent.insert("reset_token_expires".to_string(), serde_json::json!(""));
+        spent.insert(users::RESET_TOKEN.to_string(), serde_json::json!(""));
+        spent.insert(
+            users::RESET_TOKEN_EXPIRES.to_string(),
+            serde_json::json!(""),
+        );
         assert_eq!(
-            db.update_where_count(users, &by_token("digest"), spent)
+            db.update_where_count(table, &by_token("digest"), spent)
                 .await
                 .expect("the token is spent"),
             1

@@ -68,8 +68,9 @@ failed:
   old SDK until it is compiled again; then add
   `.column(Column::datetime("updated_at"))` to its `TableDef`.
   `ensure_table` adds a declared column that an existing table lacks.
-- The test suites run with strict schema (`TestContext` and the browser
-  crate's own tests), so a write naming an undeclared column fails them.
+- The test fixtures run with strict schema (every `TestContext`, and every
+  database the browser crate's `test_support::fresh_db` hands out), so a
+  tested write naming an undeclared column fails its test.
   Native and browser deployments still run without it until the pinned
   wafer-run drops lazy column-add.
 
