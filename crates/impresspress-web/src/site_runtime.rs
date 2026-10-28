@@ -84,11 +84,31 @@ use crate::runtime_factory::{DynamicBlock, RuntimeFactory};
 /// must not silently follow a change to `wafer_run::DEFAULT_FUEL`, because
 /// this number is what bounds how long one keystroke's request can run inside
 /// a service worker that has no other way to be interrupted.
-const GUEST_FUEL: u64 = 100_000_000;
+///
+/// 250M because wasmi (2.x) charges one fuel unit per executed Wasm
+/// operator. Measured on the same guests, that is about 2–2.5× what wasmi
+/// 0.44's per-instruction metering of its fused bytecode charged, so 250M
+/// leaves a legitimate guest the headroom 100M gave it there. The price is
+/// the worst case: a runaway guest's tight loop burns one unit per operator,
+/// so the longest one call can run scales with the budget — about 70 ms at
+/// 100M, about 170 ms at 250M (wasmi 2.0, native release build).
+const GUEST_FUEL: u64 = 250_000_000;
 
 /// Per-call linear-memory cap for a guest block, in 64 KiB wasmi pages
 /// (256 pages = 16 MiB).
 const GUEST_MEMORY_PAGES: u32 = 256;
+
+// The sandbox restates the producer's defaults instead of inheriting them, so
+// a wafer-run release that moves either one must fail this build rather than
+// be followed silently (or diverge silently: `impresspress-core`'s
+// `wafer_guest_golden` loads the golden guests under
+// `ResourceLimits::default()` because it is the pair `guest_limits` builds).
+// A const assertion rather than a test, so every wasm32 check or build of a
+// sandbox configuration enforces it, not only the wasm test run.
+const _: () = {
+    assert!(GUEST_FUEL == wafer_run::DEFAULT_FUEL);
+    assert!(GUEST_MEMORY_PAGES == wafer_run::DEFAULT_MAX_WASM_MEMORY_PAGES);
+};
 
 /// The limits every guest — probed or live — is loaded under.
 ///
@@ -96,7 +116,9 @@ const GUEST_MEMORY_PAGES: u32 = 256;
 /// `WorkspaceControl::probe`, in a `browser-devtools` build) under bounds it
 /// will not run under. `..Default::default()` keeps the producer's SEC-03
 /// caps (host bytes, live streams, table elements), which the sandbox has no
-/// reason to move.
+/// reason to move, and its eager compilation — the only mode wafer-run
+/// accepts with a metered budget, since lazy translation would bill a
+/// function's translation to whichever call first reaches it.
 fn guest_limits() -> ResourceLimits {
     ResourceLimits {
         fuel: FuelLimit::Metered(GUEST_FUEL),

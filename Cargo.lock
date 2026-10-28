@@ -1561,12 +1561,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
-name = "downcast-rs"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
-
-[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3192,12 +3186,6 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
-
-[[package]]
-name = "multi-stash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
 name = "native-tls"
@@ -5863,7 +5851,7 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 [[package]]
 name = "wafer-block"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5891,7 +5879,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-cors"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -5903,7 +5891,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-crypto"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "argon2",
  "async-trait",
@@ -5928,7 +5916,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-fastembed"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "fastembed",
@@ -5940,7 +5928,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-http-listener"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -5960,7 +5948,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-inspector"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "percent-encoding",
@@ -5975,7 +5963,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-local-storage"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -5992,7 +5980,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-macro"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6003,7 +5991,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-network"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "futures",
@@ -6022,7 +6010,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-postgres"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6043,7 +6031,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-readonly-guard"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -6054,7 +6042,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-router"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -6066,7 +6054,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-s3"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6083,7 +6071,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-security-headers"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "tracing",
@@ -6095,7 +6083,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6117,7 +6105,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-web"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "tracing",
@@ -6129,7 +6117,7 @@ dependencies = [
 [[package]]
 name = "wafer-core"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6152,7 +6140,7 @@ dependencies = [
 [[package]]
 name = "wafer-flow"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "serde",
  "serde_json",
@@ -6162,7 +6150,7 @@ dependencies = [
 [[package]]
 name = "wafer-net-security"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "reqwest",
  "tokio",
@@ -6172,7 +6160,7 @@ dependencies = [
 [[package]]
 name = "wafer-run"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6206,13 +6194,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasmi",
+ "wasmi_core",
  "web-time",
 ]
 
 [[package]]
 name = "wafer-schema"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "serde",
  "serde_json",
@@ -6222,7 +6211,7 @@ dependencies = [
 [[package]]
 name = "wafer-sql-utils"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?rev=da9142c96bd06af8749e91aebfe0572e3da163d7#da9142c96bd06af8749e91aebfe0572e3da163d7"
+source = "git+https://github.com/wafer-run/wafer-run?rev=f0ca9c79abbefb4647cc73d15b92bbcd4043e03b#f0ca9c79abbefb4647cc73d15b92bbcd4043e03b"
 dependencies = [
  "sea-query",
  "serde_json",
@@ -6432,54 +6421,50 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.44.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6932a935f97c2b683275706c0b8d5bd8defa90043efc7af07ac03e250120eb9"
+checksum = "78693fcdd618e0fc34af59c6b8efa9ac5d58c68df940beff4bedddb6acfe7c27"
 dependencies = [
- "arrayvec",
- "multi-stash",
- "smallvec",
  "spin 0.9.9",
  "wasmi_collections",
  "wasmi_core",
  "wasmi_ir",
- "wasmparser 0.227.1",
+ "wasmparser 0.228.0",
  "wat",
 ]
 
 [[package]]
 name = "wasmi_collections"
-version = "0.44.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f16c01ccdab2b074b6b7454069a80308ac3a111c22102b0dcb045a481fdbff1"
+checksum = "8a8be2aa467cf2d29e96ff759472c36eeb44a3c81c67fc9cb76c9a24c519c557"
 dependencies = [
  "string-interner",
 ]
 
 [[package]]
 name = "wasmi_core"
-version = "0.44.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ddd85744eff1dd2a387d2c82b352a573415c9c559581b6591bb100153312513"
+checksum = "69372d5fda3ea3d1e0aa6603c7888110e0187e88ea17cd8fc2e2df0a0e1f37fa"
 dependencies = [
- "downcast-rs",
  "libm",
 ]
 
 [[package]]
 name = "wasmi_ir"
-version = "0.44.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64f4dcd8235c21a01574860c513c598eb176feb0a8abe3779de2e0e7a855339d"
+checksum = "8f17b774caa13c618c7244f1ee51fe23c5e7b8538a471fa46d9949779758aed6"
 dependencies = [
  "wasmi_core",
 ]
 
 [[package]]
 name = "wasmparser"
-version = "0.227.1"
+version = "0.228.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f51cad774fb3c9461ab9bccc9c62dfb7388397b5deda31bf40e8108ccd678b2"
+checksum = "4abf1132c1fdf747d56bbc1bb52152400c70f336870f968b85e89ea422198ae3"
 dependencies = [
  "bitflags",
  "indexmap 2.14.0",
