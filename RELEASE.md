@@ -19,6 +19,58 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: workers-rs 0.8.7
+
+**What changes.** The Worker crates build on `worker` 0.8.7 and
+`worker-build` 0.8.7, which bring wasm-bindgen 0.2.129, js-sys and web-sys
+0.3.106. The CLI pins `worker-build` 0.8.7 and CI's `wasm-bindgen-cli` is
+0.2.129. The js-sys fork that keeps the executor alive after a CPU kill (the
+entry below) is rebased onto 0.3.106: the published crate plus
+wasm-bindgen/wasm-bindgen#5379 at its head `555c2586`, pinned by commit in the
+workspace `Cargo.toml`.
+
+- **A second reset path.** worker-build 0.8 compiles in wasm-bindgen's call
+  guard: an exception that escapes any call into the wasm, a trap inside a
+  poll included, makes the next call re-instantiate the module. Only an
+  error the Rust code throws itself (a wrapped JS exception) is exempt; a JS
+  exception from an imported function the Rust code does not catch becomes
+  a "Critical error" and resets the instance too. It logs
+  nothing; worker-build's shim still logs `Reinitializing Wasm application`
+  for its own resets. A CPU kill throws nothing, so neither path sees one,
+  and the fork stays.
+- **The entry module imports `build/index.js`,** and so does the hasher's
+  config. worker-build 0.8 still writes `build/worker/shim.mjs`, as an alias
+  for configs written against 0.7.
+- **`strip` is set by the Worker build.** wasm-bindgen 0.2.129 cannot build a
+  `strip = true` profile for worker-build 0.8 (cloudflare/workers-rs#1014):
+  the stripped module has lost the section that says it uses reference types.
+  Every Worker build the CLI runs, and the `wrangler dev` build hook it
+  generates, overrides it with `CARGO_PROFILE_RELEASE_STRIP=debuginfo`, and
+  the CLI then removes the function-names section that keeps, so the upload
+  stays the size it was (webmcp-demo: 2203.6 KiB gzip on 0.7.5, 2211.8 KiB on
+  0.8.7). The release profile check no longer asks for `strip`. A
+  `wrangler dev` build keeps the names.
+- **Errors.** `worker::Error` is no longer `Send + Sync`, and a JS error that
+  is not D1's prints as `"{name} [{code}]: {message}"`. Nothing in this
+  workspace matches on either.
+- **Tooling.** Node 22 refuses a worker-build 0.8 module (its catch wrappers
+  use `try_table`) unless run with `--experimental-wasm-exnref`. Workers and
+  `wrangler dev` run it as is.
+
+**Who has to act.**
+- **A consumer with its own `worker` dependency** must move it to
+  `worker = "0.8"`: worker-build 0.8.7 refuses `worker` 0.7. A consumer that
+  depends on `impresspress-cloudflare` by path (site) resolves two
+  incompatible `worker` crates until it does, and stops type-checking.
+- **The js-sys `[patch]` does not reach another workspace.** A Worker built
+  outside this one uses stock js-sys unless it carries the same `[patch]`.
+- **The first deploy after this release** builds and deploys a 0.8.7
+  password-hasher Worker, and no 0.8.7 hasher has run on Cloudflare before
+  it. It was checked locally (`wrangler dev --local`: bootstrap, sign-up and
+  sign-in through its Durable Object). Deploy it with the default
+  `--password-hasher deploy`, so `/_deploy/verify`'s hasher probe checks the
+  new hasher before promotion, and sign in once afterwards.
+
 ### Migrations: recorded per file; a release runs only the files it adds
 
 **What changes.**

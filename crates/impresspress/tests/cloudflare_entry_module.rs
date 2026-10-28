@@ -1,17 +1,18 @@
 //! The generated Worker entry module (`helpers::cloudflare::entry`), run in
 //! Node against worker-build's own shim.
 //!
-//! `support/cloudflare_entry/worker-build-0.7.5-shim.js` is
-//! `worker-build-0.7.5/src/js/shim.js` verbatim (Apache-2.0, Cloudflare; the
+//! `support/cloudflare_entry/worker-build-0.8.7-shim.js` is
+//! `worker-build-0.8.7/src/js/shim.js` verbatim (Apache-2.0, Cloudflare; the
 //! licence is `support/cloudflare_entry/LICENSE-worker-build`, the provenance
 //! `support/cloudflare_entry/README.md`), the version
-//! `build::WORKER_BUILD_VERSION` pins. The test fills its two
-//! placeholders the way worker-build 0.7.5's `generate_handlers` does for this
-//! Worker's two exports, and points its imports at stand-ins: `cloudflare:workers`
-//! at a `WorkerEntrypoint` that stores `ctx`/`env`, and `./index.js` at a module
-//! emulating the Rust side (`support/cloudflare_entry/index.js`). The shim's
-//! own logic — the class and instance proxies, `checkReinitialize`, the
-//! `RuntimeError` catch — is the real one.
+//! `build::WORKER_BUILD_VERSION` pins. The test fills its placeholder the way
+//! worker-build 0.8.7's `generate_handlers` does for this Worker's two
+//! exports, and points its imports at stand-ins: `cloudflare:workers` at a
+//! `WorkerEntrypoint` that stores `ctx`/`env`, and the wasm-bindgen module at
+//! one emulating the Rust side (`support/cloudflare_entry/index.js`), including
+//! worker 0.8's `__worker_init_state`. The shim's own logic — the class and
+//! instance proxies, `checkReinitialize`, the `RuntimeError` catch — is the
+//! real one.
 //!
 //! What it pins:
 //! - with the trace var off, a Worker entered through `entry.mjs` behaves
@@ -19,10 +20,8 @@
 //!   included, and nothing creates the shared state;
 //! - with it on, every request gets one `ip-entry` line naming the instance
 //!   that serves it: the request after the reset already carries the new wasm
-//!   id and the next generation. Its `wbi` field is `-`: worker-build 0.7.5's
-//!   shim keeps its instance counter module-local, and nothing creates
-//!   worker 0.8's `__worker_init_state` global. When that global is present,
-//!   the line carries its counter instead (`wbi=1`);
+//!   id, the next generation, and worker 0.8's instance counter (`wbi`) up by
+//!   2, 1 from the reset's start function and 1 from the shim;
 //! - a probe that traps still leaves a dashed `ip-entry` line, and its error
 //!   takes the path of a trap in `fetch`: `Critical`, the throw, then the
 //!   reset on the next request.
@@ -38,7 +37,7 @@ const SUPPORT: &str = concat!(
     "/tests/support/cloudflare_entry"
 );
 
-/// The `$HANDLERS` worker-build 0.7.5 generates for a Worker exporting
+/// The `$HANDLERS` worker-build 0.8.7 generates for a Worker exporting
 /// `fetch` and `__impresspressExecutorProbe`, without `RUN_TO_COMPLETION`
 /// (`generate_handlers` in `worker-build/src/main.rs`).
 const HANDLERS: &str = "Entrypoint.prototype.fetch = function fetch (arg) {
@@ -56,22 +55,38 @@ fn replace_once(source: &str, from: &str, to: &str) -> String {
     source.replace(from, to)
 }
 
+/// The name the stand-in wasm-bindgen module is staged under. worker-build
+/// bundles its shim and wasm-bindgen's `index.js` into one `build/index.js`
+/// with esbuild; the test has no bundler, so the shim is written as
+/// `build/index.js` and its `./index.js` import is pointed at this file.
+const WASM_BINDGEN_MODULE: &str = "wasm-bindgen.js";
+
 /// A consumer repo laid out as `impresspress build` leaves it: the shim at
-/// `build/worker/shim.mjs`, the entry module in
-/// `target/impresspress-cloudflare/`. Returns the entry module's directory.
+/// `build/index.js`, the entry module in `target/impresspress-cloudflare/`.
+/// Returns the entry module's directory.
 fn stage(repo: &Path) -> std::path::PathBuf {
-    assert_eq!(WORKER_BUILD_VERSION, "0.7.5", "re-vendor the shim fixture");
-    let worker = repo.join("build/worker");
-    fs::create_dir_all(&worker).unwrap();
-    let shim = fs::read_to_string(Path::new(SUPPORT).join("worker-build-0.7.5-shim.js")).unwrap();
+    assert_eq!(WORKER_BUILD_VERSION, "0.8.7", "re-vendor the shim fixture");
+    let build = repo.join("build");
+    fs::create_dir_all(&build).unwrap();
+    let shim = fs::read_to_string(Path::new(SUPPORT).join("worker-build-0.8.7-shim.js")).unwrap();
     let shim = replace_once(&shim, "$HANDLERS", HANDLERS);
-    // worker-build's non-unwind build, which is this workspace's (`panic = "abort"`).
-    let shim = replace_once(&shim, "$PANIC_CRITICAL_ERROR", "criticalError = true;");
     let shim = replace_once(&shim, "\"cloudflare:workers\"", "\"./workers-stub.mjs\"");
-    fs::write(worker.join("shim.mjs"), shim).unwrap();
-    for file in ["index.js", "workers-stub.mjs"] {
-        fs::copy(Path::new(SUPPORT).join(file), worker.join(file)).unwrap();
-    }
+    let shim = replace_once(
+        &shim,
+        "\"./index.js\"",
+        &format!("\"./{WASM_BINDGEN_MODULE}\""),
+    );
+    fs::write(build.join("index.js"), shim).unwrap();
+    fs::copy(
+        Path::new(SUPPORT).join("index.js"),
+        build.join(WASM_BINDGEN_MODULE),
+    )
+    .unwrap();
+    fs::copy(
+        Path::new(SUPPORT).join("workers-stub.mjs"),
+        build.join("workers-stub.mjs"),
+    )
+    .unwrap();
 
     let out = repo.join("target/impresspress-cloudflare");
     fs::create_dir_all(&out).unwrap();
@@ -107,7 +122,7 @@ fn untraced_the_entry_module_behaves_exactly_like_the_shim() {
     let repo = tempfile::tempdir().unwrap();
     let out = stage(repo.path());
 
-    let through_shim = serve(&out, "../../build/worker/shim.mjs", "off");
+    let through_shim = serve(&out, "../../build/index.js", "off");
     let through_entry = serve(&out, "./entry.mjs", "off");
 
     assert_eq!(through_entry, through_shim);
@@ -149,20 +164,21 @@ fn traced_each_request_logs_the_instance_that_serves_it() {
     assert_eq!(
         lines,
         [
-            "ip-entry <isolate> wasm-1 1 1 1024 wbi=-",
+            "ip-entry <isolate> wasm-1 1 1 1024 wbi=1",
             "response 200 https://example.test/a sameEnv=true",
             "state seq=1",
-            "ip-entry <isolate> wasm-1 1 2 1024 wbi=-",
+            "ip-entry <isolate> wasm-1 1 2 1024 wbi=1",
             "Critical RuntimeError: unreachable",
             "threw RuntimeError",
             "state seq=2",
             // The reset runs in the construct trap, before the override:
-            // the next ip-entry already names the new instance.
+            // the next ip-entry already names the new instance, and `wbi`
+            // has moved by 2.
             "Reinitializing Wasm application",
-            "ip-entry <isolate> wasm-2 2 3 1024 wbi=-",
+            "ip-entry <isolate> wasm-2 2 3 1024 wbi=3",
             "response 200 https://example.test/c sameEnv=true",
             "state seq=3",
-            "ip-entry <isolate> wasm-2 2 4 1024 wbi=-",
+            "ip-entry <isolate> wasm-2 2 4 1024 wbi=3",
             "response 200 https://example.test/d sameEnv=true",
             "state seq=4",
         ]
@@ -188,7 +204,7 @@ fn a_probe_that_traps_leaves_a_dashed_line_and_resets_like_a_fetch_trap() {
     assert_eq!(
         lines,
         [
-            "ip-entry <isolate> wasm-1 1 1 1024 wbi=-",
+            "ip-entry <isolate> wasm-1 1 1 1024 wbi=1",
             "response 200 https://example.test/a sameEnv=true",
             "state seq=1",
             // The `finally` still logs, with dashes for what the probe would
@@ -198,32 +214,46 @@ fn a_probe_that_traps_leaves_a_dashed_line_and_resets_like_a_fetch_trap() {
             "threw RuntimeError",
             "state seq=2",
             "Reinitializing Wasm application",
-            "ip-entry <isolate> wasm-2 2 3 1024 wbi=-",
+            "ip-entry <isolate> wasm-2 2 3 1024 wbi=3",
             "response 200 https://example.test/c sameEnv=true",
             "state seq=3",
-            "ip-entry <isolate> wasm-2 2 4 1024 wbi=-",
+            "ip-entry <isolate> wasm-2 2 4 1024 wbi=3",
             "response 200 https://example.test/d sameEnv=true",
             "state seq=4",
         ]
     );
 }
 
-/// With worker 0.8's `__worker_init_state` present, the counter the probe
-/// reads reaches the line through the entry module as `wbi=<n>`. The 0.7.5
-/// shim never moves that global, so it stays at the preset 1 across the reset.
+/// The shim's reset path (path S) moves worker 0.8's instance counter by
+/// exactly 2: `__wbg_reset_state` re-runs the start function, which adds 1,
+/// and `checkReinitialize` adds its own 1. That +2 is how a trace tells the
+/// shim's reset from wasm-bindgen's silent call-guard reset alone (+1).
 #[test]
-fn traced_with_worker_0_8s_init_state_the_line_carries_its_instance_counter() {
+fn a_trap_moves_wbi_by_two_through_the_shims_reset() {
     let repo = tempfile::tempdir().unwrap();
     let out = stage(repo.path());
 
-    let lines = serve(&out, "./entry.mjs", "on-0.8");
+    let lines = serve(&out, "./entry.mjs", "on");
 
-    let entries: Vec<&String> = lines
+    let wbi: Vec<u32> = lines
         .iter()
         .filter(|line| line.starts_with("ip-entry "))
+        .map(|line| {
+            line.rsplit_once(" wbi=")
+                .and_then(|(_, n)| n.parse().ok())
+                .unwrap_or_else(|| panic!("no numeric wbi: {line}"))
+        })
         .collect();
-    assert_eq!(entries.len(), 4, "one ip-entry per request: {lines:?}");
-    for line in entries {
-        assert!(line.ends_with(" 1024 wbi=1"), "{line}");
-    }
+    let reset = lines
+        .iter()
+        .position(|line| line == "Reinitializing Wasm application")
+        .unwrap_or_else(|| panic!("the trap was followed by the shim's reset: {lines:?}"));
+    let entries_before_reset = lines[..reset]
+        .iter()
+        .filter(|line| line.starts_with("ip-entry "))
+        .count();
+    assert_eq!(entries_before_reset, 2, "{lines:?}");
+    assert_eq!(wbi[1], wbi[0], "no reset between the first two requests");
+    assert_eq!(wbi[2], wbi[1] + 2, "{lines:?}");
+    assert_eq!(wbi[3], wbi[2], "no reset after the first");
 }

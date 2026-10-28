@@ -14,14 +14,27 @@
 //! keep in step with.
 //!
 //! The line's wasm id, generation, stack figure and `wbi` (worker 0.8's own
-//! instance counter; `-` on worker 0.7.5, which creates no global for it)
-//! come from that module's synchronous `__impresspressExecutorProbe` export,
-//! which worker-build installs on its entrypoint class like every export,
-//! called through `super` after the shim's re-initialization check has run.
-//! They therefore name the instance that serves the request, a freshly reset
-//! one included. A probe that throws (a trap in a broken instance) still
-//! leaves the line, with `-` for what it would have said, and its error
-//! reaches the shim's catch exactly as a trap in `fetch` would.
+//! instance counter, `__worker_init_state.instanceId`; `-` if that global is
+//! absent) come from that module's synchronous `__impresspressExecutorProbe`
+//! export, which worker-build installs on its entrypoint class like every
+//! export, called through `super`. They therefore name the instance that
+//! serves the request, a freshly reset one included, whichever of worker
+//! 0.8's two reset paths ran:
+//! - the shim's (`checkReinitialize`, after a `WebAssembly.RuntimeError` or a
+//!   Rust panic marked `criticalError`) runs before the override, in the
+//!   construct trap and again in the method wrapper the call goes through; it
+//!   logs `Reinitializing Wasm application` and moves `wbi` by 2;
+//! - wasm-bindgen's call guard: worker-build 0.8 builds with
+//!   `--force-enable-abort-handler`, so any exception that escapes an export,
+//!   a trap included, schedules a reset unless it is a wrapped JS exception,
+//!   and the guard at the start of the next export call runs it. Here that
+//!   call is the probe itself, so the probe answers from the new instance.
+//!   This path logs nothing. A shim reset that runs first consumes the
+//!   scheduled one, so `wbi` moves by 1 only when this path ran alone.
+//!
+//! A probe that throws (a trap in a broken instance) still leaves the line,
+//! with `-` for what it would have said, and its error reaches the shim's
+//! catch exactly as a trap in `fetch` would.
 //!
 //! The line is logged in `fetch`, not in a constructor before `super()`.
 //! Before `super()` the shim's re-initialization has not run, so the probe
@@ -55,9 +68,12 @@ use anyhow::{Context, Result};
 /// The entry module's file name, written into the config's own directory.
 pub const ENTRY_MODULE_FILE: &str = "entry.mjs";
 
-/// worker-build's shim, relative to the directory the main-Worker configs are
-/// written to (`<repo>/target/impresspress-cloudflare`).
-const WORKER_BUILD_SHIM: &str = "../../build/worker/shim.mjs";
+/// worker-build's output module (its shim bundled with wasm-bindgen's glue),
+/// relative to the directory the main-Worker configs are written to
+/// (`<repo>/target/impresspress-cloudflare`). worker-build 0.8 also writes
+/// `build/worker/shim.mjs`, an alias it keeps only for configs written
+/// against 0.7; this module imports the real file.
+const WORKER_BUILD_SHIM: &str = "../../build/index.js";
 
 /// The module's source. Deterministic: the same bytes on every deploy.
 pub fn entry_module_source() -> String {
@@ -103,8 +119,8 @@ mod tests {
     #[test]
     fn the_entry_module_subclasses_the_shim_default_and_reexports_the_rest() {
         let source = entry_module_source();
-        assert!(source.contains("import Shim from '../../build/worker/shim.mjs';"));
-        assert!(source.contains("export * from '../../build/worker/shim.mjs';"));
+        assert!(source.contains("import Shim from '../../build/index.js';"));
+        assert!(source.contains("export * from '../../build/index.js';"));
         assert!(source.contains("export default class extends Shim {"));
         assert!(
             source.contains("return super.fetch(request);"),

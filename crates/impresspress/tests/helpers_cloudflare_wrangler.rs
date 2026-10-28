@@ -2,7 +2,7 @@ use std::fs;
 
 use impresspress::cli::helpers::cloudflare::{
     assets::release_manifest_from_staged_dir,
-    build::WORKER_BUILD_VERSION,
+    build::{WORKER_BUILD_STRIP_ENV, WORKER_BUILD_VERSION},
     entry::entry_module_source,
     prepared::{stage_prepared_module, ApplicationArtifactIdentity, PREPARED_TEXT_GLOB},
     wrangler::{
@@ -362,9 +362,13 @@ fn generate_pins_worker_build_and_skips_reinstall_when_present() {
         "build command must check the installed version before deciding \
          whether to reinstall:\n{body}"
     );
+    let (strip_key, strip_value) = WORKER_BUILD_STRIP_ENV;
     assert!(
-        body.contains("worker-build --no-default-features"),
-        "build command must still run worker-build after the check:\n{body}"
+        body.contains(&format!(
+            "{strip_key}={strip_value} worker-build --no-default-features"
+        )),
+        "build command must still run worker-build after the check, with the \
+         strip override worker-build 0.8 needs:\n{body}"
     );
 }
 
@@ -635,7 +639,7 @@ fn the_password_hasher_config_is_golden() {
         r#"
 name = "wafer-site-password-hasher"
 account_id = "test-acct"
-main = "../impresspress-password-hasher/build/worker/shim.mjs"
+main = "../impresspress-password-hasher/build/index.js"
 compatibility_date = "2026-05-01"
 workers_dev = false
 preview_urls = false

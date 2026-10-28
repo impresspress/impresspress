@@ -74,7 +74,6 @@ pub fn check_release_profile(repo_root: &Path) -> Result<()> {
     eprintln!("      opt-level = \"z\"");
     eprintln!("      lto = true");
     eprintln!("      codegen-units = 1");
-    eprintln!("      strip = true");
     eprintln!("      panic = \"abort\"");
     eprintln!();
     Ok(())
@@ -151,7 +150,7 @@ pub fn check_wasm_size(wasm_path: &Path) -> Result<()> {
     eprintln!();
     eprintln!("    Levers, in priority order:");
     eprintln!("      1. Verify [profile.release] in Cargo.toml is set for size:");
-    eprintln!("         opt-level=\"z\", lto=true, codegen-units=1, strip=true,");
+    eprintln!("         opt-level=\"z\", lto=true, codegen-units=1,");
     eprintln!("         panic=\"abort\".");
     eprintln!("      2. Feature-gate impresspress-core blocks you don't use");
     eprintln!("         (products, vector, files, llm, userportal, messages).");
@@ -254,15 +253,9 @@ fn collect_profile_issues(parsed: &toml::Value) -> Vec<String> {
         },
     }
 
-    // strip: should be true to drop the function-names section (~half
-    // a MB on a typical Rust WASM).
-    match release.get("strip") {
-        None => issues.push("strip is unset — set strip = true".into()),
-        Some(v) => match (v.as_bool(), v.as_str()) {
-            (Some(true), _) | (_, Some("symbols")) | (_, Some("debuginfo")) => {}
-            _ => issues.push(format!("strip = {v} — set strip = true")),
-        },
-    }
+    // strip: not checked. Every Worker build overrides it
+    // (`build::WORKER_BUILD_STRIP_ENV` says why) and drops the
+    // function-names section itself (`build::strip_name_section`).
 
     // panic = "abort" is recommended but not required; mention only if
     // explicitly set to something else. Absence is common and not loud.
@@ -295,7 +288,7 @@ mod tests {
     #[test]
     fn default_settings_are_all_flagged() {
         let issues = collect_profile_issues(&parse("[profile.release]\n"));
-        assert_eq!(issues.len(), 4); // opt-level, lto, codegen-units, strip
+        assert_eq!(issues.len(), 3); // opt-level, lto, codegen-units
     }
 
     #[test]
@@ -356,16 +349,24 @@ strip = true
         }
     }
 
+    /// `strip` is the Worker build's to set, not the consumer's: any value,
+    /// or none, passes.
     #[test]
-    fn strip_symbols_passes() {
-        let toml = r#"
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = "symbols"
-"#;
-        assert!(collect_profile_issues(&parse(toml)).is_empty());
+    fn strip_is_not_checked() {
+        for strip in [
+            "",
+            "strip = false",
+            "strip = \"symbols\"",
+            "strip = \"debuginfo\"",
+        ] {
+            let toml = format!(
+                "[profile.release]\nopt-level = \"z\"\nlto = true\ncodegen-units = 1\n{strip}\n"
+            );
+            assert!(
+                collect_profile_issues(&parse(&toml)).is_empty(),
+                "{strip:?} should pass"
+            );
+        }
     }
 
     #[test]
