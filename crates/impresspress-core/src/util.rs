@@ -32,9 +32,9 @@ pub fn json_map(val: serde_json::Value) -> HashMap<String, serde_json::Value> {
 
 /// Coerce a JSON value to `i64`, accepting both numbers and numeric strings.
 ///
-/// The SQLite service stores auto-created (lazily added) columns as TEXT, so
-/// integer values can round-trip as JSON strings (e.g. `"384"`). Try the
-/// number first for backends/columns that round-trip faithfully, then fall
+/// A SQLite column declared `TEXT` — which every column an earlier build's
+/// lazy column-add created was, on SQLite — hands an integer back as a JSON
+/// string (e.g. `"384"`). Try the number first for backends/columns that round-trip faithfully, then fall
 /// back to parsing the string.
 pub fn json_as_i64(v: &serde_json::Value) -> Option<i64> {
     v.as_i64()
@@ -96,8 +96,9 @@ pub trait RecordExt {
     /// value is not a JSON string.
     ///
     /// A JSON-encoded column is *not* one of these: declared `TEXT` it holds
-    /// the encoded text rather than the value, and declared JSON (or added
-    /// lazily for an object/array value) it arrives as a `Value::Object`, for
+    /// the encoded text rather than the value, and declared JSON (or created
+    /// by an earlier build's lazy column-add for an object/array value) it
+    /// arrives as a `Value::Object`, for
     /// which this accessor answers `""` although the payload is plainly
     /// there. Reach for [`Self::json_value_field`],
     /// [`Self::json_object_field`] or [`Self::json_text_field`] instead.
@@ -125,9 +126,9 @@ pub trait RecordExt {
     /// Such columns are written by [`serde_json::to_string`]. A column declared
     /// `TEXT` comes back as that literal string on every backend (SQLite,
     /// Postgres, D1, the browser's sql.js), and this parses it. The
-    /// already-decoded arm is for a column declared JSON, or one added lazily
-    /// for an object/array value, which the backend hands back as the value
-    /// itself; the helper is correct either way, which is what lets a view
+    /// already-decoded arm is for a column declared JSON, or one an earlier
+    /// build's lazy column-add created for an object/array value, which the
+    /// backend hands back as the value itself; the helper is correct either way, which is what lets a view
     /// declare `object` / `array` truthfully.
     /// `Null` when the column is absent or does not decode.
     fn json_value_field(&self, key: &str) -> serde_json::Value;

@@ -872,7 +872,7 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // the `variables` door above
             "secret_tables.rs",
             // the stamped-column migration tests' engine seeds a users row
-            // by raw SQL against the schema before auth's 017 and writes the
+            // by raw SQL against the schema before auth's 017 and adds the
             // reset-token columns as production's typed write did before
             // strict schema — the schema under test, which no repo function
             // can write

@@ -16,9 +16,8 @@
 //! response waits on is exactly what runs inside the scope.
 //!
 //! The database is the platform's SQLite service behind [`D1Shaped`], a
-//! `DbExec` decorator that makes it behave like the D1 adapter in the three
-//! ways that decide what a request costs there: STRICT_SCHEMA on (as the
-//! generated wrangler config sets it), one schema cache that outlives the
+//! `DbExec` decorator that makes it behave like the D1 adapter in the two ways
+//! that decide what a request costs there: one schema cache that outlives the
 //! request (D1's is the isolate's), and one round trip per primitive, with a
 //! `run_batch`/`run_transaction` one round trip for all of its statements (D1's
 //! `db.batch()`). Every `get`/`list`/`create`/... is the shared `DbExec`
@@ -30,7 +29,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -101,7 +100,6 @@ impl Drop for InFlight<'_> {
 struct D1Shaped {
     inner: SQLiteDatabaseService,
     cache: SchemaCache,
-    strict: AtomicBool,
     ledger: Arc<Ledger>,
 }
 
@@ -143,10 +141,6 @@ impl DbExec for D1Shaped {
 
     fn schema_cache(&self) -> Option<&SchemaCache> {
         Some(&self.cache)
-    }
-
-    fn strict_schema(&self) -> bool {
-        self.strict.load(Ordering::SeqCst)
     }
 
     fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
@@ -289,7 +283,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
-            set_strict_schema: custom,
             statement_budget: forward,
         }
 
@@ -306,10 +299,6 @@ wafer_core::forward_database_service! {
         async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
             self.cache.clear();
             DatabaseService::schema_add_column(&self.inner, table, column).await
-        }
-
-        fn set_strict_schema(&self, enabled: bool) {
-            self.strict.store(enabled, Ordering::SeqCst);
         }
     }
 }
@@ -352,7 +341,6 @@ async fn start() -> Site {
     let database: Arc<dyn DatabaseService> = Arc::new(D1Shaped {
         inner: SQLiteDatabaseService::open(&infra.db_path).expect("open sqlite"),
         cache: SchemaCache::new(),
-        strict: AtomicBool::new(false),
         ledger: Arc::clone(&ledger),
     });
     let app_env = HashMap::from([
@@ -387,9 +375,6 @@ async fn start() -> Site {
     .expect("seal");
     assert!(report.ok, "boot must succeed: {report:?}");
     wafer.run_start_lifecycle().await;
-    // Production D1 runs with STRICT_SCHEMA on: the generated wrangler config
-    // sets it for every Cloudflare deploy.
-    database.set_strict_schema(true);
     Site {
         wafer: wafer.bind_all(),
         database,
@@ -812,7 +797,6 @@ async fn a_raw_transaction_is_one_round_trip_that_fails_whole() {
         )
         .expect("open sqlite"),
         cache: SchemaCache::new(),
-        strict: AtomicBool::new(true),
         ledger: Arc::clone(&ledger),
     };
 

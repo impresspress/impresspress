@@ -75,15 +75,15 @@ pub(crate) use impresspress_core::config_vars::{
 };
 
 /// Shared configuration consumed synchronously while the builder constructs
-/// middleware, plus the two operational knobs a deploy sets in
+/// middleware, plus the one operational knob a deploy sets in
 /// `wrangler.toml`.
 ///
-/// Most entries are here because they cannot be deferred to the D1-backed
-/// `ConfigSource`: the flow (and the database service) already exist by the
-/// time per-block config is resolvable.
+/// The middleware entries are here because they cannot be deferred to the
+/// D1-backed `ConfigSource`: the flow already exists by the time per-block
+/// config is resolvable.
 ///
-/// `IMPRESSPRESS_REQUEST_LOG` is the exception, and that reason does **not**
-/// apply to it — it is read per request, long after both exist. It is here
+/// `IMPRESSPRESS_REQUEST_LOG`, the knob, is here for another reason: that one
+/// does **not** apply to it — it is read per request, long after both exist. It is here
 /// for a different reason: it is an infrastructure key
 /// ([`impresspress_core::config_vars::is_infrastructure_key`]), so
 /// `blocks::config` answers it from the boot map whatever the `variables`
@@ -93,7 +93,6 @@ pub(crate) const BUILDER_WORKER_VAR_KEYS: &[&str] = &[
     impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
     impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
     impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY,
-    wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY,
 ];
 
 /// Every `worker::Env` var and secret this crate reads, as one value.
@@ -120,7 +119,6 @@ pub(crate) struct CfEnvironment {
     jwt_secret: Option<String>,
     cors_allowed_origins: Option<String>,
     csp_directives: Option<String>,
-    strict_schema: Option<String>,
     request_log: Option<String>,
 
     // ── operational knobs read by a service constructor or a request guard ───
@@ -159,30 +157,6 @@ fn secret(env: &worker::Env, name: &str) -> Option<String> {
     env.secret(name).ok().map(|value| value.to_string())
 }
 
-/// Interpret a bound `WAFER_RUN__DATABASE__STRICT_SCHEMA` value exactly as
-/// `wafer-core` does.
-///
-/// This deliberately mirrors `wafer-core`'s private `config_flag_enabled`
-/// (`interfaces/database/handler.rs`), which is what `strict_schema_from`
-/// applies to the database block's `Init` config: trimmed, `"true"`
-/// case-insensitively or `"1"`, and nothing else. Both readings are of the
-/// *same* var — the constructor's, through
-/// [`CfEnvironment::strict_schema_enabled`], and `Init`'s, through the
-/// `ConfigSource` overlay this environment fills (`BUILDER_WORKER_VAR_KEYS`) —
-/// so a value the two disagreed about would put a runtime's own D1 service and
-/// its drain handle into different modes.
-///
-/// It is therefore NOT
-/// [`impresspress_core::config_vars::is_truthy`], the repository's general
-/// yes/no predicate: that one also accepts `"yes"` and `"on"`, which
-/// `wafer-core` reads as disabled. The test
-/// `strict_schema_reads_the_flag_the_way_wafer_core_does` in this module's
-/// `tests` pins the difference.
-fn strict_schema_flag_enabled(value: &str) -> bool {
-    let value = value.trim();
-    value.eq_ignore_ascii_case("true") || value == "1"
-}
-
 impl CfEnvironment {
     /// Read every var and secret this crate consumes, once.
     ///
@@ -207,10 +181,6 @@ impl CfEnvironment {
                 impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
             ),
             csp_directives: var(env, impresspress_core::config_vars::CSP_DIRECTIVES_KEY),
-            strict_schema: var(
-                env,
-                wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY,
-            ),
             request_log: var(env, impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY),
 
             cf_log_level: var(env, CF_LOG_LEVEL_KEY),
@@ -296,8 +266,6 @@ impl CfEnvironment {
             &self.cors_allowed_origins
         } else if key == impresspress_core::config_vars::CSP_DIRECTIVES_KEY {
             &self.csp_directives
-        } else if key == wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY {
-            &self.strict_schema
         } else if key == impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY {
             &self.request_log
         } else {
@@ -337,18 +305,18 @@ impl CfEnvironment {
         self.jwt_secret = Some(value.to_string());
     }
 
+    /// Bind `WAFER_RUN_SHARED__CSP_DIRECTIVES` to the raw string a Worker var
+    /// would carry. Test-only, same rule as above.
+    #[cfg(test)]
+    pub(crate) fn set_csp_directives_for_test(&mut self, value: &str) {
+        self.csp_directives = Some(value.to_string());
+    }
+
     /// Bind `IMPRESSPRESS_PASSWORD_HASHER_SHARDS` to the raw string a Worker
     /// var would carry. Test-only, same rule as above.
     #[cfg(test)]
     pub(crate) fn set_password_hasher_shards_for_test(&mut self, value: &str) {
         self.password_hasher_shards = Some(value.to_string());
-    }
-
-    /// Bind `WAFER_RUN__DATABASE__STRICT_SCHEMA` to the raw string a Worker
-    /// var would carry. Test-only, same rule as above.
-    #[cfg(test)]
-    pub(crate) fn set_strict_schema_for_test(&mut self, value: &str) {
-        self.strict_schema = Some(value.to_string());
     }
 
     /// The deployed Worker version id, when the `[version_metadata]` binding is
@@ -390,30 +358,6 @@ impl CfEnvironment {
     #[cfg(test)]
     pub(crate) fn set_executor_trace_for_test(&mut self, value: &str) {
         self.executor_trace = Some(value.to_string());
-    }
-
-    /// This deploy's `WAFER_RUN__DATABASE__STRICT_SCHEMA` verdict — whether a
-    /// SQL backend may trust its migrated schema and skip per-operation
-    /// introspection.
-    ///
-    /// Every D1 service this crate constructs is born with this verdict
-    /// already applied (see
-    /// [`make_d1_database_service_concrete`](crate::services::make_d1_database_service_concrete)),
-    /// because `wafer-run`'s own application of it — `handle_lifecycle`
-    /// calling [`DatabaseService::set_strict_schema`] at `Init`, from the
-    /// database block's `Init` config — only ever reaches the one service a
-    /// *Wafer runtime* was built around. Two D1 services are built outside
-    /// any runtime and so are never reached by it: the audit-row write's
-    /// batch handle in
-    /// `run_with_config` (constructed per request, used inside
-    /// `ctx.wait_until`) and the handle `build_runtime` reads
-    /// `block_settings` through before it has a runtime to run `Init` on.
-    ///
-    /// [`DatabaseService::set_strict_schema`]: wafer_core::interfaces::database::service::DatabaseService::set_strict_schema
-    pub(crate) fn strict_schema_enabled(&self) -> bool {
-        self.strict_schema
-            .as_deref()
-            .is_some_and(strict_schema_flag_enabled)
     }
 
     /// How many D1 queries one Worker invocation may run: the bound
@@ -668,7 +612,6 @@ pub(crate) mod test_support {
             jwt_secret: None,
             cors_allowed_origins: None,
             csp_directives: None,
-            strict_schema: None,
             request_log: None,
             cf_log_level: None,
             asset_base_url: None,
@@ -715,7 +658,6 @@ pub(crate) mod test_support {
             ("csp_directives", |e| {
                 e.csp_directives = Some("v".to_string())
             }),
-            ("strict_schema", |e| e.strict_schema = Some("v".to_string())),
             ("request_log", |e| e.request_log = Some("v".to_string())),
             ("cf_log_level", |e| e.cf_log_level = Some("v".to_string())),
             ("asset_base_url", |e| {
@@ -857,10 +799,6 @@ mod tests {
                 "default-src 'self'",
             ),
             (
-                wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY,
-                "1",
-            ),
-            (
                 impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY,
                 "errors",
             ),
@@ -952,46 +890,6 @@ mod tests {
             .prepared_runtime_identity()
             .expect("a fully bound prepared-runtime contract parses");
         assert_eq!(prepared.application_id, "app");
-    }
-
-    /// The STRICT_SCHEMA verdict every D1 service is constructed with must be
-    /// the one `wafer-core` would reach from the same string, because
-    /// `handle_lifecycle` re-applies the var from the database block's `Init`
-    /// config on the runtime's own service. If the two readings disagreed,
-    /// that service and the audit-row write's handle would run in different
-    /// modes off one var.
-    ///
-    /// `"yes"` and `"on"` are the rows that matter: they are true for
-    /// [`impresspress_core::config_vars::is_truthy`], the repository's general
-    /// yes/no predicate, and false for `wafer-core`'s `config_flag_enabled`.
-    /// Swapping `strict_schema_flag_enabled` for `is_truthy` fails here.
-    #[wasm_bindgen_test]
-    fn strict_schema_reads_the_flag_the_way_wafer_core_does() {
-        let key = wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY;
-        let enabled_by = ["true", "TRUE", "True", " true ", "1", " 1 "];
-        let disabled_by = ["", " ", "0", "false", "yes", "on", "YES", "ON", "enabled"];
-
-        for value in enabled_by {
-            let env = RecordingEnv::new(&[(key, value)]);
-            assert!(
-                CfEnvironment::capture(&env.env).strict_schema_enabled(),
-                "{value:?} enables STRICT_SCHEMA for wafer-core, so it must here",
-            );
-        }
-        for value in disabled_by {
-            let env = RecordingEnv::new(&[(key, value)]);
-            assert!(
-                !CfEnvironment::capture(&env.env).strict_schema_enabled(),
-                "{value:?} does NOT enable STRICT_SCHEMA for wafer-core, so it \
-                 must not here",
-            );
-        }
-
-        let unbound = RecordingEnv::new(&[]);
-        assert!(
-            !CfEnvironment::capture(&unbound.env).strict_schema_enabled(),
-            "an unset var is off, matching wafer-core's `is_some_and`",
-        );
     }
 
     /// The D1 query limit: unset is the default 1000, a bound number in range
@@ -1148,7 +1046,6 @@ mod tests {
         all_set.jwt_secret = Some("jwt".to_string());
         all_set.cors_allowed_origins = Some("cors".to_string());
         all_set.csp_directives = Some("csp".to_string());
-        all_set.strict_schema = Some("1".to_string());
         all_set.request_log = Some("errors".to_string());
 
         for key in PROTECTED_ENV_KEYS.iter().chain(BUILDER_WORKER_VAR_KEYS) {
@@ -1158,7 +1055,7 @@ mod tests {
             );
             assert!(CfEnvironment::owns_config_key(key));
         }
-        assert_eq!(all_set.config_map().len(), 5);
+        assert_eq!(all_set.config_map().len(), 4);
         assert!(!CfEnvironment::owns_config_key(
             impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY
         ));

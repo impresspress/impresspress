@@ -192,17 +192,11 @@ fn settings_from_rows(rows: &[BlockSettingsRow]) -> BlockSettings {
 /// yield no rows, while every other failure must propagate — fabricating
 /// [`BlockSettings::default`] out of an outage reports every block enabled.
 ///
-/// That tolerance used to be inherited from `DbExec::list`, which returns
-/// `Ok(RecordList::default())` for a table its `table_present_for_op` guard
-/// says is absent. **STRICT_SCHEMA disables that guard**: it makes
-/// `table_present_for_op` return `Ok(true)` unconditionally (trusting the
-/// migrated schema is the whole point), so the SELECT runs and the backend
-/// answers "no such table". Cloudflare deploys set the var, so relying on
-/// that guard made the cold start depend on a flag that exists to remove it.
-///
-/// The probe is [`DatabaseService::schema_table_exists`], which `DbExec`
-/// deliberately routes past `table_present_for_op` straight to
-/// `dbx_table_exists` and which strict mode therefore does not disable.
+/// The executor trusts the migrated schema and has no table-existence guard:
+/// a `list` of a missing table runs, and the backend answers "no such
+/// table". So the tolerance is this function's, through an explicit probe:
+/// [`DatabaseService::schema_table_exists`], which asks the backend
+/// (`dbx_table_exists`) whether the table is there.
 /// [`crate::platform_state::wrap_grants::load`] — the other read on this
 /// same pre-migration path — probes the same way.
 ///
@@ -720,14 +714,13 @@ mod load_and_seed_tests {
     }
 
     #[tokio::test]
-    async fn repro_cold_start_under_strict_schema() {
+    async fn a_cold_start_before_any_migration_reads_no_settings() {
         let db = unmigrated_db();
-        db.set_strict_schema(true);
         let result = load(&db).await;
         assert!(
             result.is_ok(),
             "a first deploy builds its runtime BEFORE migrations run, so this \
-             read must tolerate the missing table even under STRICT_SCHEMA: {:?}",
+             read must tolerate the missing table: {:?}",
             result.err(),
         );
     }

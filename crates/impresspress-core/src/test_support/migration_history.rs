@@ -18,7 +18,8 @@
 //!   of (column, declared type, not-null, default, primary key) and of
 //!   indexes, order-insensitive. Seeding writes one row per table with raw
 //!   SQL that names only the columns the table has — never through a typed
-//!   write, whose lazy column-add would change the very schema under test.
+//!   write, which stamps `created_at`/`updated_at` columns an old state's
+//!   table may not have.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

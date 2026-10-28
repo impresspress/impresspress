@@ -101,19 +101,19 @@
 //!   [`Refusal::DriftedSchema`]. The remedy is the same.
 //! - **drifted schema** ([`Refusal::DriftedSchema`]): the block was adopted
 //!   or has run files, and a typed write created the column before the
-//!   migration that adds it ran. Native and browser databases run with
-//!   `STRICT_SCHEMA` off, where a write naming a missing column adds it; a
-//!   browser profile created before 2026-09-26 never migrated after its
-//!   creation, so newer code wrote such columns into it. Remedy: recreate the
-//!   database, or restore a backup (a browser's stopped screen offers
-//!   Reset).
+//!   migration that adds it ran. Until the pinned wafer-run made strict
+//!   schema the only behaviour (2026-10), native and browser databases added
+//!   a missing column on the first write naming it; a browser profile created
+//!   before 2026-09-26 never migrated after its creation, so newer code wrote
+//!   such columns into it. Remedy: recreate the database, or restore a backup
+//!   (a browser's stopped screen offers Reset).
 //!
 //! ## Adding a column a write may already have created
 //!
-//! Until strict schema is the only behaviour of every target, a native or
-//! browser database may hold a column no migration declared, created by the
-//! first typed write that named it. A new file that adds such a column is
-//! refused as drifted schema on exactly those databases. So before a file
+//! No write adds a column any more, but until 2026-10 a native or browser
+//! database added one on the first typed write that named it, so such a
+//! database may hold a column no migration declared. A new file that adds
+//! such a column is refused as drifted schema on exactly those databases. So before a file
 //! adds a column to an existing table, look for any code that ever wrote it
 //! there, current code and code since removed alike (`git log -S'"<name>"'`),
 //! and choose:
@@ -128,10 +128,9 @@
 //!   name and recreated — auth 017 does this for `users`, which six
 //!   cascading foreign keys reference, so it cannot be rebuilt.
 //!
-//! The test fixtures run strict schema (`TestContext`, and the browser
-//! crate's fixture databases), so a write path a test exercises fails that
-//! test if it names a column no migration declares. A write path no strict
-//! test reaches is not covered by that.
+//! A write path a test exercises fails that test if it names a column no
+//! migration declares, as it fails in production. A write path no test
+//! reaches is not covered by that.
 //!
 //! # Databases from before the ledger
 //!
@@ -2159,7 +2158,7 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
         let history = [state(&files[..1], Verdict::Applied(&["001_runs"]))];
         let ctx = ledger_ctx_with_hash(history[0].list_hash).await;
         pre_ledger(&ctx, &files[..1]).await;
-        // Test-fixture setup: the column a typed write added lazily.
+        // Test-fixture setup: the column an earlier build's typed write added.
         db::ddl(
             &ctx.fixture(),
             "ALTER TABLE ledger_runs ADD COLUMN drifted TEXT",
@@ -2266,7 +2265,6 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
                 schema_columns: forward,
                 schema_drop_table: forward,
                 schema_add_column: forward,
-                set_strict_schema: forward,
                 statement_budget: forward,
             }
 

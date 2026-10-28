@@ -8,28 +8,29 @@
 //! [`wafer_core::interfaces::database::codec`], the same policy the native
 //! SQLite and Cloudflare D1 backends decode with. All
 //! `get/list/count/sum/create/update/delete` orchestration — filter/IN
-//! expansion, sorted-key INSERT/UPDATE construction, lazy column-add,
-//! table-exists guards — is inherited from the shared `wafer-core` [`DbExec`]
-//! defaults, identical to `wafer-block-sqlite`, `wafer-block-postgres`, and the
+//! expansion, sorted-key INSERT/UPDATE construction, the unknown-column
+//! check — is inherited from the shared `wafer-core` [`DbExec`] defaults,
+//! identical to `wafer-block-sqlite`, `wafer-block-postgres`, and the
 //! Cloudflare D1 backend.
 //!
-//! Tables must already exist via the owning block's migration files (applied
-//! at `lifecycle(Init)`). The shared `ensure_data_columns` adds only a missing
-//! *column* a write's data names (always `TEXT` on SQLite), and
-//! `require_columns` refuses a read, filter or guard that names an unknown
-//! column instead of adding it — unless STRICT_SCHEMA is on, which this
-//! backend honours (see [`STRICT_SCHEMA`]): then neither introspects, and the
-//! statement itself fails on an unmigrated column.
+//! Every table and column comes from the owning block's migration files
+//! (applied before the runtime is built), or from a guest block's declared
+//! `ensure_table`. A write naming a column the table lacks, or any statement
+//! against a missing table, fails in sql.js (`no such column` / `no such
+//! table`). `require_columns` refuses a filter, sort or guard naming an
+//! unknown column first, as `InvalidArgument`, because SQLite would otherwise
+//! read the unresolvable `"col"` as a string literal.
 //!
 //! ## Schema cache
 //!
-//! The shared executor fronts its operations with introspection: a
-//! table-exists probe and a column list (off in STRICT_SCHEMA mode), and a
-//! primary-key lookup before every sorted or paged `list`, whose `ORDER BY`
-//! ends with the key. Each of those is a `bridge::db_query_raw` round trip
-//! into sql.js, so this backend memoizes them in [`SCHEMA_CACHE`], one cache
-//! for the one database. The shared defaults invalidate it on every schema
-//! change they make (`exec_raw`, `ensure_schema_table`, lazy column-add); the
+//! The shared executor fronts its operations with introspection: a column
+//! list (the JSON columns a row decodes with, and the unknown-column check),
+//! the id policy a `create` mints by, and a primary-key lookup before every
+//! sorted or paged `list`, whose `ORDER BY` ends with the key. Each of those
+//! is a `bridge::db_query_raw` round trip into sql.js, so this backend
+//! memoizes them in [`SCHEMA_CACHE`], one cache for the one database. The
+//! shared defaults invalidate it on every schema change they make
+//! (`exec_raw`, `ensure_schema_table`); the
 //! schema changes made anywhere else invalidate it themselves: this file's own
 //! `schema_drop_table` / `schema_add_column`, `vector::service`'s DDL (through
 //! [`forget_table_schema`]), and `db_init` reopening the database (through
@@ -39,7 +40,7 @@
 //!
 //! It is written with [`wafer_core::forward_database_service!`], whose
 //! `ops { … }` block must name every operation on the trait or it does not
-//! expand. Eight of the trait's operations carry defaults that are NOT
+//! expand. Four of the trait's operations carry defaults that are NOT
 //! pass-throughs, so an implementation that leaves one out does not inherit
 //! "the same behaviour" — it inherits a different one, silently. Writing the
 //! word `inherit` is how a default gets taken here.
@@ -50,10 +51,11 @@
 //! mutates sql.js's in-memory database. Outside a flush scope, flushing is
 //! done exactly once per *logical* [`DatabaseService`] mutation, by
 //! [`BrowserDatabaseService::with_flush`], which wraps every mutating
-//! `DatabaseService` method. A logical mutation (e.g. `create`) may issue
-//! several SQL statements internally (a lazy column-add ALTER, then the
-//! INSERT) — those all share the ONE flush at the end of the call, instead of
-//! the previous behavior of flushing after every single statement.
+//! `DatabaseService` method. A logical mutation (e.g. `ensure_schema_table`)
+//! may issue several SQL statements internally (a `CREATE TABLE`, then an
+//! `ADD COLUMN` per missing declared column) — those all share the ONE flush
+//! at the end of the call, instead of the previous behavior of flushing after
+//! every single statement.
 //!
 //! Inside a [`crate::flush_scope`] — one request — the mutations share one
 //! flush instead: each records that the scope owes one, and the scope flushes
@@ -81,13 +83,7 @@
 //! unique-key violation is [`DatabaseError::AlreadyExists`], as on the native
 //! backends, and anything else `Internal`.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        LazyLock,
-    },
-};
+use std::{collections::HashMap, sync::LazyLock};
 
 // The `forward_database_service!` ledger below spells every generated
 // signature with a fully-qualified path, so only the types the `custom` bodies
@@ -107,24 +103,14 @@ use wafer_sql_utils::{introspect, Backend};
 
 use crate::{bridge, db_codec};
 
-/// The resolved `WAFER_RUN__DATABASE__STRICT_SCHEMA` verdict, written once by
-/// `DatabaseService::set_strict_schema` at the shared `DatabaseBlock`'s `Init`
-/// and read by [`DbExec::strict_schema`] on every operation.
+/// Memoized column-list / id-policy / primary-key facts for the one sql.js
+/// database, returned by [`DbExec::schema_cache`].
 ///
 /// A static rather than a field because [`BrowserDatabaseService`] is a unit
 /// struct: it carries no handle, and every instance addresses the one global
-/// sql.js/OPFS database — `impresspress-web` constructs a second one for its
-/// boot hook precisely because they are interchangeable. STRICT_SCHEMA is a
-/// property of that database, so a per-instance field would let two handles
-/// disagree about the same schema.
-static STRICT_SCHEMA: AtomicBool = AtomicBool::new(false);
-
-/// Memoized table-exists / column-list / primary-key facts for the one
-/// sql.js database, returned by [`DbExec::schema_cache`].
-///
-/// A static for the reason [`STRICT_SCHEMA`] is one: every
-/// [`BrowserDatabaseService`] handle addresses the same database, so they
-/// share what is known about its schema. A per-handle cache would let the
+/// sql.js/OPFS database (`impresspress-web` constructs a second one for its
+/// boot hook precisely because they are interchangeable), so they share what
+/// is known about its schema. A per-handle cache would let the
 /// handle `impresspress-web`'s boot hook builds keep facts that a migration
 /// run through the runtime's handle had already invalidated.
 static SCHEMA_CACHE: LazyLock<SchemaCache> = LazyLock::new(SchemaCache::new);
@@ -302,8 +288,8 @@ where
 /// - `op` fails → the operation's own error, whatever the flush did. It is the
 ///   more specific and more actionable of the two. The flush is still
 ///   *attempted* — a failed logical operation may have applied some of its
-///   statements already (a lazy column-add ALTER before a rejected INSERT),
-///   and skipping the flush would leave those in memory until some unrelated
+///   statements already (an `ensure_schema_table` whose `CREATE TABLE` ran
+///   before a refused `ADD COLUMN`), and skipping the flush would leave those in memory until some unrelated
 ///   later mutation happened to write them out.
 pub(crate) fn resolve_flush_outcome<T, E>(op: Result<T, E>, flush: Result<(), E>) -> Result<T, E> {
     match (op, flush) {
@@ -314,7 +300,7 @@ pub(crate) fn resolve_flush_outcome<T, E>(op: Result<T, E>, flush: Result<(), E>
 }
 
 // SAFETY: `BrowserDatabaseService` is a unit struct; the state its handles
-// share (`STRICT_SCHEMA`, `SCHEMA_CACHE`) is in statics that are `Sync`.
+// share (`SCHEMA_CACHE`) is in a static that is `Sync`.
 // wasm32-unknown-unknown has no threads, so the `Send`/`Sync` bounds
 // required by `Arc<dyn DatabaseService>` are satisfied trivially — no
 // cross-thread aliasing or data races are possible.
@@ -393,13 +379,6 @@ impl DbExec for BrowserDatabaseService {
     /// `list` would read the table's primary key through the bridge first.
     fn schema_cache(&self) -> Option<&SchemaCache> {
         Some(&SCHEMA_CACHE)
-    }
-
-    /// The flag `DatabaseService::set_strict_schema` recorded. When it is on,
-    /// the shared orchestration skips the per-operation table-exists probe and
-    /// the lazy ADD COLUMN path, trusting the migrated schema.
-    fn strict_schema(&self) -> bool {
-        STRICT_SCHEMA.load(Ordering::Relaxed)
     }
 
     /// sql.js runs in the page's own worker and has no per-invocation
@@ -620,8 +599,8 @@ const NO_ACTIVE_TRANSACTION: &str = "no transaction is active";
 /// - **At `BEGIN`**, the `BEGIN` itself is the probe: SQLite refuses it with
 ///   [`NESTED_BEGIN`] when a transaction is already open. Every logical write
 ///   starts on a clean connection ([`with_flush_mapped`] sees to it), so one
-///   open here was opened during this write, and its earlier statements — a
-///   lazy `ADD COLUMN` before a `create_many`'s inserts, say — ran inside it.
+///   open here was opened during this write, and its earlier statements ran
+///   inside it.
 ///   It cannot be committed (nobody framed those statements) or kept (the
 ///   flush would roll it back), so it is rolled back and the write fails,
 ///   saying why.
@@ -704,13 +683,13 @@ fn rollback(control: &mut impl FnMut(&str) -> Result<(), String>) -> Result<(), 
 //
 // Written with `forward_database_service!` rather than by hand. The macro's
 // `ops { … }` block names EVERY operation on the trait and refuses to expand
-// if one is missing, so the thirty lines below are a ledger of what this
+// if one is missing, so the twenty-nine lines below are a ledger of what this
 // backend does with each: `forward` = the shared `DbExec` default, `custom` =
 // written here, `inherit` = deliberately the `DatabaseService` trait default.
-// Eight of those trait defaults are not pass-throughs (`take_where` is a
-// list-then-delete loop instead of `DELETE … RETURNING`, `set_strict_schema`
-// is a silent no-op, …), and a backend that omits one does not get "the same
-// behaviour" — it gets a different, worse one, invisibly. That is the bug the
+// Four of those trait defaults are not pass-throughs (`delete_where` is a
+// list-then-delete loop instead of one `DELETE … WHERE`, …), and a backend
+// that omits one does not get "the same behaviour" — it gets a different,
+// worse one, invisibly. That is the bug the
 // ledger makes unrepresentable.
 //
 // The `custom` entries here are all the same thing: every method that can
@@ -719,8 +698,6 @@ fn rollback(control: &mut impl FnMut(&str) -> Result<(), String>) -> Result<(), 
 // exactly one OPFS flush happens per logical call however many `run_execute`
 // statements the shared default issued internally. `take_where` is a mutator
 // (`DELETE … RETURNING`) despite its read-shaped return, so it is flushed too.
-// `set_strict_schema` is custom because `DbExec` has no such operation to
-// forward to — it is the setter behind `DbExec::strict_schema`.
 wafer_core::forward_database_service! {
     impl DatabaseService for BrowserDatabaseService {
         forward_to DbExec;
@@ -754,7 +731,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
-            set_strict_schema: custom,
             statement_budget: forward,
         }
 
@@ -947,17 +923,6 @@ wafer_core::forward_database_service! {
             })
             .await
         }
-
-        /// Record the resolved STRICT_SCHEMA verdict so [`DbExec::strict_schema`]
-        /// can read it. The trait default is a silent no-op, which is the
-        /// wrong answer for a backend that DOES run through `DbExec`: the
-        /// shared `DatabaseBlock` advertises
-        /// `WAFER_RUN__DATABASE__STRICT_SCHEMA` as a config key and applies it
-        /// at `Init` on every backend, so inheriting the no-op meant this
-        /// target offered an operator a switch that did nothing.
-        fn set_strict_schema(&self, enabled: bool) {
-            STRICT_SCHEMA.store(enabled, Ordering::Relaxed);
-        }
     }
 }
 
@@ -1132,19 +1097,11 @@ export function installMemoryOpfs() {
         pub fn fail_next_opfs_read(name: &str);
     }
 
-    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it, with
-    /// strict schema on, as every `TestContext` in `impresspress-core` runs:
-    /// a fixture has to declare the columns its writes name. Set here, per
-    /// fixture, because the flag is one process-wide static that a booted
-    /// runtime's database `Init` sets too (off, without the key), so a value
-    /// left by an earlier test would make this one's mode depend on order.
+    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it. A
+    /// fixture has to declare the columns its writes name, as everywhere.
     pub async fn fresh_db() -> BrowserDatabaseService {
         install_memory_opfs();
         crate::db_init().await.expect("sql.js loads");
-        wafer_core::interfaces::database::service::DatabaseService::set_strict_schema(
-            &BrowserDatabaseService,
-            true,
-        );
         BrowserDatabaseService
     }
 }
@@ -1166,7 +1123,7 @@ mod sql_js_conformance {
     use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::{test_support::fresh_db, BrowserDatabaseService};
+    use super::test_support::fresh_db;
 
     fn row(id: &str, name: Option<&str>) -> HashMap<String, serde_json::Value> {
         let mut row = HashMap::from([("id".to_string(), serde_json::json!(id))]);
@@ -1176,29 +1133,43 @@ mod sql_js_conformance {
         row
     }
 
-    /// **A fixture database runs strict schema whatever ran before it.** A
-    /// booted runtime's database `Init` turns the process-wide flag off (this
-    /// target has no key for it), so `fresh_db` turns it on for its own
-    /// fixture: a write naming a column the table does not declare fails,
-    /// rather than adding it.
+    /// **A write never adds a column.** A `create` naming a column the table
+    /// does not declare fails in sql.js, and the table is left as it was: the
+    /// executor sends no `ALTER`.
     #[wasm_bindgen_test]
-    async fn a_fresh_database_runs_strict_schema_after_anything_turned_it_off() {
-        DatabaseService::set_strict_schema(&BrowserDatabaseService, false);
+    async fn a_write_naming_an_undeclared_column_fails_and_adds_nothing() {
         let svc = fresh_db().await;
         svc.exec_raw(
-            "CREATE TABLE sql_js_strict_t (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)",
+            "CREATE TABLE sql_js_undeclared_t (id TEXT PRIMARY KEY, created_at TEXT, \
+             updated_at TEXT)",
             &[],
         )
         .await
         .expect("create table");
+        let before = svc
+            .schema_columns("sql_js_undeclared_t")
+            .await
+            .expect("columns");
         let mut data = HashMap::new();
         data.insert(
             "column_no_migration_declares".to_string(),
             serde_json::json!("x"),
         );
-        svc.create("sql_js_strict_t", data)
+        let err = svc
+            .create("sql_js_undeclared_t", data)
             .await
             .expect_err("an undeclared column is refused, not added");
+        assert!(
+            matches!(err, DatabaseError::Internal(ref text) if text.contains("column_no_migration_declares")),
+            "sql.js names the column: {err:?}"
+        );
+        assert_eq!(
+            svc.schema_columns("sql_js_undeclared_t")
+                .await
+                .expect("columns"),
+            before,
+            "the refused write added no column"
+        );
     }
 
     #[wasm_bindgen_test]
@@ -1351,46 +1322,6 @@ mod codec_policy {
     }
 }
 
-/// STRICT_SCHEMA is applied, not silently dropped. `database.rs` is
-/// wasm32-only, so these run under `wasm-pack test --node`; they read and
-/// write the flag and touch no bridge.
-#[cfg(all(test, target_arch = "wasm32"))]
-mod strict_schema_policy {
-    use wafer_core::interfaces::database::{exec::DbExec, service::DatabaseService};
-    use wasm_bindgen_test::wasm_bindgen_test;
-
-    use super::BrowserDatabaseService;
-
-    /// **Fails on the pre-change tree**, where `set_strict_schema` was the
-    /// trait's silent no-op default and `DbExec::strict_schema` therefore
-    /// always answered `false`. `DatabaseBlock`'s `Init` reads
-    /// `WAFER_RUN__DATABASE__STRICT_SCHEMA` and calls the setter on every
-    /// backend, so the browser advertised the config key (through the shared
-    /// block's `config_keys`) and then ignored whatever an operator set.
-    #[wasm_bindgen_test]
-    fn setting_strict_schema_is_observed_by_the_shared_executor() {
-        let svc = BrowserDatabaseService;
-        DatabaseService::set_strict_schema(&svc, false);
-        assert!(!DbExec::strict_schema(&svc));
-
-        DatabaseService::set_strict_schema(&svc, true);
-        assert!(
-            DbExec::strict_schema(&svc),
-            "the shared orchestration must see the flag, or the table-exists \
-             probe and the lazy ADD COLUMN path stay on the hot path"
-        );
-
-        // A second handle sees it too: the service is a unit struct over one
-        // global sql.js database, so the flag is a property of that database
-        // and not of a handle. `impresspress-web` holds a second handle for
-        // its boot hook.
-        assert!(DbExec::strict_schema(&BrowserDatabaseService));
-
-        DatabaseService::set_strict_schema(&svc, false);
-        assert!(!DbExec::strict_schema(&svc));
-    }
-}
-
 /// The schema cache the shared executor memoizes introspection in. No bridge:
 /// the facts are written straight into the cache the executor reads.
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -1500,7 +1431,7 @@ mod flush_precedence {
     /// A FAILED operation must still flush. The headline of the durability
     /// change was exactly this: four vector-service sites ran the flush with
     /// `?`, so a failed mutation skipped it and left whatever statements had
-    /// already applied (a lazy column-add ALTER before a rejected INSERT) in
+    /// already applied (a statement before the one that failed) in
     /// memory only, until some unrelated later mutation happened to write them
     /// out. `resolve_flush_outcome` cannot see this — it is handed both
     /// outcomes — so the assertion has to be on the wrapper.
@@ -2022,7 +1953,7 @@ mod sql_js_transactions {
     /// **Fails on the pre-change tree.** A transaction left open on the
     /// connection — here by a `BEGIN` sent through `query_raw`, which does
     /// not flush and so never reaches the reopen that would end it — used to
-    /// swallow the next `create_many`: its lazy `ADD COLUMN`s ran inside that
+    /// swallow the next `create_many`: its statements ran inside that
     /// transaction and its own `BEGIN` was refused ("cannot start a
     /// transaction within a transaction"). The write now rolls the stranger's
     /// transaction back before it starts, and its rows land and are durable.

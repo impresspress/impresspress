@@ -677,68 +677,50 @@ async fn boot_fresh_with_env(
     (report, db, tmp)
 }
 
-/// A write naming a column the table does not have: added lazily unless
-/// STRICT_SCHEMA is on, refused when it is.
-async fn write_with_an_undeclared_column(db: &Arc<dyn DatabaseService>) -> bool {
+/// A row of the variables table, carrying `extra` as a further column.
+fn variable_row(extra: Option<&str>) -> HashMap<String, serde_json::Value> {
     let mut data = HashMap::new();
-    data.insert("key".to_string(), serde_json::json!("P4_STRICT_PROBE"));
+    data.insert("key".to_string(), serde_json::json!("P4_SCHEMA_PROBE"));
     data.insert("value".to_string(), serde_json::json!("x"));
-    data.insert(
-        "column_no_migration_declares".to_string(),
-        serde_json::json!("x"),
-    );
-    db.create(impresspress_core::platform_state::variables::TABLE, data)
-        .await
-        .is_ok()
+    if let Some(column) = extra {
+        data.insert(column.to_string(), serde_json::json!("x"));
+    }
+    data
 }
 
-/// `WAFER_RUN__DATABASE__STRICT_SCHEMA` is an operator's process-env knob
-/// that `wafer-run/database` reads from its `lifecycle(Init)` config. Native
-/// keeps it out of the variables table (nothing impresspress declares), so
-/// the block's `ConfigSource` must resolve it from the process environment —
-/// or the block applies its declared `false` and the export does nothing.
+/// A native boot trusts its migrated schema, with nothing exported: a typed
+/// write naming a column no migration declared fails in the backend rather
+/// than adding the column, and adds nothing. The control, the same row
+/// without that column, is written: the refusal is the column's.
 #[tokio::test]
-async fn the_strict_schema_env_var_reaches_the_database_blocks_init() {
-    let (report, db, _tmp) = boot_fresh_with_env(
-        "strict_schema_env",
-        HashMap::from([(
-            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY.to_string(),
-            "true".to_string(),
-        )]),
-    )
-    .await;
-    assert!(report.ok, "a strict boot must succeed: {report:?}");
-    assert!(
-        !write_with_an_undeclared_column(&db).await,
-        "STRICT_SCHEMA was exported, so the database must refuse to add a column lazily"
-    );
-
-    // The control: without the export the same write adds its column, so the
-    // refusal above is STRICT_SCHEMA's and not the write's.
-    let (report, db, _tmp) = boot_fresh_with_env("strict_schema_unset", HashMap::new()).await;
+async fn a_native_boot_refuses_a_write_naming_an_undeclared_column() {
+    let (report, db, _tmp) = boot_fresh_with_env("undeclared_column", HashMap::new()).await;
     assert!(report.ok, "{report:?}");
-    assert!(
-        write_with_an_undeclared_column(&db).await,
-        "without STRICT_SCHEMA a write adds the column it names"
+    let table = impresspress_core::platform_state::variables::TABLE;
+    let before = db.schema_columns(table).await.expect("columns");
+
+    db.create(table, variable_row(Some("column_no_migration_declares")))
+        .await
+        .expect_err("a write naming an undeclared column is refused");
+    assert_eq!(
+        db.schema_columns(table).await.expect("columns"),
+        before,
+        "the refused write added no column"
     );
+
+    db.create(table, variable_row(None))
+        .await
+        .expect("the same row without the undeclared column is written");
 }
 
-/// A strict native boot declares what the password-reset flow writes: auth's
-/// 017 adds `reset_token` and `reset_token_expires` to `users`, so storing a
-/// reset token, finding the account by it and spending it all succeed with
-/// strict schema on (every Cloudflare deployment runs it). Without 017 the
-/// first of those writes is the backend's `no such column`.
+/// A native boot declares what the password-reset flow writes: auth's 017
+/// adds `reset_token` and `reset_token_expires` to `users`, so storing a
+/// reset token, finding the account by it and spending it all succeed.
+/// Without 017 the first of those writes is the backend's `no such column`.
 #[tokio::test]
-async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
-    let (report, db, _tmp) = boot_fresh_with_env(
-        "strict_reset_token",
-        HashMap::from([(
-            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY.to_string(),
-            "true".to_string(),
-        )]),
-    )
-    .await;
-    assert!(report.ok, "a strict boot must succeed: {report:?}");
+async fn a_native_boot_stores_finds_and_spends_a_reset_token() {
+    let (report, db, _tmp) = boot_fresh_with_env("reset_token", HashMap::new()).await;
+    assert!(report.ok, "{report:?}");
     use impresspress_core::blocks::auth::repo::users;
     let table = users::TABLE;
     // Test-fixture setup: an account, by raw SQL naming its NOT NULL columns.
@@ -762,7 +744,7 @@ async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
     );
     db.update(table, "u1", stored)
         .await
-        .expect("a reset token is stored under strict schema");
+        .expect("a reset token is stored");
     // What `find_by_reset_token` reads, and `take_reset_token` writes.
     let by_token = |value: &str| {
         vec![wafer_block::db::Filter {
@@ -791,7 +773,7 @@ async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
     assert_eq!(
         db.update_where_count(table, &by_token("digest"), spent)
             .await
-            .expect("a reset token is spent under strict schema"),
+            .expect("a reset token is spent"),
         1
     );
 }

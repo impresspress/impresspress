@@ -37,8 +37,8 @@ pub(crate) fn now() -> String {
 ///
 /// * A column declared `TEXT` comes back as the literal string on every
 ///   backend (SQLite, Postgres, D1, the browser's sql.js). A column declared
-///   JSON — or one added lazily for an object/array value — comes back
-///   already decoded. `RecordExt::str_field` collapses the decoded case to
+///   JSON — or one an earlier build's lazy column-add created for an
+///   object/array value — comes back already decoded. `RecordExt::str_field` collapses the decoded case to
 ///   `""`, which would silently lose a whole manifest, so both are accepted.
 /// * Re-encoding a decoded value yields canonical JSON, whereas the literal
 ///   string is whatever was stored. Left alone, the *same manifest* would read
@@ -68,8 +68,8 @@ pub(crate) fn json_text(record: &wafer_core::clients::database::Record, key: &st
         Some(serde_json::Value::String(text)) => {
             serde_json::from_str::<serde_json::Value>(text).map_or_else(|_| text.clone(), canonical)
         }
-        // A column declared JSON (or added lazily for an object/array value):
-        // already decoded.
+        // A column declared JSON (or created by an earlier build's lazy
+        // column-add for an object/array value): already decoded.
         Some(value) => canonical(value.clone()),
         None => String::new(),
     }

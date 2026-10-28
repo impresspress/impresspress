@@ -37,8 +37,8 @@
 //!    This is the actual fix: an admin write lands in the table and the very
 //!    next read sees it.
 //! 3. Otherwise the boot map answers. It carries what the table cannot —
-//!    worker/env bindings, builder-time vars (CORS, CSP, and on Cloudflare
-//!    the `STRICT_SCHEMA` worker var) and the synthetic block-settings JSON.
+//!    worker/env bindings, builder-time vars (CORS, CSP) and the synthetic
+//!    block-settings JSON.
 //! 4. Otherwise `NotFound`, exactly as wafer-core's block reports it: the
 //!    one answer `config::get_default` / `get_optional` take as "unset".
 //!
@@ -212,9 +212,8 @@ pub struct VariablesConfigBlock {
     /// not claim, so a new config op added upstream keeps working here.
     inner: Arc<dyn Block>,
     /// The target's boot map: what the table cannot hold, or must not be
-    /// trusted for. Env and worker bindings, builder-time vars (CORS, CSP,
-    /// and on Cloudflare the `STRICT_SCHEMA` worker var), the block-settings
-    /// JSON, runtime markers, and the JWT secret. Native and the browser do
+    /// trusted for. Env and worker bindings, builder-time vars (CORS, CSP),
+    /// the block-settings JSON, runtime markers, and the JWT secret. Native and the browser do
     /// not copy the variables table into it — this block serves stored
     /// variables from the table itself.
     boot: Arc<dyn ConfigService>,

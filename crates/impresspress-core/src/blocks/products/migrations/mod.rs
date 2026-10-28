@@ -174,7 +174,7 @@ mod strict_upgrade_tests {
     //! the live path (an already-created `stripe_events` table without
     //! `updated_at`) that an in-place `CREATE TABLE IF NOT EXISTS` edit could
     //! never fix. Before 004 the next Stripe webhook (`db::create`, which stamps
-    //! `updated_at`) failed `no such column: updated_at` under STRICT_SCHEMA.
+    //! `updated_at`) failed `no such column: updated_at`.
 
     use std::{collections::HashMap, sync::Arc};
 
@@ -295,8 +295,7 @@ mod strict_upgrade_tests {
             "004 must add updated_at to the existing stripe_events table"
         );
 
-        // 4. STRICT_SCHEMA on, then the webhook write (create stamps updated_at).
-        db.set_strict_schema(true);
+        // 4. The webhook write (create stamps updated_at).
         let mut row = HashMap::new();
         row.insert("id".to_string(), json!("evt_new"));
         row.insert(
@@ -307,7 +306,7 @@ mod strict_upgrade_tests {
         let rec = db
             .create("impresspress__products__stripe_events", row)
             .await
-            .expect("strict-mode stripe_events create must succeed after 004");
+            .expect("a stripe_events create must succeed after 004");
         assert!(rec.data.contains_key("updated_at"));
     }
 
@@ -347,7 +346,6 @@ mod strict_upgrade_tests {
             .expect("query system templates");
         assert_eq!(templates.len(), 4);
 
-        db.set_strict_schema(true);
         let mut offer = HashMap::new();
         offer.insert("id".to_string(), json!("offer_test"));
         offer.insert("product_id".to_string(), json!("product_test"));
@@ -357,7 +355,7 @@ mod strict_upgrade_tests {
         let record = db
             .create("impresspress__products__offers", offer)
             .await
-            .expect("strict-schema offer insert");
+            .expect("an offer insert names only declared columns");
         assert_eq!(
             record
                 .data

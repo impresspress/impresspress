@@ -9,25 +9,25 @@
 //! - **fresh:** every block's list from empty; each new file runs and is
 //!   recorded `ran`.
 //! - **lazy:** every block's list up to its new file, rows seeded with raw
-//!   SQL that names only the columns that list creates, then the typed
-//!   writes production made before strict schema, on a service without it,
-//!   so that the executor's lazy column-add creates the stamped columns
-//!   exactly as it did (the definition it gives a column is the thing the
-//!   PostgreSQL files' `IF NOT EXISTS` rests on, so it is reproduced, not
-//!   imitated). Then today's lists through the real runner: no refusal, each
-//!   new file `ran`, the schema equal to the fresh install's — every
-//!   column's declared type, nullability and default included — and every
-//!   seeded value where the files say it lands.
+//!   SQL that names only the columns that list creates, then the stamped
+//!   columns as the executor's lazy column-add created them before strict
+//!   schema became the only behaviour (wafer-run `f0ca9c79`): a raw `ALTER
+//!   TABLE … ADD COLUMN "c" TEXT` per column, nullable with no default, the
+//!   definition `column_type_for_value` gave a string on both dialects, and
+//!   the value its write stamped. That definition is the thing the
+//!   PostgreSQL files' `IF NOT EXISTS` rests on. Then today's lists through
+//!   the real runner: no refusal, each new file `ran`, the schema equal to
+//!   the fresh install's — every column's declared type, nullability and
+//!   default included — and every seeded value where the files say it lands.
 //! - **lazy reset token:** the same, plus a password reset written before
 //!   strict schema. `users` cannot be rebuilt (six cascading foreign keys),
 //!   so auth 017 adds its columns plainly and that database is refused by
 //!   name as drifted schema, 017 unrecorded, while every other block
 //!   upgrades.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
-use wafer_block::db::{Filter, FilterOp};
 use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_sql_utils::Backend;
 
@@ -219,89 +219,64 @@ async fn seed(db: &Arc<dyn DatabaseService>) -> Result<(), String> {
     Ok(())
 }
 
-fn eq(field: &str, value: Value) -> Filter {
-    Filter {
-        field: field.to_string(),
-        operator: FilterOp::Equal,
-        value,
-    }
-}
-
-fn data(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-    pairs
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), v.clone()))
-        .collect()
-}
-
-/// The typed writes production made before strict schema, each of which
-/// created its stamped column lazily (the executor stamps `updated_at` on
-/// every one; the maintenance create is `mark_audit_degraded`'s old
-/// fallback, which added `created_at` before its insert failed on the
-/// singleton's key). `db` must run without strict schema.
+/// The columns production's typed writes created lazily before strict
+/// schema, and what those writes left in them (test-fixture setup, by raw
+/// SQL: no write adds a column now). The executor stamped `updated_at` on
+/// every one; the maintenance `created_at` is `mark_audit_degraded`'s old
+/// fallback create, which added the column before its insert failed on the
+/// singleton's key, so it stayed NULL.
 async fn write_lazily(db: &Arc<dyn DatabaseService>, reset_token: bool) -> Result<(), String> {
-    let at = json!(LAZY_STAMP);
-    if reset_token {
-        db.update(
-            USERS,
-            "u1",
-            data(&[
-                ("reset_token", json!("digest")),
-                ("reset_token_expires", json!("2026-10-04T00:00:00Z")),
-            ]),
+    for (table, column) in lazy_columns(reset_token) {
+        // `column_type_for_value` at f0ca9c79: a string is `TEXT` on both
+        // dialects, and the column was added nullable with no default.
+        exec(
+            db,
+            &format!("ALTER TABLE {table} ADD COLUMN \"{column}\" TEXT"),
+            &[],
         )
-        .await
-        .map_err(|e| format!("lazy reset token: {e}"))?;
+        .await?;
+    }
+    let mut stamped: Vec<(&str, &str, &str, &str)> = Vec::new();
+    if reset_token {
+        stamped.extend([
+            (USERS, "reset_token", "id = 'u1'", "digest"),
+            (
+                USERS,
+                "reset_token_expires",
+                "id = 'u1'",
+                "2026-10-04T00:00:00Z",
+            ),
+        ]);
     }
     if compiled("impresspress/dev") {
-        for (table, id) in [(GENERATIONS, "g1"), (BUILDS, "b1")] {
-            db.update(table, id, data(&[("updated_at", at.clone())]))
-                .await
-                .map_err(|e| format!("lazy {table}: {e}"))?;
-        }
-        db.update_where(
-            SEED_INFO,
-            &[eq("singleton_id", json!(1))],
-            data(&[("updated_at", at.clone())]),
-        )
-        .await
-        .map_err(|e| format!("lazy {SEED_INFO}: {e}"))?;
+        stamped.extend([
+            (GENERATIONS, "updated_at", "id = 'g1'", LAZY_STAMP),
+            (BUILDS, "updated_at", "id = 'b1'", LAZY_STAMP),
+            (SEED_INFO, "updated_at", "singleton_id = 1", LAZY_STAMP),
+        ]);
     }
     if compiled("impresspress/tickets") {
-        for table in [EVENTS, ANALYSES] {
-            db.update_where(
-                table,
-                &[eq("ticket_id", json!("t1"))],
-                data(&[("expires_at", json!("2027-01-01T00:00:00Z"))]),
-            )
-            .await
-            .map_err(|e| format!("lazy {table}: {e}"))?;
-        }
-        db.update(
-            MAINTENANCE,
-            "singleton",
-            data(&[("audit_degraded", json!(1))]),
-        )
-        .await
-        .map_err(|e| format!("lazy {MAINTENANCE}: {e}"))?;
-        let duplicate = db
-            .create(
-                MAINTENANCE,
-                data(&[("id", json!("singleton")), ("audit_degraded", json!(1))]),
-            )
-            .await;
-        if duplicate.is_ok() {
-            return Err("the maintenance singleton took a second insert".into());
-        }
+        stamped.extend([
+            (EVENTS, "updated_at", "ticket_id = 't1'", LAZY_STAMP),
+            (ANALYSES, "updated_at", "ticket_id = 't1'", LAZY_STAMP),
+            (MAINTENANCE, "updated_at", "id = 'singleton'", LAZY_STAMP),
+        ]);
     }
     if compiled("impresspress/vector") {
-        db.update_where(
+        stamped.push((
             REGISTRY,
-            &[eq("prefixed_name", json!("impresspress__vector__docs"))],
-            data(&[("model", json!("m"))]),
+            "updated_at",
+            "prefixed_name = 'impresspress__vector__docs'",
+            LAZY_STAMP,
+        ));
+    }
+    for (table, column, row, value) in stamped {
+        exec(
+            db,
+            &format!("UPDATE {table} SET \"{column}\" = '{value}' WHERE {row}"),
+            &[],
         )
-        .await
-        .map_err(|e| format!("lazy {REGISTRY}: {e}"))?;
+        .await?;
     }
     Ok(())
 }
@@ -484,7 +459,7 @@ async fn check_values(db: &Arc<dyn DatabaseService>, case: &str, problems: &mut 
 }
 
 /// The three cases of the module docs, each on a database `new_db` hands
-/// back empty and without strict schema: what is wrong, if anything.
+/// back empty: what is wrong, if anything.
 pub async fn check(backend: Backend, new_db: NewDatabase<'_>) -> Vec<String> {
     let mut problems = Vec::new();
     if let Err(e) = check_cases(backend, new_db, &mut problems).await {

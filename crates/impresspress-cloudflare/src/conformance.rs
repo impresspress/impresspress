@@ -44,14 +44,11 @@
 //!   binding). Smallest change that would close the gap: a `wrangler dev` /
 //!   miniflare (workerd) test harness with a `[[d1_databases]]` binding — or
 //!   the `@cloudflare/vitest-pool-workers` runner — invoking
-//!   `run_conformance(&D1DatabaseService::new(env.d1("DB")?, false, "DB",
+//!   `run_conformance(&D1DatabaseService::new(env.d1("DB")?, "DB",
 //!   D1QueryCount::new(), D1_QUERIES_PER_INVOCATION_DEFAULT)).await` — a
 //!   fresh count and the Workers Paid limit, since the suite is one
-//!   invocation's work (the suite's first act is `set_strict_schema(false)`
-//!   anyway — it exercises
-//!   the lazy-column paths strict mode skips). The suite
-//!   already drops-then-creates its own `conf_*` tables, so it is safe against
-//!   a persistent D1 instance.
+//!   invocation's work. The suite already drops-then-creates its own `conf_*`
+//!   tables, so it is safe against a persistent D1 instance.
 //!
 //! - [`KvCachedD1DatabaseService`] wraps `Arc<dyn DatabaseService>` (the inner
 //!   D1 adapter) plus `Arc<dyn KvBackend>`. Its cache-specific logic

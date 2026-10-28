@@ -161,7 +161,8 @@ export function dbQueryRaw(sql, params) {
  * this exactly ONCE per logical `DatabaseService` mutation
  * (`create`/`update`/`delete`/`upsert`/`exec_raw`/schema changes), not once
  * per SQL statement — a logical mutation that issues several statements
- * (e.g. a lazy column-add ALTER before the INSERT) is one flush, not N.
+ * (e.g. an `ensure_table`'s CREATE TABLE and its ADD COLUMNs) is one flush,
+ * not N.
  * Inside a flush scope (one request), a mutation calls nothing: it records
  * that the scope owes a flush, and the scope calls this exactly ONCE when
  * its work is done, before the request's reply is returned. A scope that

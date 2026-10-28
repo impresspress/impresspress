@@ -9,9 +9,9 @@
 //!   aside), as on SQLite.
 //! - **The stamped-column files** (auth 017, dev 005, tickets 002, vector
 //!   002) are right on a fresh database and on one whose writes created
-//!   their columns lazily, the lazily created column's type, nullability
-//!   and default included, and auth 017 is refused by name where a password
-//!   reset was stored lazily
+//!   their columns lazily before strict schema was the only behaviour, the
+//!   lazily created column's type, nullability and default included, and
+//!   auth 017 is refused by name where a password reset was stored lazily
 //!   (`impresspress_core::test_support::stamped_columns`).
 //! - **Every state upgrades as its entry says:** every supported entry of
 //!   every block's PostgreSQL history, rebuilt with the runner from before

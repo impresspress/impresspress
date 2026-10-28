@@ -96,7 +96,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            set_strict_schema: forward,
             statement_budget: forward,
         }
 
@@ -450,7 +449,7 @@ fn todays_lists_in_the_table_adopt_every_file() {
 
 /// Every table a fresh install's migrations create declares `updated_at`:
 /// the executor stamps it on every typed create and update, so a table
-/// without it could take no typed write under strict schema.
+/// without it could take no typed write.
 ///
 /// The one table it does not hold for is the migration ledger, which no
 /// migration creates: the runner creates it and writes its rows itself, as
