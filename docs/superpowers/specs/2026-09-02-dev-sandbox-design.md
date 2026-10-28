@@ -317,8 +317,10 @@ HTTP like any page.
 
 ### 6.6 Limits
 
-`ResourceLimits { fuel: Metered(100_000_000), memory_pages: 256 }` per call
-(wafer-run defaults); artifact ≤ 4 MiB; ≤ 16 blocks per workspace; one
+`ResourceLimits { fuel: Metered(250_000_000), memory_pages: 256 }` per call
+(wafer-run defaults; wasmi 2.x charges one fuel unit per Wasm operator, about
+2–2.5× wasmi 0.44's charge for the same work, so 250M keeps the headroom 100M
+gave there); artifact ≤ 4 MiB; ≤ 16 blocks per workspace; one
 compile at a time; compile timeout 120 s; source file ≤ 512 KiB; ≤ 2 000 files
 and ≤ 64 MiB of blobs per workspace. A guest trap fails that request with 500
 and a log line and never poisons the outer runtime.
