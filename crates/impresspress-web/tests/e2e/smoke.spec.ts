@@ -295,9 +295,16 @@ const SQL_JS_SOURCE = readFileSync(fileURLToPath(new URL('sql-wasm-esm.js', VEND
 const SQL_WASM_BASE64 = readFileSync(fileURLToPath(new URL('sql-wasm.wasm', VENDOR))).toString('base64');
 
 const ADMIN = 'impresspress/admin';
-// Created by admin's 001 with `IF NOT EXISTS`, so re-applying the set brings
+// Created by admin's 001 with `IF NOT EXISTS`, so a re-run of 001 would bring
 // it back, and nothing reads it: dropping it is a harmless marker.
 const MARKER_INDEX = 'impresspress__admin__request_logs_created_at_idx';
+// Admin's last file, which the test makes pending again by deleting its
+// ledger row. What it does is visible: it rebuilds `block_settings` from the
+// columns it names, so a column it does not name is gone after it runs.
+const ADMIN_LAST = '009_block_settings_clear_blessed_hash';
+// The column the test adds to `block_settings` for 009 to drop.
+const UNNAMED_COLUMN = 'zz_rewound';
+const LEDGER = 'impresspress__admin__applied_migrations';
 
 /** Worker-console lines the test reads: runtime starts, and SQLite's
  * duplicate-column refusals — which only a migration re-run produces. */
@@ -331,12 +338,13 @@ async function bootAgain(page: Page, seen: { starts: number }) {
 }
 
 /** Run `statements` against the OPFS database, in the page, while no worker
- * is running; answer admin's recorded migration hash and whether the marker
- * index exists. */
+ * is running; answer admin's recorded migration hash, whether the marker
+ * index exists, how many of admin's files the ledger records, and whether
+ * `block_settings` has the column 009 does not name. */
 async function onStoredDatabase(page: Page, statements: string[]) {
   await page.addScriptTag({ content: SQL_JS_SOURCE });
   return page.evaluate(
-    async ({ wasm, statements, admin, marker }) => {
+    async ({ wasm, statements, admin, marker, ledger, unnamed }) => {
       const bytes = Uint8Array.from(atob(wasm), (c) => c.charCodeAt(0));
       const init = (globalThis as unknown as { __initSqlJs: (c: object) => Promise<any> }).__initSqlJs;
       const SQL = await init({ wasmBinary: bytes });
@@ -354,17 +362,31 @@ async function onStoredDatabase(page: Page, statements: string[]) {
         [admin],
       )[0]?.values[0]?.[0] as string | undefined;
       const index = db.exec("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", [marker]);
+      const recorded = db.exec(`SELECT count(*) FROM ${ledger} WHERE block_name = ?`, [admin])[0]
+        ?.values[0]?.[0] as number;
+      const unnamedColumn = db.exec(
+        "SELECT 1 FROM pragma_table_info('impresspress__admin__block_settings') WHERE name = ?",
+        [unnamed],
+      ).length > 0;
       db.close();
-      return { hash, markerIndex: index.length > 0 };
+      return { hash, markerIndex: index.length > 0, recorded, unnamedColumn };
     },
-    { wasm: SQL_WASM_BASE64, statements, admin: ADMIN, marker: MARKER_INDEX },
+    {
+      wasm: SQL_WASM_BASE64,
+      statements,
+      admin: ADMIN,
+      marker: MARKER_INDEX,
+      ledger: LEDGER,
+      unnamed: UNNAMED_COLUMN,
+    },
   );
 }
 
-test('a changed migration applies once, and a restart re-runs nothing', async ({ page, context }) => {
+test('a pending migration applies once, alone, and a restart runs nothing', async ({ page, context }) => {
   // A browser install's migrations run inside every block's `lifecycle(Init)`,
-  // gated on the hash recorded in `block_settings`. Two ways that gate went
-  // wrong, one per half of this test:
+  // gated on the hash recorded in `block_settings` and planned against the
+  // per-file migration ledger. Three ways that went wrong or could, one per
+  // check below:
   //
   // - The runtime used to be built before that state was read, so every boot
   //   looked like a fresh install and re-ran every block's whole set — the
@@ -373,11 +395,15 @@ test('a changed migration applies once, and a restart re-runs nothing', async ({
   // - Read the state but give no consent, and the gate treats a changed hash
   //   as drift an operator must bless — which nobody can do in a browser, so
   //   an install created by an older bundle would keep its schema forever.
+  // - A pending file must run alone: the files the ledger records never run
+  //   again.
   //
-  // A "bundle with a new migration" is staged by rewinding what the database
-  // records instead: admin's hash set to one this bundle does not have, as an
-  // older bundle would have left it, and one of admin's indexes dropped so
-  // that re-applying the set is visible in the schema itself.
+  // "A bundle with a new migration" is staged by rewinding what the database
+  // records: admin's hash set to one this bundle does not have, as an older
+  // bundle would have left it, and the ledger row of admin's last file
+  // deleted, as a database that never ran it has none. What that file does
+  // is visible (its rebuild drops a column it does not name), and so would a
+  // re-run of admin's 001 be (it recreates the dropped marker index).
   const seen = watchWorker(context);
 
   // Boot 1: a fresh profile.
@@ -387,23 +413,27 @@ test('a changed migration applies once, and a restart re-runs nothing', async ({
   await expect.poll(() => seen.starts, { timeout: 30_000 }).toBe(1);
 
   await stopWorkers(page);
-  const fresh = await onStoredDatabase(page, [
+  const booted = await onStoredDatabase(page, []);
+  const rewound = await onStoredDatabase(page, [
     `UPDATE impresspress__admin__block_settings SET current_hash = 'older-bundle' ` +
       `WHERE block_name = '${ADMIN}'`,
+    `DELETE FROM ${LEDGER} WHERE block_name = '${ADMIN}' AND file_name = '${ADMIN_LAST}'`,
+    `ALTER TABLE impresspress__admin__block_settings ADD COLUMN ${UNNAMED_COLUMN} TEXT NOT NULL DEFAULT ''`,
     `DROP INDEX ${MARKER_INDEX}`,
   ]);
-  expect(fresh).toEqual({ hash: 'older-bundle', markerIndex: false });
+  expect(rewound).toMatchObject({ hash: 'older-bundle', markerIndex: false, recorded: booted.recorded - 1 });
+  expect(rewound.unnamedColumn).toBe(true);
 
-  // Boot 2: the changed set applies, and is recorded as applied.
+  // Boot 2: the pending file applies, alone, and is recorded.
   await bootAgain(page, seen);
   await stopWorkers(page);
   const upgraded = await onStoredDatabase(page, []);
-  expect(upgraded.markerIndex, 'admin\'s changed migrations were not applied').toBe(true);
-  expect(upgraded.hash).toMatch(/^[0-9a-f]{64}$/);
-  // Re-applying admin's set re-runs its ADD COLUMNs, so this boot warned.
-  expect(seen.duplicateColumns.length).toBeGreaterThan(0);
+  expect(upgraded.unnamedColumn, "admin's pending migration was not applied").toBe(false);
+  expect(upgraded.recorded).toBe(booted.recorded);
+  expect(upgraded.hash).toBe(booted.hash);
+  expect(upgraded.markerIndex, 'a recorded migration ran again').toBe(false);
 
-  // Boot 3: nothing changed, so nothing re-runs.
+  // Boot 3: nothing changed, so nothing runs.
   seen.duplicateColumns.length = 0;
   await bootAgain(page, seen);
   await stopWorkers(page);

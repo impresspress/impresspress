@@ -885,14 +885,7 @@ impl Block for LlmBlock {
         // otherwise the provider reload would hit ensure_table fallback
         // paths instead of the indexed table. `lifecycle_init` no-ops on
         // non-Init events.
-        crate::migration_helper::lifecycle_init(
-            ctx,
-            &event,
-            Self::BLOCK_NAME,
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
-        .await?;
+        crate::migration_helper::lifecycle_init(ctx, &event, &migrations::MIGRATIONS).await?;
         if matches!(event.event_type, LifecycleType::Init) {
             // Load enabled providers into the in-memory service on startup
             // so chat dispatch finds them without waiting for an admin CRUD

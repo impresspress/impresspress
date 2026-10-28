@@ -1,20 +1,27 @@
 //! Auth migration 016 makes every inline `users.role` a `user_roles` grant
-//! and drops the column, on both SQL dialects, through the tracked runner a
-//! native boot applies a block's list with
-//! (`migration_helper::apply_pending_via_service`).
+//! and drops the column, on both SQL dialects, through the runner a native
+//! boot applies a block's list with
+//! (`migration_helper::apply_pending_via_service`, with auth's history).
 //!
-//! The database is the one an upgrade meets: admin's schema, auth's 001–015,
-//! and accounts whose role is the inline column — one of them already holding
-//! the same role as a grant, one with a role no system seeds (`editor`) and
-//! one with an empty role. After the upgrade every account holds exactly its
-//! non-empty role as a grant, under its own name, and the column is gone;
-//! the next change to the auth list re-runs the whole of it, 016 included,
-//! and changes nothing.
+//! The database is the one an upgrade meets: admin's schema, and auth's list
+//! as it stood on main from 2026-09-23 (001–015; `cc40a45f` on SQLite,
+//! `4390791b` on PostgreSQL), built and
+//! recorded by the runner from before the per-file ledger, holding accounts
+//! whose role is the inline column — one of them already holding the same
+//! role as a grant, one with a role no system seeds (`editor`) and one with
+//! an empty role. The upgrade adopts 001–015 from that record and runs 016.
+//! After it every account holds exactly its non-empty role as a grant, under
+//! its own name, and the column is gone; the next change to the auth list
+//! runs only its new file.
+//!
+//! A database that ran 016 as it first shipped (`e73b4cc2` / `43907ff1`)
+//! adopts all
+//! sixteen files and runs nothing; a fresh one runs the whole list.
 //!
 //! Why each statement of 016 is shaped as it is: the 016 note on
 //! `blocks::auth::migrations::ROLES_ARE_GRANTS`.
 //!
-//! The SQLite test runs everywhere. The PostgreSQL one needs a server, so it
+//! The SQLite tests run everywhere. The PostgreSQL one needs a server, so it
 //! is `#[ignore]`d; CI's `test-postgres` job runs it with
 //! `IMPRESSPRESS_TEST_POSTGRES_URL` naming a database it may create others
 //! from.
@@ -22,39 +29,29 @@
 use std::{collections::HashMap, sync::Arc};
 
 use impresspress_core::{
-    blocks::{
-        admin,
-        auth::{
-            self,
-            migrations::{POSTGRES_MIGRATIONS, ROLES_ARE_GRANTS, SQLITE_MIGRATIONS},
-            repo::users,
-        },
+    blocks::auth::{
+        self,
+        migrations::{MIGRATIONS, ROLES_ARE_GRANTS},
+        repo::users,
     },
-    migration_helper::{apply_ddl_via_service, apply_pending_via_service, MigrationFile},
-    platform_state::user_roles,
+    migration_helper::{apply_pending_via_service, MigrationFile},
+    platform_state::{applied_migrations::Origin, user_roles},
+    test_support::migration_history as history,
 };
 use serde_json::{json, Value};
 use wafer_core::interfaces::database::service::DatabaseService;
+use wafer_sql_utils::Backend;
+
+/// The newest state of auth's list before 016 and the one 016 first shipped
+/// in, in `backend`'s dialect.
+fn states(backend: Backend) -> (&'static str, &'static str) {
+    match backend {
+        Backend::Sqlite => ("cc40a45f", "e73b4cc2"),
+        Backend::Postgres => ("4390791b", "43907ff1"),
+    }
+}
 
 const CREATED: &str = "2026-03-01T00:00:00Z";
-
-/// Auth's list in `dialect`, and the files of it before 016.
-fn auth_lists(dialect: &str) -> (Vec<MigrationFile<'static>>, Vec<MigrationFile<'static>>) {
-    let all: Vec<MigrationFile<'static>> = match dialect {
-        "postgres" => POSTGRES_MIGRATIONS.to_vec(),
-        _ => SQLITE_MIGRATIONS.to_vec(),
-    };
-    let at = all
-        .iter()
-        .position(|(name, _)| *name == ROLES_ARE_GRANTS)
-        .unwrap_or_else(|| panic!("016 is wired into auth's {dialect} list"));
-    assert_eq!(at, all.len() - 1, "016 is the last auth migration");
-    (all[..at].to_vec(), all)
-}
-
-fn sql_of(files: &[MigrationFile<'static>]) -> Vec<&'static str> {
-    files.iter().map(|(_, sql)| *sql).collect()
-}
 
 /// Test-fixture setup: a users row in the pre-016 shape, inline role and all.
 async fn seed_account(db: &Arc<dyn DatabaseService>, id: &str, role: &str) {
@@ -63,6 +60,19 @@ async fn seed_account(db: &Arc<dyn DatabaseService>, id: &str, role: &str) {
     row.insert("email".into(), json!(format!("{id}@example.com")));
     row.insert("display_name".into(), json!(id));
     row.insert("role".into(), json!(role));
+    row.insert("created_at".into(), json!(CREATED));
+    row.insert("updated_at".into(), json!(CREATED));
+    db.create(users::TABLE, row)
+        .await
+        .unwrap_or_else(|e| panic!("seed {id}: {e}"));
+}
+
+/// Test-fixture setup: a users row in the post-016 shape.
+async fn seed_account_without_role(db: &Arc<dyn DatabaseService>, id: &str) {
+    let mut row: HashMap<String, Value> = HashMap::new();
+    row.insert("id".into(), json!(id));
+    row.insert("email".into(), json!(format!("{id}@example.com")));
+    row.insert("display_name".into(), json!(id));
     row.insert("created_at".into(), json!(CREATED));
     row.insert("updated_at".into(), json!(CREATED));
     db.create(users::TABLE, row)
@@ -105,15 +115,38 @@ async fn grants(
     out
 }
 
-/// The upgrade, then a re-run of the whole list.
-async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
-    let (before_016, all) = auth_lists(dialect);
-    apply_ddl_via_service(&db, &admin::migrations::ddl_files(dialect))
+/// The columns of `users`.
+async fn user_columns(db: &Arc<dyn DatabaseService>) -> Vec<String> {
+    db.schema_columns(users::TABLE)
+        .await
+        .expect("introspect users")
+}
+
+/// Auth's ledger as `(file, origin, adopted_from)`, in file order.
+async fn auth_ledger(db: &Arc<dyn DatabaseService>) -> Vec<(String, Origin, String)> {
+    history::ledger(db, auth::AUTH_BLOCK_ID)
+        .await
+        .expect("read the ledger")
+        .into_iter()
+        .map(|row| (row.file_name, row.origin, row.adopted_from))
+        .collect()
+}
+
+/// The upgrade from the newest state before 016, then the next change to
+/// the list.
+async fn upgrades(db: Arc<dyn DatabaseService>, backend: Backend) {
+    let (all, history_rows) = MIGRATIONS.for_backend(backend);
+    assert_eq!(
+        all.last().map(|(name, _)| *name),
+        Some(ROLES_ARE_GRANTS),
+        "016 is the last auth migration"
+    );
+    history::fresh_admin(&db, backend)
         .await
         .expect("admin's list applies first, as every boot applies it");
-    apply_ddl_via_service(&db, &sql_of(&before_016))
+    let before = history::build_state(&db, backend, &MIGRATIONS, states(backend).0)
         .await
-        .expect("auth's 001-015 apply");
+        .expect("auth as it stood from 2026-09-23, recorded by the old runner");
 
     seed_account(&db, "u1", "admin").await;
     seed_account(&db, "u2", "user").await;
@@ -134,9 +167,25 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
         .await
         .expect("seed u3's grant");
 
-    apply_pending_via_service(&db, auth::AUTH_BLOCK_ID, &all)
+    history::upgrade(&db, backend, &MIGRATIONS)
         .await
         .expect("auth's list, 016 included, applies to an upgraded database");
+
+    let expected: Vec<(String, Origin, String)> = all
+        .iter()
+        .map(|(name, _)| {
+            if *name == ROLES_ARE_GRANTS {
+                (name.to_string(), Origin::Ran, String::new())
+            } else {
+                (
+                    name.to_string(),
+                    Origin::Adopted,
+                    before.list_hash.to_string(),
+                )
+            }
+        })
+        .collect();
+    assert_eq!(auth_ledger(&db).await, expected, "001-015 adopted, 016 ran");
 
     let after = grants(&db).await;
     let pairs = |grants: &HashMap<(String, String), (String, String, String)>| {
@@ -176,53 +225,65 @@ async fn upgrades(db: Arc<dyn DatabaseService>, dialect: &str) {
         ("ur_held".to_string(), "admin_x".to_string(), String::new()),
         "the grant u3 already held is the one it keeps"
     );
-    let columns = db
-        .schema_columns(users::TABLE)
-        .await
-        .expect("introspect users");
+    let columns = user_columns(&db).await;
     assert!(
         !columns.iter().any(|c| c == "role"),
         "016 drops the inline column: {columns:?}"
     );
     assert!(columns.iter().any(|c| c == "email"), "{columns:?}");
 
-    // The next change to the auth list re-runs it whole, 016 included: the
-    // ADD puts the column back empty, the copy finds nothing, the DROP
-    // removes it again.
-    let mut next = all.clone();
+    // The next change to the auth list runs only its new file.
+    let mut next: Vec<MigrationFile<'static>> = all.to_vec();
     next.push((
         "999_next_auth_change",
-        "-- Any new file moves the hash, so the whole list re-runs.",
+        "-- A new file runs alone; 016 is recorded and never runs again.",
     ));
-    apply_pending_via_service(&db, auth::AUTH_BLOCK_ID, &next)
+    apply_pending_via_service(&db, backend, auth::AUTH_BLOCK_ID, &next, history_rows)
         .await
-        .expect("a later change re-runs the auth list, 016 included");
-    assert_eq!(grants(&db).await, after, "the re-run copies nothing");
-    let columns = db
-        .schema_columns(users::TABLE)
-        .await
-        .expect("introspect users");
-    assert!(!columns.iter().any(|c| c == "role"), "{columns:?}");
+        .expect("a later change applies");
+    assert_eq!(grants(&db).await, after, "nothing is copied again");
 }
 
-/// A database created after 016: admin's list, then auth's whole list, then
-/// a re-run of it. 001 creates the column and 016 drops it again.
-async fn applies_fresh(db: Arc<dyn DatabaseService>, dialect: &str) {
-    let (_, all) = auth_lists(dialect);
-    apply_ddl_via_service(&db, &admin::migrations::ddl_files(dialect))
+/// A database that ran 016 as it first shipped — its `ADD COLUMN`, copy and
+/// `DROP` — and recorded that list: every file is adopted from that record
+/// and nothing runs.
+async fn ran_the_first_016(db: Arc<dyn DatabaseService>, backend: Backend) {
+    history::fresh_admin(&db, backend)
         .await
         .expect("admin's list applies first");
-    apply_pending_via_service(&db, auth::AUTH_BLOCK_ID, &all)
+    let state = history::build_state(&db, backend, &MIGRATIONS, states(backend).1)
+        .await
+        .expect("auth as 016 first shipped, recorded by the old runner");
+    seed_account_without_role(&db, "u1").await;
+    history::upgrade(&db, backend, &MIGRATIONS)
+        .await
+        .expect("adopts every file");
+    let ledger = auth_ledger(&db).await;
+    assert_eq!(ledger.len(), MIGRATIONS.for_backend(backend).0.len());
+    assert!(
+        ledger
+            .iter()
+            .all(|(_, origin, from)| *origin == Origin::Adopted && from == state.list_hash),
+        "{ledger:?}"
+    );
+    assert!(!user_columns(&db).await.iter().any(|c| c == "role"));
+}
+
+/// A database created after 016: admin's list, then auth's whole list. 001
+/// creates the column, and 016 drops it again.
+async fn applies_fresh(db: Arc<dyn DatabaseService>, backend: Backend) {
+    history::fresh_admin(&db, backend)
+        .await
+        .expect("admin's list applies first");
+    history::upgrade(&db, backend, &MIGRATIONS)
         .await
         .expect("auth's list applies to a fresh database");
-    apply_ddl_via_service(&db, &sql_of(&all))
-        .await
-        .expect("auth's list replays over a fresh database");
     assert!(grants(&db).await.is_empty());
-    let columns = db
-        .schema_columns(users::TABLE)
+    assert!(auth_ledger(&db)
         .await
-        .expect("introspect users");
+        .iter()
+        .all(|(_, origin, _)| *origin == Origin::Ran));
+    let columns = user_columns(&db).await;
     assert!(!columns.iter().any(|c| c == "role"), "{columns:?}");
 }
 
@@ -236,13 +297,19 @@ async fn sqlite(dir: &tempfile::TempDir, name: &str) -> Arc<dyn DatabaseService>
 #[tokio::test]
 async fn migration_016_makes_every_inline_role_a_grant_on_sqlite() {
     let dir = tempfile::tempdir().expect("tempdir");
-    upgrades(sqlite(&dir, "upgraded.sqlite3").await, "sqlite").await;
+    upgrades(sqlite(&dir, "upgraded.sqlite3").await, Backend::Sqlite).await;
 }
 
 #[tokio::test]
 async fn migration_016_applies_to_a_fresh_sqlite_database() {
     let dir = tempfile::tempdir().expect("tempdir");
-    applies_fresh(sqlite(&dir, "fresh.sqlite3").await, "sqlite").await;
+    applies_fresh(sqlite(&dir, "fresh.sqlite3").await, Backend::Sqlite).await;
+}
+
+#[tokio::test]
+async fn a_database_that_ran_the_first_016_adopts_it_on_sqlite() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ran_the_first_016(sqlite(&dir, "ran.sqlite3").await, Backend::Sqlite).await;
 }
 
 /// Both scenarios against PostgreSQL, each on a database of its own.
@@ -255,7 +322,7 @@ async fn the_same_holds_on_postgres() {
     let server = impresspress_native::make_postgres_database_service(&url)
         .await
         .expect("connect to PostgreSQL");
-    for scenario in ["upgraded", "fresh"] {
+    for scenario in ["upgraded", "ran", "fresh"] {
         let name = format!("impresspress_auth_016_{scenario}");
         // Test-fixture setup: a database per scenario, created fresh.
         server
@@ -271,8 +338,9 @@ async fn the_same_holds_on_postgres() {
             .await
             .expect("connect to the scenario's database");
         match scenario {
-            "upgraded" => upgrades(db, "postgres").await,
-            _ => applies_fresh(db, "postgres").await,
+            "upgraded" => upgrades(db, Backend::Postgres).await,
+            "ran" => ran_the_first_016(db, Backend::Postgres).await,
+            _ => applies_fresh(db, Backend::Postgres).await,
         }
     }
 }

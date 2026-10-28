@@ -432,11 +432,14 @@ impl DbExec for D1DatabaseService {
     /// Every D1 schema change invalidates what it touches, which is what
     /// makes an isolate-lifetime cache sound here:
     ///
-    /// - **Migrations** reach `DatabaseService::exec_raw` — both the
-    ///   `database.ddl` host op and `migration_helper::apply_ddl_via_service`
-    ///   end there, and the KV decorator forwards it — and the shared
-    ///   [`DbExec::exec_raw`] clears the whole cache after a statement it
-    ///   cannot attribute to a table. (The admin SQL explorer is not a writer:
+    /// - **Migrations** reach `DatabaseService::exec_raw` — the
+    ///   `database.ddl` host op (the ledger's `CREATE TABLE`) — or
+    ///   `DatabaseService::exec_raw_transaction`, through the
+    ///   `database.ddl_transaction` host op (every migration file, with its
+    ///   ledger row). The KV decorator forwards both, and
+    ///   the shared [`DbExec::exec_raw`] and `DbExec::exec_raw_transaction`
+    ///   clear the whole cache after statements they cannot attribute to a
+    ///   table. (The admin SQL explorer is not a writer:
     ///   `validate_readonly_query` refuses anything but a read.)
     /// - **The lazy column-add** (`DbExec::add_column_checked`, non-strict
     ///   mode only) invalidates the table it alters.
@@ -707,6 +710,13 @@ impl DbExec for D1DatabaseService {
     /// statement (`UNIQUE constraint failed: t.id: SQLITE_CONSTRAINT`), so
     /// this adapter cannot say which one failed and does not guess. The
     /// classified code and D1's own message are kept.
+    ///
+    /// The checks after `batch()` resolves — the result count, each
+    /// statement's success flag, the decoding of its result — report a
+    /// failure on a batch D1 has already committed. Such an error leaves the
+    /// outcome unknown, as [`TransactionError`] says: a caller re-reads its
+    /// own state (the migration runner re-reads its ledger) rather than
+    /// taking the error as a rollback.
     ///
     /// Decoded positionally, as [`run_batch`](DbExec::run_batch) is: a
     /// [`TxOp::Execute`] yields `meta().changes`, as

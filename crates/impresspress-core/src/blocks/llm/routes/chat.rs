@@ -1265,9 +1265,7 @@ mod tests {
 
         crate::migration_helper::apply_migrations(
             ctx,
-            "impresspress/messages",
-            crate::blocks::messages::migrations::SQLITE_MIGRATIONS,
-            crate::blocks::messages::migrations::POSTGRES_MIGRATIONS,
+            &crate::blocks::messages::migrations::MIGRATIONS,
         )
         .await
         .expect("apply messages migrations in the chat fixture");

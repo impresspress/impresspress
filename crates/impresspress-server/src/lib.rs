@@ -222,9 +222,9 @@ async fn build_and_boot(
     //     the variables table) run before any other block's Init writes to
     //     block_settings via migration_helper. Without it, HashMap key-
     //     iteration order could put another block first, hit a hard
-    //     'no such table' error (impresspress #182 made write_state propagate
-    //     strictly), skip auth's bootstrap, and surface as a login 401 on the
-    //     freshly-booted server in CI E2E.
+    //     'no such table' error (impresspress #182 made the record's write
+    //     propagate strictly), skip auth's bootstrap, and surface as a login
+    //     401 on the freshly-booted server in CI E2E.
     //
     //     `start_native` then runs the Start lifecycle and binds the HTTP
     //     socket — the steps `boot` deliberately omits because the stateless
@@ -268,12 +268,18 @@ pub async fn build_native_runtime(
 ) -> anyhow::Result<Wafer> {
     // Apply admin's pending migrations pre-wafer: the variables /
     // block_settings tables they create are read below to build the runtime.
-    // The same list, hash and `block_settings` row admin's `Init` uses, so
-    // `Init` finds it applied — and an unchanged list is not run again.
+    // The same list, history, ledger, hash and `block_settings` row admin's
+    // `Init` uses, so `Init` finds it applied — and no applied file runs
+    // again.
+    let admin_migrations = &impresspress_core::blocks::admin::migrations::MIGRATIONS;
+    let backend = impresspress_core::migration_helper::backend_named(&infra.db_type);
+    let (files, history) = admin_migrations.for_backend(backend);
     impresspress_core::migration_helper::apply_pending_via_service(
         &database,
-        impresspress_core::blocks::admin::ADMIN_BLOCK_ID,
-        impresspress_core::blocks::admin::migrations::migration_files(&infra.db_type),
+        backend,
+        admin_migrations.block,
+        files,
+        history,
     )
     .await
     .map_err(|e| anyhow!("apply the admin migrations: {e}"))?;
@@ -517,8 +523,8 @@ pub fn password_peppers_from_env(
 /// failed its `Init` binds nothing; any other block that failed is unusable
 /// until the process restarts, because a failed `Init` stays failed. The error
 /// lists every block that failed with its own error, which for a migration
-/// names the file and the statement the database refused; the next boot
-/// re-runs that block's list.
+/// names the file and the statement the database refused; the failed file
+/// rolled back and stays unrecorded, so the next boot runs it again.
 ///
 /// `build_native_runtime` reads the admin-created grants from the platform
 /// database and hands them to `ImpresspressBuilder::wrap_grants` before

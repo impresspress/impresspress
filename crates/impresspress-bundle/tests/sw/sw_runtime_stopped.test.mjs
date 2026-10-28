@@ -39,6 +39,18 @@ const unreadable = () => async () => {
 };
 const UNREADABLE = `runtime initialize() failed: DatabaseUnreadable: ${UNREADABLE_MESSAGE}`;
 
+// What `initialize()` rejects with when the database's migration ledger and
+// the bundle disagree: the error impresspress-browser's boot makes
+// (`boot::MIGRATION_REFUSED`), which the runtime hands back untouched.
+const REFUSED_MESSAGE =
+  'apply the admin migrations: impresspress/admin: this database has applied migrations this build does not ship (010_newer)';
+const refusedMigration = () => async () => {
+  const error = new Error(REFUSED_MESSAGE);
+  error.name = 'MigrationRefused';
+  throw error;
+};
+const REFUSED = `runtime initialize() failed: MigrationRefused: ${REFUSED_MESSAGE}`;
+
 // What a worker built with no sandbox ('none', the default rendering) says
 // over a runtime compiled as `compiled`.
 const builtFor = (compiled) =>
@@ -311,6 +323,33 @@ test('a database that could not be read stops the worker at stage `open`, and er
 test('the open stage comes from the error’s name, not its message', async (t) => {
   captureConsole(t);
   const worker = await loadWorker({ initialize: trap(`DatabaseUnreadable: ${UNREADABLE_MESSAGE}`) });
+
+  await worker.request('/', { method: 'GET' });
+
+  assert.equal(worker.leftForBootShell().stage, 'initialize');
+});
+
+// A migration the runtime refused is the code's verdict against the record
+// of what ran, not a finding about the data: stage `migration`, which no
+// recovery erases for — in a build rendered to erase on recovery too, where
+// a database started afresh would run the refused migration cleanly and hide
+// the error.
+test('a refused migration stops the worker at stage `migration`, and erases nothing', async (t) => {
+  captureConsole(t);
+  for (const wipe of [false, true]) {
+    const worker = await loadWorker({ initialize: refusedMigration() }, { wipe });
+
+    const { response } = await worker.request('/', { method: 'GET' });
+
+    await assertStoppedAnswer(response, REFUSED, 'migration', RESTART);
+    assertSentToBootShell(worker, REFUSED, 'migration');
+  }
+});
+
+// Like `open`, the `migration` stage rests on the error's name, not its text.
+test('the migration stage comes from the error’s name, not its message', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({ initialize: trap(`MigrationRefused: ${REFUSED_MESSAGE}`) });
 
   await worker.request('/', { method: 'GET' });
 

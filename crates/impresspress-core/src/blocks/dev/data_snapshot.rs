@@ -78,7 +78,7 @@ use crate::{
         },
     },
     // audit-allow: names the platform tables for the export's exclusion bookkeeping below — none is read or written, only listed as deliberately left out of every export
-    platform_state::{block_settings, request_logs, wrap_grants},
+    platform_state::{applied_migrations, block_settings, request_logs, wrap_grants},
 };
 use crate::{
     blocks::{
@@ -297,6 +297,10 @@ pub const TABLE_EXCLUDED: &[&str] = &[
     // --- admin: operational logs, and infrastructure state the runtime
     // re-derives at every boot rather than something anyone authored. ---
     block_settings::TABLE, // per-block enable flag + migration-hash tracking
+    // The per-file migration ledger: what THIS database has applied. An
+    // import that carried it would claim migrations the destination never
+    // ran.
+    applied_migrations::TABLE,
     request_logs::TABLE,
     AUDIT_LOGS_TABLE,
     STORAGE_ACCESS_LOGS_TABLE,

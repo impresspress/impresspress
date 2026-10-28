@@ -1,0 +1,235 @@
+# Every judgment `examples/migration-history.rs` cannot derive from git, each
+# with its reason. The generator walks every list state each block's
+# migrations were in on main and gives each a verdict by one mechanical rule
+# (see the example's docs); anything the rule cannot decide is an error until
+# an entry here names it. Every entry must be used.
+#
+# - `horizon`: states before it are unsupported, for its reason. A block with
+#   no entry is supported from its first state.
+# - `unsupported`: one state after the horizon that cannot be upgraded.
+# - `converges`: an older text of a file (`block/basename@<sha8 of its whole
+#   text>`) that a state ran, whose effect today's list reaches once the rest
+#   of it runs. The state's schema then equals a fresh install's;
+#   `migration_history_tests` proves it.
+# - `rerun_safe`: a file whose current statements are idempotent, so a state
+#   that ran an older text of it has it pending, and today's text runs.
+# - `superseded_basename`: a basename a state carries that today's list does
+#   not (a rename). It is never recorded.
+#
+# States and hashes are the first eight hex digits of `migration_set_hash`.
+
+# --- SQLite ---------------------------------------------------------------
+
+[[horizon]]
+block = "admin"
+dialect = "sqlite"
+state = "f8494bf2"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "auth"
+dialect = "sqlite"
+state = "347b7fa3"
+reason = "before 2026-09-06 its sessions table keeps the access-token layout, which no file converts"
+
+[[horizon]]
+block = "files"
+dialect = "sqlite"
+state = "29957d0c"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "products"
+dialect = "sqlite"
+state = "9b3fd43a"
+reason = "before 2026-07-21 its 001 created columns and a table today's files never create"
+
+[[horizon]]
+block = "legalpages"
+dialect = "sqlite"
+state = "3718c995"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "llm"
+dialect = "sqlite"
+state = "cdb54c48"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "messages"
+dialect = "sqlite"
+state = "b304034f"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "userportal"
+dialect = "sqlite"
+state = "cd777abb"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "vector"
+dialect = "sqlite"
+state = "0a29a7df"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[unsupported]]
+block = "admin"
+dialect = "sqlite"
+state = "a2512c2f"
+reason = "it ran the first text of 007 and then 008, so 007 cannot run again in order"
+
+[[unsupported]]
+block = "dev"
+dialect = "sqlite"
+state = "c5760de7"
+reason = "it ran the first text of 004, which today's 004 would add a column to again"
+
+[[unsupported]]
+block = "signal"
+dialect = "sqlite"
+state = "44354f7d"
+reason = "its 001 created the rooms table without the id and updated_at columns"
+
+# --- PostgreSQL -----------------------------------------------------------
+
+[[horizon]]
+block = "admin"
+dialect = "postgres"
+state = "0d9a72d9"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "auth"
+dialect = "postgres"
+state = "cede5d74"
+reason = "before 2026-09-06 its sessions table keeps the access-token layout, which no file converts"
+
+[[horizon]]
+block = "files"
+dialect = "postgres"
+state = "66035730"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "products"
+dialect = "postgres"
+state = "7bbe85c3"
+reason = "before 2026-07-21 its 001 created columns and a table today's files never create, and 015 gave livemode another type"
+
+[[horizon]]
+block = "legalpages"
+dialect = "postgres"
+state = "5c858a1e"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "llm"
+dialect = "postgres"
+state = "12147f02"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "messages"
+dialect = "postgres"
+state = "275e893e"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "userportal"
+dialect = "postgres"
+state = "f67dc244"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[horizon]]
+block = "vector"
+dialect = "postgres"
+state = "e5f33cbe"
+reason = "before 2026-07-13 its tables were named solobase__*, which no file renames"
+
+[[unsupported]]
+block = "admin"
+dialect = "postgres"
+state = "38efafeb"
+reason = "it ran the first text of 007 and then 008, so 007 cannot run again in order"
+
+[[unsupported]]
+block = "dev"
+dialect = "postgres"
+state = "5b71153b"
+reason = "it ran the first text of 004, which today's 004 would add a column to again"
+
+[[unsupported]]
+block = "signal"
+dialect = "postgres"
+state = "bf2bb1be"
+reason = "its 001 created the rooms table without the id and updated_at columns"
+
+[[unsupported]]
+block = "legalpages"
+dialect = "postgres"
+state = "230d64bf"
+reason = "it ran the first text of 002, which left version's type as it was"
+
+# --- Both dialects --------------------------------------------------------
+
+[[rerun_safe]]
+file = "auth/015_api_key_expiry_canonical"
+reason = "both arms are guarded (revoked_at IS NULL; the stored expiry differs from its canonical form), so a key the older text repaired is left alone"
+
+[[rerun_safe]]
+file = "files/003_legacy_share_token_expiry"
+reason = "every UPDATE requires an expiry that is NULL or empty, which the older text already set"
+
+[[rerun_safe]]
+file = "products/020_normalize_blank_deleted_at"
+reason = "the UPDATE requires deleted_at = '', which the older text already rewrote"
+
+[[rerun_safe]]
+file = "admin/009_block_settings_clear_blessed_hash"
+reason = "today's 009 rebuilds block_settings from the columns every database has, copied by name, whatever the older text left"
+
+[[superseded_basename]]
+file = "products/023_canonical_product_currency"
+reason = "renamed to 023_canonical_currency the same day (9ff3dfe8); today's 023 is pending in that state and its UPDATEs are guarded"
+
+[[converges]]
+file = "admin/001_admin_schema@0ecfaf76"
+reason = "001 before 2026-10-07 also created block_settings.blessed_hash; today's 009 rebuilds the table without it"
+
+[[converges]]
+file = "admin/001_admin_schema@1e080c29"
+reason = "001 before 2026-10-07 also created block_settings.blessed_hash; today's 009 drops it"
+
+[[converges]]
+file = "auth/001_auth_schema@ff016951"
+reason = "001 before 2026-10-22 left the family-keyed sessions table to 012, whose older text created it with the same columns 001 and 010 create today"
+
+[[converges]]
+file = "auth/012_sessions_family@5ff6bc7c"
+reason = "012 before 2026-10-22 dropped and recreated sessions in the family layout today's 001 creates, with id and updated_at inline where today's 010 adds them"
+
+[[converges]]
+file = "auth/004_refresh_tokens@db3e8325"
+reason = "004 before 2026-09-23 opened with DROP TABLE IF EXISTS tokens before creating it; the table it leaves is the one today's 004 creates"
+
+[[converges]]
+file = "auth/016_roles_are_grants@24670c77"
+reason = "016 before this release opened with an ADD COLUMN role that only re-added what its DROP then removed; its copy into user_roles and its DROP are today's 016"
+
+[[converges]]
+file = "auth/016_roles_are_grants@bf0ef53a"
+reason = "016 before this release opened with an ADD COLUMN IF NOT EXISTS role that only re-added what its DROP then removed; its copy into user_roles and its DROP are today's 016"
+
+[[converges]]
+file = "auth/001_auth_schema@b69e363f"
+reason = "001 before 2026-10-22 left the family-keyed sessions table to 012, whose older text created it with the same columns 001 and 010 create today"
+
+[[converges]]
+file = "auth/012_sessions_family@c9682752"
+reason = "012 before 2026-10-22 dropped and recreated sessions in the family layout today's 001 creates, with id and updated_at inline where today's 010 adds them"
+
+[[converges]]
+file = "auth/004_refresh_tokens@363b6d12"
+reason = "004 before 2026-09-23 opened with DROP TABLE IF EXISTS tokens before creating it; the table it leaves is the one today's 004 creates"

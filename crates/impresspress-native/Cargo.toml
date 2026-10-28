@@ -51,12 +51,19 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-# Test-only: `tests/transport_body_cap.rs` asserts that
+# Test-only; the library itself has no core dependency and does not gain one
+# here. `tests/transport_body_cap.rs` asserts that
 # `impresspress_core::streaming::MAX_REQUEST_BODY_BYTES` — the cap the wasm
 # adapters enforce and the files block clamps its quota to — still matches the
-# `max_body_bytes` default declared by the listener this crate registers. The
-# library itself has no core dependency and does not gain one here.
-impresspress-core = { path = "../impresspress-core", default-features = false }
+# `max_body_bytes` default declared by the listener this crate registers; the
+# migration tests apply core's blocks' lists to SQLite and PostgreSQL through
+# core's runner. Default features, so every block core ships by default is
+# compiled in and `tests/postgres_migration_history.rs` covers each of them;
+# `test-support` for the history engine
+# (`impresspress_core::test_support::migration_history`).
+impresspress-core = { path = "../impresspress-core", features = ["test-support"] }
+# The SQL dialect the migration tests name.
+wafer-sql-utils = { workspace = true }
 
 [lints]
 workspace = true

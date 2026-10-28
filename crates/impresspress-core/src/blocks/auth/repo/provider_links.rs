@@ -12,8 +12,7 @@
 //! wherever this table can be read. [`upsert`] writes the column empty, and
 //! auth migration `014_clear_provider_access_tokens` empties the rows written
 //! before it did. The column itself stays, `NOT NULL` as migration 001
-//! declares it: SQLite cannot guard a `DROP COLUMN` with `IF EXISTS`, and auth
-//! migrations re-run in full whenever the block's SQL changes.
+//! declares it; dropping it is a migration of its own.
 
 use std::collections::HashMap;
 

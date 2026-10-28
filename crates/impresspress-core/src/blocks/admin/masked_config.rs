@@ -275,9 +275,12 @@ mod tests {
             wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
                 .expect("open in-memory sqlite"),
         );
-        crate::migration_helper::apply_ddl_via_service(
+        crate::migration_helper::apply_pending_via_service(
             &sqlite,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+            wafer_sql_utils::Backend::Sqlite,
+            ADMIN_BLOCK_ID,
+            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
+            &[],
         )
         .await
         .expect("apply admin migrations");

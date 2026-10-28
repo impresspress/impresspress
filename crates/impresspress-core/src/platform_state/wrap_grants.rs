@@ -678,7 +678,7 @@ mod migration_005_tests {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, before_005(), &[])
+        migration_helper::apply_pending(&ctx, ADMIN, before_005(), &[])
             .await
             .expect("001-004 apply");
         for (id, write) in [("wg_read", 0), ("wg_full", 1), ("wg_append", 2)] {
@@ -690,7 +690,7 @@ mod migration_005_tests {
         }
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
+        migration_helper::apply_pending(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("005 applies to a database holding grants");
 
@@ -776,12 +776,13 @@ mod boot_tests {
         assert!(load(&db).await.is_empty());
 
         // Apply admin migrations (creates the wrap_grants table among the
-        // other admin tables) through the untracked migration runner — the
+        // other admin tables) through the real migration runner — the
         // migration-file-runner exception to the no-raw-SQL rule (CLAUDE.md),
         // reusing the real embedded schema.
-        crate::migration_helper::apply_ddl_via_service(
+        crate::test_support::migrate_sqlite(
             &db,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
         )
         .await
         .expect("apply admin migrations");
@@ -854,26 +855,25 @@ mod boot_tests {
 
     /// On a table 001-004 created, a row that spelled append-only `write = 2`
     /// comes out of 005 as `write = 0, append = 1` and still loads as an
-    /// append grant; running the whole list again (as any later admin
-    /// migration makes a deploy or boot do) changes nothing.
+    /// append grant; a second boot over the same list runs nothing and
+    /// changes nothing.
     #[tokio::test]
     async fn migration_005_moves_a_write_2_row_onto_the_append_column() {
-        use crate::blocks::admin::migrations::{
-            ddl_files, SQLITE_MIGRATIONS, WRAP_GRANTS_APPEND_COLUMN,
+        use crate::blocks::admin::{
+            migrations::{SQLITE_MIGRATIONS, WRAP_GRANTS_APPEND_COLUMN},
+            ADMIN_BLOCK_ID,
         };
 
         let db = bare_db().await;
-        let all = ddl_files("sqlite");
         let at = SQLITE_MIGRATIONS
             .iter()
             .position(|(name, _)| *name == WRAP_GRANTS_APPEND_COLUMN)
             .expect("005 is wired into SQLITE_MIGRATIONS");
-        let before_005 = &all[..at];
         assert!(
-            all[at].contains("ADD COLUMN append"),
+            SQLITE_MIGRATIONS[at].1.contains("ADD COLUMN append"),
             "{WRAP_GRANTS_APPEND_COLUMN} is where the list says it is"
         );
-        crate::migration_helper::apply_ddl_via_service(&db, before_005)
+        crate::test_support::migrate_sqlite(&db, ADMIN_BLOCK_ID, &SQLITE_MIGRATIONS[..at])
             .await
             .expect("001-004 apply");
 
@@ -900,9 +900,9 @@ mod boot_tests {
         );
 
         for boot in ["first", "second"] {
-            crate::migration_helper::apply_ddl_via_service(&db, &all)
+            crate::test_support::migrate_sqlite(&db, ADMIN_BLOCK_ID, SQLITE_MIGRATIONS)
                 .await
-                .unwrap_or_else(|e| panic!("{boot} run of 001-005: {e}"));
+                .unwrap_or_else(|e| panic!("{boot} boot: {e}"));
             let stored = db.get(TABLE, "wg_legacy").await.expect("read the row");
             assert_eq!(stored.data["write"], json!(0), "{boot} run");
             assert_eq!(stored.data["append"], json!(1), "{boot} run");

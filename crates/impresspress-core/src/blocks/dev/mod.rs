@@ -858,14 +858,7 @@ impl Block for DevBlock {
     }
 
     async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
-        crate::migration_helper::lifecycle_init(
-            ctx,
-            &event,
-            BLOCK_NAME,
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
-        .await
+        crate::migration_helper::lifecycle_init(ctx, &event, &migrations::MIGRATIONS).await
     }
 }
 

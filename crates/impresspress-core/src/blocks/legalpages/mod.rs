@@ -771,10 +771,7 @@ crate::impresspress_feature_block! {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/legalpages",
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
+            &migrations::MIGRATIONS)
         .await?;
         // Seed the default draft documents after migrations, only on Init.
         if matches!(event.event_type, wafer_run::LifecycleType::Init) {
@@ -791,14 +788,9 @@ pub(super) async fn test_ctx() -> crate::test_support::TestContext {
     let ctx = crate::test_support::TestContext::with_admin()
         .await
         .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
-    crate::migration_helper::apply_migrations(
-        &ctx,
-        "impresspress/legalpages",
-        migrations::SQLITE_MIGRATIONS,
-        migrations::POSTGRES_MIGRATIONS,
-    )
-    .await
-    .expect("apply legalpages migrations");
+    crate::migration_helper::apply_migrations(&ctx, &migrations::MIGRATIONS)
+        .await
+        .expect("apply legalpages migrations");
     ctx
 }
 

@@ -292,9 +292,7 @@ async fn chat_fixture_with(service: Arc<dyn Block>) -> (TestContext, String) {
     let mut ctx = TestContext::with_llm().await;
     crate::migration_helper::apply_migrations(
         &ctx,
-        "impresspress/messages",
-        crate::blocks::messages::migrations::SQLITE_MIGRATIONS,
-        crate::blocks::messages::migrations::POSTGRES_MIGRATIONS,
+        &crate::blocks::messages::migrations::MIGRATIONS,
     )
     .await
     .expect("apply messages migrations");
