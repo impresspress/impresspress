@@ -711,3 +711,173 @@ async fn a_refused_dependent_read_is_a_refusal_not_a_default() {
         misses.join("\n")
     );
 }
+
+/// Every tickets write path writes, with strict schema on (as every
+/// `TestContext` and every Cloudflare deployment runs): the creation event,
+/// a note, an analysis, a status change's expiry propagated onto the
+/// ticket's events and analyses, and a maintenance pass's status row. Each
+/// names a column the host stamps (`updated_at`, and `created_at` on a
+/// create), which only tickets' 002 declares on `events`, `analyses` and
+/// `maintenance`.
+#[tokio::test]
+async fn every_tickets_write_path_writes_under_strict_schema() {
+    let ctx = TestContext::with_tickets().await;
+    let kind = service::create_type(&ctx, ticket_type("strict-writes"))
+        .await
+        .expect("create type");
+    let created = service::create_ticket(
+        &ctx,
+        ticket(&kind.id),
+        TicketSource::Admin,
+        ActorType::Admin,
+        "admin-1",
+        None,
+    )
+    .await
+    .expect("create ticket");
+    service::add_note(&ctx, &created.id, "Checked.", ActorType::Admin, "admin-1")
+        .await
+        .expect("a note is written");
+    service::add_analysis(
+        &ctx,
+        &created.id,
+        AnalysisInput {
+            source: "triage-agent".into(),
+            model: None,
+            prompt_version: "tickets-v1".into(),
+            summary: "Stale listing.".into(),
+            suggested_type_id: None,
+            suggested_priority: None,
+            confidence: 0.5,
+            suggested_actions: serde_json::json!([]),
+        },
+    )
+    .await
+    .expect("an analysis is written");
+    service::update_workflow(
+        &ctx,
+        &created.id,
+        WorkflowUpdate {
+            status: Some("resolved".into()),
+            priority: None,
+            assignee_id: None,
+            duplicate_of: None,
+            legal_hold: None,
+            reason: "Corrected.".into(),
+        },
+        ActorType::Admin,
+        "admin-1",
+    )
+    .await
+    .expect("a status change propagates its expiry");
+
+    let events = db::list_all(&ctx, repo::EVENTS, vec![])
+        .await
+        .expect("read the events");
+    assert_eq!(events.len(), 3, "created, note, resolved: {events:?}");
+    let analyses = db::list_all(&ctx, repo::ANALYSES, vec![])
+        .await
+        .expect("read the analyses");
+    for row in events.iter().chain(&analyses) {
+        assert!(
+            row.data.get("expires_at").is_some_and(|v| v.is_string()),
+            "the resolution's expiry reached every row: {row:?}"
+        );
+        assert!(
+            row.data.get("updated_at").is_some_and(|v| v.is_string()),
+            "{row:?}"
+        );
+    }
+
+    let pass =
+        impresspress_core::blocks::tickets::maintenance::prune(&ctx, chrono::Utc::now()).await;
+    assert!(pass.complete, "{:?}", pass.errors);
+    let status = db::get(&ctx, repo::MAINTENANCE, "singleton")
+        .await
+        .expect("read the maintenance row");
+    assert!(
+        status
+            .data
+            .get("last_pruned_at")
+            .is_some_and(|v| v.is_string()),
+        "the pass recorded itself: {status:?}"
+    );
+    assert_eq!(
+        status.data.get("audit_degraded"),
+        Some(&serde_json::json!(0)),
+        "nothing failed, so the audit trail is not degraded: {status:?}"
+    );
+}
+
+/// An audit event that cannot be written degrades: the ticket is saved and
+/// the "audit degraded" flag is set. A flag that cannot be written either
+/// is the caller's error — nothing would record the gap — and so is a
+/// maintenance pass that cannot record itself (`"status"`, and not
+/// complete, so the route answers 503). None of them creates the singleton
+/// row, which tickets' 001 seeds.
+#[tokio::test]
+async fn a_failed_audit_write_degrades_and_a_failed_flag_write_is_reported() {
+    use impresspress_core::test_support::FailingDbOpContext;
+    use wafer_block::ServiceOp;
+
+    let ctx = TestContext::with_tickets().await;
+    let kind = service::create_type(&ctx, ticket_type("audit-failure"))
+        .await
+        .expect("create type");
+    let failing = |tables: &[&'static str]| {
+        FailingDbOpContext::new(
+            ctx.clone(),
+            tables
+                .iter()
+                .flat_map(|table| ServiceOp::DATABASE_OPS.iter().map(move |op| (*op, *table)))
+                .collect(),
+        )
+    };
+
+    // The event alone fails: degraded, and the ticket stands.
+    let saved = service::create_ticket(
+        &failing(&[repo::EVENTS]),
+        ticket(&kind.id),
+        TicketSource::Admin,
+        ActorType::Admin,
+        "admin-1",
+        None,
+    )
+    .await
+    .expect("a failed audit event does not fail the ticket");
+    repo::get_ticket(&ctx, &saved.id)
+        .await
+        .expect("the ticket is saved");
+    let flag = db::get(&ctx, repo::MAINTENANCE, "singleton")
+        .await
+        .expect("read the maintenance row");
+    assert_eq!(
+        flag.data.get("audit_degraded"),
+        Some(&serde_json::json!(1)),
+        "the gap is recorded: {flag:?}"
+    );
+
+    // The event and the flag fail: the caller hears of it.
+    let refused = service::create_ticket(
+        &failing(&[repo::EVENTS, repo::MAINTENANCE]),
+        ticket(&kind.id),
+        TicketSource::Admin,
+        ActorType::Admin,
+        "admin-1",
+        None,
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(service::ServiceError::Db(_))),
+        "a flag that cannot be written is the caller's error: {refused:?}"
+    );
+
+    // A maintenance pass that cannot record itself does not complete.
+    let pass = impresspress_core::blocks::tickets::maintenance::prune(
+        &failing(&[repo::MAINTENANCE]),
+        chrono::Utc::now(),
+    )
+    .await;
+    assert!(!pass.complete);
+    assert_eq!(pass.errors, ["status"]);
+}

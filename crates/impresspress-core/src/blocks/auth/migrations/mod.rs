@@ -55,6 +55,9 @@ const SQL_015_POSTGRES: &str = include_str!("015_api_key_expiry_canonical.postgr
 const SQL_016_SQLITE: &str = include_str!("016_roles_are_grants.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_016_POSTGRES: &str = include_str!("016_roles_are_grants.postgres.sql");
+const SQL_017_SQLITE: &str = include_str!("017_reset_token_columns.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_017_POSTGRES: &str = include_str!("017_reset_token_columns.postgres.sql");
 
 /// Basename of the API-key expiry repair, named once so the migration list
 /// and the test that drives it cannot drift apart.
@@ -125,6 +128,34 @@ pub(crate) const API_KEY_EXPIRY_CANONICAL: &str = "015_api_key_expiry_canonical"
 /// `crates/impresspress-native/tests/auth_roles_are_grants.rs`.
 pub const ROLES_ARE_GRANTS: &str = "016_roles_are_grants";
 
+/// Basename of the migration that declares the password-reset columns.
+///
+/// # The 017 note
+///
+/// `repo::users`' reset-token functions write `reset_token` (the SHA-256 hex
+/// of the emailed token) and `reset_token_expires` on the users row, and no
+/// migration declared either. Without strict schema the runtime created them
+/// on the first reset request; under it (every Cloudflare deployment) that
+/// request failed, and forgot-password answered its generic success with no
+/// mail sent. 017 declares both, nullable TEXT, the definitions lazy
+/// column-add gave them.
+///
+/// - **A plain `ADD COLUMN`, not a rebuild or a new name.** `users` is the
+///   parent of six `ON DELETE CASCADE` foreign keys, so a rebuild's
+///   `DROP TABLE` would delete every credential, session and grant (SQLite
+///   cascades on the implicit `DELETE`, and D1 enforces foreign keys
+///   always). And the original names are kept, by the user's decision
+///   (2026-10-29): there are no production users.
+/// - **What that costs.** A native or browser database that served a reset
+///   before strict schema already holds both columns, created lazily. There
+///   017 fails whole inside its transaction, nothing of it runs, and the
+///   runner refuses the database by name as drifted schema
+///   (`Refusal::DriftedSchema`); such a database is recreated. RELEASE.md
+///   names it, local-run included.
+/// - **Outstanding reset links** need nothing: on a database where 017 runs
+///   no reset was ever stored.
+pub const RESET_TOKEN_COLUMNS: &str = "017_reset_token_columns";
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle(Init)` apply path (auth's `init`).
 /// Order here is the apply order.
@@ -145,6 +176,7 @@ pub const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("014_clear_provider_access_tokens", SQL_014_SQLITE),
     (API_KEY_EXPIRY_CANONICAL, SQL_015_SQLITE),
     (ROLES_ARE_GRANTS, SQL_016_SQLITE),
+    (RESET_TOKEN_COLUMNS, SQL_017_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
@@ -169,6 +201,7 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     ("014_clear_provider_access_tokens", SQL_014_POSTGRES),
     (API_KEY_EXPIRY_CANONICAL, SQL_015_POSTGRES),
     (ROLES_ARE_GRANTS, SQL_016_POSTGRES),
+    (RESET_TOKEN_COLUMNS, SQL_017_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
 pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

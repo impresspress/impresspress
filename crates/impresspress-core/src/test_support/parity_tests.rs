@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use wafer_block::{codec, common::ServiceOp, wire::database::CountRequest};
+use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_run::{
     context::Context, streams::output::TerminalNotResponse, Block, BlockCapabilities, BlockInfo,
     InputStream, Message, OutputStream, ResourceGrant,
@@ -171,18 +172,36 @@ impl Block for Probe {
 
 /// What `entry` answers `hops` with in a sealed runtime holding `probes`,
 /// and in a [`TestContext`] holding the same probes.
+/// The tables the probes' database hops read, one per probe block that owns
+/// one (test-fixture setup).
+async fn create_probe_tables(db: &Arc<dyn DatabaseService>) {
+    for table in ["test__a__rows", "test__b__rows"] {
+        db.exec_raw(
+            &format!(
+                "CREATE TABLE {table} (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"
+            ),
+            &[],
+        )
+        .await
+        .expect("create a probe table");
+    }
+}
+
 async fn run_both(probes: Vec<Probe>, entry: &str, hops: &[Hop]) -> (String, String) {
     let probes: Vec<Arc<Probe>> = probes.into_iter().map(Arc::new).collect();
 
+    // Both sides run strict schema (the fixture always does) over the
+    // tables the probes read, so a database hop's outcome is the gate's
+    // answer and not a missing table's.
+    let runtime_db: Arc<dyn DatabaseService> = Arc::new(
+        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+            .expect("open in-memory sqlite"),
+    );
+    runtime_db.set_strict_schema(true);
+    create_probe_tables(&runtime_db).await;
     let mut wafer = super::dispatch::empty_wafer();
-    wafer_core::service_blocks::database::register_with(
-        &mut wafer,
-        Arc::new(
-            wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
-                .expect("open in-memory sqlite"),
-        ),
-    )
-    .expect("the database registers");
+    wafer_core::service_blocks::database::register_with(&mut wafer, runtime_db)
+        .expect("the database registers");
     for (alias, target) in crate::builder::SERVICE_ALIASES {
         if *target == "wafer-run/database" {
             wafer.add_alias(*alias, *target).expect("alias");
@@ -202,6 +221,7 @@ async fn run_both(probes: Vec<Probe>, entry: &str, hops: &[Hop]) -> (String, Str
     .await;
 
     let mut ctx = TestContext::new().await;
+    create_probe_tables(&ctx.db_service).await;
     for probe in &probes {
         ctx.register_block(probe.name, probe.clone());
     }

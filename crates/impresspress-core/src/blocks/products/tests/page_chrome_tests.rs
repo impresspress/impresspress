@@ -775,7 +775,7 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
             ("details_submitted", json!(ready)), ("charges_enabled", json!(ready)), ("payouts_enabled", json!(false)),
             ("requirements_json", json!(r#"{"currently_due":["individual.verification.document","external_account"]}"#)),
             ("fee_basis_points", json!(250)), ("dashboard_type", json!("express")),
-            ("disabled_reason", json!(reason)),
+            ("requirements_disabled_reason", json!(reason)),
             (
                 "sync_error",
                 json!("No such account: 'acct_1NvQh2KZp7a9XyTqLongAccountIdentifier'"),
@@ -795,7 +795,6 @@ async fn commerce_ctx() -> crate::test_support::TestContext {
             ),
             ("owner_id", json!("seller_1")),
             ("created_by", json!("seller_1")),
-            ("owner_type", json!("user")),
             ("status", json!("draft")),
             ("approval_status", json!("pending")),
             ("submitted_at", when.clone()),

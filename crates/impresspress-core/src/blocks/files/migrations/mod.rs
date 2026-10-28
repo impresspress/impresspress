@@ -61,23 +61,16 @@ const SQL_003_POSTGRES: &str = include_str!("003_legacy_share_token_expiry.postg
 // has no default for that reason: a default would give every old row the same
 // value.
 //
-// Re-running is harmless on every backend: `ADD COLUMN IF NOT EXISTS` on
-// PostgreSQL, and on SQLite/D1 the duplicate-column error the frozen-file
-// statement loop tolerates for an `ALTER TABLE … ADD COLUMN`
-// (`migration_helper`'s "Frozen files"). What the legacy replay re-runs —
-// the whole frozen set, 001 onwards, over live rows — is pinned by
-// `replay_tests` below.
+// The file runs once, recorded in the migration ledger, so it needs no
+// re-run safety of its own. (`ADD COLUMN IF NOT EXISTS` on PostgreSQL dates
+// from the runner that re-ran whole lists; the file's text is shipped and
+// stays.)
 //
-// A native deployment that has not run it yet still takes fresh uploads, as
-// long as `WAFER_RUN__DATABASE__STRICT_SCHEMA` is off: the database service
-// then adds a column a write's data names but the table lacks (the lazy
-// column-add). Taking over an existing row filters on `claim_id`, and a filter
-// never adds a column, so a replacement is refused until the column exists —
-// until 004 runs or a fresh upload has added it; `uploads_before_migration_004_has_run`
-// in `storage::objects` exercises both. Under strict schema there is no lazy
-// add, so every reservation fails until 004 runs. Cloudflare deploys set strict schema, but every
-// `impresspress deploy` runs the block migrations in its prepare funnel, so
-// they get the column on deploy.
+// Until 004 runs, every reservation fails where strict schema is on: taking
+// over a row filters on `claim_id`, and an upload's data names it. Every
+// target applies the block's pending migrations before it serves a release
+// (a Cloudflare deploy in its prepare funnel, a native server at boot, the
+// browser before it builds its runtime), so no build runs without it.
 const SQL_004_SQLITE: &str = include_str!("004_object_claim_id.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_004_POSTGRES: &str = include_str!("004_object_claim_id.postgres.sql");
@@ -97,13 +90,8 @@ const SQL_004_POSTGRES: &str = include_str!("004_object_claim_id.postgres.sql");
 // row is rewritten and no blob is copied — an old object keeps being served
 // from where it is until an upload replaces it, which then deletes it.
 //
-// Re-running is harmless on every backend, for the reason 004's is: `ADD
-// COLUMN IF NOT EXISTS` on PostgreSQL, and on SQLite/D1 the duplicate-column
-// error the frozen-file statement loop tolerates for an `ALTER TABLE … ADD
-// COLUMN`. The replay of the whole set is pinned by `replay_tests` below. A native
-// deployment that has not run it still uploads while strict schema is off,
-// through the same lazy column-add `uploads_work_before_migration_005_has_run`
-// in `storage::objects` exercises.
+// The file runs once, recorded in the migration ledger, as 004 does; every
+// target applies it before it serves the code that names `blob_key`.
 const SQL_005_SQLITE: &str = include_str!("005_object_blob_key.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_005_POSTGRES: &str = include_str!("005_object_blob_key.postgres.sql");

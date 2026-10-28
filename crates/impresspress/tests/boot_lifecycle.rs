@@ -723,6 +723,75 @@ async fn the_strict_schema_env_var_reaches_the_database_blocks_init() {
     );
 }
 
+/// A strict native boot declares what the password-reset flow writes: auth's
+/// 017 adds `reset_token` and `reset_token_expires` to `users`, so storing a
+/// reset token, finding the account by it and spending it all succeed with
+/// strict schema on (every Cloudflare deployment runs it). Without 017 the
+/// first of those writes is the backend's `no such column`.
+#[tokio::test]
+async fn a_strict_boot_stores_finds_and_spends_a_reset_token() {
+    let (report, db, _tmp) = boot_fresh_with_env(
+        "strict_reset_token",
+        HashMap::from([(
+            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY.to_string(),
+            "true".to_string(),
+        )]),
+    )
+    .await;
+    assert!(report.ok, "a strict boot must succeed: {report:?}");
+    let users = impresspress_core::blocks::auth::repo::users::TABLE;
+    // Test-fixture setup: an account, by raw SQL naming its NOT NULL columns.
+    db.exec_raw(
+        &format!(
+            "INSERT INTO {users} (id, email, display_name, created_at, updated_at) \
+             VALUES ('u1', 'u1@example.com', 'u1', '2026-10-01T00:00:00Z', \
+             '2026-10-01T00:00:00Z')"
+        ),
+        &[],
+    )
+    .await
+    .expect("seed an account");
+
+    // What `repo::users::set_reset_token` writes.
+    let mut stored = HashMap::new();
+    stored.insert("reset_token".to_string(), serde_json::json!("digest"));
+    stored.insert(
+        "reset_token_expires".to_string(),
+        serde_json::json!("2026-10-01T01:00:00Z"),
+    );
+    db.update(users, "u1", stored)
+        .await
+        .expect("a reset token is stored under strict schema");
+    // What `find_by_reset_token` reads, and `take_reset_token` writes.
+    let by_token = |value: &str| {
+        vec![wafer_block::db::Filter {
+            field: "reset_token".into(),
+            operator: wafer_block::db::FilterOp::Equal,
+            value: serde_json::json!(value),
+        }]
+    };
+    let found = db
+        .list(
+            users,
+            &wafer_block::db::ListOptions {
+                filters: by_token("digest"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("an account is found by its reset token");
+    assert_eq!(found.records.len(), 1);
+    let mut spent = HashMap::new();
+    spent.insert("reset_token".to_string(), serde_json::json!(""));
+    spent.insert("reset_token_expires".to_string(), serde_json::json!(""));
+    assert_eq!(
+        db.update_where_count(users, &by_token("digest"), spent)
+            .await
+            .expect("a reset token is spent under strict schema"),
+        1
+    );
+}
+
 /// The `wafer-run/network` limits are the block's declared config, read at
 /// its `lifecycle(Init)`: an operator's process-env value must reach it, and
 /// an invalid one must fail that block's Init naming the key rather than be

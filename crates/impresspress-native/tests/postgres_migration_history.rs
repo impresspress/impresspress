@@ -5,6 +5,14 @@
 //! - **Every block applies fresh, atomically:** each block's whole
 //!   PostgreSQL list from an empty database, admin first, each file one
 //!   transaction, through the real runner, with no failure.
+//! - **Every table declares `updated_at`** on a fresh install (the ledger
+//!   aside), as on SQLite.
+//! - **The stamped-column files** (auth 017, dev 005, tickets 002, vector
+//!   002) are right on a fresh database and on one whose writes created
+//!   their columns lazily, the lazily created column's type, nullability
+//!   and default included, and auth 017 is refused by name where a password
+//!   reset was stored lazily
+//!   (`impresspress_core::test_support::stamped_columns`).
 //! - **Every state upgrades as its entry says:** every supported entry of
 //!   every block's PostgreSQL history, rebuilt with the runner from before
 //!   the ledger and upgraded through today's, converges on a fresh install's
@@ -13,7 +21,7 @@
 //!   supported state reached from an older one is the line
 //!   `migration-history-crossing.txt` records for it.
 //!
-//! Needs a server, so both are `#[ignore]`d. CI's `test-postgres` job runs
+//! Needs a server, so each is `#[ignore]`d. CI's `test-postgres` job runs
 //! them with `IMPRESSPRESS_TEST_POSTGRES_URL` naming a database on a server
 //! they may create others on: each case gets an empty database of its own,
 //! dropped when the test ends.
@@ -30,7 +38,7 @@ use std::{
     },
 };
 
-use impresspress_core::test_support::migration_history as history;
+use impresspress_core::test_support::{migration_history as history, stamped_columns};
 use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_sql_utils::Backend;
 
@@ -166,4 +174,34 @@ async fn every_state_upgrades_as_its_entry_says_on_postgres() {
             .collect::<Vec<_>>()
             .join("\n  "),
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a PostgreSQL server named by IMPRESSPRESS_TEST_POSTGRES_URL"]
+async fn every_table_declares_updated_at_on_postgres() {
+    let server = Server::connect("impresspress_updated_at").await;
+    let db = server.database().await;
+    let results = history::apply_fresh(&db, Backend::Postgres).await;
+    let failures: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    let schema = history::Schema::read(&db, Backend::Postgres).await;
+    drop(db);
+    server.drop_all().await;
+    assert!(failures.is_empty(), "a fresh install failed: {failures:?}");
+    let lacking = history::tables_without_updated_at(&schema.expect("read the schema"));
+    assert!(
+        lacking.is_empty(),
+        "tables a fresh install creates without `updated_at`: {lacking:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a PostgreSQL server named by IMPRESSPRESS_TEST_POSTGRES_URL"]
+async fn the_stamped_column_files_are_right_for_both_kinds_of_database_on_postgres() {
+    let server = Server::connect("impresspress_stamped").await;
+    let new_db = || {
+        Box::pin(server.database()) as Pin<Box<dyn Future<Output = Arc<dyn DatabaseService>> + '_>>
+    };
+    let problems = stamped_columns::check(Backend::Postgres, &new_db).await;
+    server.drop_all().await;
+    assert!(problems.is_empty(), "{problems:#?}");
 }

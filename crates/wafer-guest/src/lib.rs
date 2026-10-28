@@ -2000,11 +2000,34 @@ pub mod db {
         call, filters_json, json::Json, Ctx, Filter, HostError, ListOptions, TableDef, DATABASE,
     };
 
-    /// Create `table` and its indexes if they are not already there.
+    /// Create `table` and its indexes if they are not already there, and add
+    /// any column it declares that an existing table lacks.
     ///
     /// Idempotent, and the right thing to call from `init` on every start —
     /// a block has no separate migration step.
+    ///
+    /// **`table` must declare `updated_at`.** The host stamps it on every
+    /// write, so a table without it could take no write at all; this refuses
+    /// it here, an `InvalidArgument` naming the column, so the block fails
+    /// when it starts rather than on its first write. A table a block
+    /// creates rows in with [`create`] needs `created_at` as well, which the
+    /// host stamps on insert; a block that only upserts or updates does not.
     pub fn ensure_table(_ctx: &Ctx, table: TableDef) -> Result<(), HostError> {
+        if !table
+            .columns
+            .iter()
+            .any(|column| column.name == "updated_at")
+        {
+            return Err(HostError {
+                code: "InvalidArgument".to_string(),
+                message: format!(
+                    "table `{}` declares no `updated_at` column, and the host stamps \
+                     `updated_at` on every write: add \
+                     `.column(Column::datetime(\"updated_at\"))` to its `TableDef`",
+                    table.name
+                ),
+            });
+        }
         call(
             DATABASE,
             "database.ensure_table",
@@ -2282,6 +2305,26 @@ pub mod log {
 #[cfg(test)]
 mod tests {
     use super::json::Json;
+
+    /// A table without `updated_at` is refused before anything reaches the
+    /// host, naming the column: the host stamps it on every write, so the
+    /// table could take none. (Reaching the host would panic here: a native
+    /// build has no host to call.)
+    #[test]
+    fn ensure_table_refuses_a_table_without_updated_at() {
+        let table = super::TableDef::new("site__newsletter__subscribers")
+            .column(super::Column::text("id").primary_key())
+            .column(super::Column::datetime("created_at"));
+        let error = super::db::ensure_table(&super::Ctx, table)
+            .expect_err("a table without `updated_at` is refused");
+        assert_eq!(error.code, "InvalidArgument");
+        assert!(error.message.contains("`updated_at`"), "{}", error.message);
+        assert!(
+            error.message.contains("site__newsletter__subscribers"),
+            "{}",
+            error.message
+        );
+    }
 
     /// A `\u` pair whose second half is not a low surrogate is a parse error,
     /// not a code point folded together out of two unrelated escapes.

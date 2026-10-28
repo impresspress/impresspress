@@ -22,7 +22,7 @@
                       "type": "boolean"
                     },
                     "errors": {
-                      "description": "Names of the deletes that failed (`\"analyses\"`, `\"events\"`,\n`\"tickets\"`, `\"rate-counters\"`).",
+                      "description": "Names of the steps that failed: the deletes (`\"analyses\"`, `\"events\"`,\n`\"tickets\"`, `\"rate-counters\"`), and `\"status\"` when the pass could\nnot be recorded for the status endpoint.",
                       "items": {
                         "type": "string"
                       },

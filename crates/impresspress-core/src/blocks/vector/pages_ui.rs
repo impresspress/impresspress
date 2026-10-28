@@ -666,15 +666,30 @@ mod integration_tests {
         // Staged from the fixture's own frame: the `_meta` table is the
         // vector backend's, which creates it through raw DDL.
         let ctx = &ctx.fixture();
-        // Registry row.
-        let mut registry_row: HashMap<String, serde_json::Value> = HashMap::new();
-        registry_row.insert("prefixed_name".into(), json!("impresspress__vector__docs"));
-        registry_row.insert("model".into(), json!("fastembed"));
-        registry_row.insert("dimensions".into(), json!(384));
-        registry_row.insert("keyword_search".into(), json!(1));
-        db::create(ctx, "impresspress__vector__registry", registry_row)
-            .await
-            .expect("seed registry row");
+        // Registry row, written as `pages::create_index` writes it: an
+        // `upsert` on the name, which stamps nothing (a `db::create` would
+        // stamp `created_at`, a column the registry does not have).
+        db::upsert(
+            ctx,
+            "impresspress__vector__registry",
+            vec![
+                (
+                    "prefixed_name".to_string(),
+                    json!("impresspress__vector__docs"),
+                ),
+                ("model".to_string(), json!("fastembed")),
+                ("dimensions".to_string(), json!(384)),
+                ("keyword_search".to_string(), json!(1)),
+            ],
+            vec!["prefixed_name".to_string()],
+            wafer_block::wire::database::OnConflict::SetColumns(vec![
+                "model".to_string(),
+                "dimensions".to_string(),
+                "keyword_search".to_string(),
+            ]),
+        )
+        .await
+        .expect("seed registry row");
 
         // Per-index `_meta` table — created on demand in production by the
         // upstream `wafer-run/vector` runtime block via `vclient::create_index`

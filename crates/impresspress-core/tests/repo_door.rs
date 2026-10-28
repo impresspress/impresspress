@@ -871,6 +871,12 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // the admin SQL explorer's refusal list; see the note on
             // the `variables` door above
             "secret_tables.rs",
+            // the stamped-column migration tests' engine seeds a users row
+            // by raw SQL against the schema before auth's 017 and writes the
+            // reset-token columns as production's typed write did before
+            // strict schema — the schema under test, which no repo function
+            // can write
+            "test_support/stamped_columns.rs",
             // the export allowlist/exclusion bookkeeping; its reads go
             // through a generic `db::list_all(ctx, table, ..)` over the
             // allowlist and its import through `seed::import`

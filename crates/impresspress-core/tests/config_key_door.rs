@@ -166,6 +166,9 @@ const DECLARES_A_CONFIG_KEY: &[&str] = &[
 ///   names an admin chose for a provider, which no block declares by design.
 /// * `test_support.rs` — a shared key and a foreign block's key a probe block
 ///   declares, which the runtime's registration must refuse.
+/// * `ui/settings_form.rs` — keys the save tests post through the
+///   production config writer, which only takes a well-formed key; no block
+///   declares them.
 ///
 /// `config_vars.rs`, `blocks/auth/config.rs` and `platform_state/variables.rs`
 /// hold fixture constants of the same kind (the flags `get_bool` is tested on,
@@ -180,6 +183,7 @@ const DECLARES_A_TEST_FIXTURE_KEY: &[&str] = &[
     "blocks/llm/routes/providers.rs",
     "blocks/llm/schema.rs",
     "test_support.rs",
+    "ui/settings_form.rs",
 ];
 
 /// Every namespace prefix a key can start with, for the bypass scan: a

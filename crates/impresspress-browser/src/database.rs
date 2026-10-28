@@ -117,7 +117,13 @@ use crate::{bridge, db_codec};
 /// boot hook precisely because they are interchangeable. STRICT_SCHEMA is a
 /// property of that database, so a per-instance field would let two handles
 /// disagree about the same schema.
-static STRICT_SCHEMA: AtomicBool = AtomicBool::new(false);
+///
+/// This crate's own tests start strict, as every `TestContext` does in
+/// `impresspress-core`: a fixture has to declare the columns its writes name,
+/// so the suite proves this backend's paths under the behaviour every target
+/// is moving to. A build of the crate (the browser runtime) starts off until
+/// the database block's `Init` says otherwise.
+static STRICT_SCHEMA: AtomicBool = AtomicBool::new(cfg!(test));
 
 /// Memoized table-exists / column-list / primary-key facts for the one
 /// sql.js database, returned by [`DbExec::schema_cache`].
@@ -1171,7 +1177,8 @@ mod sql_js_conformance {
     async fn a_duplicate_insert_is_already_exists() {
         let svc = fresh_db().await;
         svc.exec_raw(
-            "CREATE TABLE sql_js_dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
+            "CREATE TABLE sql_js_dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+             created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await
@@ -1335,7 +1342,7 @@ mod strict_schema_policy {
     #[wasm_bindgen_test]
     fn setting_strict_schema_is_observed_by_the_shared_executor() {
         let svc = BrowserDatabaseService;
-        // The default the shared executor starts from.
+        DatabaseService::set_strict_schema(&svc, false);
         assert!(!DbExec::strict_schema(&svc));
 
         DatabaseService::set_strict_schema(&svc, true);
@@ -1350,9 +1357,7 @@ mod strict_schema_policy {
         // and not of a handle. `impresspress-web` holds a second handle for
         // its boot hook.
         assert!(DbExec::strict_schema(&BrowserDatabaseService));
-
-        DatabaseService::set_strict_schema(&svc, false);
-        assert!(!DbExec::strict_schema(&svc));
+        // Left on: every other test of this crate runs strict.
     }
 }
 
@@ -1817,7 +1822,10 @@ mod sql_js_transactions {
     async fn fresh() -> BrowserDatabaseService {
         let svc = fresh_db().await;
         svc.exec_raw(
-            &format!("CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT)"),
+            &format!(
+                "CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, \
+                 updated_at TEXT)"
+            ),
             &[],
         )
         .await
@@ -1848,10 +1856,9 @@ mod sql_js_transactions {
 
     /// **The coalescing half of the durability contract, on the real
     /// service.** `create_many` is one logical mutation however many rows it
-    /// carries and however many statements it takes — here twenty inserts,
-    /// plus the lazy ADD COLUMNs for the `created_at`/`updated_at` stamps
-    /// before them — so it writes the database to OPFS exactly once, and that
-    /// one write holds every row. Fails when `create_many` is `forward` (no
+    /// carries and however many statements it takes — here twenty inserts —
+    /// so it writes the database to OPFS exactly once, and that one write
+    /// holds every row. Fails when `create_many` is `forward` (no
     /// flush: nothing durable) or flushes per statement.
     #[wasm_bindgen_test]
     async fn create_many_flushes_to_opfs_exactly_once() {
@@ -2086,7 +2093,7 @@ mod sql_js_transactions {
             .expect("parent table");
         svc.exec_raw(
             "CREATE TABLE sql_js_fk_child (id TEXT PRIMARY KEY, \
-             parent TEXT REFERENCES sql_js_fk_parent(id))",
+             parent TEXT REFERENCES sql_js_fk_parent(id), created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await

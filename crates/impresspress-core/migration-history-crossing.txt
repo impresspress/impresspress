@@ -221,10 +221,10 @@ impresspress/userportal postgres f67dc244 every-state residue table suppers_ai__
 impresspress/userportal postgres f67dc244 from-first residue table suppers_ai__userportal__buttons
 impresspress/userportal sqlite cd777abb every-state residue table suppers_ai__userportal__buttons
 impresspress/userportal sqlite cd777abb from-first residue table suppers_ai__userportal__buttons
-impresspress/vector postgres e5f33cbe every-state diverges index impresspress__vector__registry.idx_vector_registry_model["model"]
-impresspress/vector postgres e5f33cbe from-first diverges index impresspress__vector__registry.idx_vector_registry_model["model"]
-impresspress/vector sqlite 0a29a7df every-state diverges index impresspress__vector__registry.idx_vector_registry_model["model"]
-impresspress/vector sqlite 0a29a7df from-first diverges index impresspress__vector__registry.idx_vector_registry_model["model"]
+impresspress/vector postgres e5f33cbe every-state residue table suppers_ai__vector__registry
+impresspress/vector postgres e5f33cbe from-first residue table suppers_ai__vector__registry
+impresspress/vector sqlite 0a29a7df every-state residue table suppers_ai__vector__registry
+impresspress/vector sqlite 0a29a7df from-first residue table suppers_ai__vector__registry
 wafer-run/auth postgres 0761a0d1 every-state residue table suppers_ai__auth__api_keys; table suppers_ai__auth__bootstrap_tokens; table suppers_ai__auth__cli_exchange_codes; table suppers_ai__auth__jwt_blocklist; table suppers_ai__auth__local_credentials; table suppers_ai__auth__oauth_pkce_states; table suppers_ai__auth__orgs; table suppers_ai__auth__personal_access_tokens; table suppers_ai__auth__provider_links; table suppers_ai__auth__rate_limits; table suppers_ai__auth__sessions; table suppers_ai__auth__tokens; table suppers_ai__auth__users
 wafer-run/auth postgres 0761a0d1 from-first residue table suppers_ai__auth__bootstrap_tokens; table suppers_ai__auth__cli_exchange_codes; table suppers_ai__auth__local_credentials; table suppers_ai__auth__orgs; table suppers_ai__auth__personal_access_tokens; table suppers_ai__auth__provider_links; table suppers_ai__auth__sessions; table suppers_ai__auth__users
 wafer-run/auth postgres 0761a0d1 from-last-unsupported converges

@@ -288,7 +288,9 @@ claim every collection you touch.
 
 A **record** is `{"id": …, "data": {…}}` — the id is the primary key, `data`
 holds the row's columns. The host generates an id when your data carries
-none, and stamps `created_at` on insert and `updated_at` on every write.
+none, and stamps `created_at` on insert and `updated_at` on every write — so
+a table declares both, and a write naming a column the table does not
+declare fails.
 
 ### `db::ensure_table`
 
@@ -299,9 +301,15 @@ db::ensure_table(
         .column(Column::text("id").primary_key())
         .column(Column::text("email").not_null().unique())
         .column(Column::datetime("created_at").default_now())
+        .column(Column::datetime("updated_at"))
         .index(&["created_at"], false),
 )?;
 ```
+
+A table without `updated_at` is refused with `InvalidArgument`, naming the
+column, so the block fails when it starts rather than on its first write.
+`ensure_table` adds a declared column an existing table lacks, so adding
+`updated_at` to an older block's `TableDef` is all it takes.
 
 Columns are `string`, `text`, `int`, `int64`, `float`, `bool`, `datetime`,
 `json` and `blob`, and are **nullable by default** — `.not_null()`,

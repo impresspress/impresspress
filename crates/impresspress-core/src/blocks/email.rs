@@ -705,7 +705,7 @@ where
 /// writes the composite key into the `wafer_run__auth__rate_limits` D1 table,
 /// which until now held only user ids and IPs. A recipient address is
 /// somebody's mailbox and does not belong in a table that exists to count
-/// requests — the same reason `users.reset_token_hash` stores a digest. The
+/// requests — the same reason `users.reset_token` stores a digest. The
 /// bucket only ever needs equality, which a digest preserves.
 fn recipient_bucket_key(to: &str) -> String {
     crate::util::sha256_hex(to.trim().to_lowercase().as_bytes())

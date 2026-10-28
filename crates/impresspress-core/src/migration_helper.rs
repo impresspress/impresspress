@@ -108,6 +108,30 @@
 //!   database, or restore a backup (a browser's stopped screen offers
 //!   Reset).
 //!
+//! ## Adding a column a write may already have created
+//!
+//! Until strict schema is the only behaviour of every target, a native or
+//! browser database may hold a column no migration declared, created by the
+//! first typed write that named it. A new file that adds such a column is
+//! refused as drifted schema on exactly those databases. So before a file
+//! adds a column to an existing table, look for any code that ever wrote it
+//! there, current code and code since removed alike (`git log -S'"<name>"'`),
+//! and choose:
+//!
+//! - a **rebuild** of the table (SQLite: a `_v2` table, the rows copied by
+//!   name, the old table dropped, its indexes recreated; PostgreSQL:
+//!   `ADD COLUMN IF NOT EXISTS` with the exact definition the lazy add gave
+//!   the column), which gives both kinds of database the same end state —
+//!   dev 005, tickets 002 and vector 002 do this, and their headers name the
+//!   two kinds; it is possible only for a table no foreign key references;
+//! - or a plain `ADD COLUMN`, accepting that such a database is refused by
+//!   name and recreated — auth 017 does this for `users`, which six
+//!   cascading foreign keys reference, so it cannot be rebuilt.
+//!
+//! Every column current code writes is declared by a migration (the test
+//! suites run strict schema, so a write naming an undeclared column fails
+//! them).
+//!
 //! # Databases from before the ledger
 //!
 //! A block with no ledger rows is classified by its `current_hash` against

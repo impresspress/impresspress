@@ -16,16 +16,25 @@
 const SQL_001_SQLITE: &str = include_str!("001_vector_schema.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_vector_schema.postgres.sql");
+const SQL_002_SQLITE: &str = include_str!("002_registry_updated_at.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_002_POSTGRES: &str = include_str!("002_registry_updated_at.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
-pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_vector_schema", SQL_001_SQLITE)];
+pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_vector_schema", SQL_001_SQLITE),
+    ("002_registry_updated_at", SQL_002_SQLITE),
+];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[("001_vector_schema", SQL_001_POSTGRES)];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_vector_schema", SQL_001_POSTGRES),
+    ("002_registry_updated_at", SQL_002_POSTGRES),
+];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 

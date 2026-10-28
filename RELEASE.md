@@ -19,6 +19,126 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Schema: every column a write names is declared (auth 017, dev 005, tickets 002, vector 002)
+
+**What was wrong.** The database layer stamps `created_at` on every typed
+insert and `updated_at` on every typed write. Some tables never declared
+the columns a write names. Native and browser databases created such a
+column on the first write that named it (lazy column-add, which is on while
+strict schema is off). Cloudflare runs strict schema, so there the write
+failed:
+
+- **Password reset, on every Cloudflare deployment.** No migration declared
+  `users.reset_token` or `reset_token_expires`. Forgot-password stored
+  nothing, sent no mail, and still gave its generic success answer (an
+  address must not be told apart by the answer): the visitor saw no
+  failure, and only the Worker's error log recorded one.
+- **Tickets, on a Cloudflare build that enables `block-tickets`** (the
+  `full` preset). Every audit event failed, and so did the "audit
+  degraded" flag that is meant to record such a failure. A public
+  submission answered 201 with no audit trail and no error anywhere. A note,
+  an analysis, a status change's expiry and the maintenance pass's status
+  row failed too.
+- **Vector, on a Cloudflare build that enables `block-vector`.** Renaming a
+  legacy mixed-case index wrote `registry.updated_at`.
+- **The dev sandbox** (browser only) and the sandbox's `table` block
+  template relied on lazy column-add for `updated_at`.
+
+**What changes.**
+
+- Four new migrations declare the columns: auth 017 (`reset_token`,
+  `reset_token_expires`), dev 005 (`updated_at` on `generations`, `builds`
+  and `seed_info`), tickets 002 (`updated_at` on `events` and `analyses`,
+  `created_at` and `updated_at` on `maintenance`) and vector 002
+  (`updated_at` on `registry`). Password reset, the tickets audit trail and
+  the vector rename work on Cloudflare from this release on.
+- **Tickets: a failed audit write still degrades, and a failure to record
+  that now fails.** An audit event that cannot be written still leaves the
+  ticket saved and sets the "audit degraded" flag. If the flag itself cannot
+  be written, nothing would record the gap, so the request now fails with
+  the database error instead of answering success. A maintenance pass that
+  cannot write its status row reports `"status"` among its errors and
+  answers 503, so a scheduler retries. Neither falls back to creating the
+  singleton row any more; tickets' 001 creates it.
+- **Sandbox blocks: `db::ensure_table` refuses a table without
+  `updated_at`.** The guest SDK refuses it with `InvalidArgument`, naming
+  the column, so a block fails when it is activated instead of on its
+  first write. The `table` template and the reference page declare
+  `created_at` and `updated_at`. A block that is already compiled keeps its
+  old SDK until it is compiled again; then add
+  `.column(Column::datetime("updated_at"))` to its `TableDef`.
+  `ensure_table` adds a declared column that an existing table lacks.
+- The test suites run with strict schema (`TestContext` and the browser
+  crate's own tests), so a write naming an undeclared column fails them.
+  Native and browser deployments still run without it until the pinned
+  wafer-run drops lazy column-add.
+
+**Two populations, one end state.** On native and in the browser, a
+database that exercised these paths already holds lazily created stamp
+columns. Examples: every sandbox that built or published, and every
+profile with a ticket note or a maintenance pass. A database that did not
+exercise them has no such columns. Both have the same record, so each
+file is written to leave both the same:
+
+- **SQLite, D1 and the browser:** dev 005, tickets 002 and vector 002
+  rebuild their tables. Each creates a `_v2` table with the declared
+  columns, copies the rows by column name, drops the old table and renames
+  the new one. No foreign key references these tables. This has two effects
+  nobody asked for, both silent:
+  - Any other column that a write created lazily on those seven tables is
+    dropped with its values. A column no migration declares is not schema.
+  - `updated_at` on existing rows is set from the row's own data:
+    `created_at` for generations, builds, events and analyses;
+    `imported_at` for the seed record; the last pass's time for the
+    maintenance row; and NULL for registry rows, which have no time of
+    their own. This replaces any value a lazy write stamped. The
+    maintenance row's `created_at` is NULL.
+- **PostgreSQL:** the same columns are added with `ADD COLUMN IF NOT
+  EXISTS`, and an `UPDATE` then writes the values listed above. Lazy
+  column-add created exactly `<column> TEXT`, nullable with no default, so
+  the declared column and the lazily created one are the same column. A
+  test pins the type, nullability and default on a lazily created
+  database.
+- **The vector `model` index is renamed** to
+  `idx_impresspress__vector__registry_model` on both dialects. On a vector
+  database created before 2026-07-13, 001's name was already taken by the
+  registry's earlier table, so that database now has the index too (see
+  the ledger entry's "Upgraded but not equal to a fresh install").
+- A fresh install runs the rebuilds over empty tables.
+
+**Refused: a native or browser database that ever served a password
+reset.** `users` cannot be rebuilt. Six foreign keys reference it with `ON
+DELETE CASCADE`, so dropping the table would delete every credential,
+session and grant. Auth 017 is therefore a plain `ADD COLUMN`. A database
+that served a reset request while strict schema was off already holds both
+columns. There 017 fails as one transaction, nothing of it runs, and auth
+is refused by name: "its schema drifted: migration `017_reset_token_columns`
+adds a column the database already has…". Every other block upgrades.
+
+- **Who:** a native server's SQLite or PostgreSQL database, **including a
+  `local-run` development database**, and a browser profile (the demo, a
+  dev sandbox) on which anyone requested a password reset.
+- **Cloudflare is not affected.** It has run strict schema since
+  2026-07-17, so a D1 database created since then never stored a reset. An
+  older D1 database that served a reset before then would be refused by
+  `/_deploy/prepare`, and the current version keeps serving.
+- **What you see:** a native server refuses to start with the message. A
+  browser shows the stopped screen with the cause and **Reset local data
+  and reload**, which erases only when chosen.
+- **Remedy:** recreate the database (in the browser, Reset). To keep the
+  data instead, drop the two columns and start again; 017 then adds them
+  back empty:
+  `ALTER TABLE wafer_run__auth__users DROP COLUMN reset_token;` and
+  `ALTER TABLE wafer_run__auth__users DROP COLUMN reset_token_expires;`.
+  Any outstanding reset link stops working either way.
+
+**Cloudflare.** The next deploy's prepare runs the four files: two `ADD
+COLUMN`s on `users`, and the rebuilds of the tickets and vector tables on
+a Worker that compiles those blocks. Dev never runs on a Worker. The
+fresh-install budget test now counts only the blocks
+`impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
+Worker database sends 480 statements, within half of the default 1000.
+
 ### Cloudflare: workers-rs 0.8.7
 
 **What changes.** The Worker crates build on `worker` 0.8.7 and
@@ -161,9 +281,11 @@ migrating run after the upgrade decides from what the block recorded:
     or later (`e73b4cc2`; PostgreSQL `43907ff1`) keeps the sessions table
     keyed on the access token. It is adopted, nothing runs, and no device can
     stay signed in on it.
-  - files, messages, legalpages and vector databases created before
-    2026-07-13 lack indexes their `001` names (the names were taken by the
-    `solobase__` tables then). Queries are slower; nothing fails.
+  - files, messages and legalpages databases created before 2026-07-13
+    lack indexes their `001` names (the names were taken by the
+    `solobase__` tables then). Queries are slower; nothing fails. Vector
+    databases of that age lacked one too, until vector's 002 recreated it
+    under a new name.
   - a signal database created on signal's 2026-09-13 first text and next
     migrated on today's list lacks `rooms.id` and `rooms.updated_at`. Writes
     to rooms fail where strict schema is on (Cloudflare).
@@ -230,9 +352,10 @@ and is refused as "its tracking was lost", rolled back. Restore
 `impresspress__admin__applied_migrations` from a backup taken before the
 loss, or recreate the database.
 
-**Cloudflare budget.** A fresh database's `/_deploy/prepare` sends 454
-statements for its migrations (counted by a test that keeps it within half
-of the default budget of 1000). Leave
+**Cloudflare budget.** A fresh database's `/_deploy/prepare` sent 454
+statements for its migrations at this release, and 480 since the
+stamped-column migrations (counted by a test that keeps it within half of
+the default budget of 1000). Leave
 `[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
 fresh install.
 
