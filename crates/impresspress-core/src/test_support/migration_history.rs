@@ -590,6 +590,20 @@ impl Schema {
     }
 }
 
+/// The tables of `schema` without an `updated_at` column, sorted, leaving out
+/// the migration ledger: no migration creates it, and the runner writes its
+/// rows itself, as raw statements inside each file's transaction, so the
+/// executor never stamps it.
+pub fn tables_without_updated_at(schema: &Schema) -> Vec<String> {
+    schema
+        .tables
+        .iter()
+        .filter(|(name, _)| name.as_str() != applied_migrations::TABLE)
+        .filter(|(_, table)| !table.columns.iter().any(|c| c.name == "updated_at"))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// [`Schema::compare`]'s answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comparison {
@@ -1286,8 +1300,18 @@ pub async fn apply_fresh(
     db: &Arc<dyn DatabaseService>,
     backend: Backend,
 ) -> Vec<Result<(String, usize, usize), String>> {
+    apply_fresh_blocks(db, backend, &blocks()).await
+}
+
+/// [`apply_fresh`] over `selected` alone, in the order given (admin's
+/// first, as every target applies it).
+pub async fn apply_fresh_blocks(
+    db: &Arc<dyn DatabaseService>,
+    backend: Backend,
+    selected: &[&BlockMigrations],
+) -> Vec<Result<(String, usize, usize), String>> {
     let mut out = Vec::new();
-    for migrations in blocks() {
+    for migrations in selected.iter().copied() {
         let (files, history) = migrations.for_backend(backend);
         let statements: usize = files
             .iter()

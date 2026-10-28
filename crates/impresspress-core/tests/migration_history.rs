@@ -6,8 +6,10 @@
 //!   an empty database, admin first, each file one transaction, through the
 //!   real runner, with no failure. This is what the two file edits of the
 //!   ledger release (auth 016, admin 009) make true.
-//! - **The fresh-install budget:** what that install sends, counted through
-//!   a decorator, fits half of one D1 invocation's default budget.
+//! - **The fresh-install budget:** what a Cloudflare build's install sends
+//!   (the blocks `impresspress-cloudflare` can compile, read from its
+//!   manifest), counted through a decorator, fits half of one D1
+//!   invocation's default budget.
 //! - **The history table:** every state's composition resolves to its own
 //!   hash; the table's invariants hold; every supported state, rebuilt with
 //!   the runner from before the ledger and upgraded through today's,
@@ -114,34 +116,13 @@ wafer_core::forward_database_service! {
 /// file as one transaction, with nothing failing — the rule that lets the
 /// runner tolerate nothing. One transaction per file, its ledger row
 /// included, is counted.
-///
-/// And the budget: `/_deploy/prepare` applies a fresh install in ONE Worker
-/// invocation, and until a D1 batch is admitted as one call the adapter
-/// admits each statement, so the statements sent — every file's statements
-/// and its ledger row, plus each block's own calls (the ledger table, the
-/// ledger read, the record's read and write, the fast-path read) — must fit
-/// half of the default budget ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]), with
-/// the funnel's seeds and config reads in what is left. Counted here through
-/// a decorator, not computed, so the runner's next change is measured.
-///
-/// [`D1_QUERIES_PER_INVOCATION_DEFAULT`]: impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT
 #[tokio::test]
 async fn every_block_applies_fresh_atomically() {
     let (_dir, inner) = sqlite();
-    let counting = Arc::new(Counting {
-        inner,
-        transactions: AtomicUsize::new(0),
-        statements_in_transactions: AtomicUsize::new(0),
-        other_calls: AtomicUsize::new(0),
-    });
+    let counting = counting(inner);
     let db: Arc<dyn DatabaseService> = counting.clone();
     let results = history::apply_fresh(&db, Backend::Sqlite).await;
-    let failures: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-    assert!(failures.is_empty(), "a fresh install failed: {failures:?}");
-
-    let applied: Vec<(String, usize, usize)> = results.into_iter().map(Result::unwrap).collect();
-    let files: usize = applied.iter().map(|(_, f, _)| f).sum();
-    let statements: usize = applied.iter().map(|(_, _, s)| s).sum();
+    let (files, statements) = assert_applied(results);
     assert_eq!(
         counting.transactions.load(Ordering::SeqCst),
         files,
@@ -152,20 +133,177 @@ async fn every_block_applies_fresh_atomically() {
         statements + files,
         "each file's statements and its ledger row, in its transaction"
     );
+}
+
+/// Every block in the migration registry, with the `impresspress-core`
+/// feature that compiles it in (`None`: every build has it).
+///
+/// The fresh-install budget below is a Cloudflare limit, so it counts the
+/// blocks a Cloudflare build can compile: those with no feature, and those
+/// whose feature `impresspress-cloudflare` passes through (read from its
+/// `Cargo.toml`, as `manifest_block_parity.rs` reads it). A block added to
+/// the registry must be added here, or
+/// `every_registered_block_names_its_feature` fails.
+const BLOCK_FEATURES: &[(&str, Option<&str>)] = &[
+    ("impresspress/admin", None),
+    ("wafer-run/auth", None),
+    ("impresspress/dev", Some("site-runtime")),
+    ("impresspress/files", Some("block-files")),
+    ("impresspress/legalpages", Some("block-legalpages")),
+    ("impresspress/llm", Some("block-llm")),
+    ("impresspress/messages", Some("block-messages")),
+    ("impresspress/products", Some("block-products")),
+    ("impresspress/signal", Some("block-signal")),
+    ("impresspress/tickets", Some("block-tickets")),
+    ("impresspress/userportal", Some("block-userportal")),
+    ("impresspress/vector", Some("block-vector")),
+];
+
+/// The `[features]` table of the crate in `crate_dir`, as
+/// `name -> [implied…]`.
+fn manifest_features(crate_dir: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(crate_dir)
+        .join("Cargo.toml");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let manifest: toml::Table = text
+        .parse()
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .map(|(name, implied)| {
+                    let implied = implied
+                        .as_array()
+                        .unwrap_or_else(|| panic!("feature `{name}` is not an array"))
+                        .iter()
+                        .map(|v| v.as_str().expect("a feature name").to_string())
+                        .collect();
+                    (name.clone(), implied)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `impresspress-core` features `impresspress-cloudflare` passes
+/// through: each `X = ["impresspress-core/X"]` of its `[features]`.
+fn cloudflare_passthroughs() -> BTreeSet<String> {
+    manifest_features("impresspress-cloudflare")
+        .into_iter()
+        .filter(|(name, implied)| implied == &[format!("impresspress-core/{name}")])
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The blocks a Cloudflare build can compile, by [`BLOCK_FEATURES`].
+fn cloudflare_blocks() -> BTreeSet<&'static str> {
+    let passthroughs = cloudflare_passthroughs();
+    BLOCK_FEATURES
+        .iter()
+        .filter(|(_, feature)| feature.is_none_or(|f| passthroughs.contains(f)))
+        .map(|(block, _)| *block)
+        .collect()
+}
+
+/// [`BLOCK_FEATURES`] names every block this build registers, each once,
+/// and every feature it names is one `impresspress-core` declares.
+#[test]
+fn every_registered_block_names_its_feature() {
+    let core = manifest_features("impresspress-core");
+    let named: BTreeSet<&str> = BLOCK_FEATURES.iter().map(|(block, _)| *block).collect();
+    assert_eq!(named.len(), BLOCK_FEATURES.len(), "a block is listed twice");
+    for migrations in history::blocks() {
+        assert!(
+            named.contains(migrations.block),
+            "{} migrates but `BLOCK_FEATURES` does not name it: add it with the \
+             impresspress-core feature that compiles it in",
+            migrations.block
+        );
+    }
+    for (block, feature) in BLOCK_FEATURES {
+        if let Some(feature) = feature {
+            assert!(
+                core.contains_key(*feature),
+                "{block}: impresspress-core declares no feature `{feature}`"
+            );
+        }
+    }
+}
+
+/// The budget: `/_deploy/prepare` applies a fresh install in ONE Worker
+/// invocation, and until a D1 batch is admitted as one call the adapter
+/// admits each statement, so the statements sent — every file's statements
+/// and its ledger row, plus each block's own calls (the ledger table, the
+/// ledger read, the record's read and write, the fast-path read) — must fit
+/// half of the default budget ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]), with
+/// the funnel's seeds and config reads in what is left. Counted here through
+/// a decorator, not computed, so the runner's next change is measured.
+///
+/// It counts what a Cloudflare build migrates ([`cloudflare_blocks`]): a
+/// block the Worker cannot compile never runs in its prepare. Every one of
+/// those blocks must be compiled into this test, or the count is short.
+///
+/// [`D1_QUERIES_PER_INVOCATION_DEFAULT`]: impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT
+#[tokio::test]
+async fn a_cloudflare_fresh_install_fits_half_the_d1_budget() {
+    let on_cloudflare = cloudflare_blocks();
+    let selected: Vec<_> = history::blocks()
+        .into_iter()
+        .filter(|m| on_cloudflare.contains(m.block))
+        .collect();
+    let compiled: BTreeSet<&str> = selected.iter().map(|m| m.block).collect();
+    assert_eq!(
+        compiled, on_cloudflare,
+        "this build does not compile every block a Cloudflare build can, so the \
+         count would be short; run it with impresspress-core's default features"
+    );
+
+    let (_dir, inner) = sqlite();
+    let counting = counting(inner);
+    let db: Arc<dyn DatabaseService> = counting.clone();
+    let results = history::apply_fresh_blocks(&db, Backend::Sqlite, &selected).await;
+    let (files, statements) = assert_applied(results);
 
     let sent = statements + files + counting.other_calls.load(Ordering::SeqCst);
     println!(
-        "a fresh install sends {sent}: {statements} file statements, {files} ledger rows, {} \
-         other calls",
+        "a Cloudflare fresh install sends {sent}: {statements} file statements, {files} \
+         ledger rows, {} other calls",
         sent - statements - files
     );
     let limit = impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
     assert!(
         sent <= limit / 2,
-        "a fresh install sends {sent} statements ({statements} in files, {files} ledger rows, \
-         the rest the runner's own calls), more than half of the {limit} D1 queries \
-         `/_deploy/prepare` may run in its one invocation"
+        "a Cloudflare fresh install sends {sent} statements ({statements} in files, {files} \
+         ledger rows, the rest the runner's own calls), more than half of the {limit} D1 \
+         queries `/_deploy/prepare` may run in its one invocation"
     );
+}
+
+/// A [`Counting`] decorator over `inner`, every counter at zero.
+fn counting(inner: Arc<dyn DatabaseService>) -> Arc<Counting> {
+    Arc::new(Counting {
+        inner,
+        transactions: AtomicUsize::new(0),
+        statements_in_transactions: AtomicUsize::new(0),
+        other_calls: AtomicUsize::new(0),
+    })
+}
+
+/// Assert a fresh install had no failure; the files and statements it sent.
+fn assert_applied(results: Vec<Result<(String, usize, usize), String>>) -> (usize, usize) {
+    let failures: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    assert!(failures.is_empty(), "a fresh install failed: {failures:?}");
+    let applied: Vec<(String, usize, usize)> = results.into_iter().map(Result::unwrap).collect();
+    (
+        applied.iter().map(|(_, f, _)| f).sum(),
+        applied.iter().map(|(_, _, s)| s).sum(),
+    )
 }
 
 #[test]
@@ -308,4 +446,27 @@ fn todays_lists_in_the_table_adopt_every_file() {
             }
         }
     }
+}
+
+/// Every table a fresh install's migrations create declares `updated_at`:
+/// the executor stamps it on every typed create and update, so a table
+/// without it could take no typed write under strict schema.
+///
+/// The one table it does not hold for is the migration ledger, which no
+/// migration creates: the runner creates it and writes its rows itself, as
+/// raw statements inside each file's transaction, and nothing writes it
+/// typed.
+#[tokio::test]
+async fn every_table_declares_updated_at() {
+    let (_dir, db) = sqlite();
+    let (files, _) = assert_applied(history::apply_fresh(&db, Backend::Sqlite).await);
+    assert!(files > 0);
+    let schema = history::Schema::read(&db, Backend::Sqlite)
+        .await
+        .expect("read the schema");
+    let lacking = history::tables_without_updated_at(&schema);
+    assert!(
+        lacking.is_empty(),
+        "tables a fresh install creates without `updated_at`: {lacking:?}"
+    );
 }

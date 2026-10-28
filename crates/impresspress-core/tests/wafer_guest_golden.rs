@@ -275,7 +275,9 @@ fn build_crate(name: &str, root: &Path, dir: &Path) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// An unstarted `Wafer` carrying the real `wafer-run/database` block over an
-/// in-memory SQLite.
+/// in-memory SQLite, with strict schema on: a write naming a column the
+/// guest's table does not declare fails, as it does on every target once
+/// lazy column-add is gone.
 ///
 /// The shape `wafer-run`'s own `json_host_codec_e2e` uses: no admin block and
 /// no WRAP grants, so the guest is an ordinary unprivileged caller that
@@ -287,6 +289,10 @@ fn golden_wafer() -> Wafer {
         .build()
         .expect("build a Wafer");
     let sqlite = Arc::new(SQLiteDatabaseService::open_in_memory().expect("in-memory sqlite"));
+    wafer_core::interfaces::database::service::DatabaseService::set_strict_schema(
+        sqlite.as_ref(),
+        true,
+    );
     wafer_core::service_blocks::database::register_with_tables(&mut wafer, sqlite, vec![])
         .expect("register wafer-run/database");
     wafer
@@ -631,6 +637,53 @@ async fn a_hyphenated_block_round_trips_its_own_rows() {
     assert_eq!(
         subscriber_emails(&wafer, "my-shop").await,
         vec!["mine@example.com".to_string()],
+    );
+}
+
+/// A block whose table does not declare `updated_at` fails its `Init`, by
+/// name, and serves nothing: the guest SDK's `db::ensure_table` refuses the
+/// table,
+/// because the host stamps `updated_at` on every write and the table could
+/// take none. The `table` template declares it; this is that template with
+/// the column taken out.
+#[tokio::test]
+async fn a_table_without_updated_at_fails_the_blocks_init_by_name() {
+    if !buildable() {
+        return;
+    }
+    const DECLARED: &str = "\n            .column(Column::datetime(\"updated_at\"))";
+    let wasm = build_scaffolded_with(Template::Table, "nostamp", |content| {
+        content.replace(DECLARED, "")
+    });
+    let (block, _) = load_as_the_sandbox_does("nostamp", &wasm);
+    let mut wafer = golden_wafer();
+    wafer
+        .register_block("site/nostamp", Arc::new(block))
+        .expect("register site/nostamp");
+    // `start` tolerates a block whose `Init` fails (logged), as the
+    // sandbox's runtime does; the block then answers every call with that
+    // failure.
+    let wafer = wafer.start().await.expect("start the runtime");
+    let answer = wafer
+        .run_block(
+            "site/nostamp",
+            http_msg("POST", "/b/nostamp/subscribe", &[("auth.user_id", "")]),
+            InputStream::from_bytes(br#"{"email":"a@b.c"}"#.to_vec()),
+        )
+        .await
+        .collect_buffered()
+        .await;
+    let error = match answer {
+        Ok(out) => panic!(
+            "a block whose table lacks `updated_at` must not serve: {} {}",
+            http_codec::resolve_status(&out.meta, 200),
+            String::from_utf8_lossy(&out.body)
+        ),
+        Err(error) => format!("{error:?}"),
+    };
+    assert!(
+        error.contains("`updated_at`") && error.contains("site__nostamp__subscribers"),
+        "the refusal names the table and the column: {error}"
     );
 }
 

@@ -502,14 +502,19 @@ mod tests {
         /// policy `policy`.
         async fn install(policy: &str) -> BrowserDatabaseService {
             let db = fresh_db().await;
-            db.exec_raw(&format!("CREATE TABLE {WRITES} (id TEXT PRIMARY KEY)"), &[])
-                .await
-                .expect("create writes table");
             db.exec_raw(
                 &format!(
-                    "CREATE TABLE {LOGS} (id TEXT PRIMARY KEY, method TEXT, path TEXT, \
-                     status TEXT, status_code INTEGER, duration_ms INTEGER, \
-                     error_message TEXT, client_ip TEXT, user_id TEXT, \
+                    "CREATE TABLE {WRITES} (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"
+                ),
+                &[],
+            )
+            .await
+            .expect("create writes table");
+            db.exec_raw(
+                &format!(
+                    "CREATE TABLE {LOGS} (id TEXT PRIMARY KEY, flow_id TEXT, method TEXT, \
+                     path TEXT, status TEXT, status_code INTEGER, duration_ms INTEGER, \
+                     error_message TEXT, client_ip TEXT, user_id TEXT, block TEXT, \
                      created_at TEXT, updated_at TEXT)"
                 ),
                 &[],

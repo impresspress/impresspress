@@ -286,7 +286,7 @@ mod tests {
     async fn fresh() -> BrowserDatabaseService {
         let db = fresh_db().await;
         db.exec_raw(
-            &format!("CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT)"),
+            &format!("CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT)"),
             &[],
         )
         .await

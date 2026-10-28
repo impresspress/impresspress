@@ -854,6 +854,20 @@ fn adopted_then_ran(
         .collect()
 }
 
+/// How many files the entry named by its first eight characters had
+/// applied: the ones a boot adopts. The files after them run.
+fn applied_by_entry(migrations: &BlockMigrations, backend: Backend, short: &str) -> usize {
+    match history::state(migrations, backend, short)
+        .expect("a history entry")
+        .verdict
+    {
+        impresspress_core::migration_helper::Verdict::Applied(files) => files.len(),
+        impresspress_core::migration_helper::Verdict::Unsupported(reason) => {
+            panic!("{short} is unsupported: {reason}")
+        }
+    }
+}
+
 /// The full hash of an entry named by its first eight characters.
 fn full(migrations: &BlockMigrations, backend: Backend, short: &str) -> &'static str {
     history::state(migrations, backend, short)
@@ -874,8 +888,8 @@ async fn has_blessed_hash(database: &Database) -> bool {
 }
 
 /// Admin on 2026-10-07's list and auth on its newest list before 016, both
-/// recorded by the old runner: the boot runs admin's 009 and auth's 016 and
-/// nothing else of either, and every other block installs fresh.
+/// recorded by the old runner: the boot runs admin's 009 and auth's 016 (and
+/// the auth files added after 016), and every other block installs fresh.
 async fn a_database_from_main_runs_only_what_it_lacks(
     database: &Database,
     storage_root: &str,
@@ -901,25 +915,24 @@ async fn a_database_from_main_runs_only_what_it_lacks(
         adopted_then_ran(admin_m, backend, admin_files - 1, admin_hash),
         "admin adopted 001-008 and ran 009"
     );
-    let auth_files = auth_m.for_backend(backend).0.len();
     assert_eq!(
         ledger_from(database, auth_m.block).await,
         adopted_then_ran(
             auth_m,
             backend,
-            auth_files - 1,
+            applied_by_entry(auth_m, backend, auth_short),
             full(auth_m, backend, auth_short)
         ),
-        "auth adopted 001-015 and ran 016"
+        "auth adopted 001-015 and ran 016 and every later file"
     );
     assert!(!has_blessed_hash(database).await);
 }
 
 /// Admin on the list with 009's first text, which added and emptied
 /// `blessed_hash`, and auth on the list with 016's first text: auth adopts
-/// every file, and admin adopts 001-008 and runs today's 009, which drops the
+/// every file through 016 and runs the later ones, and admin adopts 001-008 and runs today's 009, which drops the
 /// column — the history marks the first 009 as not applied.
-async fn a_database_that_ran_the_first_016_and_009_runs_009_only(
+async fn a_database_that_ran_the_first_016_and_009_runs_009_and_the_newer_files(
     database: &Database,
     storage_root: &str,
     backend: Backend,
@@ -947,16 +960,15 @@ async fn a_database_that_ran_the_first_016_and_009_runs_009_only(
         ledger_from(database, admin_m.block).await,
         adopted_then_ran(admin_m, backend, admin_files - 1, admin_hash)
     );
-    let auth_files = auth_m.for_backend(backend).0.len();
     assert_eq!(
         ledger_from(database, auth_m.block).await,
         adopted_then_ran(
             auth_m,
             backend,
-            auth_files,
+            applied_by_entry(auth_m, backend, auth_short),
             full(auth_m, backend, auth_short)
         ),
-        "auth adopted every file and ran nothing"
+        "auth adopted every file through 016 and ran only the later ones"
     );
     assert!(
         !has_blessed_hash(database).await,
@@ -1082,9 +1094,9 @@ async fn a_database_from_main_runs_only_the_files_its_record_lacks() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_database_that_ran_the_first_016_and_009_runs_today_s_009_only() {
+async fn a_database_that_ran_the_first_016_and_009_runs_today_s_009_and_the_newer_files() {
     let db = sqlite();
-    a_database_that_ran_the_first_016_and_009_runs_009_only(
+    a_database_that_ran_the_first_016_and_009_runs_009_and_the_newer_files(
         &db.database,
         &db.storage_root,
         Backend::Sqlite,
@@ -1184,7 +1196,7 @@ async fn the_same_holds_on_postgres() {
                 .await
             }
             "first_016_009" => {
-                a_database_that_ran_the_first_016_and_009_runs_009_only(
+                a_database_that_ran_the_first_016_and_009_runs_009_and_the_newer_files(
                     &database,
                     &storage_root,
                     Backend::Postgres,

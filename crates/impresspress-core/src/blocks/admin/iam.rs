@@ -910,7 +910,7 @@ mod tests {
     /// reads them stops matching.
     #[tokio::test]
     async fn update_role_rename_cascades_to_its_assignments() {
-        let ctx = TestContext::with_admin()
+        let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
 

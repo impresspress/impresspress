@@ -941,8 +941,9 @@ mod db_error_tests {
         TestContext::new().await.running_as("test/ungranted")
     }
 
-    /// Under STRICT_SCHEMA — what every Cloudflare deploy runs — a statement
-    /// against a table that does not exist reaches native SQLite and fails.
+    /// Under strict schema — what every Cloudflare deploy runs, and every
+    /// `TestContext` — a statement against a table that does not exist
+    /// reaches native SQLite and fails.
     /// The routes that name a row (`get_record`, `update_record`,
     /// `delete_record`) must answer that as the fault it is, a 500, not as
     /// the caller's missing row. A real missing table, not a hand-built
@@ -953,7 +954,6 @@ mod db_error_tests {
         // Run as the block the table would belong to, so the only thing
         // wrong with each statement is the table it names.
         let ctx = TestContext::new().await.running_as("impresspress/crudtest");
-        ctx.set_strict_schema(true);
 
         let got = get_record(&ctx, NEVER_CREATED, "any-id", "Row")
             .await

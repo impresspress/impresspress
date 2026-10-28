@@ -285,52 +285,6 @@ mod test_helpers {
         with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
     }
 
-    /// [`ctx_with_storage_handle`] on a database with every files migration
-    /// but `004_object_claim_id` — code running before 004 has been applied,
-    /// so its objects table has no `claim_id` column.
-    pub(super) async fn ctx_with_storage_before_004() -> (TestContext, Arc<MemStorage>) {
-        let ctx = TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        let sql: Vec<(&str, &str)> = crate::blocks::files::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .filter(|(basename, _)| *basename != "004_object_claim_id")
-            .copied()
-            .collect();
-        assert_eq!(
-            sql.len() + 1,
-            crate::blocks::files::migrations::SQLITE_MIGRATIONS.len(),
-            "004 is still shipped, under this name"
-        );
-        crate::migration_helper::apply_pending(&ctx, "impresspress/files", &sql, &[])
-            .await
-            .expect("001-003 apply");
-        with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
-    }
-
-    /// [`ctx_with_storage_handle`] on a database with every files migration
-    /// but `005_object_blob_key` — code running before 005 has been applied,
-    /// so its objects table has no `blob_key` column.
-    pub(super) async fn ctx_with_storage_before_005() -> (TestContext, Arc<MemStorage>) {
-        let ctx = TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        let sql: Vec<(&str, &str)> = crate::blocks::files::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .filter(|(basename, _)| *basename != "005_object_blob_key")
-            .copied()
-            .collect();
-        assert_eq!(
-            sql.len() + 1,
-            crate::blocks::files::migrations::SQLITE_MIGRATIONS.len(),
-            "005 is still shipped, under this name"
-        );
-        crate::migration_helper::apply_pending(&ctx, "impresspress/files", &sql, &[])
-            .await
-            .expect("001-004 apply");
-        with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
-    }
-
     fn with_storage(mut ctx: TestContext) -> (TestContext, Arc<MemStorage>) {
         let service = Arc::new(MemStorage::default());
         ctx.register_block(

@@ -479,21 +479,14 @@ mod tests {
         );
     }
 
-    /// Production Cloudflare/D1 runs with `WAFER_RUN__DATABASE__STRICT_SCHEMA`
-    /// on (see `impresspress-cloudflare/src/database.rs`), where the shared
-    /// `db::create`/`db::update_by_filters_count` defaults' lazy
-    /// `ALTER TABLE ADD COLUMN` for the synthesized `id` and stamped
-    /// `updated_at` columns is switched off — a write against an undeclared
-    /// column fails loudly instead. This is the regression test for that:
-    /// every default (non-strict) unit test above would still pass even if
-    /// the migration forgot `id`/`updated_at`, because lazy column-add
-    /// papers over the gap. This one can't, because
-    /// `TestContext::set_strict_schema` disables that lazy path the same
-    /// way production's config flag does.
+    /// A room is opened and answered with strict schema on, which every
+    /// `TestContext` runs (as every Cloudflare deployment does): the shared
+    /// `db::create`/`db::update_by_filters_count` defaults name the
+    /// synthesized `id` and the stamped `updated_at`, so the migration must
+    /// declare both or these writes fail in the backend.
     #[tokio::test]
     async fn a_room_can_be_opened_and_answered_under_strict_schema() {
         let ctx = TestContext::with_signal().await;
-        ctx.set_strict_schema(true);
         open_room(&ctx, "AB2CD3", &sdp(1), 600)
             .await
             .expect("open under strict schema");

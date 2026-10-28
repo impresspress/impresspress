@@ -43,7 +43,14 @@ fn caller(action: &str, path: &str) -> Message {
 
 fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
     Box::pin(async {
-        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        // The export rows read the data snapshot's tables, which span
+        // products, admin and auth, as a sandbox's database does.
+        let ctx = TestContext::with_products()
+            .await
+            .with_auth_added()
+            .await
+            .with_dev_added(FakeControl::new())
+            .await;
         // One site file, so a generation is active: what the export rows
         // export, and the generation the by-id row reads.
         let written = output_json(

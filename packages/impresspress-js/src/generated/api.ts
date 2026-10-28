@@ -21602,8 +21602,9 @@ export interface paths {
                              */
                             complete: boolean;
                             /**
-                             * @description Names of the deletes that failed (`"analyses"`, `"events"`,
-                             *     `"tickets"`, `"rate-counters"`).
+                             * @description Names of the steps that failed: the deletes (`"analyses"`, `"events"`,
+                             *     `"tickets"`, `"rate-counters"`), and `"status"` when the pass could
+                             *     not be recorded for the status endpoint.
                              */
                             errors: string[];
                             /**

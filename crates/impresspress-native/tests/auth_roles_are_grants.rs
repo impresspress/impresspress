@@ -9,14 +9,14 @@
 //! recorded by the runner from before the per-file ledger, holding accounts
 //! whose role is the inline column — one of them already holding the same
 //! role as a grant, one with a role no system seeds (`editor`) and one with
-//! an empty role. The upgrade adopts 001–015 from that record and runs 016.
-//! After it every account holds exactly its non-empty role as a grant, under
-//! its own name, and the column is gone; the next change to the auth list
-//! runs only its new file.
+//! an empty role. The upgrade adopts 001–015 from that record and runs 016
+//! and the files auth gained after it. After it every account holds exactly
+//! its non-empty role as a grant, under its own name, and the column is
+//! gone; the next change to the auth list runs only its new file.
 //!
 //! A database that ran 016 as it first shipped (`e73b4cc2` / `43907ff1`)
-//! adopts all
-//! sixteen files and runs nothing; a fresh one runs the whole list.
+//! adopts all sixteen files through 016 and runs only the later ones; a
+//! fresh one runs the whole list.
 //!
 //! Why each statement of 016 is shaped as it is: the 016 note on
 //! `blocks::auth::migrations::ROLES_ARE_GRANTS`.
@@ -122,6 +122,15 @@ async fn user_columns(db: &Arc<dyn DatabaseService>) -> Vec<String> {
         .expect("introspect users")
 }
 
+/// Where 016 is in auth's list. The files after it are later changes, which
+/// a database 016 has run on runs as any other pending file.
+fn position_of_016(files: &[MigrationFile<'static>]) -> usize {
+    files
+        .iter()
+        .position(|(name, _)| *name == ROLES_ARE_GRANTS)
+        .expect("auth ships 016")
+}
+
 /// Auth's ledger as `(file, origin, adopted_from)`, in file order.
 async fn auth_ledger(db: &Arc<dyn DatabaseService>) -> Vec<(String, Origin, String)> {
     history::ledger(db, auth::AUTH_BLOCK_ID)
@@ -136,11 +145,7 @@ async fn auth_ledger(db: &Arc<dyn DatabaseService>) -> Vec<(String, Origin, Stri
 /// the list.
 async fn upgrades(db: Arc<dyn DatabaseService>, backend: Backend) {
     let (all, history_rows) = MIGRATIONS.for_backend(backend);
-    assert_eq!(
-        all.last().map(|(name, _)| *name),
-        Some(ROLES_ARE_GRANTS),
-        "016 is the last auth migration"
-    );
+    let at_016 = position_of_016(all);
     history::fresh_admin(&db, backend)
         .await
         .expect("admin's list applies first, as every boot applies it");
@@ -173,19 +178,24 @@ async fn upgrades(db: Arc<dyn DatabaseService>, backend: Backend) {
 
     let expected: Vec<(String, Origin, String)> = all
         .iter()
-        .map(|(name, _)| {
-            if *name == ROLES_ARE_GRANTS {
-                (name.to_string(), Origin::Ran, String::new())
-            } else {
+        .enumerate()
+        .map(|(at, (name, _))| {
+            if at < at_016 {
                 (
                     name.to_string(),
                     Origin::Adopted,
                     before.list_hash.to_string(),
                 )
+            } else {
+                (name.to_string(), Origin::Ran, String::new())
             }
         })
         .collect();
-    assert_eq!(auth_ledger(&db).await, expected, "001-015 adopted, 016 ran");
+    assert_eq!(
+        auth_ledger(&db).await,
+        expected,
+        "001-015 adopted, 016 and every later file ran"
+    );
 
     let after = grants(&db).await;
     let pairs = |grants: &HashMap<(String, String), (String, String, String)>| {
@@ -245,8 +255,8 @@ async fn upgrades(db: Arc<dyn DatabaseService>, backend: Backend) {
 }
 
 /// A database that ran 016 as it first shipped — its `ADD COLUMN`, copy and
-/// `DROP` — and recorded that list: every file is adopted from that record
-/// and nothing runs.
+/// `DROP` — and recorded that list: every file through 016 is adopted from
+/// that record, and only the files auth gained since run.
 async fn ran_the_first_016(db: Arc<dyn DatabaseService>, backend: Backend) {
     history::fresh_admin(&db, backend)
         .await
@@ -257,14 +267,23 @@ async fn ran_the_first_016(db: Arc<dyn DatabaseService>, backend: Backend) {
     seed_account_without_role(&db, "u1").await;
     history::upgrade(&db, backend, &MIGRATIONS)
         .await
-        .expect("adopts every file");
+        .expect("adopts every file through 016");
+    let all = MIGRATIONS.for_backend(backend).0;
+    let at_016 = position_of_016(all);
     let ledger = auth_ledger(&db).await;
-    assert_eq!(ledger.len(), MIGRATIONS.for_backend(backend).0.len());
+    assert_eq!(ledger.len(), all.len());
+    let (through_016, later) = ledger.split_at(at_016 + 1);
     assert!(
-        ledger
+        through_016
             .iter()
             .all(|(_, origin, from)| *origin == Origin::Adopted && from == state.list_hash),
-        "{ledger:?}"
+        "every file through 016 is adopted: {ledger:?}"
+    );
+    assert!(
+        later
+            .iter()
+            .all(|(_, origin, from)| *origin == Origin::Ran && from.is_empty()),
+        "every file after 016 runs: {ledger:?}"
     );
     assert!(!user_columns(&db).await.iter().any(|c| c == "role"));
 }

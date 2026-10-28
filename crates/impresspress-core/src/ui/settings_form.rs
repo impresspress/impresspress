@@ -1110,6 +1110,12 @@ mod tests {
 
     use crate::test_support::{output_json, TestContext};
 
+    /// Settings keys the save tests declare for themselves, in a shape the
+    /// production config writer accepts.
+    const TEST_ENABLED_KEY: &str = "IMPRESSPRESS__TEST__ENABLED";
+    const TEST_CALLBACK_URL_KEY: &str = "IMPRESSPRESS__TEST__CALLBACK_URL";
+    const TEST_API_SECRET_KEY: &str = "IMPRESSPRESS__TEST__API_SECRET";
+
     async fn run_save(
         ctx: &TestContext,
         allowed: &[ConfigVar],
@@ -1197,26 +1203,33 @@ mod tests {
     /// would refuse today (stored before the rule, or through another path).
     #[tokio::test]
     async fn save_settings_leaves_a_key_the_body_does_not_carry_unvalidated_and_unchanged() {
-        let mut ctx = TestContext::new()
+        // Admin's schema: the save reads the stored `variables` row and
+        // writes an audit row, as it does in production.
+        let mut ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        ctx.set_config("X__CALLBACK_URL", "https://10.0.0.1/callback");
+        ctx.set_config(TEST_CALLBACK_URL_KEY, "https://10.0.0.1/callback");
         let allowed = [
-            var("X__ENABLED", "Enabled", InputType::Toggle),
-            var("X__CALLBACK_URL", "Callback", InputType::Url),
+            var(TEST_ENABLED_KEY, "Enabled", InputType::Toggle),
+            var(TEST_CALLBACK_URL_KEY, "Callback", InputType::Url),
         ];
 
-        let out = run_save(&ctx, &allowed, serde_json::json!({"X__ENABLED": "false"})).await;
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({TEST_ENABLED_KEY: "false"}),
+        )
+        .await;
         assert_eq!(output_json(out).await["message"], "Settings saved");
         assert_eq!(
-            config::get_default(&ctx, "X__CALLBACK_URL", "")
+            config::get_default(&ctx, TEST_CALLBACK_URL_KEY, "")
                 .await
                 .expect("config read"),
             "https://10.0.0.1/callback",
             "a key the save did not carry keeps its stored value"
         );
         assert_eq!(
-            config::get_default(&ctx, "X__ENABLED", "")
+            config::get_default(&ctx, TEST_ENABLED_KEY, "")
                 .await
                 .expect("config read"),
             "false"
@@ -1226,7 +1239,7 @@ mod tests {
         let out = run_save(
             &ctx,
             &allowed,
-            serde_json::json!({"X__ENABLED": "true", "X__CALLBACK_URL": "https://10.0.0.1/callback"}),
+            serde_json::json!({TEST_ENABLED_KEY: "true", TEST_CALLBACK_URL_KEY: "https://10.0.0.1/callback"}),
         )
         .await;
         assert!(matches!(
@@ -1237,21 +1250,23 @@ mod tests {
 
     #[tokio::test]
     async fn save_settings_leaves_a_sensitive_field_unchanged_on_empty_submit() {
-        let mut ctx = TestContext::new()
+        // Admin's schema: the save reads the stored `variables` row and
+        // writes an audit row, as it does in production.
+        let mut ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         // Registers a real `wafer-run/config` service block (TestContext::set_config)
         // and seeds the current stored secret.
-        ctx.set_config("X__API_SECRET", "original-secret");
-        let allowed = [var("X__API_SECRET", "API Secret", InputType::Password)];
+        ctx.set_config(TEST_API_SECRET_KEY, "original-secret");
+        let allowed = [var(TEST_API_SECRET_KEY, "API Secret", InputType::Password)];
 
         // Empty submit (what `render_field` actually emits for a set secret,
         // per the render-side fix) must not touch the stored value.
-        let out = run_save(&ctx, &allowed, serde_json::json!({"X__API_SECRET": ""})).await;
+        let out = run_save(&ctx, &allowed, serde_json::json!({TEST_API_SECRET_KEY: ""})).await;
         let body = output_json(out).await;
         assert_eq!(body["message"], "Settings saved");
         assert_eq!(
-            config::get_default(&ctx, "X__API_SECRET", "")
+            config::get_default(&ctx, TEST_API_SECRET_KEY, "")
                 .await
                 .expect("config read"),
             "original-secret",
@@ -1262,13 +1277,13 @@ mod tests {
         let out = run_save(
             &ctx,
             &allowed,
-            serde_json::json!({"X__API_SECRET": "brand-new-secret"}),
+            serde_json::json!({TEST_API_SECRET_KEY: "brand-new-secret"}),
         )
         .await;
         let body = output_json(out).await;
         assert_eq!(body["message"], "Settings saved");
         assert_eq!(
-            config::get_default(&ctx, "X__API_SECRET", "")
+            config::get_default(&ctx, TEST_API_SECRET_KEY, "")
                 .await
                 .expect("config read"),
             "brand-new-secret",
@@ -1818,11 +1833,20 @@ mod tests {
     async fn save_settings_still_clears_a_non_sensitive_field_on_empty_submit() {
         // Non-sensitive fields keep the pre-existing behavior: an empty
         // submit is a real write (clears the stored value), not "unchanged".
-        let mut ctx = TestContext::new()
+        // Admin's schema: the save reads and writes the stored `variables`
+        // row, as it does in production, so the value is stored by a save.
+        let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        ctx.set_config(APP_NAME_KEY, "MyApp");
         let allowed = [var(APP_NAME_KEY, "App name", InputType::Text)];
+        let out = run_save(&ctx, &allowed, serde_json::json!({APP_NAME_KEY: "MyApp"})).await;
+        assert_eq!(output_json(out).await["message"], "Settings saved");
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "MyApp"
+        );
 
         let out = run_save(&ctx, &allowed, serde_json::json!({APP_NAME_KEY: ""})).await;
         let body = output_json(out).await;

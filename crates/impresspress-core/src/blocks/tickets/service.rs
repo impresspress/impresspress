@@ -261,7 +261,7 @@ pub async fn create_ticket(
                     &serde_json::json!({"source": source.as_str()}),
                     None,
                 )
-                .await;
+                .await?;
                 return Ok(ticket);
             }
             Err(error) => {
@@ -473,7 +473,7 @@ pub async fn update_workflow(
         .map_err(ServiceError::Db)?;
 
     if lifecycle_changed {
-        propagate_expiry(ctx, id, expiry.as_deref()).await;
+        propagate_expiry(ctx, id, expiry.as_deref()).await?;
     }
 
     let event_type = status_changed.map_or("workflow_updated", TicketStatus::as_str);
@@ -487,7 +487,7 @@ pub async fn update_workflow(
         &serde_json::Value::Object(changes),
         expiry.as_deref(),
     )
-    .await;
+    .await?;
     Ok(WorkflowOutcome::Updated(updated))
 }
 
@@ -602,10 +602,10 @@ async fn append_event_best_effort(
     body: &str,
     metadata: &serde_json::Value,
     expires_at: Option<&str>,
-) {
+) -> Result<(), ServiceError> {
     if let Err(error) = validate_metadata(metadata) {
         tracing::warn!(ticket_id, error, "ticket audit metadata rejected");
-        return;
+        return Ok(());
     }
     if let Err(error) = repo::append_event(
         ctx, ticket_id, event_type, actor_type, actor_id, body, metadata, expires_at,
@@ -613,47 +613,54 @@ async fn append_event_best_effort(
     .await
     {
         tracing::warn!(ticket_id, event_type, error = %error, "ticket audit event write failed");
-        mark_audit_degraded(ctx).await;
+        mark_audit_degraded(ctx).await?;
     }
+    Ok(())
 }
 
-async fn mark_audit_degraded(ctx: &dyn Context) {
-    let result = db::update(
+/// Record that the audit timeline may be incomplete
+/// ([`super::maintenance::OperationalStatus::audit_degraded`]).
+///
+/// An audit write that fails degrades: the write it describes stands, and
+/// this flag tells the operator the timeline has a gap. A failure to set the
+/// flag is the one thing that cannot degrade — nothing would then record the
+/// gap — so it is the caller's error. The singleton row exists from the
+/// block's 001 on, so this is an update and nothing else. (It used to fall
+/// back to creating the row and discard that create's failure, which is how
+/// every audit write failing on Cloudflare went unseen.)
+async fn mark_audit_degraded(ctx: &dyn Context) -> Result<(), ServiceError> {
+    db::update(
         ctx,
         repo::MAINTENANCE,
         "singleton",
         json_map(serde_json::json!({"audit_degraded": true})),
     )
-    .await;
-    if result.is_err() {
-        let _ = db::create(
-            ctx,
-            repo::MAINTENANCE,
-            json_map(serde_json::json!({
-                "id": "singleton",
-                "last_pruned_day": "",
-                "last_pruned_at": serde_json::Value::Null,
-                "last_prune_error": "",
-                "audit_degraded": true,
-            })),
-        )
-        .await;
-    }
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        tracing::error!(error = %error, "ticket audit-degraded flag write failed");
+        ServiceError::Db(error)
+    })
 }
 
-async fn propagate_expiry(ctx: &dyn Context, ticket_id: &str, expiry: Option<&str>) {
+async fn propagate_expiry(
+    ctx: &dyn Context,
+    ticket_id: &str,
+    expiry: Option<&str>,
+) -> Result<(), ServiceError> {
     let filters = vec![repo::eq("ticket_id", ticket_id)];
     let data = json_map(serde_json::json!({"expires_at": expiry}));
     if let Err(error) =
         db::update_by_filters(ctx, repo::EVENTS, filters.clone(), data.clone()).await
     {
         tracing::warn!(ticket_id, error = %error, "ticket event expiry propagation failed");
-        mark_audit_degraded(ctx).await;
+        mark_audit_degraded(ctx).await?;
     }
     if let Err(error) = db::update_by_filters(ctx, repo::ANALYSES, filters, data).await {
         tracing::warn!(ticket_id, error = %error, "ticket analysis expiry propagation failed");
-        mark_audit_degraded(ctx).await;
+        mark_audit_degraded(ctx).await?;
     }
+    Ok(())
 }
 
 /// When a ticket closed as `status` expires. A failed retention read is

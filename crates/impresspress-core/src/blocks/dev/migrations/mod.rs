@@ -12,12 +12,16 @@ const SQL_003_POSTGRES: &str = include_str!("003_seed_info.postgres.sql");
 const SQL_004_SQLITE: &str = include_str!("004_seed_llms_text.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_004_POSTGRES: &str = include_str!("004_seed_llms_text.postgres.sql");
+const SQL_005_SQLITE: &str = include_str!("005_stamped_columns.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_005_POSTGRES: &str = include_str!("005_stamped_columns.postgres.sql");
 
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("001_dev_schema", SQL_001_SQLITE),
     ("002_build_artifact_bytes", SQL_002_SQLITE),
     ("003_seed_info", SQL_003_SQLITE),
     ("004_seed_llms_text", SQL_004_SQLITE),
+    ("005_stamped_columns", SQL_005_SQLITE),
 ];
 
 #[cfg(feature = "postgres")]
@@ -26,6 +30,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     ("002_build_artifact_bytes", SQL_002_POSTGRES),
     ("003_seed_info", SQL_003_POSTGRES),
     ("004_seed_llms_text", SQL_004_POSTGRES),
+    ("005_stamped_columns", SQL_005_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

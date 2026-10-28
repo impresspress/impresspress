@@ -1132,10 +1132,19 @@ export function installMemoryOpfs() {
         pub fn fail_next_opfs_read(name: &str);
     }
 
-    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it.
+    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it, with
+    /// strict schema on, as every `TestContext` in `impresspress-core` runs:
+    /// a fixture has to declare the columns its writes name. Set here, per
+    /// fixture, because the flag is one process-wide static that a booted
+    /// runtime's database `Init` sets too (off, without the key), so a value
+    /// left by an earlier test would make this one's mode depend on order.
     pub async fn fresh_db() -> BrowserDatabaseService {
         install_memory_opfs();
         crate::db_init().await.expect("sql.js loads");
+        wafer_core::interfaces::database::service::DatabaseService::set_strict_schema(
+            &BrowserDatabaseService,
+            true,
+        );
         BrowserDatabaseService
     }
 }
@@ -1157,7 +1166,7 @@ mod sql_js_conformance {
     use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::test_support::fresh_db;
+    use super::{test_support::fresh_db, BrowserDatabaseService};
 
     fn row(id: &str, name: Option<&str>) -> HashMap<String, serde_json::Value> {
         let mut row = HashMap::from([("id".to_string(), serde_json::json!(id))]);
@@ -1167,11 +1176,37 @@ mod sql_js_conformance {
         row
     }
 
+    /// **A fixture database runs strict schema whatever ran before it.** A
+    /// booted runtime's database `Init` turns the process-wide flag off (this
+    /// target has no key for it), so `fresh_db` turns it on for its own
+    /// fixture: a write naming a column the table does not declare fails,
+    /// rather than adding it.
+    #[wasm_bindgen_test]
+    async fn a_fresh_database_runs_strict_schema_after_anything_turned_it_off() {
+        DatabaseService::set_strict_schema(&BrowserDatabaseService, false);
+        let svc = fresh_db().await;
+        svc.exec_raw(
+            "CREATE TABLE sql_js_strict_t (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)",
+            &[],
+        )
+        .await
+        .expect("create table");
+        let mut data = HashMap::new();
+        data.insert(
+            "column_no_migration_declares".to_string(),
+            serde_json::json!("x"),
+        );
+        svc.create("sql_js_strict_t", data)
+            .await
+            .expect_err("an undeclared column is refused, not added");
+    }
+
     #[wasm_bindgen_test]
     async fn a_duplicate_insert_is_already_exists() {
         let svc = fresh_db().await;
         svc.exec_raw(
-            "CREATE TABLE sql_js_dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
+            "CREATE TABLE sql_js_dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+             created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await
@@ -1335,7 +1370,7 @@ mod strict_schema_policy {
     #[wasm_bindgen_test]
     fn setting_strict_schema_is_observed_by_the_shared_executor() {
         let svc = BrowserDatabaseService;
-        // The default the shared executor starts from.
+        DatabaseService::set_strict_schema(&svc, false);
         assert!(!DbExec::strict_schema(&svc));
 
         DatabaseService::set_strict_schema(&svc, true);
@@ -1817,7 +1852,10 @@ mod sql_js_transactions {
     async fn fresh() -> BrowserDatabaseService {
         let svc = fresh_db().await;
         svc.exec_raw(
-            &format!("CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT)"),
+            &format!(
+                "CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, \
+                 updated_at TEXT)"
+            ),
             &[],
         )
         .await
@@ -1848,10 +1886,9 @@ mod sql_js_transactions {
 
     /// **The coalescing half of the durability contract, on the real
     /// service.** `create_many` is one logical mutation however many rows it
-    /// carries and however many statements it takes — here twenty inserts,
-    /// plus the lazy ADD COLUMNs for the `created_at`/`updated_at` stamps
-    /// before them — so it writes the database to OPFS exactly once, and that
-    /// one write holds every row. Fails when `create_many` is `forward` (no
+    /// carries and however many statements it takes — here twenty inserts —
+    /// so it writes the database to OPFS exactly once, and that one write
+    /// holds every row. Fails when `create_many` is `forward` (no
     /// flush: nothing durable) or flushes per statement.
     #[wasm_bindgen_test]
     async fn create_many_flushes_to_opfs_exactly_once() {
@@ -2086,7 +2123,7 @@ mod sql_js_transactions {
             .expect("parent table");
         svc.exec_raw(
             "CREATE TABLE sql_js_fk_child (id TEXT PRIMARY KEY, \
-             parent TEXT REFERENCES sql_js_fk_parent(id))",
+             parent TEXT REFERENCES sql_js_fk_parent(id), created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await

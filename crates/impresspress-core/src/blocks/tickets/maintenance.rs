@@ -22,8 +22,9 @@ pub struct MaintenanceResult {
     pub tickets_deleted: i64,
     /// Stale submission rate-limit counters removed.
     pub rate_counters_deleted: i64,
-    /// Names of the deletes that failed (`"analyses"`, `"events"`,
-    /// `"tickets"`, `"rate-counters"`).
+    /// Names of the steps that failed: the deletes (`"analyses"`, `"events"`,
+    /// `"tickets"`, `"rate-counters"`), and `"status"` when the pass could
+    /// not be recorded for the status endpoint.
     pub errors: Vec<String>,
 }
 
@@ -140,7 +141,13 @@ pub async fn prune(ctx: &dyn Context, now: chrono::DateTime<chrono::Utc>) -> Mai
         }
     }
     result.complete = result.errors.is_empty();
-    store_result(ctx, &result).await;
+    if let Err(error) = store_result(ctx, &result).await {
+        // The row the status page reads is stale, so the pass did not
+        // complete: the scheduler sees the 503 and retries.
+        tracing::error!(error = %error, "ticket maintenance status write failed");
+        result.errors.push("status".into());
+        result.complete = false;
+    }
     result
 }
 
@@ -160,8 +167,9 @@ pub async fn status(
         }],
     )
     .await?;
-    // No row yet is an instance that has never run maintenance; a read that
-    // failed is not that, and must not report the audit trail as healthy.
+    // The block's 001 seeds the row, so a missing one is a database that
+    // migration never built, and reports no pass; a read that failed is not
+    // that, and must not report the audit trail as healthy.
     let stored = match db::get(ctx, repo::MAINTENANCE, "singleton").await {
         Ok(record) => Some(record),
         Err(error) if error.code == wafer_run::ErrorCode::NotFound => None,
@@ -197,23 +205,22 @@ async fn prune_table(
     }
 }
 
-async fn store_result(ctx: &dyn Context, result: &MaintenanceResult) {
+/// Record the pass in the maintenance singleton.
+///
+/// The row exists from the block's 001 on, so this is an update and nothing
+/// else: a failure is the database's, and is returned. (It used to fall back
+/// to creating the row and swallow that create's failure too, which is how a
+/// status write failing on every Cloudflare build went unseen.)
+async fn store_result(ctx: &dyn Context, result: &MaintenanceResult) -> Result<(), WaferError> {
     let now = chrono::Utc::now();
     let data = json_map(serde_json::json!({
         "last_pruned_day": now.format("%Y-%m-%d").to_string(),
         "last_pruned_at": now.to_rfc3339(),
         "last_prune_error": if result.complete { String::new() } else { result.errors.join(",") },
     }));
-    if db::update(ctx, repo::MAINTENANCE, "singleton", data.clone())
+    db::update(ctx, repo::MAINTENANCE, "singleton", data)
         .await
-        .is_err()
-    {
-        let mut create = data;
-        create.insert("id".into(), serde_json::json!("singleton"));
-        if let Err(error) = db::create(ctx, repo::MAINTENANCE, create).await {
-            tracing::warn!(error = %error, "ticket maintenance status write failed");
-        }
-    }
+        .map(|_| ())
 }
 
 #[cfg(test)]

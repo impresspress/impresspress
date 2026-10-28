@@ -41,6 +41,7 @@ pub mod migration_history;
 #[cfg(test)]
 mod parity_tests;
 pub mod source_scan;
+pub mod stamped_columns;
 
 use std::{
     cell::RefCell,
@@ -308,10 +309,19 @@ impl TestContext {
     /// The common wiring both constructors above share: put `svc` behind the
     /// production `DatabaseBlock` and hand back a context routing
     /// `wafer-run/database` at it.
+    ///
+    /// The service runs with strict schema, as every Cloudflare deployment
+    /// does and as every target will once the pinned wafer-run drops the
+    /// lazy alternative: a typed write naming a column no migration declared
+    /// fails in the backend, and a read of a table no migration created is
+    /// the backend's `no such table`. So a fixture has to build the schema
+    /// its code reads, through that code's migrations, and a suite that
+    /// passes here proves every write path is declared.
     fn over(
         svc: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
         db_file: Option<Arc<TempDbFile>>,
     ) -> Self {
+        svc.set_strict_schema(true);
         let database_block: Arc<dyn Block> = Arc::new(
             wafer_core::service_blocks::database::DatabaseBlock::new(svc.clone()),
         );
@@ -1846,23 +1856,6 @@ impl TestContext {
             })
         });
         (ctx, log)
-    }
-
-    /// Toggle `STRICT_SCHEMA` directly on the backing `DatabaseService`, the
-    /// same flag production sets from `WAFER_RUN__DATABASE__STRICT_SCHEMA`
-    /// at the database block's own `lifecycle(Init)`
-    /// (`wafer_core::interfaces::database::handler::handle_lifecycle`).
-    /// `TestContext` never boots that lifecycle event (migrations are
-    /// applied directly via [`Self::apply_block_migrations`], not through
-    /// it), so there is no config value to flip here — this reaches the
-    /// service's own `set_strict_schema` directly instead, after whatever
-    /// migrations already ran (this only changes how *future* writes are
-    /// validated: no schema introspection, no lazy `ALTER TABLE ADD
-    /// COLUMN`), so a test can call this once its fixture's migrations are
-    /// in place and then exercise writes exactly as a strict-schema
-    /// production deployment (Cloudflare/D1) would.
-    pub fn set_strict_schema(&self, enabled: bool) {
-        self.db_service.set_strict_schema(enabled);
     }
 }
 
@@ -5428,6 +5421,43 @@ mod tests {
             .status(200)
             .body(br#"{"ok":true}"#.to_vec(), "application/json");
         assert_eq!(output_json(out).await, serde_json::json!({"ok": true}));
+    }
+
+    /// Every `TestContext` runs strict schema: a typed write naming a column
+    /// no migration declared fails in the backend, rather than adding the
+    /// column, and a read of a table no migration created is the backend's
+    /// error, not an empty answer. What lets a green suite say every write
+    /// path is declared.
+    #[tokio::test]
+    async fn a_test_context_runs_strict_schema() {
+        const TABLE: &str = "impresspress__test__strict_probe";
+        let ctx = TestContext::new().await;
+        // Test-fixture setup: a table declaring the stamped columns only.
+        db::exec_raw(
+            &ctx.fixture(),
+            &format!(
+                "CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"
+            ),
+            &[],
+        )
+        .await
+        .expect("create the probe table");
+        let mut row = HashMap::new();
+        row.insert(
+            "column_no_migration_declares".to_string(),
+            serde_json::json!("x"),
+        );
+        db::create(&ctx.fixture(), TABLE, row)
+            .await
+            .expect_err("an undeclared column is refused, not added");
+        let missing = db::get(&ctx.fixture(), "impresspress__test__never_created", "any")
+            .await
+            .expect_err("a table no migration created is an error");
+        assert_ne!(
+            missing.code,
+            wafer_run::ErrorCode::NotFound,
+            "the backend's error, not the caller's missing row: {missing:?}"
+        );
     }
 
     #[tokio::test]

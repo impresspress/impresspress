@@ -595,7 +595,9 @@ async fn assert_the_export_shell_refusal(ctx: &TestContext, says: &[&str]) {
 /// everyone the site is handed to.
 #[tokio::test]
 async fn a_deployment_without_an_export_shell_refuses_to_export() {
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_bypass(FakeControl::new(), None, fake_bypass_rules())
         .await;
@@ -696,7 +698,9 @@ async fn an_export_shell_that_is_missing_or_unreadable_is_refused() {
     ];
     for (case, shell, says) in cases {
         let shell = std::sync::Arc::new(shell);
-        let ctx = TestContext::with_admin()
+        let ctx = TestContext::with_products()
+            .await
+            .with_auth_added()
             .await
             .with_dev_added_and_shell(FakeControl::new(), shell.clone())
             .await;
@@ -739,7 +743,9 @@ async fn a_listed_file_that_is_not_the_listed_bytes_is_refused() {
         ),
     ];
     for (shell, says) in cases {
-        let ctx = TestContext::with_admin()
+        let ctx = TestContext::with_products()
+            .await
+            .with_auth_added()
             .await
             .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
             .await;
@@ -761,7 +767,9 @@ async fn a_listed_file_that_is_not_the_listed_bytes_is_refused() {
 #[tokio::test]
 async fn a_shell_that_lists_a_seed_file_is_refused() {
     let shell = FakeShell::new().with_listed("seed/manifest.json", b"{\"schema_version\":1}");
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
         .await;
@@ -785,7 +793,9 @@ async fn a_shell_that_lists_a_seed_file_is_refused() {
 #[tokio::test]
 async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
     let shell = std::sync::Arc::new(FakeShell::new());
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_bypass(
             FakeControl::new(),
@@ -846,7 +856,9 @@ async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it(
     const ROUTES: [&str; 2] = ["/b/dev/api/export", "/b/dev/api/export/manifest"];
 
     let shell = std::sync::Arc::new(site_shell().serve());
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_bypass(
             FakeControl::new(),
@@ -927,7 +939,9 @@ async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it(
 #[tokio::test]
 async fn a_prefix_only_the_sandbox_bypasses_is_not_an_exported_rule() {
     let shell = std::sync::Arc::new(FakeShell::new());
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_bypass(
             FakeControl::new(),
@@ -1052,7 +1066,9 @@ async fn the_exported_sw_is_the_export_shells_a_site_with_no_workspace() {
 #[tokio::test]
 async fn the_exported_boot_page_is_the_shells_titled_as_the_site() {
     let site = site_shell();
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(site.serve()))
         .await;
@@ -1099,7 +1115,9 @@ async fn a_boot_page_the_export_cannot_retitle_is_refused() {
         ),
     ] {
         let shell = FakeShell::new().with_listed("index.html", page.as_bytes());
-        let ctx = TestContext::with_admin()
+        let ctx = TestContext::with_products()
+            .await
+            .with_auth_added()
             .await
             .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
             .await;
@@ -1152,7 +1170,9 @@ async fn the_readme_says_whether_each_blocks_sources_match_its_artifact() {
 async fn a_recorded_source_digest_is_compared_against_the_workspace() {
     let control = FakeControl::new();
     control.set_validated_info(hello_info("site/hello"));
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_shell(control.clone(), std::sync::Arc::new(FakeShell::new()))
         .await;
@@ -1275,7 +1295,7 @@ async fn a_recorded_source_digest_is_compared_against_the_workspace() {
 #[tokio::test]
 async fn export_manifest_previews_the_archive_without_building_it() {
     let ctx = TestContext::with_dev_added_and_shell(
-        TestContext::with_admin().await,
+        TestContext::with_products().await.with_auth_added().await,
         FakeControl::new(),
         std::sync::Arc::new(FakeShell::new()),
     )
@@ -1307,7 +1327,7 @@ async fn export_manifest_previews_the_archive_without_building_it() {
 #[tokio::test]
 async fn a_generation_with_no_block_exports_no_guest_crate() {
     let ctx = TestContext::with_dev_added_and_shell(
-        TestContext::with_admin().await,
+        TestContext::with_products().await.with_auth_added().await,
         FakeControl::new(),
         std::sync::Arc::new(FakeShell::new()),
     )
@@ -1887,7 +1907,9 @@ async fn name_the_site(ctx: &TestContext, name: &str) {
 #[tokio::test]
 async fn nothing_the_sandbox_says_about_itself_is_exported() {
     let site = site_shell();
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(site.serve()))
         .await;
@@ -1976,7 +1998,9 @@ async fn nothing_the_sandbox_says_about_itself_is_exported() {
 async fn a_shell_file_named_llms_txt_is_exported_like_any_other() {
     let bundled = b"# An app that ships its own\n";
     let shell = FakeShell::new().with_listed("llms.txt", bundled);
-    let ctx = TestContext::with_admin()
+    let ctx = TestContext::with_products()
+        .await
+        .with_auth_added()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
         .await;

@@ -78,13 +78,18 @@ pub fn block() -> Block {
 ///
 /// Idempotent, and run on every activation: a block has no separate migration
 /// step, so `init` is where its schema lives.
+///
+/// The host stamps `created_at` on every insert and `updated_at` on every
+/// write, so the table declares both; `ensure_table` refuses a table without
+/// `updated_at`.
 pub fn init(ctx: &Ctx) -> Result<(), String> {
     db::ensure_table(
         ctx,
         TableDef::new(SUBSCRIBERS)
             .column(Column::text("id").primary_key())
             .column(Column::text("email").not_null().unique())
-            .column(Column::datetime("created_at").default_now()),
+            .column(Column::datetime("created_at").default_now())
+            .column(Column::datetime("updated_at")),
     )
     .map_err(|error| error.to_string())
 }
