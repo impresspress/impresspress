@@ -37,8 +37,10 @@ workspace = true
 # chooses), so without this a `cargo test -p impresspress-server` run would
 # boot a runtime with no feature blocks at all — about 2 MB instead of about
 # 20 MB — and the runtime probes would only cover the full set when another
-# selected package happened to enable it.
-impresspress-core = { path = "../impresspress-core" }
+# selected package happened to enable it. `test-support` for the migration
+# history engine `tests/boot_migrations.rs` builds pre-ledger databases with.
+impresspress-core = { path = "../impresspress-core", features = ["test-support"] }
+wafer-sql-utils = { workspace = true }
 tempfile = "3"
 # Signs the access JWT `tests/runtime_drop.rs` authenticates through the
 # runtime, the way auth-ui signs one.

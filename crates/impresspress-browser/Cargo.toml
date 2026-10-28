@@ -96,9 +96,13 @@ rusqlite = { workspace = true }
 wasm-bindgen-test = "0.3"
 # `test-hooks`: `after_response::{enter_for_test, current_for_test}`, which
 # `runtime`'s root-scope test uses to stand in for a request stopped
-# mid-poll. Dev-only, so the shipped bundle never sees them.
+# mid-poll. `migration-fixtures`: the runner from before the per-file ledger
+# (`migration_helper::legacy_runner`), which `boot`'s migration tests build a
+# pre-ledger database file with. Dev-only, so the shipped bundle never sees
+# them.
 impresspress-core = { path = "../impresspress-core", default-features = false, features = [
     "test-hooks",
+    "migration-fixtures",
 ] }
 # `RequestInit` is test-only: the adapter reads the `Request` the Service
 # Worker hands it and never builds one. The request-side wasm tests do build

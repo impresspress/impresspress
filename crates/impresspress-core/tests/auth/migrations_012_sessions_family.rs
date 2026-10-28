@@ -5,9 +5,10 @@
 //! `sha256(access_token)`-keyed layout and recreating it. That drop re-ran
 //! with every later auth migration and, once a session row became a family's
 //! liveness, signed every device out each time. The family-keyed layout now
-//! lives in 001 and nothing drops it. Two paths: a fresh database, and one
-//! that already holds the family-keyed table with rows in it, which is the
-//! shape every live deployment is in when this change lands.
+//! lives in 001 and nothing drops it. These are the fresh database's paths;
+//! a database from before the per-file ledger, rows and all, is upgraded
+//! from the states main had by `tests/migration_history.rs`, which checks
+//! that every seeded row survives.
 //!
 //! Same harness as `migrations_001`: `call_block("wafer-run/database", ..)`
 //! goes to a real `DatabaseBlock` over in-memory SQLite, so the migration
@@ -116,76 +117,6 @@ async fn fresh_apply_creates_the_maintenance_singleton() {
         1,
         "the singleton row is seeded by the migration, so the first sweep has a row to update"
     );
-}
-
-/// The path a live deployment takes: the family-keyed table already exists,
-/// created by the old 012, with a signed-in device in it. Running the set
-/// again (any auth migration change does) must leave the row, since the row
-/// is what keeps the device signed in.
-#[tokio::test]
-async fn apply_over_an_existing_family_table_keeps_its_rows() {
-    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
-
-    // 1. The post-B12 world, spelled out rather than derived from the
-    //    migration list: the on-disk shape the old 012 left, pinned verbatim
-    //    so a later edit to 001 cannot quietly change what this test claims
-    //    to upgrade from.
-    for stmt in [
-        "CREATE TABLE wafer_run__auth__users ( \
-             id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, \
-             display_name TEXT NOT NULL, avatar_url TEXT, \
-             role TEXT NOT NULL DEFAULT 'user', \
-             email_verified INTEGER NOT NULL DEFAULT 0, \
-             created_at TEXT NOT NULL, updated_at TEXT NOT NULL )",
-        "CREATE TABLE wafer_run__auth__sessions ( \
-             family TEXT PRIMARY KEY, \
-             user_id TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE, \
-             auth_method TEXT NOT NULL DEFAULT '', \
-             created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, \
-             expires_at TEXT NOT NULL, id TEXT, updated_at TEXT )",
-        "CREATE INDEX wafer_run__auth__sessions_user_id_idx \
-             ON wafer_run__auth__sessions (user_id)",
-        "CREATE INDEX wafer_run__auth__sessions_expires_at_idx \
-             ON wafer_run__auth__sessions (expires_at)",
-    ] {
-        db::ddl(&ctx, stmt)
-            .await
-            .expect("build the post-B12 schema");
-    }
-
-    // 2. A user and a signed-in device, the way a live database holds them.
-    db::exec_raw(
-        &ctx.fixture(),
-        "INSERT INTO wafer_run__auth__users \
-         (id, email, display_name, role, created_at, updated_at) \
-         VALUES ('u1', 'u1@example.com', 'U1', 'user', \
-         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-        &[],
-    )
-    .await
-    .expect("seed pre-existing user");
-    db::exec_raw(
-        &ctx.fixture(),
-        "INSERT INTO wafer_run__auth__sessions \
-         (family, user_id, auth_method, created_at, last_used_at, expires_at) \
-         VALUES ('fam-1', 'u1', 'password', '2026-01-01T00:00:00Z', \
-         '2026-01-01T00:00:00Z', '2099-01-01T00:00:00Z')",
-        &[],
-    )
-    .await
-    .expect("seed a signed-in device");
-
-    // 3. The full apply.
-    migrations::apply(&ctx).await.expect("apply migrations");
-
-    assert_eq!(
-        row_count(&ctx, "wafer_run__auth__sessions").await,
-        1,
-        "the signed-in device survives the set"
-    );
-    assert!(columns(&ctx, "wafer_run__auth__sessions")
-        .await
-        .contains(&"family".to_string()));
 }
 
 /// A second full apply is a no-op, and leaves both tables in their shape.

@@ -460,7 +460,8 @@ pub async fn set_enabled(
 /// (`enabled = true`) when absent and preserving every column the patch
 /// leaves unset otherwise.
 ///
-/// Shared by `migration_helper::record_applied` (the migration hash column),
+/// Shared by `migration_helper::apply_pending`'s stamp (the migration hash
+/// column),
 /// `admin::settings::seed_defaults` (`seed_defaults_hash`) and
 /// [`set_enabled`], so every writer goes through the same
 /// single-row-per-block primitive.
@@ -732,7 +733,7 @@ mod load_and_seed_tests {
     }
 
     /// A `DatabaseService` with the admin schema applied through the
-    /// untracked migration runner (the migration-file-runner exception to the
+    /// real migration runner (the migration-file-runner exception to the
     /// no-raw-SQL rule), so the table under test is the one production
     /// creates rather than a hand-rolled mirror of it.
     async fn migrated_db() -> Arc<dyn DatabaseService> {
@@ -740,9 +741,10 @@ mod load_and_seed_tests {
             wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
                 .expect("open in-memory sqlite"),
         );
-        crate::migration_helper::apply_ddl_via_service(
+        crate::test_support::migrate_sqlite(
             &db,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
         )
         .await
         .expect("apply admin migrations");
@@ -837,6 +839,9 @@ mod load_and_seed_tests {
         let stale_default = !current_default;
         let stale_hash = seed_hash_for(stale_default);
         seed_row(&db, &block_name, stale_default, &stale_hash).await;
+        // The seeded row, and admin's own, which the migration runner wrote
+        // to record admin's list.
+        let rows_before = read_rows(&db).await.expect("read rows").len();
 
         let settings = load(&db).await.expect("read-only load");
 
@@ -847,7 +852,7 @@ mod load_and_seed_tests {
         );
         assert_eq!(
             read_rows(&db).await.expect("read rows").len(),
-            1,
+            rows_before,
             "read-only load must not insert the rest of the defaults"
         );
     }

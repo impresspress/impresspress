@@ -913,8 +913,9 @@ pub enum Wrote {
 /// (so migration 002's `block` column exists) and BEFORE the remaining blocks
 /// initialize, on the targets that seed post-admin (Cloudflare, browser) —
 /// which is exactly the slot [`crate::builder::BootHooks::seed_after_admin_init`]
-/// occupies in [`crate::builder::boot`]. Native seeds pre-wafer, so it ensures
-/// the tables itself first via [`crate::migration_helper::apply_ddl_via_service`].
+/// occupies in [`crate::builder::boot`]. Native seeds pre-wafer, so it applies
+/// admin's list itself first, through
+/// [`crate::migration_helper::apply_pending_via_service`].
 pub async fn seed_auto_generated(db: &Arc<dyn DatabaseService>) {
     let block_infos = crate::blocks::all_block_infos();
     for info in &block_infos {
@@ -2407,19 +2408,19 @@ mod boot_tests {
         },
     };
 
-    /// A `DatabaseService` with the admin schema applied through the
-    /// untracked migration runner (`migration_helper::apply_ddl_via_service` +
-    /// `blocks::admin::migrations::ddl_files`), the migration-file-runner
-    /// exception to the no-raw-SQL rule, so the row shape under test is the
-    /// one production writes.
+    /// A `DatabaseService` with the admin schema applied through the real
+    /// migration runner (`test_support::migrate_sqlite`), the
+    /// migration-file-runner exception to the no-raw-SQL rule, so the row
+    /// shape under test is the one production writes.
     async fn migrated_db() -> Arc<dyn DatabaseService> {
         let db: Arc<dyn DatabaseService> = Arc::new(
             wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
                 .expect("open in-memory sqlite"),
         );
-        crate::migration_helper::apply_ddl_via_service(
+        crate::test_support::migrate_sqlite(
             &db,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
         )
         .await
         .expect("apply admin migrations");

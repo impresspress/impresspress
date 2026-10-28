@@ -1300,19 +1300,19 @@ mod tests {
     /// Migrations 007 and 008 over rows written before them: an action name
     /// becomes its HTTP method, an `update` row (PUT or PATCH) and an
     /// `execute` row (any other method) are dropped, since nobody can say
-    /// which method they were, and every row gets the block its path names. Both
-    /// re-run without changing anything.
+    /// which method they were, and every row gets the block its path names. A
+    /// second boot over the same list runs nothing and changes nothing.
     #[tokio::test]
     async fn migrations_007_and_008_bring_old_rows_onto_the_new_shape() {
-        use crate::blocks::admin::migrations::{
-            ddl_files, REQUEST_LOGS_BLOCK, REQUEST_LOGS_HTTP_METHOD, SQLITE_MIGRATIONS,
+        use crate::blocks::admin::{
+            migrations::{REQUEST_LOGS_BLOCK, REQUEST_LOGS_HTTP_METHOD, SQLITE_MIGRATIONS},
+            ADMIN_BLOCK_ID,
         };
         let db: std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
             std::sync::Arc::new(
                 wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
                     .expect("open in-memory sqlite"),
             );
-        let all = ddl_files("sqlite");
         let at = |name: &str| {
             SQLITE_MIGRATIONS
                 .iter()
@@ -1320,7 +1320,7 @@ mod tests {
                 .expect("wired into SQLITE_MIGRATIONS")
         };
         let (method_at, block_at) = (at(REQUEST_LOGS_HTTP_METHOD), at(REQUEST_LOGS_BLOCK));
-        crate::migration_helper::apply_ddl_via_service(&db, &all[..method_at])
+        crate::test_support::migrate_sqlite(&db, ADMIN_BLOCK_ID, &SQLITE_MIGRATIONS[..method_at])
             .await
             .expect("the migrations before 007");
 
@@ -1347,9 +1347,13 @@ mod tests {
         }
 
         for run in ["first", "second"] {
-            crate::migration_helper::apply_ddl_via_service(&db, &all[..=block_at])
-                .await
-                .unwrap_or_else(|e| panic!("{run} run of 001-008: {e}"));
+            crate::test_support::migrate_sqlite(
+                &db,
+                ADMIN_BLOCK_ID,
+                &SQLITE_MIGRATIONS[..=block_at],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{run} run of 001-008: {e}"));
             let mut rows: Vec<(String, String, String)> = db
                 .list(TABLE, &ListOptions::default())
                 .await

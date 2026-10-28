@@ -155,6 +155,18 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = POSTGRES_MIGRATION_FILES
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+pub(crate) const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: "impresspress/products",
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::products::SQLITE,
+        postgres_history: crate::migration_history::products::POSTGRES,
+    };
+
 #[cfg(test)]
 mod strict_upgrade_tests {
     //! Existing-table upgrade path for `004_strict_schema_columns` — the same
@@ -182,41 +194,29 @@ mod strict_upgrade_tests {
         SQL_019_SQLITE, SQL_020_POSTGRES, SQL_020_SQLITE, SQL_021_POSTGRES, SQL_021_SQLITE,
         SQL_022_POSTGRES, SQL_022_SQLITE, SQL_023_POSTGRES, SQL_023_SQLITE,
     };
-    use crate::migration_helper::apply_ddl_via_service;
+    use crate::test_support::migrate_sqlite;
 
-    fn pre_004_migrations_sql() -> Vec<&'static str> {
-        SQLITE_MIGRATIONS
-            .iter()
-            .take_while(|(name, _)| *name != "004_strict_schema_columns")
-            .map(|(_, sql)| *sql)
-            .collect()
-    }
-
+    const BLOCK: &str = "impresspress/products";
     const NORMALIZE_BLANK: &str = "020_normalize_blank_deleted_at";
 
-    fn pre_020_migrations_sql() -> Vec<&'static str> {
+    /// Where `file` sits in `SQLITE_MIGRATIONS`, by name: an unwired
+    /// migration panics here instead of silently testing nothing.
+    fn at(file: &str) -> usize {
         SQLITE_MIGRATIONS
             .iter()
-            .take_while(|(name, _)| *name != NORMALIZE_BLANK)
-            .map(|(_, sql)| *sql)
-            .collect()
+            .position(|(name, _)| *name == file)
+            .unwrap_or_else(|| {
+                panic!("{file} must be wired into SQLITE_MIGRATIONS to reach a deployed database")
+            })
     }
 
-    // Sliced out of `SQLITE_MIGRATIONS` rather than read from
-    // `SQL_020_SQLITE` directly, so the callers cover the wiring as well as
-    // the SQL: an unwired migration yields an empty slice and trips the
-    // assert here instead of silently testing nothing.
-    fn from_020_migrations_sql() -> Vec<&'static str> {
-        let sql: Vec<&str> = SQLITE_MIGRATIONS
-            .iter()
-            .skip_while(|(name, _)| *name != NORMALIZE_BLANK)
-            .map(|(_, sql)| *sql)
-            .collect();
-        assert!(
-            !sql.is_empty(),
-            "020 must be wired into SQLITE_MIGRATIONS to reach a deployed database"
-        );
-        sql
+    /// The products list up to (not including) index `end`, applied through
+    /// the real runner — the state of a deployment that stopped there, or,
+    /// called again with a later `end`, its upgrade.
+    async fn migrate_until(db: &Arc<dyn DatabaseService>, end: usize) {
+        migrate_sqlite(db, BLOCK, &SQLITE_MIGRATIONS[..end])
+            .await
+            .unwrap_or_else(|e| panic!("the products list through #{end}: {e}"));
     }
 
     async fn ids_matching(db: &Arc<dyn DatabaseService>, predicate: &str) -> Vec<String> {
@@ -268,9 +268,7 @@ mod strict_upgrade_tests {
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
 
         // 1. Pre-upgrade schema (001-003), stripe_events WITHOUT updated_at.
-        apply_ddl_via_service(&db, &pre_004_migrations_sql())
-            .await
-            .expect("apply base (pre-004) products migrations");
+        migrate_until(&db, at("004_strict_schema_columns")).await;
         assert!(
             !has_column(&db, "impresspress__products__stripe_events", "updated_at").await,
             "precondition: pre-004 stripe_events must lack updated_at"
@@ -291,9 +289,7 @@ mod strict_upgrade_tests {
         .expect("seed pre-existing stripe_events row");
 
         // 3. Apply the 004 ALTER (the fix).
-        apply_ddl_via_service(&db, &[SQL_004_SQLITE])
-            .await
-            .expect("apply 004 ALTER migration");
+        migrate_until(&db, at("004_strict_schema_columns") + 1).await;
         assert!(
             has_column(&db, "impresspress__products__stripe_events", "updated_at").await,
             "004 must add updated_at to the existing stripe_events table"
@@ -319,10 +315,7 @@ mod strict_upgrade_tests {
     async fn commerce_v2_creates_owned_tables_templates_and_strict_offer_shape() {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        let all_sql: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        apply_ddl_via_service(&db, &all_sql)
-            .await
-            .expect("apply all products migrations");
+        migrate_until(&db, SQLITE_MIGRATIONS.len()).await;
 
         for table in [
             "impresspress__products__product_versions",
@@ -382,8 +375,8 @@ mod strict_upgrade_tests {
     /// everywhere — out of the public catalog, the admin list and the seller
     /// cap, with no admin action and nothing logged. 020 repairs those rows.
     ///
-    /// Drives the real migration harness (`apply_ddl_via_service` over
-    /// `SQLITE_MIGRATIONS`), the same shape as
+    /// Drives the real migration runner over `SQLITE_MIGRATIONS`, the same
+    /// shape as
     /// `strict_stripe_event_write_succeeds_after_004_alter_on_preexisting_table`:
     /// pre-migration schema, a pre-existing row the new migration has to
     /// repair, then the migration.
@@ -392,9 +385,7 @@ mod strict_upgrade_tests {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
 
-        apply_ddl_via_service(&db, &pre_020_migrations_sql())
-            .await
-            .expect("apply pre-020 products migrations");
+        migrate_until(&db, at(NORMALIZE_BLANK)).await;
 
         // Every value the column can hold: the historical `''` a
         // pass-through create body produced, a live NULL row, and a genuine
@@ -431,9 +422,7 @@ mod strict_upgrade_tests {
             "precondition: the pre-020 schema stores an empty-string deleted_at as-is"
         );
 
-        apply_ddl_via_service(&db, &from_020_migrations_sql())
-            .await
-            .expect("apply 020 normalization migration");
+        migrate_until(&db, SQLITE_MIGRATIONS.len()).await;
 
         assert_eq!(
             blanks(db.clone()).await,
@@ -488,9 +477,10 @@ mod strict_upgrade_tests {
     ///
     /// An unguarded `UPDATE … SET deleted_at = NULL` raises `UNIQUE
     /// constraint failed` there, and that is fatal rather than tolerated:
-    /// `migration_helper::apply_pending` forgives only a duplicate
-    /// `ALTER … ADD COLUMN`, so the error propagates, `write_state` never
-    /// stamps the hash, and every later boot re-runs and re-fails. On
+    /// the statement loop a frozen migration runs through forgives only a
+    /// duplicate `ALTER … ADD COLUMN`, so the error propagates, the file is
+    /// never recorded as applied, and every later boot runs it again and
+    /// fails again. On
     /// Cloudflare `builder::InitPolicy::Strict` turns a block Init failure
     /// into `Err`, and `IMPRESSPRESS_RUN_MIGRATIONS` is baked into the
     /// deployment — so every request 500s until someone hand-edits D1.
@@ -506,9 +496,7 @@ mod strict_upgrade_tests {
     async fn slug_collision_cannot_fail_020() {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        apply_ddl_via_service(&db, &pre_020_migrations_sql())
-            .await
-            .expect("apply pre-020 products migrations");
+        migrate_until(&db, at(NORMALIZE_BLANK)).await;
 
         // (id, slug, deleted_at). `owner_kind`/`owner_id` take their column
         // defaults, which is what every platform product carries — so the
@@ -556,9 +544,8 @@ mod strict_upgrade_tests {
             "precondition: six rows carry the historical empty-string stamp"
         );
 
-        apply_ddl_via_service(&db, &from_020_migrations_sql())
-            .await
-            .expect("020 must never fail the deploy over a slug collision");
+        // 020 must never fail the deploy over a slug collision.
+        migrate_until(&db, SQLITE_MIGRATIONS.len()).await;
 
         assert_eq!(
             ids_matching(&db, "deleted_at IS NULL").await,
@@ -641,31 +628,12 @@ mod strict_upgrade_tests {
     /// spelling `cancel_and_reset_addons` wrote before 022 — is rewritten to
     /// Stripe's `canceled`, the only spelling `SubscriptionStatus` still
     /// decodes. Every other status is left exactly as it was.
-    ///
-    /// The block re-applies its WHOLE migration set whenever the combined hash
-    /// changes, so the second half replays every file over the migrated rows:
-    /// nothing is dropped, and the rewrite has nothing left to match.
+
     #[tokio::test]
     async fn a_stored_cancelled_subscription_is_rewritten_to_canceled_by_022() {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        let before: Vec<&str> = SQLITE_MIGRATIONS
-            .iter()
-            .take_while(|(name, _)| *name != CANONICAL_STATUS)
-            .map(|(_, sql)| *sql)
-            .collect();
-        let from: Vec<&str> = SQLITE_MIGRATIONS
-            .iter()
-            .skip_while(|(name, _)| *name != CANONICAL_STATUS)
-            .map(|(_, sql)| *sql)
-            .collect();
-        assert!(
-            !from.is_empty(),
-            "022 must be wired into SQLITE_MIGRATIONS to reach a deployed database"
-        );
-        apply_ddl_via_service(&db, &before)
-            .await
-            .expect("apply pre-022 products migrations");
+        migrate_until(&db, at(CANONICAL_STATUS)).await;
 
         for (id, status) in [
             ("sub_active", "active"),
@@ -695,18 +663,8 @@ mod strict_upgrade_tests {
         .map(|(id, status)| (id.to_string(), status.to_string()))
         .collect();
 
-        apply_ddl_via_service(&db, &from).await.expect("apply 022");
+        migrate_until(&db, SQLITE_MIGRATIONS.len()).await;
         assert_eq!(subscription_statuses(&db).await, expected);
-
-        let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        apply_ddl_via_service(&db, &all)
-            .await
-            .expect("replay the whole products migration set");
-        assert_eq!(
-            subscription_statuses(&db).await,
-            expected,
-            "a replay of every products migration must keep every row and change nothing"
-        );
     }
 
     #[test]
@@ -758,31 +716,12 @@ mod strict_upgrade_tests {
     /// checkout created from its request's own `currency` field — is
     /// rewritten to the upper-case code every offer, preview and new order
     /// carries. A row already upper-case is left as it was.
-    ///
-    /// The second half replays every file over the migrated rows, as the
-    /// block does whenever the combined hash changes: nothing is dropped and
-    /// the rewrite has nothing left to match.
+
     #[tokio::test]
     async fn stored_product_and_order_currencies_are_upper_cased_by_023() {
         let db: Arc<dyn DatabaseService> =
             Arc::new(SQLiteDatabaseService::open_in_memory().unwrap());
-        let before: Vec<&str> = SQLITE_MIGRATIONS
-            .iter()
-            .take_while(|(name, _)| *name != CANONICAL_CURRENCY)
-            .map(|(_, sql)| *sql)
-            .collect();
-        let from: Vec<&str> = SQLITE_MIGRATIONS
-            .iter()
-            .skip_while(|(name, _)| *name != CANONICAL_CURRENCY)
-            .map(|(_, sql)| *sql)
-            .collect();
-        assert!(
-            !from.is_empty(),
-            "023 must be wired into SQLITE_MIGRATIONS to reach a deployed database"
-        );
-        apply_ddl_via_service(&db, &before)
-            .await
-            .expect("apply pre-023 products migrations");
+        migrate_until(&db, at(CANONICAL_CURRENCY)).await;
 
         let seeded = [
             ("row_canonical", "NZD"),
@@ -820,22 +759,9 @@ mod strict_upgrade_tests {
         .map(|(id, currency)| (id.to_string(), currency.to_string()))
         .collect();
 
-        apply_ddl_via_service(&db, &from).await.expect("apply 023");
+        migrate_until(&db, SQLITE_MIGRATIONS.len()).await;
         for table in [PRODUCTS, PURCHASES] {
             assert_eq!(currencies(&db, table).await, expected, "{table}");
-        }
-
-        let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        apply_ddl_via_service(&db, &all)
-            .await
-            .expect("replay the whole products migration set");
-        for table in [PRODUCTS, PURCHASES] {
-            assert_eq!(
-                currencies(&db, table).await,
-                expected,
-                "{table}: a replay of every products migration must keep every row and change \
-                 nothing"
-            );
         }
     }
 

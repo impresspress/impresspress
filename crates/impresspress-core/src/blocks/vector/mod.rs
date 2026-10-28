@@ -241,10 +241,7 @@ crate::impresspress_feature_block! {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/vector",
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
+            &migrations::MIGRATIONS)
         .await?;
         if matches!(event.event_type, wafer_run::LifecycleType::Init) {
             legacy_names::rename_legacy_indexes(ctx).await?;

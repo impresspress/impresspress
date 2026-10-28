@@ -1,13 +1,31 @@
--- Empty `blessed_hash` on every block's row, so a build from before the
--- column was retired that is still serving logs schema drift instead of
--- re-applying its own migrations. The column is added where it is missing,
--- so every database has it. The reasoning lives beside the constant that
--- embeds this file, in `migrations/mod.rs`; a shipped migration is
--- hash-addressed over its whole text, so prose here cannot be corrected.
+-- Retire `block_settings.blessed_hash`. A database whose 001 predates
+-- 2026-10-07 has the column and one created since does not, under the same
+-- recorded list, so this file must leave both the same: it rebuilds the
+-- table from the columns every database has, copied by name, and drops the
+-- old one with whatever it held. (The basename predates this text, which
+-- once emptied the column instead; the name is the file's key in the
+-- migration ledger, so it stays.) The reasoning lives beside the constant
+-- that embeds this file, in `migrations/mod.rs`.
 
-ALTER TABLE impresspress__admin__block_settings
-    ADD COLUMN blessed_hash TEXT NOT NULL DEFAULT '';
+CREATE TABLE impresspress__admin__block_settings_v2 (
+    id                  TEXT PRIMARY KEY,
+    block_name          TEXT NOT NULL UNIQUE,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    current_hash        TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    seed_defaults_hash  TEXT NOT NULL DEFAULT ''
+);
 
-UPDATE impresspress__admin__block_settings
-SET blessed_hash = ''
-WHERE blessed_hash <> '';
+INSERT INTO impresspress__admin__block_settings_v2
+    (id, block_name, enabled, current_hash, created_at, updated_at, seed_defaults_hash)
+SELECT id, block_name, enabled, current_hash, created_at, updated_at, seed_defaults_hash
+  FROM impresspress__admin__block_settings;
+
+DROP TABLE impresspress__admin__block_settings;
+
+ALTER TABLE impresspress__admin__block_settings_v2
+    RENAME TO impresspress__admin__block_settings;
+
+CREATE UNIQUE INDEX impresspress__admin__block_settings_block_name_uniq
+    ON impresspress__admin__block_settings (block_name);

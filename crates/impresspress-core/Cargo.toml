@@ -45,7 +45,14 @@ postgres = []
 # Pulls `wafer-block-sqlite` in as a regular (non-optional) dep — TestContext
 # wires the production `DatabaseBlock` over `SQLiteDatabaseService`. Enabled
 # via the self dev-dependency below; never enabled in production builds.
-test-support = ["dep:wafer-block-sqlite"]
+test-support = ["dep:wafer-block-sqlite", "migration-fixtures"]
+# Exposes `migration_helper::legacy_runner`, the runner from before the
+# per-file ledger, which the history tests rebuild pre-ledger databases with.
+# No dependencies, so it builds for wasm32 too (the browser's tests build a
+# pre-ledger database file with it). Never enabled by a shipped build:
+# `migration_helper`'s `no_deployed_module_names_the_legacy_runner` keeps
+# every non-test module from naming it.
+migration-fixtures = []
 # Exposes `after_response::{enter_for_test, current_for_test}`, which no
 # production path may call: the Cloudflare adapter's wasm32 tests stand in
 # for a request hard-stopped mid-poll with them. No dependencies, so it builds

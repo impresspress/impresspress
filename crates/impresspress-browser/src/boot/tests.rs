@@ -307,3 +307,219 @@ async fn a_runtime_replace_wafer_displaced_is_freed_with_its_last_handle() {
         "the displaced runtime's auth block outlived its last handle"
     );
 }
+
+/// What every block's pre-build migration pass ([`super::apply_block_migrations`])
+/// does with a database file from before the per-file ledger, on real sql.js.
+mod pre_ledger_migrations {
+    use std::sync::Arc;
+
+    use impresspress_core::{
+        blocks::admin::{
+            migrations::{BLOCK_SETTINGS_CLEAR_BLESSED_HASH, MIGRATIONS},
+            ADMIN_BLOCK_ID,
+        },
+        migration_helper::{legacy_runner, migration_set_hash, MigrationFile},
+        platform_state::{
+            applied_migrations::{self, Origin},
+            block_settings::{self, BlockSettingsPatch},
+        },
+    };
+    use wafer_core::interfaces::database::service::DatabaseService;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::super::{apply_block_migrations, MIGRATION_REFUSED};
+    use crate::database::test_support::fresh_db;
+
+    /// Admin 009 as it first shipped (2026-10-15, `56ab1250`): `ADD COLUMN
+    /// blessed_hash` then an `UPDATE` emptying it. A byte-exact copy of the
+    /// text main carried, pinned by the history table's fixture.
+    const FIRST_009: &str = include_str!(
+        "../../../impresspress-core/src/blocks/admin/migrations/history/009_block_settings_clear_blessed_hash.3863a42e.sqlite.sql"
+    );
+
+    /// The history entry first seen at `commit`, for admin's SQLite list.
+    fn admin_state(commit: &str) -> &'static str {
+        impresspress_core::migration_history::admin::SQLITE
+            .iter()
+            .find(|state| state.first_seen.ends_with(commit))
+            .expect("an admin state")
+            .list_hash
+    }
+
+    async fn record(db: &Arc<dyn DatabaseService>, block: &str, hash: &str) {
+        block_settings::upsert_fields_via_service(
+            db,
+            block,
+            BlockSettingsPatch {
+                current_hash: Some(hash.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("record the list as the old runner did");
+    }
+
+    fn name_of(error: &JsValue) -> Option<String> {
+        js_sys::Reflect::get(error, &"name".into())
+            .ok()
+            .and_then(|name| name.as_string())
+    }
+
+    /// **A database file the old runner left on main's 2026-10-15 list
+    /// (`0f4bad57`) is adopted, and keeps its rows.** Built with the runner
+    /// from before the ledger, from the texts that list carried (today's
+    /// 001-008 and the first 009), and recorded as that runner recorded it.
+    /// The pass adopts 001-008 from that record, runs today's 009 — the
+    /// history marks the first 009 as not applied — and drops the column,
+    /// and a grant the database held survives.
+    #[wasm_bindgen_test]
+    async fn a_pre_ledger_database_file_is_adopted_and_keeps_its_rows() {
+        let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
+        let mut files: Vec<MigrationFile<'static>> = MIGRATIONS.sqlite.to_vec();
+        let last = files.pop().expect("009");
+        assert_eq!(last.0, BLOCK_SETTINGS_CLEAR_BLESSED_HASH);
+        files.push((BLOCK_SETTINGS_CLEAR_BLESSED_HASH, FIRST_009));
+        let state = admin_state("56ab1250");
+        assert_eq!(
+            migration_set_hash(&files),
+            state,
+            "the file is the 0f4bad57 list"
+        );
+        legacy_runner::apply(&db, &files)
+            .await
+            .expect("the old runner applies the list");
+        record(&db, ADMIN_BLOCK_ID, state).await;
+        let mut grant = std::collections::HashMap::new();
+        for (column, value) in [
+            ("id", "ur_kept"),
+            ("user_id", "u1"),
+            ("role", "admin"),
+            ("assigned_at", "2026-10-16T00:00:00Z"),
+            ("assigned_by", ""),
+            ("created_at", "2026-10-16T00:00:00Z"),
+            ("updated_at", "2026-10-16T00:00:00Z"),
+        ] {
+            grant.insert(column.to_string(), serde_json::json!(value));
+        }
+        db.create(impresspress_core::platform_state::user_roles::TABLE, grant)
+            .await
+            .expect("a grant the database held");
+
+        apply_block_migrations(&db)
+            .await
+            .unwrap_or_else(|e| panic!("the pass adopts the file: {e:?}"));
+
+        let ledger = applied_migrations::list_for_block_via_service(&db, ADMIN_BLOCK_ID)
+            .await
+            .expect("read the ledger");
+        let mut rows: Vec<(String, Origin, String)> = ledger
+            .into_iter()
+            .map(|row| (row.file_name, row.origin, row.adopted_from))
+            .collect();
+        rows.sort();
+        let expected: Vec<(String, Origin, String)> = MIGRATIONS
+            .sqlite
+            .iter()
+            .map(|(name, _)| {
+                if *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH {
+                    (name.to_string(), Origin::Ran, String::new())
+                } else {
+                    (name.to_string(), Origin::Adopted, state.to_string())
+                }
+            })
+            .collect();
+        assert_eq!(rows, expected);
+        let columns = db
+            .schema_columns(block_settings::TABLE)
+            .await
+            .expect("introspect block_settings");
+        assert!(!columns.iter().any(|c| c == "blessed_hash"), "{columns:?}");
+        db.get(
+            impresspress_core::platform_state::user_roles::TABLE,
+            "ur_kept",
+        )
+        .await
+        .expect("the grant survives");
+    }
+
+    /// **A database file from before 2026-07-13 is refused by name, and
+    /// nothing is erased.** Its admin record is a list the history table
+    /// marks unsupported (its tables were `solobase__*`), so the pass rejects
+    /// with an `Error` named [`MIGRATION_REFUSED`] — the name `sw.js` keys its
+    /// non-erasing `migration` stage on — and runs and records nothing.
+    #[wasm_bindgen_test]
+    async fn a_database_file_from_before_2026_07_13_is_refused_by_name() {
+        let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
+        // Admin's tables, so the record has a row to live in; the refusal
+        // depends on the record alone.
+        legacy_runner::apply(&db, &MIGRATIONS.sqlite[..1])
+            .await
+            .expect("admin's 001");
+        let state = admin_state("f5f73c25");
+        record(&db, ADMIN_BLOCK_ID, state).await;
+
+        let error = apply_block_migrations(&db)
+            .await
+            .expect_err("the pass refuses the record");
+        assert_eq!(
+            name_of(&error).as_deref(),
+            Some(MIGRATION_REFUSED),
+            "{error:?}"
+        );
+        let message = js_sys::Reflect::get(&error, &"message".into())
+            .ok()
+            .and_then(|m| m.as_string())
+            .unwrap_or_default();
+        assert!(message.contains("cannot be upgraded"), "{message}");
+        assert!(message.contains(&state[..8]), "{message}");
+        assert!(
+            applied_migrations::list_for_block_via_service(&db, ADMIN_BLOCK_ID)
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing recorded"
+        );
+        let settings = block_settings::load(&db).await.expect("read the record");
+        assert_eq!(
+            settings.state(ADMIN_BLOCK_ID).migration.current_hash,
+            state,
+            "the record stayed"
+        );
+    }
+
+    /// **A file that fails on the data is not a refusal.** The pass rejects
+    /// with a plain error — `sw.js`'s `initialize` stage, the one stage a
+    /// build rendered to erase on recovery may erase for — and the failed
+    /// file is not recorded. Here admin's 001 meets a `variables` table some
+    /// other code created without the column its index names.
+    #[wasm_bindgen_test]
+    async fn a_file_that_fails_on_the_data_is_an_ordinary_error() {
+        let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
+        // Test-fixture setup: a table admin's 001 cannot index.
+        db.exec_raw(
+            "CREATE TABLE impresspress__admin__variables (other TEXT)",
+            &[],
+        )
+        .await
+        .expect("a conflicting table");
+
+        let error = apply_block_migrations(&db)
+            .await
+            .expect_err("admin's 001 fails");
+        assert_ne!(
+            name_of(&error).as_deref(),
+            Some(MIGRATION_REFUSED),
+            "{error:?}"
+        );
+        let message = error.as_string().unwrap_or_default();
+        assert!(message.contains("001_admin_schema"), "{message}");
+        assert!(
+            applied_migrations::list_for_block_via_service(&db, ADMIN_BLOCK_ID)
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the failed file is not recorded"
+        );
+    }
+}

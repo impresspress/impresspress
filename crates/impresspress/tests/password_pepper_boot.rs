@@ -248,9 +248,10 @@ impl wafer_run::Block for ConfigProbe {
 /// `wafer-run/config` block. Without the grants WRAP refuses the read before
 /// the config block looks, and a refusal would prove nothing.
 async fn seed_probe_grants(database: &Arc<dyn DatabaseService>, keys: &[&str]) {
-    impresspress_core::migration_helper::apply_ddl_via_service(
+    impresspress_core::test_support::migrate_sqlite(
         database,
-        &impresspress_core::blocks::admin::migrations::ddl_files("sqlite"),
+        impresspress_core::blocks::admin::ADMIN_BLOCK_ID,
+        impresspress_core::blocks::admin::migrations::MIGRATIONS.sqlite,
     )
     .await
     .expect("apply admin tables");

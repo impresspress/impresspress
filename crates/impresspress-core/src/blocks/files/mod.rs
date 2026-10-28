@@ -574,10 +574,7 @@ crate::impresspress_feature_block! {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/files",
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
+            &migrations::MIGRATIONS)
         .await
     },
 }
@@ -728,8 +725,39 @@ mod test_support {
         owner: &str,
         storage: Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
     ) -> TestContext {
-        let mut ctx = TestContext::with_files().await;
+        share_ctx_on(TestContext::with_files().await, bucket, owner, storage).await
+    }
 
+    /// [`share_ctx`] on a database whose files list stops before `file` — a
+    /// deployment that has not yet applied it — in a build that applies
+    /// migrations, so the test can seed what that deployment holds and then
+    /// apply the shipped list through the real runner.
+    pub(super) async fn share_ctx_before(bucket: &str, owner: &str, file: &str) -> TestContext {
+        let mut ctx = TestContext::with_auth()
+            .await
+            .running_as(super::FilesBlock::BLOCK_NAME);
+        let at = super::migrations::SQLITE_MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == file)
+            .unwrap_or_else(|| panic!("{file} is a shipped files migration"));
+        crate::migration_helper::apply_pending(
+            &ctx,
+            super::FilesBlock::BLOCK_NAME,
+            &super::migrations::SQLITE_MIGRATIONS[..at],
+            &[],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("the files list before {file}: {e}"));
+        ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
+        share_ctx_on(ctx, bucket, owner, Arc::new(InMemoryStorageService::new())).await
+    }
+
+    async fn share_ctx_on(
+        mut ctx: TestContext,
+        bucket: &str,
+        owner: &str,
+        storage: Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
+    ) -> TestContext {
         let crypto_svc = Arc::new(
             wafer_block_crypto::service::Argon2JwtCryptoService::new(
                 // ≥ 32 bytes for the HMAC-SHA256 minimum-length check.

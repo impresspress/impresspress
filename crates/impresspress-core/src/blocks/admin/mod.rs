@@ -65,7 +65,9 @@ use crate::{
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
     features::BlockSettings,
     http::{err_bad_request, ok_json},
-    platform_state::{block_settings, request_logs, user_roles, variables, wrap_grants},
+    platform_state::{
+        applied_migrations, block_settings, request_logs, user_roles, variables, wrap_grants,
+    },
 };
 
 /// Path-parameter schema for the `/iam/roles/{id}` routes.
@@ -653,6 +655,7 @@ crate::impresspress_feature_block! {
                 CollectionSchema::new(request_logs::TABLE),
                 CollectionSchema::new(STORAGE_ACCESS_LOGS_TABLE),
                 CollectionSchema::new(block_settings::TABLE),
+                CollectionSchema::new(applied_migrations::TABLE),
                 CollectionSchema::new(wrap_grants::TABLE),
             ])
             .grants(vec![
@@ -691,6 +694,12 @@ crate::impresspress_feature_block! {
                 ),
                 // Every block may upsert its own migration state into block_settings.
                 wafer_run::ResourceGrant::read_write("*", block_settings::TABLE),
+                // Every block's migration runner reads its own rows of the
+                // ledger. Nothing writes it through a grant: a row is written
+                // only inside its migration file's transaction, on the
+                // `__ddl__` channel that file runs on
+                // (`platform_state::applied_migrations`).
+                wafer_run::ResourceGrant::read("*", applied_migrations::TABLE),
                 // Infrastructure logging: storage wrapper + pipeline write logs
                 wafer_run::ResourceGrant::read_write("*", STORAGE_ACCESS_LOGS_TABLE),
                 wafer_run::ResourceGrant::read_write("*", request_logs::TABLE),
@@ -886,10 +895,7 @@ crate::impresspress_feature_block! {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/admin",
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
+            &migrations::MIGRATIONS)
         .await?;
         // Seed default roles/permissions + shared/default variables after the
         // schema is in place, only on Init.

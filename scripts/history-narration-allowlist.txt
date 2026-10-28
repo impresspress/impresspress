@@ -43,7 +43,6 @@
 1	crates/impresspress-core/src/blocks/userportal/pages/security.rs
 1	crates/impresspress-core/src/blocks/userportal/pages/sessions.rs
 1	crates/impresspress-core/src/builder/registration.rs
-1	crates/impresspress-core/src/migration_helper.rs
 1	crates/impresspress-core/src/pipeline.rs
 2	crates/impresspress-core/src/platform_state/variables.rs
 1	crates/impresspress-core/src/routing.rs

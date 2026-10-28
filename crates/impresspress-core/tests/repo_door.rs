@@ -60,6 +60,11 @@ const TABLES: &[(&str, &str, &str)] = &[
         "crate::platform_state::block_settings::TABLE",
     ),
     (
+        "applied_migrations",
+        "impresspress__admin__applied_migrations",
+        "crate::platform_state::applied_migrations::TABLE",
+    ),
+    (
         "wrap_grants",
         "impresspress__admin__wrap_grants",
         "crate::platform_state::wrap_grants::TABLE",
@@ -361,21 +366,15 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
         &["platform_state/block_settings.rs", "cache_key.rs"],
     ),
     (
+        "applied_migrations",
+        &["platform_state/applied_migrations.rs"],
+    ),
+    (
         "wrap_grants",
         &["platform_state/wrap_grants.rs", "cache_key.rs"],
     ),
     ("request_logs", &["platform_state/request_logs.rs"]),
-    (
-        "user_roles",
-        &[
-            "platform_state/user_roles.rs",
-            // auth migration 016 copies roles into this table, and its
-            // ordering test asserts the error the `.sql` file's statement
-            // raises without admin's schema; reading the name back from the
-            // constant would make it tautological
-            "blocks/auth/migrations/mod.rs",
-        ],
-    ),
+    ("user_roles", &["platform_state/user_roles.rs"]),
     // The files doors. Each is its own `repo/<module>.rs` and nothing else,
     // with one exception on the objects table: the WRAP-grant loader's
     // fixture seeds a grant whose target IS a table name on the wire, and
@@ -763,6 +762,10 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
         &[
             "cache_key.rs",
             "config_generation.rs",
+            // the migration runner's refusals name the table an operator
+            // restores, and its tests delete a row as fixture setup (a
+            // `block_settings` row lost on its own)
+            "migration_helper.rs",
             "blocks/admin/mod.rs",
             // names the table only to aim the fault injector
             // (`FailingDbOpContext`) at it in the toggle handler's tests
@@ -772,6 +775,24 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // the table its database site reads or writes, so the denial
             // lands on the query under test.
             "blocks/admin/error_mapping_tests.rs",
+        ],
+    ),
+    (
+        "applied_migrations",
+        &[
+            // `BlockInfo::collections(..)` / `grants(..)` are advisory
+            // declarations for WRAP and the admin database explorer
+            "blocks/admin/mod.rs",
+            // the export's exclusion bookkeeping: listed, never read
+            "blocks/dev/data_snapshot.rs",
+            // the migration runner's refusals name the table an operator
+            // restores; its tests edit a ledger row by hand as fixture setup
+            // and check that no migration file names the table
+            "migration_helper.rs",
+            // the history tests' engine leaves the ledger out of the schema
+            // it compares with a fresh install's (the runner adds that table
+            // itself, and a refusal must add nothing else)
+            "test_support/migration_history.rs",
         ],
     ),
     (

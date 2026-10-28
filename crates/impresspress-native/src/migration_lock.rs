@@ -3,9 +3,14 @@
 //! A native boot applies every pending block migration before it serves.
 //! Two processes booting against one database at once — two replicas started
 //! together, or a restart that overlaps the process it replaces — would each
-//! read the same pending lists and both apply them: every statement twice,
-//! racing each other, and a list such as auth's, which drops and re-creates
-//! tables, re-run under a process that may already be serving.
+//! read the same pending files and both try to apply them, racing each
+//! other. The ledger's claim — each file's ledger row, first in its
+//! transaction — decides which records a file: the other's transaction
+//! rolls back and it goes on (`migration_helper`, "A failed file is decided
+//! by the ledger"). But both still run the file's statements against one
+//! schema at once, and a process that may already be serving sees that. The
+//! lock keeps boots from racing at all; the claim is defence in depth behind
+//! it.
 //! [`MigrationLock::acquire`] makes them take turns: the second process waits
 //! until the first has finished its boot, and only then reads which lists are
 //! applied.

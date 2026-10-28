@@ -296,10 +296,7 @@ crate::impresspress_feature_block! {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/messages",
-            migrations::SQLITE_MIGRATIONS,
-            migrations::POSTGRES_MIGRATIONS,
-        )
+            &migrations::MIGRATIONS)
         .await
     },
 }
@@ -345,14 +342,9 @@ pub(crate) mod test_support {
         let mut ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::messages::MessagesBlock::BLOCK_NAME);
-        crate::migration_helper::apply_migrations(
-            &ctx,
-            "impresspress/messages",
-            super::migrations::SQLITE_MIGRATIONS,
-            super::migrations::POSTGRES_MIGRATIONS,
-        )
-        .await
-        .expect("apply messages migrations in test fixture");
+        crate::migration_helper::apply_migrations(&ctx, &super::migrations::MIGRATIONS)
+            .await
+            .expect("apply messages migrations in test fixture");
         ctx.register_block(
             "impresspress/messages",
             Arc::new(super::MessagesBlock::new()),

@@ -62,9 +62,11 @@ const SQL_003_POSTGRES: &str = include_str!("003_legacy_share_token_expiry.postg
 // value.
 //
 // Re-running is harmless on every backend: `ADD COLUMN IF NOT EXISTS` on
-// PostgreSQL, and on SQLite/D1 the duplicate-column error `apply_pending`
-// tolerates for an `ALTER TABLE … ADD COLUMN`. What shipping it re-runs — the
-// whole set, 001 onwards, over live rows — is pinned by `replay_tests` below.
+// PostgreSQL, and on SQLite/D1 the duplicate-column error the frozen-file
+// statement loop tolerates for an `ALTER TABLE … ADD COLUMN`
+// (`migration_helper`'s "Frozen files"). What the legacy replay re-runs —
+// the whole frozen set, 001 onwards, over live rows — is pinned by
+// `replay_tests` below.
 //
 // A native deployment that has not run it yet still takes fresh uploads, as
 // long as `WAFER_RUN__DATABASE__STRICT_SCHEMA` is off: the database service
@@ -97,8 +99,8 @@ const SQL_004_POSTGRES: &str = include_str!("004_object_claim_id.postgres.sql");
 //
 // Re-running is harmless on every backend, for the reason 004's is: `ADD
 // COLUMN IF NOT EXISTS` on PostgreSQL, and on SQLite/D1 the duplicate-column
-// error `apply_pending` tolerates for an `ALTER TABLE … ADD COLUMN`. The
-// replay of the whole set is pinned by `replay_tests` below. A native
+// error the frozen-file statement loop tolerates for an `ALTER TABLE … ADD
+// COLUMN`. The replay of the whole set is pinned by `replay_tests` below. A native
 // deployment that has not run it still uploads while strict schema is off,
 // through the same lazy column-add `uploads_work_before_migration_005_has_run`
 // in `storage::objects` exercises.
@@ -111,13 +113,13 @@ const SQL_005_POSTGRES: &str = include_str!("005_object_blob_key.postgres.sql");
 // 001 declares it; no code reads or writes it. Nothing enforces a reset
 // period, so `QuotaConfig`, the admin quota PATCH whitelist
 // (`cloud::handle_update_quota`) and the published contract do not carry it.
-// The column stays because `DROP COLUMN` is unsafe under this block's runner:
-// `apply_pending` re-runs the whole joined migration SQL whenever its hash
-// changes and tolerates only a duplicate `ADD COLUMN`, so a `DROP COLUMN`
-// would fail with "no such column" on the next re-run on SQLite/D1 and fail
-// the block's `Init`. A table rebuild (create, copy, drop, rename) can be
-// written to survive re-runs, but is not worth it for a column nothing
-// touches. It is
+// The column stays because, when this was decided, `DROP COLUMN` was unsafe
+// under this block's runner: it re-ran the whole joined migration SQL
+// whenever its hash changed and tolerated only a duplicate `ADD COLUMN`, so a
+// `DROP COLUMN` would fail with "no such column" on the next re-run on
+// SQLite/D1 and fail the block's `Init`. A file added after the per-file
+// ledger runs once, so a `DROP COLUMN` there would be safe; nothing touches
+// the column, so it has not been worth one. It is
 // `NOT NULL DEFAULT 0`, so a row written without it is still accepted.
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
@@ -161,6 +163,18 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = POSTGRES_MIGRATION_FILES
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+pub(crate) const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: super::FILES_BLOCK_ID,
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::files::SQLITE,
+        postgres_history: crate::migration_history::files::POSTGRES,
+    };
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -174,9 +188,8 @@ mod tests {
     /// Every other fixture applies 001 and 002 together against an empty
     /// table, so the `DELETE` never has a duplicate to find and a SQL error
     /// in it would go unnoticed until a real deployment tried to upgrade —
-    /// where it fails the whole batch, leaves the index uncreated, and
-    /// re-fails on every later boot (`apply_pending` tolerates only a
-    /// duplicate `ALTER … ADD COLUMN`).
+    /// where the file's transaction rolls back, leaves the index uncreated,
+    /// and fails again on every later boot (the runner swallows no error).
     ///
     /// So this applies 001 alone, plants the takeover the index exists to
     /// stop, and then applies the real migration list the way an upgrading
@@ -186,7 +199,7 @@ mod tests {
         let mut ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
-        crate::migration_helper::apply_migrations(
+        crate::migration_helper::apply_pending(
             &ctx,
             "impresspress/files",
             &SQLITE_MIGRATIONS[..1],
@@ -215,14 +228,9 @@ mod tests {
         }
 
         ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
-        crate::migration_helper::apply_migrations(
-            &ctx,
-            "impresspress/files",
-            SQLITE_MIGRATIONS,
-            &[],
-        )
-        .await
-        .expect("002 applies to a database holding a duplicate");
+        crate::migration_helper::apply_pending(&ctx, "impresspress/files", SQLITE_MIGRATIONS, &[])
+            .await
+            .expect("002 applies to a database holding a duplicate");
 
         assert!(
             repo::buckets::find_owned(&ctx, "assets", "alice")
@@ -248,154 +256,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod replay_tests {
-    //! What re-running this block's migrations does to a live deployment.
-    //!
-    //! `apply_pending` hashes the JOINED text of every file, so shipping
-    //! any new migration — 004 included — re-runs 001 onwards on the next
-    //! deploy or boot, over whatever the tables hold. For auth that
-    //! re-run signs every user out (its 004 drops the refresh-token table);
-    //! nothing here may do the equivalent to share links, buckets or uploads.
-
-    use serde_json::json;
-    use wafer_core::clients::database::RecordData;
-
-    use super::SQLITE_MIGRATIONS;
-    use crate::{blocks::files::repo, migration_helper, test_support::TestContext};
-
-    /// Every row of every table the files block owns, each column as stored,
-    /// by table and id.
-    async fn every_row(ctx: &TestContext) -> Vec<(&'static str, String, RecordData)> {
-        let tables = [
-            ("buckets", repo::buckets::raw_rows(ctx).await),
-            ("objects", repo::objects::raw_rows(ctx).await),
-            ("views", repo::views::raw_rows(ctx).await),
-            ("shares", repo::shares::raw_rows(ctx).await),
-            ("access_logs", repo::shares::raw_access_log_rows(ctx).await),
-            ("quotas", repo::quota::raw_rows(ctx).await),
-        ];
-        let mut rows = Vec::new();
-        for (table, records) in tables {
-            let mut records = records.unwrap_or_else(|e| panic!("read {table}: {e}"));
-            records.sort_by(|a, b| a.id.cmp(&b.id));
-            rows.extend(records.into_iter().map(|r| (table, r.id, r.data)));
-        }
-        rows
-    }
-
-    /// Replaying every files migration over a deployment's live rows changes
-    /// none of them: no share link gains, loses or moves an expiry, no bucket
-    /// or object row is deleted, and a reservation keeps its `claim_id`.
-    ///
-    /// A guard, not a regression test — it passes before 004 and 005 as
-    /// after. It exists because a re-run is what each of them triggers on every upgrading
-    /// deployment, and a statement added later that is not safe to replay
-    /// (a `DROP`, an unguarded `UPDATE`) has to fail here rather than there.
-    /// The replay is forced under a fresh migration-state key, as
-    /// `the_repair_is_idempotent` explains: an unchanged hash would skip it.
-    #[tokio::test]
-    async fn replaying_every_files_migration_leaves_live_rows_alone() {
-        let mut ctx = TestContext::with_files().await;
-        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-
-        repo::buckets::insert(&ctx, "photos", false, "alice")
-            .await
-            .expect("a bucket");
-        for (id, token, expires_at) in [
-            // A legacy link 003 already dated, and a current one.
-            (
-                "legacy",
-                "eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoic2hhcmUifQ.sig",
-                "2027-04-20T10:00:00Z",
-            ),
-            (
-                "opaque",
-                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-                "2026-12-01T00:00:00Z",
-            ),
-        ] {
-            repo::shares::seed(
-                &ctx,
-                crate::util::json_map(json!({
-                    "id": id,
-                    "token": token,
-                    "bucket": "photos",
-                    "key": "a.png",
-                    "created_by": "alice",
-                    "expires_at": expires_at,
-                    "access_count": 3,
-                    "created_at": "2026-04-20T10:00:00Z",
-                })),
-            )
-            .await
-            .expect("a share");
-        }
-        let stored = repo::objects::reserve_upload(
-            &ctx,
-            "photos",
-            "a.png",
-            8,
-            "image/png",
-            "alice",
-            &crate::blocks::files::models::QuotaConfig::effective_default(),
-        )
-        .await
-        .expect("reserve");
-        assert_eq!(
-            repo::objects::mark_complete(&ctx, &stored)
-                .await
-                .expect("a stored object"),
-            repo::objects::Completion::Completed
-        );
-        repo::objects::reserve_upload(
-            &ctx,
-            "photos",
-            "b.png",
-            4,
-            "image/png",
-            "alice",
-            &crate::blocks::files::models::QuotaConfig::effective_default(),
-        )
-        .await
-        .expect("an upload in flight");
-        repo::views::insert(&ctx, "photos", "a.png", "alice")
-            .await
-            .expect("a view");
-        repo::quota::upsert_for_user(
-            &ctx,
-            "alice",
-            crate::util::json_map(json!({
-                "max_storage_bytes": 5_000,
-            })),
-        )
-        .await
-        .expect("a quota override");
-        let before = every_row(&ctx).await;
-
-        migration_helper::apply_migrations(
-            &ctx,
-            "impresspress/files-replay",
-            SQLITE_MIGRATIONS,
-            &[],
-        )
-        .await
-        .expect("the whole set replays over live rows");
-
-        assert_eq!(every_row(&ctx).await, before);
-        assert!(
-            before.iter().any(|(table, _, row)| *table == "objects"
-                && row.get("claim_id").is_some_and(|c| c.is_string())),
-            "the replay was checked over rows that carry a claim"
-        );
-        assert!(
-            before.iter().any(|(table, _, row)| *table == "objects"
-                && row.get("blob_key").is_some_and(|c| c.is_string())),
-            "the replay was checked over rows that name their blob"
-        );
-    }
-}
-
-#[cfg(test)]
 mod legacy_share_expiry_tests {
     //! What `003_legacy_share_token_expiry` does to the rows of a deployment
     //! upgraded into the opaque-token scheme.
@@ -407,10 +267,10 @@ mod legacy_share_expiry_tests {
     //! used to impose. The end-to-end half — the repaired row refused by
     //! `share::handle_direct_access` — lives beside that handler.
     //!
-    //! The repair is driven through `apply_migrations`, the path an upgrading
-    //! deployment's first migrating boot or deploy takes, and the rows are
-    //! read back
-    //! through `repo::shares`, so what is asserted is what the block sees.
+    //! The repair is driven through `apply_pending`, the path an upgrading
+    //! deployment's first migrating boot or deploy takes, over a database
+    //! whose files list stops before it, and the rows are read back through
+    //! `repo::shares`, so what is asserted is what the block sees.
 
     use std::collections::HashMap;
 
@@ -427,34 +287,51 @@ mod legacy_share_expiry_tests {
     /// A token minted under the new one: 32 bytes, hex, no dots.
     const OPAQUE_TOKEN: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
-    /// A fixture whose schema is in place, in a build that applies
-    /// migrations, as every deploy and native boot is.
+    /// The shipped list before the repair, sliced out by name: an unwired
+    /// repair would leave the whole list here and trip this assert instead of
+    /// silently testing nothing.
+    fn before_the_repair() -> &'static [(&'static str, &'static str)] {
+        let at = SQLITE_MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == LEGACY_SHARE_TOKEN_EXPIRY)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{LEGACY_SHARE_TOKEN_EXPIRY} must be wired into SQLITE_MIGRATIONS to reach \
+                     a deployed database"
+                )
+            });
+        &SQLITE_MIGRATIONS[..at]
+    }
+
+    /// A deployment whose files list stops before the repair, in a build that
+    /// applies migrations, as every deploy and native boot is.
     async fn upgrading_deployment() -> TestContext {
-        let mut ctx = TestContext::with_files().await;
+        let mut ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::files::FilesBlock::BLOCK_NAME);
+        migration_helper::apply_pending(
+            &ctx,
+            crate::blocks::files::FilesBlock::BLOCK_NAME,
+            before_the_repair(),
+            &[],
+        )
+        .await
+        .expect("the files list before the repair");
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
         ctx
     }
 
-    /// The repair onwards, sliced out of the shipped list rather than read
-    /// from `SQL_002_SQLITE` directly: an unwired migration yields an empty
-    /// slice and trips this assert instead of silently testing nothing.
-    fn the_repair() -> Vec<(&'static str, &'static str)> {
-        let sql: Vec<(&str, &str)> = SQLITE_MIGRATIONS
-            .iter()
-            .skip_while(|(name, _)| *name != LEGACY_SHARE_TOKEN_EXPIRY)
-            .copied()
-            .collect();
-        assert!(
-            !sql.is_empty(),
-            "{LEGACY_SHARE_TOKEN_EXPIRY} must be wired into SQLITE_MIGRATIONS to reach a deployed database"
-        );
-        sql
-    }
-
+    /// The upgrade: the shipped list, whose pending files are the repair and
+    /// what follows it.
     async fn apply_the_repair(ctx: &TestContext) {
-        migration_helper::apply_migrations(ctx, "impresspress/files", &the_repair(), &[])
-            .await
-            .expect("apply the legacy-expiry repair");
+        migration_helper::apply_pending(
+            ctx,
+            crate::blocks::files::FilesBlock::BLOCK_NAME,
+            SQLITE_MIGRATIONS,
+            &[],
+        )
+        .await
+        .expect("apply the legacy-expiry repair");
     }
 
     /// Seed one share row exactly as the old code left it.
@@ -656,12 +533,11 @@ mod legacy_share_expiry_tests {
 
     /// Running the repair's statements a second time moves nothing.
     ///
-    /// The second pass has to be forced: `apply_pending` short-circuits
-    /// on an unchanged hash, so calling `apply_migrations` twice would
-    /// execute the SQL once and prove nothing. Running it under a second
-    /// migration-state key gives the statements a fresh state to run
-    /// against — the same thing a changed list's redeploy does — and the rows
-    /// are what is asserted either way.
+    /// Before the ledger, the runner re-ran every file whenever the list
+    /// changed, so a deployment that kept upgrading ran this repair more than
+    /// once: `migration-history.toml` declares it `rerun_safe`, and the
+    /// history's verdicts for those states rest on that. The second pass is
+    /// the runner from before the ledger; today's runs the file once.
     #[tokio::test]
     async fn the_repair_is_idempotent() {
         let ctx = upgrading_deployment().await;
@@ -673,9 +549,16 @@ mod legacy_share_expiry_tests {
             expires_at(&ctx, &old).await,
             expires_at(&ctx, &recent).await,
         );
-        migration_helper::apply_migrations(&ctx, "impresspress/files-replay", &the_repair(), &[])
-            .await
-            .expect("re-run the repair against a fresh migration state");
+        let (_, repair) = SQLITE_MIGRATIONS
+            .iter()
+            .find(|(name, _)| *name == LEGACY_SHARE_TOKEN_EXPIRY)
+            .expect("the repair is wired");
+        migration_helper::legacy_runner::apply(
+            &ctx.database_service(),
+            &[(LEGACY_SHARE_TOKEN_EXPIRY, repair)],
+        )
+        .await
+        .expect("the old runner's second pass");
 
         assert_eq!(
             (

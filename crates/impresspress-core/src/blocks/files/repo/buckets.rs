@@ -230,15 +230,6 @@ pub async fn seed(
         .map(|r| BucketRow::from_record(&r))
 }
 
-/// Test helper: every row of `TABLE`, undecoded — each column exactly as
-/// stored, for asserting that something left the table alone.
-#[cfg(test)]
-pub async fn raw_rows(
-    ctx: &dyn Context,
-) -> Result<Vec<wafer_core::clients::database::Record>, WaferError> {
-    crate::db_read::list_every(ctx, TABLE, vec![]).await
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

@@ -26,6 +26,18 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+pub(crate) const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: "impresspress/legalpages",
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::legalpages::SQLITE,
+        postgres_history: crate::migration_history::legalpages::POSTGRES,
+    };
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,7 +56,7 @@ mod tests {
             .await
             .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
         let block = "impresspress/legalpages";
-        crate::migration_helper::apply_migrations(&ctx, block, &SQLITE_MIGRATIONS[..1], &[])
+        crate::migration_helper::apply_pending(&ctx, block, &SQLITE_MIGRATIONS[..1], &[])
             .await
             .expect("apply 001");
 
@@ -65,7 +77,7 @@ mod tests {
         }
 
         ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
-        crate::migration_helper::apply_migrations(&ctx, block, SQLITE_MIGRATIONS, &[])
+        crate::migration_helper::apply_pending(&ctx, block, SQLITE_MIGRATIONS, &[])
             .await
             .expect("apply 002");
 
@@ -108,7 +120,7 @@ mod tests {
         let ctx = crate::test_support::TestContext::with_admin()
             .await
             .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
-        crate::migration_helper::apply_migrations(
+        crate::migration_helper::apply_pending(
             &ctx,
             "impresspress/legalpages",
             &SQLITE_MIGRATIONS[..1],

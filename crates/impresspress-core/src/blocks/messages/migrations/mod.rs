@@ -33,6 +33,18 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
+/// This block's migrations as its `lifecycle(Init)` applies them, and as
+/// [`crate::blocks::all_block_migrations`] lists them: both dialects' files
+/// and both dialects' pre-ledger history (`crate::migration_history`).
+pub(crate) const MIGRATIONS: crate::migration_helper::BlockMigrations =
+    crate::migration_helper::BlockMigrations {
+        block: "impresspress/messages",
+        sqlite: SQLITE_MIGRATIONS,
+        postgres: POSTGRES_MIGRATIONS,
+        sqlite_history: crate::migration_history::messages::SQLITE,
+        postgres_history: crate::migration_history::messages::POSTGRES,
+    };
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "postgres")]
@@ -185,7 +197,7 @@ mod owner_id_backfill_tests {
             .iter()
             .position(|(name, _)| *name == OWNER_ID)
             .expect("002 is wired into SQLITE_MIGRATIONS")];
-        migration_helper::apply_migrations(&ctx, MESSAGES, before, &[])
+        migration_helper::apply_pending(&ctx, MESSAGES, before, &[])
             .await
             .expect("001 applies");
 
@@ -215,7 +227,7 @@ mod owner_id_backfill_tests {
         }
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, MESSAGES, SQLITE_MIGRATIONS, &[])
+        migration_helper::apply_pending(&ctx, MESSAGES, SQLITE_MIGRATIONS, &[])
             .await
             .expect("002 applies to a database holding conversations");
 

@@ -730,9 +730,10 @@ mod tests {
     #[tokio::test]
     async fn database_and_pre_installed_grants_agree() {
         let db = bare_db().await;
-        crate::migration_helper::apply_ddl_via_service(
+        crate::test_support::migrate_sqlite(
             &db,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
         )
         .await
         .expect("apply admin migrations");
@@ -788,9 +789,10 @@ mod tests {
     #[tokio::test]
     async fn pre_installed_does_not_read_the_database() {
         let db = bare_db().await;
-        crate::migration_helper::apply_ddl_via_service(
+        crate::test_support::migrate_sqlite(
             &db,
-            &crate::blocks::admin::migrations::ddl_files("sqlite"),
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
         )
         .await
         .expect("apply admin migrations");

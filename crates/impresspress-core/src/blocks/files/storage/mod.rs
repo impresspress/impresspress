@@ -279,7 +279,7 @@ mod test_helpers {
             .iter()
             .find(|(basename, _)| *basename == "001_initial_schema")
             .expect("the files block still has its initial-schema migration");
-        crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &[initial], &[])
+        crate::migration_helper::apply_pending(&ctx, "impresspress/files", &[initial], &[])
             .await
             .expect("001 applies");
         with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
@@ -302,7 +302,7 @@ mod test_helpers {
             crate::blocks::files::migrations::SQLITE_MIGRATIONS.len(),
             "004 is still shipped, under this name"
         );
-        crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &sql, &[])
+        crate::migration_helper::apply_pending(&ctx, "impresspress/files", &sql, &[])
             .await
             .expect("001-003 apply");
         with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
@@ -325,7 +325,7 @@ mod test_helpers {
             crate::blocks::files::migrations::SQLITE_MIGRATIONS.len(),
             "005 is still shipped, under this name"
         );
-        crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &sql, &[])
+        crate::migration_helper::apply_pending(&ctx, "impresspress/files", &sql, &[])
             .await
             .expect("001-004 apply");
         with_storage(ctx.running_as(crate::blocks::files::FilesBlock::BLOCK_NAME))
