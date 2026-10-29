@@ -34,14 +34,21 @@ own names. The deploy log now names the site directory it staged.
 
 - **A consumer with a `public/` (or `frontend/build/`) site:** the site is
   served after the next deploy. `/` itself serves it only with
-  `WAFER_RUN_SHARED__HAS_LANDING_PAGE=true`, on every target (see the
-  README's "Serving your own site").
-- **A consumer that worked around this** with
-  `cloudflare.r2.release_assets_dir` + `release_assets_prefix =
-  "wafer-run/web/site"`: that keeps working. If the repo also has a
-  `public/` or `frontend/build/`, a file both write is a key collision and
-  the build fails, naming it; drop the workaround and keep the site in one
-  place.
+  `WAFER_RUN_SHARED__HAS_LANDING_PAGE=true` (default `false` on every server
+  target; see the README's "Serving your own site").
+- **A repo with both `frontend/build/` and `public/`** now serves
+  `frontend/build/` on Cloudflare, as native always did, and no longer
+  uploads `public/` at all.
+- **A consumer that worked around this with `cloudflare.r2.release_assets_dir
+  = "public"` + `release_assets_prefix = "wafer-run/web/site"`:** every
+  deploy now fails with an `R2 release asset key collision`, because the same
+  files are staged twice. Remove both lines; the site is staged there
+  without them. A workaround that pointed `release_assets_dir` at a directory
+  other than the site directory keeps working as long as no file in it has
+  the same path as one in the site.
+- **`cloudflare.r2.release_assets_exclude` patterns written for site files**
+  must now match `wafer-run/web/site/…` instead of `public/…`; a `public/…`
+  pattern matches nothing any more.
 - **A consumer block that read the storage folder `public`** (none in this
   repository or its known consumers) no longer finds those keys. Ship that
   directory explicitly: `release_assets_dir = "public"` +

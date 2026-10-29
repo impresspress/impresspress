@@ -105,11 +105,15 @@ use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use super::{blobs, generation::SiteManifest, repo::seed_info, seed, workspace::FileEntry};
 
-/// The cross-block folder the published site lives in.
+/// The cross-block folder the published site lives in, as this block names
+/// it: [`crate::flows::SITE_STORAGE_FOLDER`] made absolute with `@`, since a
+/// plain folder would resolve under the dev block's own namespace.
 ///
 /// `wafer-run/web` owns it; the dev block reaches it under the one WRAP grant
 /// [`super::wrap_grants`] hands the runtime.
-pub const SITE_FOLDER: &str = "@wafer-run/web/site";
+pub fn site_folder() -> String {
+    crate::flows::site_storage_folder_absolute()
+}
 
 /// The document a site is entered through, and the last file a publish writes.
 pub const ENTRYPOINT: &str = "index.html";
@@ -345,7 +349,14 @@ async fn write(ctx: &dyn Context, file: Published<'_>) -> Result<(), WaferError>
         }
         Published::Sandbox(llms) => &llms.bytes,
     };
-    storage::put(ctx, SITE_FOLDER, &entry.path, bytes, entry.content_type()).await
+    storage::put(
+        ctx,
+        &site_folder(),
+        &entry.path,
+        bytes,
+        entry.content_type(),
+    )
+    .await
 }
 
 /// Remove one path from the published folder.
@@ -353,7 +364,7 @@ async fn write(ctx: &dyn Context, file: Published<'_>) -> Result<(), WaferError>
 /// A path that is already gone is the outcome asked for: an interrupted
 /// publish may have deleted it, and converging on that state must not fail.
 async fn remove(ctx: &dyn Context, path: &str) -> Result<(), WaferError> {
-    match storage::delete(ctx, SITE_FOLDER, path).await {
+    match storage::delete(ctx, &site_folder(), path).await {
         Err(e) if e.code == ErrorCode::NotFound => Ok(()),
         other => other,
     }
