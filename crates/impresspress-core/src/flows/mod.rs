@@ -15,6 +15,22 @@ const WEB_BLOCK: &str = "wafer-run/web";
 const CORS_BLOCK: &str = "wafer-run/cors";
 const SECURITY_HEADERS_BLOCK: &str = "wafer-run/security-headers";
 
+/// The `web_root` the site-main flow gives `wafer-run/web`: the folder,
+/// inside the web block's own storage namespace, it serves the site from.
+pub const SITE_WEB_ROOT: &str = "site";
+
+/// Where a deployment's site lives in storage, on every target: the folder
+/// `wafer-run/web` reads [`SITE_WEB_ROOT`] as. The web block reads storage
+/// through the `wafer-run/storage` alias, which namespaces every folder under
+/// the calling block's name, so this is `{WEB_BLOCK}/{SITE_WEB_ROOT}`
+/// (pinned by a test below).
+///
+/// Whatever puts a site in place writes here: the native CLI flows copy the
+/// site directory into `<storage root>/` + this, and the Cloudflare deploy
+/// stages it under this logical key prefix in the R2 release set. A site
+/// anywhere else is a set of objects nothing serves.
+pub const SITE_STORAGE_FOLDER: &str = "wafer-run/web/site";
+
 /// Register the site-main flow (used with impresspress/router).
 ///
 /// `cors_allowed_origins` and `csp_directives` are the operator-configured
@@ -118,7 +134,7 @@ pub fn site_main_block_configs(
             merged(
                 declared(existing_block_configs, WEB_BLOCK),
                 serde_json::json!({
-                    "web_root": "site", "web_spa": "true", "web_index": "index.html"
+                    "web_root": SITE_WEB_ROOT, "web_spa": "true", "web_index": "index.html"
                 }),
                 &[],
             ),
@@ -258,6 +274,23 @@ fn combine_csp(before: &str, after: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The folder every site writer targets is the one the web block reads
+    /// under the root this flow configures.
+    #[test]
+    fn the_site_storage_folder_is_the_web_blocks_namespace_and_root() {
+        assert_eq!(SITE_STORAGE_FOLDER, format!("{WEB_BLOCK}/{SITE_WEB_ROOT}"));
+        let web = config_for(&site_main_block_configs("", "", &[]), WEB_BLOCK).clone();
+        assert_eq!(web["web_root"], SITE_WEB_ROOT);
+        let routes = site_main::default_routes();
+        let fallback = routes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["block"] == WEB_BLOCK)
+            .unwrap();
+        assert_eq!(fallback["config"]["web_root"], SITE_WEB_ROOT);
+    }
 
     /// What `impresspress-web`'s `RuntimeFactory` declares on a
     /// `browser-devtools` build with `[sandbox] mode = "workspace"` (`runtime_factory.rs`):

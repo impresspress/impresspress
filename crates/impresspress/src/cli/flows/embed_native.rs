@@ -9,8 +9,6 @@ use crate::cli::{
     helpers::{blocks, frontend},
 };
 
-const RUNTIME_SITE_REL: &str = "data/storage/wafer-run/web/site";
-
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     // A malformed `impresspress.toml` fails the build here, before any work;
     // only an absent file means "no manifest_path override".
@@ -20,10 +18,7 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     blocks::build_all(repo_root).await?;
 
     // 2. Frontend copy (if any).
-    if let Some(fe) = frontend::find_frontend_dir(repo_root) {
-        let dst = repo_root.join(RUNTIME_SITE_REL);
-        frontend::copy_tree(&fe, &dst).map_err(|e| anyhow!("copy frontend: {e}"))?;
-    }
+    frontend::stage_native_site(repo_root).map_err(|e| anyhow!("copy frontend: {e}"))?;
 
     // 3. cargo build the user's bin crate.
     let mut cargo = tokio::process::Command::new("cargo");

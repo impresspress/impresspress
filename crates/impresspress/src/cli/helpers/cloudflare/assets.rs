@@ -1,6 +1,11 @@
-//! Stage static assets from a consumer's dist/ + content/ + public/ and an
-//! optional explicitly configured release-assets directory into
-//! `target/impresspress-cloudflare/assets/` for later R2 upload.
+//! Stage the release asset set into `target/impresspress-cloudflare/assets/`
+//! for later R2 upload: the consumer's site, its `dist/` and `content/`
+//! storage folders, and an optional explicitly configured release-assets
+//! directory.
+//!
+//! A staged file's path under `assets/` is its logical key: the storage
+//! `folder/key` the Worker's R2-backed storage service answers it for. So
+//! where a directory is staged decides what reads it.
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +19,14 @@ pub use impresspress_core::release_inventory::{
 };
 use impresspress_core::{routing::STATIC_PREFIX, ui::assets as ui_assets};
 
-/// Source dirs (relative to repo_root) to mirror into out_dir/assets/.
-const ASSET_DIRS: &[&str] = &["dist", "content", "public"];
+use crate::cli::helpers::frontend::{self, SITE_STORAGE_FOLDER};
+
+/// Source dirs (relative to repo_root) mirrored into out_dir/assets/ under
+/// their own names, i.e. as the storage folders `dist` and `content`. Nothing
+/// in impresspress reads those folders; a consumer's own block does (the
+/// wafer-site content block serves the `dist` folder). The site is not one of
+/// them: it is staged where `wafer-run/web` reads it, see [`stage`].
+const ASSET_DIRS: &[&str] = &["dist", "content"];
 
 /// Where a deployed worker should fetch UI assets (CSS/JS/fonts/logos) from.
 ///
@@ -137,6 +148,9 @@ pub fn release_manifest_from_staged_dir(assets_root: &Path) -> Result<ReleaseMan
 
 #[derive(Debug, Default)]
 pub struct StageReport {
+    /// The site directory staged under [`SITE_STORAGE_FOLDER`], if the repo
+    /// has one (`helpers::frontend::find_frontend_dir`).
+    pub site_dir: Option<PathBuf>,
     pub files_copied: usize,
     pub bytes_copied: u64,
     pub dirs_skipped: Vec<&'static str>,
@@ -146,6 +160,16 @@ pub struct StageReport {
     pub files_excluded: Vec<String>,
 }
 
+/// Stage the release asset set under `out_dir/assets/`, replacing any earlier
+/// staging:
+///
+/// * the site (`frontend/build/`, else `public/`) under
+///   [`SITE_STORAGE_FOLDER`], the folder `wafer-run/web` serves `/**` from;
+/// * `dist/` and `content/` under their own names ([`ASSET_DIRS`]);
+/// * `release_assets_dir`, when configured, under `release_assets_prefix`.
+///
+/// Two sources writing the same logical key is an error, never a silent
+/// overwrite.
 pub fn stage(
     repo_root: &Path,
     out_dir: &Path,
@@ -162,6 +186,14 @@ pub fn stage(
         .with_context(|| format!("create {}", assets_dir.display()))?;
 
     let mut report = StageReport::default();
+    // The site lands where `wafer-run/web` serves it from, the same folder
+    // the native flows copy it into — the one choice of directory and the
+    // one destination both come from `helpers::frontend`.
+    if let Some(src) = frontend::find_frontend_dir(repo_root) {
+        let dst = assets_dir.join(SITE_STORAGE_FOLDER);
+        copy_dir_recursive(&src, &dst, SITE_STORAGE_FOLDER, exclude, &mut report)?;
+        report.site_dir = Some(src);
+    }
     for &name in ASSET_DIRS {
         let src = repo_root.join(name);
         if !src.exists() {

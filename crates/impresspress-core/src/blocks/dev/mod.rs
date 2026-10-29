@@ -554,10 +554,11 @@ fn with_no_store(mut error: WaferError) -> WaferError {
 ///   block's rows directly, not a delegated call through that block's own
 ///   authorized handler, so WRAP has no other way to see it as legitimate.
 pub fn wrap_grants() -> Vec<wafer_run::ResourceGrant> {
-    let mut grants = vec![
-        wafer_run::ResourceGrant::read_write(BLOCK_NAME, "wafer-run/web/site/*")
-            .typed(wafer_run::ResourceType::Storage),
-    ];
+    let mut grants = vec![wafer_run::ResourceGrant::read_write(
+        BLOCK_NAME,
+        &format!("{}/*", crate::flows::SITE_STORAGE_FOLDER),
+    )
+    .typed(wafer_run::ResourceType::Storage)];
     grants.extend(data_snapshot::TABLE_ALLOWLIST.iter().map(|(table, _mode)| {
         wafer_run::ResourceGrant::read_write(BLOCK_NAME, table).typed(wafer_run::ResourceType::Db)
     }));

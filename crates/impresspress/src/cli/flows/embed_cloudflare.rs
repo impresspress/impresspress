@@ -5,10 +5,13 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
-use crate::cli::helpers::cloudflare::{
-    analytics, assets, build as cf_build, deploy as cf_deploy, env, first_create,
-    password_hasher::{self, PasswordHasherMode},
-    profile_check, wrangler,
+use crate::cli::helpers::{
+    cloudflare::{
+        analytics, assets, build as cf_build, deploy as cf_deploy, env, first_create,
+        password_hasher::{self, PasswordHasherMode},
+        profile_check, wrangler,
+    },
+    frontend,
 };
 
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
@@ -86,6 +89,17 @@ async fn build_artifacts(
         report.bytes_copied as f64 / 1024.0,
         out_dir.display(),
     );
+    match &report.site_dir {
+        Some(dir) => println!(
+            "  (site {} staged under {})",
+            dir.display(),
+            frontend::SITE_STORAGE_FOLDER,
+        ),
+        None => println!(
+            "  (no site: neither {} exists)",
+            frontend::FRONTEND_DIRS.join("/ nor ") + "/",
+        ),
+    }
     if !report.dirs_skipped.is_empty() {
         println!("  (skipped missing dirs: {:?})", report.dirs_skipped);
     }

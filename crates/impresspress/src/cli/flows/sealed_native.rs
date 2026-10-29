@@ -13,8 +13,6 @@ use crate::cli::{
     helpers::{blocks, frontend, overlays},
 };
 
-const RUNTIME_SITE_REL: &str = "data/storage/wafer-run/web/site";
-
 pub async fn build(repo_root: &Path, _release: bool) -> Result<()> {
     // A malformed `impresspress.toml` fails the build here, before any work;
     // only an absent file means "no overlays".
@@ -24,14 +22,11 @@ pub async fn build(repo_root: &Path, _release: bool) -> Result<()> {
     blocks::build_all(repo_root).await?;
 
     // 2. Frontend copy.
-    if let Some(fe) = frontend::find_frontend_dir(repo_root) {
-        let dst = repo_root.join(RUNTIME_SITE_REL);
-        frontend::copy_tree(&fe, &dst).map_err(|e| anyhow::anyhow!("copy frontend: {e}"))?;
-    }
+    frontend::stage_native_site(repo_root).map_err(|e| anyhow::anyhow!("copy frontend: {e}"))?;
 
     // 3. Optional overlays from impresspress.toml.
     if let Some((cfg, root)) = cfg {
-        let dst = root.join(RUNTIME_SITE_REL);
+        let dst = frontend::native_site_dir(&root);
         overlays::apply_overlays(&cfg, &root, &dst)?;
     }
 
