@@ -39,15 +39,20 @@ pub(in crate::blocks::admin) enum IntrospectError {
     Read(WaferError),
 }
 
-/// Run the backend table count for one table name.
+/// The error for a count statement that could not be built for `name`.
 ///
-/// The name has already been through the backend's quoting (it comes from the
-/// backend's own table listing, or from a column read that found the table),
-/// so a build error here is a fault, not user input.
-async fn table_row_count(ctx: &dyn Context, name: &str) -> Result<i64, WaferError> {
-    let count_sql = introspect::build_table_row_count(name, crate::db_backend(ctx).await?)
-        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("count {name}: {e}")))?;
-    let rows = db::query_raw(ctx, &count_sql, &[]).await?;
+/// Each caller hands its builder a name that builder accepts by construction
+/// — a name the catalog holds (never empty, never a NUL), or one
+/// `build_table_info` already held to the plain-identifier rule — so a
+/// refusal here is a fault, not user input.
+fn count_build_fault(name: &str, e: wafer_sql_utils::SqlBuildError) -> WaferError {
+    WaferError::new(ErrorCode::Internal, format!("count {name}: {e}"))
+}
+
+/// Run `count_sql`, the row-count statement built for table `name`, and read
+/// its count.
+async fn run_row_count(ctx: &dyn Context, name: &str, count_sql: &str) -> Result<i64, WaferError> {
+    let rows = db::query_raw(ctx, count_sql, &[]).await?;
     rows.first()
         .and_then(|r| r.data.get("cnt").and_then(|v| v.as_i64()))
         .ok_or_else(|| {
@@ -66,12 +71,18 @@ async fn table_row_count(ctx: &dyn Context, name: &str) -> Result<i64, WaferErro
 /// deadlock, and the row is read-once-per-page, so the dedupe (not the
 /// fan-out) is the win here.
 ///
+/// Each name is the catalog's, which need not be a name the database layer
+/// would create (a table made by a console or another tool can be `Foo` or
+/// `a-b`), so it is counted through the catalog-name builder, which quotes it
+/// rather than holding it to the plain-identifier rule.
+///
 /// A failed listing or count is an error: an empty list or a `0` count would
 /// read as an empty database.
 pub(in crate::blocks::admin) async fn introspect_table_summaries(
     ctx: &dyn Context,
 ) -> Result<Vec<TableSummary>, WaferError> {
-    let sql = introspect::build_list_tables(crate::db_backend(ctx).await?);
+    let backend = crate::db_backend(ctx).await?;
+    let sql = introspect::build_list_tables(backend);
     let records = db::query_raw(ctx, &sql, &[]).await?;
     let mut out = Vec::with_capacity(records.len());
     for r in &records {
@@ -84,7 +95,9 @@ pub(in crate::blocks::admin) async fn introspect_table_summaries(
         if name.is_empty() {
             continue;
         }
-        let row_count = table_row_count(ctx, &name).await?;
+        let count_sql = introspect::build_catalog_table_row_count(&name, backend)
+            .map_err(|e| count_build_fault(&name, e))?;
+        let row_count = run_row_count(ctx, &name, &count_sql).await?;
         out.push(TableSummary { name, row_count });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -134,7 +147,11 @@ pub(in crate::blocks::admin) async fn introspect_columns(
                 .map(str::to_string),
         })
         .collect();
-    let row_count = table_row_count(ctx, table)
+    // `table` passed `build_table_info`'s plain-identifier rule, the same one
+    // `build_table_row_count` applies.
+    let count_sql = introspect::build_table_row_count(table, backend)
+        .map_err(|e| IntrospectError::Read(count_build_fault(table, e)))?;
+    let row_count = run_row_count(ctx, table, &count_sql)
         .await
         .map_err(IntrospectError::Read)?;
     Ok((cols, row_count))
@@ -468,6 +485,79 @@ mod tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let out = api(&ctx, "/b/admin/api/database/tables/no_such_table/columns").await;
         assert_eq!(output_http_status(out).await, 404);
+    }
+
+    /// An engine's own tables are not the schema's: D1 keeps `_cf_KV` and
+    /// `_cf_METADATA` in `sqlite_master` and refuses to read either
+    /// (`SQLITE_AUTH`), so the listings leave them out. (What made the page
+    /// 500 on Cloudflare was the count of `_cf_KV` being refused as a
+    /// non-plain identifier before any query ran — see
+    /// `a_table_named_outside_the_plain_rule_is_listed_and_counted`.) SQLite
+    /// lets the fixture create the table; the listings must still leave it
+    /// out.
+    #[tokio::test]
+    async fn an_engines_reserved_tables_are_not_listed() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.database_service()
+            .exec_raw(
+                "CREATE TABLE \"_cf_KV\" (key TEXT PRIMARY KEY, value BLOB)",
+                &[],
+            )
+            .await
+            .expect("create D1's internal table");
+        let roles = crate::blocks::admin::ROLES_TABLE;
+
+        let tables = output_json(api(&ctx, "/b/admin/api/database/tables").await).await;
+        let listed: Vec<&str> = tables
+            .as_array()
+            .expect("an array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(listed.contains(&roles), "{listed:?}");
+        assert!(!listed.contains(&"_cf_KV"), "{listed:?}");
+
+        let info = output_json(api(&ctx, "/b/admin/api/database/info").await).await;
+        let listed: Vec<&str> = info["tables"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(listed.contains(&roles), "{listed:?}");
+        assert!(!listed.contains(&"_cf_KV"), "{listed:?}");
+        assert_eq!(info["table_count"], listed.len(), "{info}");
+    }
+
+    /// The catalog holds tables the database layer never created, under
+    /// names that are not plain identifiers (`Foo`, made by a console, a
+    /// migration or `wrangler d1 execute`). The listing must show such a
+    /// table with its real count; counting it under the plain-identifier
+    /// rule refused the name and turned the whole listing into a 500.
+    #[tokio::test]
+    async fn a_table_named_outside_the_plain_rule_is_listed_and_counted() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let db = ctx.database_service();
+        db.exec_raw("CREATE TABLE \"Foo\" (id INTEGER PRIMARY KEY)", &[])
+            .await
+            .expect("create a mixed-case table");
+        db.exec_raw("INSERT INTO \"Foo\" (id) VALUES (1), (2)", &[])
+            .await
+            .expect("seed two rows");
+
+        let out = api(&ctx, "/b/admin/api/database/tables").await;
+        let tables = output_json(out).await;
+        let row = tables
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|t| t["name"] == "Foo")
+            .unwrap_or_else(|| panic!("Foo is listed: {tables}"));
+        assert_eq!(row["row_count"], 2, "{row}");
     }
 
     /// Control: healthy reads answer the tables with counts and the columns.
