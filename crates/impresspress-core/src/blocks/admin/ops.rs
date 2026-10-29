@@ -724,11 +724,12 @@ impl CreateRefusal {
 /// The bootstrap TOKEN is the case the static
 /// [`crate::config_vars::is_provisioning_only_key`] cannot answer, and the same
 /// trap the password exemption exists to avoid was still set for it. Its
-/// branch of `bootstrap::run` creates NO user, so while `users` is empty every
-/// boot re-reads the plaintext and mints a fresh 24h `bootstrap_tokens` row —
-/// clearing it then strands the deployment with no admin path, and Cloudflare
-/// has no process environment to re-seed from. Once an admin user exists the
-/// token is redeemed and inert, and `into_row` flags it while
+/// branch of `bootstrap::run` creates NO user: the first boot that reads the
+/// plaintext installs its 24h `bootstrap_tokens` row, and every later boot
+/// while `users` is empty finds that row and leaves it alone. Until the token
+/// is redeemed it is the deployment's one admin path, so it is not spent, and
+/// the rule against clearing a secret holds for it. Once an admin user exists
+/// the token is redeemed and inert, and `into_row` flags it while
 /// `delete_variable` and `key_is_deletable` both refuse a declared
 /// `WAFER_RUN_SHARED__*` row — so without this it could never be cleared or
 /// deleted by any route. "Has the token been redeemed" is a checkable
@@ -2534,9 +2535,9 @@ mod tests {
 
     /// The token exemption turns on whether the token has been REDEEMED.
     ///
-    /// Unredeemed (`users` empty) it is a live credential: every boot re-reads
-    /// the plaintext and mints a fresh 24h `bootstrap_tokens` row, so clearing
-    /// it strands the deployment with no admin path. Redeemed, it is inert —
+    /// Unredeemed (`users` empty) it is a live credential: its
+    /// `bootstrap_tokens` row is the deployment's one admin path, so the rule
+    /// against clearing a secret holds for it. Redeemed, it is inert —
     /// and since `into_row` now flags it and `delete_variable` refuses a
     /// declared `WAFER_RUN_SHARED__*` row, refusing the clear too would leave
     /// a plaintext credential removable by no route at all, which is the exact
@@ -2647,12 +2648,10 @@ mod tests {
     /// The difference is which branch of `auth::bootstrap::run` populates
     /// `wafer_run__auth__users`: the email+password branch inserts a user, so
     /// from the next boot `run` early-returns and the password is spent. The
-    /// token branch inserts only into `bootstrap_tokens` and creates NO user,
-    /// so `users` stays empty, `run` re-runs on every boot (it is called from
-    /// `AuthServiceImpl::init`), and the plaintext row keeps minting fresh 24h
-    /// tokens. Clearing it on a deployment with no admin yet lets the
-    /// outstanding token expire with nothing to regenerate it and no admin path
-    /// left — and Cloudflare has no process environment to re-seed from.
+    /// token branch installs only a `bootstrap_tokens` row and creates NO
+    /// user, so `users` stays empty and the stored token stays a live
+    /// credential until someone redeems it. Until then it is not spent, and
+    /// the rule against clearing a secret holds for it.
     #[tokio::test]
     async fn the_bootstrap_token_cannot_be_cleared_but_the_password_can() {
         use crate::blocks::auth::config::{

@@ -19,6 +19,33 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### A bootstrap admin token survives a restart
+
+**What was wrong.** With `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_TOKEN` set
+and no account yet, only the first runtime build started. Auth's `Init`
+runs on every build (each native start, each Cloudflare isolate and
+prepared plan, each browser rebuild), and each one inserted the token's
+`bootstrap_tokens` row again. Its `token_hash` is UNIQUE, so every later
+`Init` failed: a native restart refused to start, a Cloudflare deploy's
+`/_deploy/verify` answered 5xx and the deploy was not promoted, and a
+browser rebuild left auth failed. This lasted until someone redeemed the
+token.
+
+**What changes.** The first build that sees the token installs its row, and
+every later build finds that row and leaves it as it is. The install is one
+`INSERT … ON CONFLICT (token_hash) DO NOTHING`, so two isolates or processes
+installing it at once leave one row, and neither fails.
+
+- **The token's 24 hours run from that first install.** A rebuild does not
+  restart them.
+- **A token that expired unredeemed stays expired.** Configure a different
+  token and restart or redeploy. The new token gets its own row. The old
+  row stays in the table but can no longer be redeemed.
+- **Upgrading needs no action.** A deployment stuck on this, with the token
+  set and no account, starts on the new build. Its row is the one the first
+  boot wrote, so if that boot was more than 24 hours ago the token has
+  expired. Configure a different one.
+
 ### wafer-run 1272fd63: strict schema is the only behaviour, on every target
 
 **What changes.** The wafer-run pin moves from `f0ca9c79` to `1272fd63`

@@ -409,9 +409,9 @@ async fn bootstrap_admin_insert_denial_is_403_not_500() {
     let expires = (chrono::Utc::now() + chrono::Duration::hours(1))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    bootstrap_tokens::insert(
+    bootstrap_tokens::insert_if_absent(
         &ctx,
-        crate::blocks::auth::service::hash_token(raw),
+        &crate::blocks::auth::service::hash_token(raw),
         &expires,
     )
     .await

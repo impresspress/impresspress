@@ -966,23 +966,20 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 ///    boot on, `run` returns early and never reads the password again: it
 ///    survives as an argon2 hash, and the plaintext row is a spent copy no
 ///    login consults. Clearable.
-/// 2. token only → `bootstrap_with_token` inserts into `bootstrap_tokens` and
-///    **creates no user at all**. `users` stays empty, so every subsequent boot
-///    re-runs this branch, re-reads the plaintext token, and mints a fresh 24h
-///    row from it. The stored value is a LIVE credential that is continuously
-///    reissued, not a spent copy.
+/// 2. token only → `bootstrap_with_token` installs the token's
+///    `bootstrap_tokens` row and **creates no user at all**. The row is
+///    installed once: every later boot finds it and leaves it as it is
+///    (`bootstrap_tokens::insert_if_absent`), expiry included. `users` stays
+///    empty until someone redeems the token, so until then the stored value
+///    is a LIVE credential, not a spent copy.
 /// 3. email alone → refused: `Init` fails, and nothing is written.
 /// 4. neither → nothing.
 ///
-/// So `BOOTSTRAP_ADMIN_TOKEN` is deliberately NOT here. Exempting it from the
-/// sensitive-empty guard is a lockout: on a deployment provisioned by token
-/// with no admin user yet, clearing the row lets the outstanding
-/// `bootstrap_tokens` row expire within 24h with nothing to regenerate it and
-/// no admin path left — and on Cloudflare there is no process environment to
-/// re-seed from, so there is no route back at all. A token that has already
-/// been redeemed into an admin user is inert, but nothing in the row says
-/// whether it has, and guessing wrong one way is an inconvenience while
-/// guessing wrong the other locks the operator out of their own deployment.
+/// So `BOOTSTRAP_ADMIN_TOKEN` is deliberately NOT here. This predicate
+/// answers from the key alone, and only a token that has been redeemed into an
+/// admin user is spent; nothing in the key or its row says whether it has.
+/// `admin::ops::is_clearable_provisioning_credential` answers that by counting
+/// the users, on the one surface with a `Context` to count them through.
 ///
 /// `BOOTSTRAP_ADMIN_EMAIL` is not here either, though it is spent in the same
 /// way as the password: `run` reads it only on that first boot (and refuses

@@ -10,6 +10,7 @@ use impresspress_core::{
         service::hash_token,
     },
     test_support::seed_user,
+    util::RecordExt as _,
 };
 
 use crate::common::auth_fixture;
@@ -162,6 +163,171 @@ async fn token_path_inserts_bootstrap_token_row() {
         0,
         "token path must not create a user"
     );
+}
+
+/// Every `bootstrap_tokens` row, as `(token_hash, expires_at)`.
+async fn token_rows(ctx: &impresspress_core::test_support::TestContext) -> Vec<(String, String)> {
+    wafer_core::clients::database::list_all(ctx, bootstrap_tokens::TABLE, Vec::new())
+        .await
+        .expect("list bootstrap tokens")
+        .into_iter()
+        .map(|row| {
+            (
+                row.str_field("token_hash").to_string(),
+                row.str_field("expires_at").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `iso` as `bootstrap_tokens` stores an expiry.
+fn iso(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// **The token step runs on every `Init` while no account exists, and only
+/// the first one installs anything.** Every runtime build runs `Init` (each
+/// native start, each Cloudflare isolate and prepared plan), so the second
+/// one meeting the first one's row is the ordinary case. It used to insert
+/// the same `token_hash` again, fail the UNIQUE constraint and fail `Init`.
+#[tokio::test]
+async fn the_token_step_installs_once_however_often_init_runs() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migrations");
+    let cfg = cfg_token("secret-token");
+
+    bootstrap::run(&ctx, &cfg).await.expect("the first Init");
+    let first = token_rows(&ctx).await;
+    assert_eq!(first.len(), 1, "the first Init installs the token");
+    bootstrap::run(&ctx, &cfg).await.expect("the second Init");
+    bootstrap::run(&ctx, &cfg).await.expect("the third Init");
+
+    assert_eq!(
+        token_rows(&ctx).await,
+        first,
+        "later Inits leave the first one's row as it is"
+    );
+    assert!(
+        bootstrap_tokens::is_valid(&ctx, &hash_token("secret-token"))
+            .await
+            .expect("is_valid")
+    );
+}
+
+/// **The 24 hours run from the first install, not from the latest `Init`.**
+/// The row here was installed an hour before it expires, as a first `Init`
+/// 23 hours ago left it; a later `Init` computes "24 hours from now" and must
+/// not write it over that, or a site rebuilt now and then would keep an
+/// unredeemed token alive for ever.
+#[tokio::test]
+async fn a_later_init_keeps_the_first_install_s_expiry() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migrations");
+    let expires = iso(chrono::Utc::now() + chrono::Duration::hours(1));
+    assert!(
+        bootstrap_tokens::insert_if_absent(&ctx, &hash_token("secret-token"), &expires)
+            .await
+            .expect("the first install")
+    );
+
+    bootstrap::run(&ctx, &cfg_token("secret-token"))
+        .await
+        .expect("a later Init");
+
+    let rows = token_rows(&ctx).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, expires, "the first install's expiry stands");
+}
+
+/// **A token that expired unredeemed stays expired.** `Init` succeeds and
+/// does not bring it back: reviving it would be the silent extension the
+/// expiry exists to prevent. The operator configures a different token.
+#[tokio::test]
+async fn an_expired_token_is_not_revived_by_a_later_init() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migrations");
+    let expired = iso(chrono::Utc::now() - chrono::Duration::hours(1));
+    assert!(
+        bootstrap_tokens::insert_if_absent(&ctx, &hash_token("secret-token"), &expired)
+            .await
+            .expect("the first install")
+    );
+
+    bootstrap::run(&ctx, &cfg_token("secret-token"))
+        .await
+        .expect("Init with an expired token installed");
+
+    assert_eq!(token_rows(&ctx).await[0].1, expired);
+    assert!(
+        !bootstrap_tokens::is_valid(&ctx, &hash_token("secret-token"))
+            .await
+            .expect("is_valid")
+    );
+
+    bootstrap::run(&ctx, &cfg_token("the-next-token"))
+        .await
+        .expect("Init with a different token");
+    assert_eq!(
+        token_rows(&ctx).await.len(),
+        2,
+        "a different token gets its own row"
+    );
+    assert!(
+        bootstrap_tokens::is_valid(&ctx, &hash_token("the-next-token"))
+            .await
+            .expect("is_valid")
+    );
+}
+
+/// **A redeemed token is not installed again.** Redemption spends the row
+/// and creates the admin; from then on `Init` finds an account and does
+/// nothing, so the token still in the config cannot come back.
+#[tokio::test]
+async fn a_redeemed_token_is_not_installed_again() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migrations");
+    let cfg = cfg_token("secret-token");
+    bootstrap::run(&ctx, &cfg).await.expect("the first Init");
+
+    // What `POST /b/auth/api/bootstrap` does: spend the token, then create
+    // the admin.
+    assert!(
+        bootstrap_tokens::take_valid_by_hash(&ctx, &hash_token("secret-token"))
+            .await
+            .expect("take")
+    );
+    seed_user("root@x.io")
+        .display_name("Admin")
+        .insert(&ctx)
+        .await;
+
+    bootstrap::run(&ctx, &cfg)
+        .await
+        .expect("Init after redemption");
+    assert!(
+        token_rows(&ctx).await.is_empty(),
+        "nothing is installed again"
+    );
+}
+
+/// **Two `Init`s installing the same token at once leave one row, and both
+/// succeed** — two Cloudflare isolates building together, or two native
+/// processes over one database. The install is one statement, so there is no
+/// gap between a "not there yet" read and the insert for the other to land in.
+/// Over a file-backed database, so the two really are in flight together on
+/// separate connections.
+#[tokio::test]
+async fn two_inits_installing_the_same_token_at_once_leave_one_row() {
+    let ctx = impresspress_core::test_support::TestContext::with_auth_on_disk()
+        .await
+        .running_as(impresspress_core::blocks::auth::AUTH_BLOCK_ID);
+    let cfg = cfg_token("secret-token");
+
+    let (a, b) = futures::join!(bootstrap::run(&ctx, &cfg), bootstrap::run(&ctx, &cfg));
+    a.expect("the first Init");
+    b.expect("the second Init");
+
+    assert_eq!(token_rows(&ctx).await.len(), 1);
 }
 
 #[tokio::test]

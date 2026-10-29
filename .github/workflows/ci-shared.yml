@@ -481,6 +481,16 @@ jobs:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
         run: cargo test --locked -p impresspress-server --features impresspress-core/postgres,impresspress-native/postgres --test boot_migrations -- --ignored --nocapture
 
+      # A native restart with a bootstrap admin token still configured boots,
+      # and leaves the first boot's one `bootstrap_tokens` row as it was; two
+      # runtimes installing the token at once leave one row. The SQLite half
+      # runs in the main test job. It creates a database of its own per
+      # scenario.
+      - name: A restart with a bootstrap token configured boots on PostgreSQL
+        env:
+          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
+        run: cargo test --locked -p impresspress-server --features impresspress-core/postgres,impresspress-native/postgres --test bootstrap_token_boot -- --ignored --nocapture
+
       # The native migration lock on PostgreSQL is a session-level advisory
       # lock: a second process waits, and a holder whose session ends learns
       # the lock is lost while the server hands it to the waiter.
