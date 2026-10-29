@@ -31,8 +31,8 @@ what it did happens on every native boot.
   the file and line number, e.g. `refusing to start: the env file cannot be
   loaded: /srv/site/.env:4: env file line cannot be parsed, …`. An unreadable
   `.env` fails the same way. No `.env` at all is still fine.
-- **`IMPRESSPRESS_ENV_FILE` must name an existing file**, read relative to the
-  process cwd as documented. A missing one used to print a warning and boot
+- **`IMPRESSPRESS_ENV_FILE` must name an existing file** (set but empty
+  counts as unset), read relative to the process cwd as documented. A missing one used to print a warning and boot
   without it, and a relative name was also searched for in parent
   directories; now it stops the boot.
 - **`impresspress serve --port N` now sets a sealed native server's port**,

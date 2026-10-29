@@ -2,7 +2,9 @@
 //!
 //! Resolution rule for env-overlayable fields: **env > toml > error**.
 //! That makes clone-and-deploy work: a fresh checkout has no deployer
-//! identifiers committed, and a `.env` supplies them at deploy time.
+//! identifiers committed, and the process environment supplies them at
+//! deploy time. The CLI reads no `.env` for this; a caller that keeps them in
+//! one exports it first (e.g. by sourcing it in its deploy script).
 //!
 //! Bindings (`d1.binding`, `r2.binding`) stay toml-only because they're
 //! code contracts — the worker reads `env.DB` / `env.STORAGE` by exact
