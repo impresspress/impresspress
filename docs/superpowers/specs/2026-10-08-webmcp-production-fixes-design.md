@@ -71,6 +71,17 @@ likely way a user meets the secure-context rule: serving an export on
   standard proposal (webmachinelearning/webmcp) and Chrome both put the API
   on `navigator`; a second spelling would be exactly the kind of compat shim
   `CLAUDE.md` forbids.
+
+  *Amended 2026-10-29:* superseded. The OpenAI Codex / ChatGPT in-app
+  browser provides its registry ONLY as `document.modelContext` (defined by
+  its preload; async `registerTool` that rejects on a refusal, no
+  `unregisterTool`, removal by aborting the registration's `signal`), so a
+  `navigator`-only registrar handed its agents nothing. `webmcpRegistrar`
+  (`ui/assets/webmcp-core.js`) now registers every tool on each registry the
+  browser itself provides — `navigator.modelContext` and
+  `document.modelContext`, once if they are the same object. That is not an
+  alias: nothing defines or copies a registry, so the polyfill rule below
+  still holds and the e2e suite still runs on Chrome's real registry.
 - No registrar ever tries to register a name that is already registered.
   Each registration is guarded, so one rejected tool doesn't lose the rest
   (`webmcp.js` already does this; `dev.js` guards inside `registerPageTool`,

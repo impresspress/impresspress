@@ -3,10 +3,10 @@
 // keeps the live-site iframe in step with what the agent publishes.
 //
 // Authored as a TAIL, not a script. `blocks/dev/assets.rs` composes it with
-// `ui/assets/webmcp-core.js` into a single IIFE, so `buildRequest` and
-// `toolOptions` are in scope here exactly as they are in `webmcp.js`, and
-// nothing declared below reaches `window`. No outer IIFE and no
-// `'use strict'` — the wrapper supplies both.
+// `ui/assets/webmcp-core.js` into a single IIFE, so `webmcpRegistrar`,
+// `buildRequest` and `toolOptions` are in scope here exactly as they are in
+// `webmcp.js`, and nothing declared below reaches `window`. No outer IIFE and
+// no `'use strict'` — the wrapper supplies both.
 //
 // The composed script is an ES MODULE (`<script type="module">`), because it
 // imports `BrowserRustCompiler` from `/b/dev/static/compiler-adapter.js` —
@@ -574,33 +574,32 @@ if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
 var MUTATING =
   /^(?:(?:dev_write_file|dev_write_files|dev_delete_file|dev_create_block|dev_rollback|dev_remove_block)$|shop_(?!list_))/;
 
-// Whether this browser has WebMCP. Asked once: it is a property of the
-// browser (and of this page being a secure context), and everything below
-// that differs by it — whether a tool is handed to `navigator.modelContext`,
-// what the guide says — must agree.
-var hasWebmcp =
-  'modelContext' in navigator && typeof navigator.modelContext.registerTool === 'function';
+// This page's hold on the browser's WebMCP registries — every one it
+// provides, `navigator.modelContext` and `document.modelContext` alike
+// (`webmcpRegistrar`, webmcp-core.js). Asked once: which registries exist is
+// a property of the browser (and of this page being a secure context).
+var webmcp = webmcpRegistrar();
+
+// Whether this browser has WebMCP — read off `webmcp`, so everything below
+// that differs by it (whether a tool is handed to a registry, what the guide
+// says) agrees with where the tools actually go.
+var hasWebmcp = webmcp.available;
 
 // Every tool this page publishes, in publication order — the options objects
 // themselves, `execute` and all.
 //
 // This is the ONE list. A WebMCP browser's agent is handed these objects
-// through `navigator.modelContext.registerTool`; the Tool console (below)
-// lists the same objects and calls the same `execute`. So a tool run from the
-// console builds the same request, gets the same session check and — for a
-// mutating tool — the same progress panel and catch-up as one an agent
-// called, because it is the same function.
+// through `webmcp.register` (each registry's `registerTool`); the Tool
+// console (below) lists the same objects and calls the same `execute`. So a
+// tool run from the console builds the same request, gets the same session
+// check and — for a mutating tool — the same progress panel and catch-up as
+// one an agent called, because it is the same function.
 var pageTools = [];
 
-// Every name this page registered with WebMCP. `registerTool`'s options bag
-// takes an `AbortSignal`, and the proposal says aborting it unregisters the
-// tool — but Chrome (146/147) ignores the signal, so this list is the path
-// that actually runs: on abort, unregister exactly these by name. The signal
-// is still passed, because a browser that honours it is also correct.
-var registered = [];
-
 // Publish one tool, whichever registrar it came from: onto `pageTools`
-// always, and to WebMCP where the browser has it.
+// always, and to every WebMCP registry the browser has. Resolves once every
+// registry has answered — never rejects: a refusal is logged, and the tool
+// stays in the console.
 //
 // The `withProgress` wrap lives HERE rather than in `registerFromManifest`
 // so that both registrars obey the same rule: a page-local tool that mutates
@@ -626,36 +625,21 @@ function registerPageTool(options) {
   // Before the WebMCP call, not after: a tool the browser's registrar
   // rejects is still a tool this page can run from the console.
   pageTools.push(options);
-  if (hasWebmcp) {
-    try {
-      navigator.modelContext.registerTool(options, { signal: abort.signal });
-      registered.push(options.name);
-    } catch (error) {
-      // One tool the browser rejected (a duplicate name, a schema it will
-      // not take) is not a reason to lose the ones after it — the same
-      // per-tool guard `webmcp.js` applies.
-      logError(error);
-    }
-  }
+  // One tool a registry refused (a duplicate name, a schema it will not
+  // take) is not a reason to lose the ones after it — the same per-tool
+  // rule `webmcp.js` applies. With no registry there is nothing to refuse.
+  return webmcp.register(options).then(function (outcome) {
+    outcome.errors.forEach(logError);
+  });
 }
 
 function unregisterPageTools() {
   // Runs on every `pagehide` and every 401/403, whether or not registration
-  // ever happened. `registered` is only ever filled when `hasWebmcp`, so a
-  // browser without WebMCP has nothing to remove.
-  if (!hasWebmcp) {
-    registered = [];
-    return;
-  }
-  registered.forEach(function (name) {
-    try {
-      navigator.modelContext.unregisterTool(name);
-    } catch (error) {
-      // Already gone: a browser that honours the signal removed it on abort.
-      // Chrome does not, so on Chrome this call is the one that removes it.
-    }
-  });
-  registered = [];
+  // ever happened. `clear` aborts the signal every tool was registered with
+  // (how Codex's registry lets go) and unregisters each by name where the
+  // registry can (how Chrome's, which ignores the signal, does); a browser
+  // without WebMCP has nothing to remove.
+  webmcp.clear();
 }
 
 // The session check for the manifest tools' own requests.
@@ -680,10 +664,12 @@ function withSessionCheck(execute) {
   };
 }
 
+// Returns each tool's registration (`registerPageTool`'s promise).
 function registerFromManifest(manifest) {
   if (!manifest || !Array.isArray(manifest.tools)) {
-    return;
+    return [];
   }
+  var registrations = [];
   manifest.tools.forEach(function (tool) {
     try {
       // `toolOptions` (webmcp-core.js) turns one manifest entry into the
@@ -693,7 +679,7 @@ function registerFromManifest(manifest) {
       // Session check innermost, so it sees the raw result. The progress
       // wrap goes on outside it, in `registerPageTool`.
       options.execute = withSessionCheck(options.execute);
-      registerPageTool(options);
+      registrations.push(registerPageTool(options));
     } catch (error) {
       // One manifest entry `toolOptions` cannot turn into a tool is not a
       // reason to lose the rest. (A tool the browser's registrar rejects is
@@ -701,6 +687,7 @@ function registerFromManifest(manifest) {
       logError(error);
     }
   });
+  return registrations;
 }
 
 // `dev_compile_block` and `dev_export` are the two tools with no HTTP tool
@@ -712,8 +699,7 @@ function registerFromManifest(manifest) {
 // `/b/dev/api/tools.json`. (`dev_export_manifest`, which IS small JSON, is in
 // that manifest — an agent inspects what an export would contain there.)
 function registerPageLocal() {
-  registerCompileTool();
-  registerExportTool();
+  return [registerCompileTool(), registerExportTool()];
 }
 
 // ---- the tool console -----------------------------------------------------
@@ -945,14 +931,16 @@ function siteToolCount() {
 // has, and how many the browser refused — every number the page states about its own tools
 // (the guide's sentence and the log's line) is read here, from the two lists
 // `registerPageTool` fills: `pageTools`, what the console runs, and
-// `registered`, what the browser accepted of it. Only called once both of
-// this page's registrars (`registerFromManifest`, `registerPageLocal`) have
-// run, so a tool added to either is counted without anything here changing.
+// `webmcp.names()`, what the browser's registries accepted of it. Only called
+// once both of this page's registrars (`registerFromManifest`,
+// `registerPageLocal`) have run and every registry has answered, so a tool
+// added to either is counted without anything here changing.
 function workspaceToolCounts() {
+  var registered = webmcp.names().length;
   return {
     console: pageTools.length,
-    registered: registered.length,
-    refused: pageTools.length - registered.length
+    registered: registered,
+    refused: pageTools.length - registered
   };
 }
 
@@ -1046,10 +1034,23 @@ api
   .get('/b/dev/api/tools.json')
   .then(json)
   .then(function (manifest) {
-    registerFromManifest(manifest);
-    registerPageLocal();
+    // A session lost before the list arrived (another request's 401/403)
+    // has already removed the tools and said so: hand out nothing now.
+    if (abort.signal.aborted) {
+      return;
+    }
+    var registrations = registerFromManifest(manifest).concat(registerPageLocal());
     renderConsole();
-    announceTools();
+    // Counted once every registry has answered: one that answers with a
+    // promise (Codex's) has not accepted anything until it settles.
+    return Promise.all(registrations);
+  })
+  .then(function () {
+    // A session lost while the registries answered has taken the tools away
+    // and said so; announcing them now would contradict it.
+    if (!abort.signal.aborted) {
+      announceTools();
+    }
   })
   .catch(function (error) {
     logError(error);
@@ -1077,8 +1078,8 @@ api
 // but a manual reload would bring it back. A frozen document's tools are not
 // reachable by an agent on whatever page replaced it, so there is nothing to
 // tear down while it sits there; if it is evicted instead of restored, the
-// document is discarded and its `navigator.modelContext` registrations go
-// with it.
+// document is discarded and its registrations (on whichever registry the
+// browser provides) go with it.
 window.addEventListener('pagehide', function (event) {
   if (event.persisted) {
     return;
@@ -2129,7 +2130,7 @@ async function runCompile(name) {
 }
 
 function registerCompileTool() {
-  registerPageTool({
+  return registerPageTool({
     name: 'dev_compile_block',
     description:
       'Compile blocks/<name>/ with the in-browser Rust toolchain (wasm32-wasip1; the only \
@@ -2379,7 +2380,7 @@ async function runExport() {
 }
 
 function registerExportTool() {
-  registerPageTool({
+  return registerPageTool({
     name: 'dev_export',
     description:
       'Export the current site as a runnable static bundle (zip) and hand it to the browser as \

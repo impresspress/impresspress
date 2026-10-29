@@ -17,7 +17,9 @@ itself:
   `list_my_purchases` for a signed-in buyer.
 - `crates/impresspress-core/src/ui/assets/webmcp.js` — on every page, fetches
   `/b/webmcp/manifest.json` (filtered to the visitor's auth level) and calls
-  `navigator.modelContext.registerTool` per tool.
+  `registerTool` per tool on every registry the browser provides
+  (`navigator.modelContext` in Chrome, `document.modelContext` in the OpenAI
+  Codex / ChatGPT in-app browser).
 - `crates/impresspress-core/src/pipeline.rs` — serves that manifest after auth
   resolution, so an anonymous visitor's agent never learns a tool it cannot
   use.

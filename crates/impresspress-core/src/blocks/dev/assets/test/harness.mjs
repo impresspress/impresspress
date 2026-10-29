@@ -31,6 +31,11 @@ const core = fs.readFileSync(
  * @param {object} [options]
  * @param {boolean} [options.hasModelContext]  give the stub navigator a WebMCP
  *   registrar, as a browser that supports it would.
+ * @param {{navigator?: object, document?: object}} [options.registries]  put
+ *   these WebMCP registries where a browser would — `navigator.modelContext`,
+ *   `document.modelContext` — instead of `hasModelContext`'s recording one
+ *   (`ui/assets/test/registries.mjs` has the shapes). A test reads each
+ *   registry's own `tools` then; the harness's `tools` map stays empty.
  * @param {(name: string) => boolean} [options.refuseTool]  which names that
  *   registrar refuses: `registerTool` throws for them, as Chrome does for a
  *   duplicate name or a schema it will not take. None, by default.
@@ -118,6 +123,7 @@ const unref = (timer) => {
 
 export function instantiate({
   hasModelContext = false,
+  registries = null,
   refuseTool = () => false,
   compilerManifest = null,
   manifestGate = null,
@@ -308,6 +314,24 @@ export function instantiate({
     size: file.size ?? file.content.length
   });
 
+  // What the stub navigator offers as `navigator.modelContext`: the given
+  // registry, or — with `hasModelContext` — one that records into `tools`.
+  const navigatorRegistry = registries
+    ? registries.navigator
+    : hasModelContext
+      ? {
+          registerTool(options) {
+            if (refuseTool(options.name)) {
+              throw new Error(`the browser refused ${options.name}`);
+            }
+            tools.set(options.name, options);
+          },
+          unregisterTool(name) {
+            tools.delete(name);
+          }
+        }
+      : undefined;
+
   const sandbox = {
     document: {
       getElementById: elementById,
@@ -325,7 +349,8 @@ export function instantiate({
         return element;
       },
       body: { appendChild: (child) => child },
-      addEventListener() {}
+      addEventListener() {},
+      ...(registries && registries.document ? { modelContext: registries.document } : {})
     },
     window: {
       addEventListener(type, listener) {
@@ -338,21 +363,7 @@ export function instantiate({
     },
     navigator: {
       serviceWorker,
-      ...(hasModelContext
-        ? {
-            modelContext: {
-              registerTool(options) {
-                if (refuseTool(options.name)) {
-                  throw new Error(`the browser refused ${options.name}`);
-                }
-                tools.set(options.name, options);
-              },
-              unregisterTool(name) {
-                tools.delete(name);
-              }
-            }
-          }
-        : {})
+      ...(navigatorRegistry ? { modelContext: navigatorRegistry } : {})
     },
     fetch(...args) {
       fetchCalls.push(args);
@@ -532,7 +543,7 @@ return {
   abort,
   registerPageTool,
   unregisterPageTools,
-  get registered() { return registered.slice() },
+  get registered() { return webmcp.names() },
   isFileConflict,
   refusalBody,
   refusalMessage,
