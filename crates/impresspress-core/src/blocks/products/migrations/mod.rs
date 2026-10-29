@@ -482,9 +482,10 @@ mod strict_upgrade_tests {
     /// Cloudflare `builder::InitPolicy::Strict` turns a block Init failure
     /// into `Err`, and `IMPRESSPRESS_RUN_MIGRATIONS` is baked into the
     /// deployment — so every request 500s until someone hand-edits D1.
-    /// Natively `InitPolicy::Tolerant` logs and continues, but SQLite
-    /// rolls the whole statement back, so not one row gets repaired while
-    /// `is_deleted` has already made them all invisible.
+    /// Natively `boot_native` refuses to start on it (`InitPolicy::Reported`,
+    /// then a refusal on any failed Init), and SQLite rolls the whole
+    /// statement back, so not one row gets repaired while `is_deleted` has
+    /// already made them all invisible.
     ///
     /// Both collision shapes are covered: a blank row against a LIVE row, and
     /// two blank rows against each other (repairing both would collide them

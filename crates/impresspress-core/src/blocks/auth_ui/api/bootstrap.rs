@@ -228,7 +228,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -271,7 +271,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -297,7 +297,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -326,7 +326,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -370,7 +370,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -426,7 +426,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -506,7 +506,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -537,7 +537,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -566,7 +566,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash, &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
 
@@ -603,7 +603,7 @@ mod tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash, &expires)
             .await
             .unwrap();
         let form = format!(

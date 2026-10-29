@@ -76,7 +76,7 @@ async fn require_role_user_admin_and_bootstrap_token() {
 
     // Bootstrap-token fast path — an unexpired row grants Admin.
     let bt_raw = "bootstrap-raw";
-    bootstrap_tokens::insert(ctx.as_ref(), hash_token(bt_raw), "9999-01-01T00:00:00Z")
+    bootstrap_tokens::insert_if_absent(ctx.as_ref(), &hash_token(bt_raw), "9999-01-01T00:00:00Z")
         .await
         .expect("seed bootstrap token");
     svc.require_role(&*ctx, &bearer(bt_raw), Role::Admin)
@@ -86,9 +86,9 @@ async fn require_role_user_admin_and_bootstrap_token() {
     // Expired bootstrap → Unauthorized/Forbidden (falls through to the JWT
     // verify, which refuses it, then the PAT lookup, which misses).
     let expired_raw = "bootstrap-expired";
-    bootstrap_tokens::insert(
+    bootstrap_tokens::insert_if_absent(
         ctx.as_ref(),
-        hash_token(expired_raw),
+        &hash_token(expired_raw),
         "1970-01-02T00:00:00Z",
     )
     .await

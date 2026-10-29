@@ -8,9 +8,10 @@
 //!    grant, its `local_credentials` row and its address proof
 //!    ([`create_admin`]).
 //! 2. `BOOTSTRAP_ADMIN_TOKEN` — store sha256(token) in `bootstrap_tokens`
-//!    with a 24h expiry. The holder later redeems it at
-//!    `POST /b/auth/api/bootstrap` (`auth_ui::api::bootstrap`), which creates
-//!    the admin through [`create_admin`] too.
+//!    with a 24h expiry, unless that token's row is already there. The holder
+//!    later redeems it at `POST /b/auth/api/bootstrap`
+//!    (`auth_ui::api::bootstrap`), which creates the admin through
+//!    [`create_admin`] too.
 //! 3. `BOOTSTRAP_ADMIN_EMAIL` alone — refused: `Init` fails. Nothing would
 //!    create the first admin, and no sign-in grants a role from the email.
 //! 4. Nothing set, or a password without an email — log and do nothing;
@@ -23,6 +24,25 @@
 //! config — bootstrap is a first-run mechanism only, never a "re-seed"
 //! trigger. So every one of these values is spent once an account exists,
 //! and a later settings edit cannot fail a running site's `Init`.
+//!
+//! Until then [`run`] runs on every `Init`, and every runtime build runs
+//! `Init`: each native start, each Cloudflare isolate and prepared plan, each
+//! browser rebuild. So the token step installs a token once, on the first
+//! `Init` that sees it, and every later one finds that row and leaves it
+//! alone ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable
+//! for 24 hours from that first install, however often the runtime is
+//! rebuilt; a token that expired unredeemed stays expired, and the operator
+//! configures a different one.
+//!
+//! Configuring a different token installs a row of its own and does not
+//! revoke the earlier one. That is a known gap, not a design: until the
+//! earlier row expires it can still be redeemed — even after another token
+//! has created the admin, minting a second admin — and it still answers
+//! `AuthServiceImpl::require_role(Admin)` as a bearer. `run` does not revoke
+//! on rotation, because an isolate still on the old config during a rollout
+//! would delete the new row and re-install its own; the fix belongs to
+//! redemption (spend every row once the first account exists) and to
+//! `require_role` (honour a token only while `users` is empty).
 
 use wafer_core::clients::crypto;
 use wafer_run::{context::Context, ErrorCode, WaferError};
@@ -74,10 +94,16 @@ pub async fn run(ctx: &dyn Context, cfg: &AuthConfig) -> Result<(), RunError> {
             tracing::info!("auth: bootstrapped admin user: {email}");
         }
         (_, _, Some(token)) => {
-            bootstrap_with_token(ctx, token)
+            if bootstrap_with_token(ctx, token)
                 .await
-                .map_err(RunError::Failed)?;
-            tracing::info!("auth: bootstrap token installed; expires in 24h");
+                .map_err(RunError::Failed)?
+            {
+                tracing::info!("auth: bootstrap token installed; expires in 24h");
+            } else {
+                tracing::debug!(
+                    "auth: bootstrap token already installed; its first install's expiry stands"
+                );
+            }
         }
         // The operator named an admin and nothing would create it: no
         // sign-in grants a role from the email. Booting would leave the site
@@ -160,13 +186,14 @@ pub(crate) async fn create_admin(
     Ok(())
 }
 
-async fn bootstrap_with_token(ctx: &dyn Context, token: &str) -> Result<(), WaferError> {
+/// Install `token` for 24 hours from now, unless it is installed already.
+/// `true` when this call installed it.
+async fn bootstrap_with_token(ctx: &dyn Context, token: &str) -> Result<bool, WaferError> {
     let expires = chrono::Utc::now() + chrono::Duration::hours(24);
     let expires_iso = expires.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    bootstrap_tokens::insert(ctx, hash_token(token), &expires_iso)
+    bootstrap_tokens::insert_if_absent(ctx, &hash_token(token), &expires_iso)
         .await
-        .map_err(bootstrap_failed)?;
-    Ok(())
+        .map_err(bootstrap_failed)
 }
 
 /// `error` prefixed with this step, keeping its code: a WRAP denial on the

@@ -1,11 +1,17 @@
-//! Narrow access over `wafer_run__auth__bootstrap_tokens`.
+//! Row-level access over `wafer_run__auth__bootstrap_tokens`.
 //!
-//! Only the subset needed by `AuthServiceImpl::require_role` plus a test
-//! insert. The full bootstrap-admin lifecycle (issuance, consumption,
-//! single-use semantics) lands in Plan A2.
+//! A row is one installed bootstrap token: sha256 of the raw token
+//! (`token_hash`, UNIQUE) and when it stops being redeemable (`expires_at`).
+//! [`insert_if_absent`] installs one (`auth::bootstrap::run`, on `Init`),
+//! [`is_valid`] answers whether a presented token is live (the redemption
+//! route's pre-check and `AuthServiceImpl::require_role`), and
+//! [`take_valid_by_hash`] spends one (`POST /b/auth/api/bootstrap`).
 
 use serde_json::json;
-use wafer_block::db::{Filter, FilterOp};
+use wafer_block::{
+    db::{Filter, FilterOp},
+    wire::database::OnConflict,
+};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
@@ -17,30 +23,40 @@ use crate::{
 
 pub const TABLE: &str = "wafer_run__auth__bootstrap_tokens";
 
-/// Insert a bootstrap token row. Used by Plan A2's bootstrap-admin init;
-/// exposed here so the `require_role` integration tests can seed a row
-/// directly without re-implementing the SQL.
-pub async fn insert(
+/// Install a row for `token_hash` expiring at `expires_at`, unless a row for
+/// that hash is already there. `true` when this call installed it, `false`
+/// when it found one and left it exactly as it was.
+///
+/// One `INSERT … ON CONFLICT (token_hash) DO NOTHING RETURNING *`, so the
+/// "is it there" and the "install it" cannot be split by another writer: two
+/// runtimes installing the same token at once (two Cloudflare isolates, two
+/// native processes over one PostgreSQL) leave one row, and neither fails.
+///
+/// The existing row is never rewritten, expired or not. `auth::bootstrap::run`
+/// calls this on every `Init` while no account exists, and every runtime build
+/// runs `Init`; a rewrite would restart the token's 24 hours on each of them.
+pub async fn insert_if_absent(
     ctx: &dyn Context,
-    token_hash: Vec<u8>,
+    token_hash: &[u8],
     expires_at: &str,
-) -> Result<(), WaferError> {
-    use std::collections::HashMap;
-
-    use serde_json::Value;
-    let id = uuid::Uuid::now_v7().to_string();
+) -> Result<bool, WaferError> {
     let now = now_iso();
-    let hex = hex_encode(&token_hash);
-    let mut data: HashMap<String, Value> = HashMap::new();
-    data.insert("id".into(), json!(id));
-    data.insert("token_hash".into(), json!(hex));
-    data.insert("created_at".into(), json!(now));
-    data.insert("expires_at".into(), json!(expires_at));
-
-    db::create(ctx, TABLE, data)
-        .await
-        .map_err(|e| db_failed("bootstrap_tokens insert", e))?;
-    Ok(())
+    let installed = db::upsert_returning(
+        ctx,
+        TABLE,
+        vec![
+            ("id".to_string(), json!(uuid::Uuid::now_v7().to_string())),
+            ("token_hash".to_string(), json!(hex_encode(token_hash))),
+            ("created_at".to_string(), json!(now)),
+            ("expires_at".to_string(), json!(expires_at)),
+        ],
+        vec!["token_hash".to_string()],
+        // No columns to set: `DO NOTHING` on a conflict.
+        OnConflict::SetColumns(Vec::new()),
+    )
+    .await
+    .map_err(|e| db_failed("bootstrap_tokens insert", e))?;
+    Ok(installed.is_some())
 }
 
 /// Returns true iff an unexpired row exists with the given hash.
@@ -71,36 +87,6 @@ pub async fn is_valid(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, Wafe
     .await
     .map_err(|e| db_failed("bootstrap_tokens lookup", e))?;
     Ok(!records.is_empty())
-}
-
-/// Delete every row whose `token_hash` matches `token_hash`. Used by the
-/// `/b/auth/bootstrap` redemption flow to consume the token after a
-/// successful admin creation.
-///
-/// Single-use semantics: even if multiple rows happened to share the same
-/// hash (shouldn't, but the schema doesn't enforce uniqueness here), this
-/// removes all of them so subsequent `is_valid` calls return false.
-pub async fn delete_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<(), WaferError> {
-    let hex = hex_encode(token_hash);
-    let filters = vec![Filter {
-        field: "token_hash".into(),
-        operator: FilterOp::Equal,
-        value: json!(hex),
-    }];
-    let records = db_read::list_bounded(
-        ctx,
-        TABLE,
-        filters,
-        Bound::UniqueKey("bootstrap_tokens.token_hash is declared UNIQUE"),
-    )
-    .await
-    .map_err(|e| db_failed("bootstrap_tokens lookup for delete", e))?;
-    for record in records {
-        db::delete(ctx, TABLE, &record.id)
-            .await
-            .map_err(|e| db_failed("bootstrap_tokens delete", e))?;
-    }
-    Ok(())
 }
 
 /// Atomically validate-and-consume an unexpired bootstrap token in a single
@@ -159,7 +145,9 @@ mod typed_client_tests {
     async fn insert_then_validate_round_trips_under_wrap() {
         let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0xab_u8; 32];
-        insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
+        assert!(insert_if_absent(&ctx, &hash, &future_iso(3600))
+            .await
+            .unwrap());
         assert!(is_valid(&ctx, &hash).await.unwrap());
     }
 
@@ -174,17 +162,9 @@ mod typed_client_tests {
     async fn expired_hash_is_invalid() {
         let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0xef_u8; 32];
-        insert(&ctx, hash.clone(), &past_iso(3600)).await.unwrap();
-        assert!(!is_valid(&ctx, &hash).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn insert_then_delete_round_trips_under_wrap() {
-        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
-        let hash = vec![0xff_u8; 32];
-        insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
-        assert!(is_valid(&ctx, &hash).await.unwrap());
-        delete_by_hash(&ctx, &hash).await.unwrap();
+        assert!(insert_if_absent(&ctx, &hash, &past_iso(3600))
+            .await
+            .unwrap());
         assert!(!is_valid(&ctx, &hash).await.unwrap());
     }
 
@@ -192,7 +172,9 @@ mod typed_client_tests {
     async fn take_valid_by_hash_consumes_the_row_exactly_once() {
         let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0x11_u8; 32];
-        insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
+        assert!(insert_if_absent(&ctx, &hash, &future_iso(3600))
+            .await
+            .unwrap());
 
         assert!(
             take_valid_by_hash(&ctx, &hash).await.unwrap(),
@@ -228,7 +210,9 @@ mod typed_client_tests {
             .await
             .running_as("wafer-run/auth");
         let hash = vec![0x44_u8; 32];
-        insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
+        assert!(insert_if_absent(&ctx, &hash, &future_iso(3600))
+            .await
+            .unwrap());
 
         assert!(
             take_valid_by_hash(&ctx, &hash).await.unwrap(),
@@ -258,7 +242,9 @@ mod typed_client_tests {
     async fn take_valid_by_hash_does_not_consume_an_expired_row() {
         let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0x33_u8; 32];
-        insert(&ctx, hash.clone(), &past_iso(3600)).await.unwrap();
+        assert!(insert_if_absent(&ctx, &hash, &past_iso(3600))
+            .await
+            .unwrap());
 
         assert!(!take_valid_by_hash(&ctx, &hash).await.unwrap());
         // The expired row is untouched by the failed take (its filter

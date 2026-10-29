@@ -308,6 +308,84 @@ async fn a_runtime_replace_wafer_displaced_is_freed_with_its_last_handle() {
     );
 }
 
+/// Configures a bootstrap admin token, as an operator's variable does.
+struct BootstrapTokenSeed;
+
+const BOOTSTRAP_TOKEN: &str = "a bootstrap token for the rebuild test";
+
+#[wafer_block::wafer_async_trait]
+impl AppSeed for BootstrapTokenSeed {
+    async fn seed(&self, db: &Arc<dyn DatabaseService>) -> Result<(), String> {
+        impresspress_core::platform_state::variables::seed_if_absent(
+            db,
+            impresspress_core::blocks::auth::config::BOOTSTRAP_ADMIN_TOKEN_KEY,
+            BOOTSTRAP_TOKEN,
+            "Bootstrap admin token",
+            "the token the rebuild test provisions with",
+            true,
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+/// Every `bootstrap_tokens` row, as `(token_hash, expires_at)`.
+async fn bootstrap_token_rows(db: &Arc<dyn DatabaseService>) -> Vec<(String, String)> {
+    let text = |row: &wafer_core::interfaces::database::service::Record, column: &str| {
+        row.data
+            .get(column)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{column} is text: {row:?}"))
+            .to_string()
+    };
+    db.list(
+        impresspress_core::blocks::auth::repo::bootstrap_tokens::TABLE,
+        &wafer_block::db::ListOptions::default(),
+    )
+    .await
+    .expect("list bootstrap tokens")
+    .records
+    .iter()
+    .map(|row| (text(row, "token_hash"), text(row, "expires_at")))
+    .collect()
+}
+
+/// **A runtime rebuilt with a bootstrap token configured and no account yet
+/// boots**, on real sql.js. Every build runs auth's `Init`, and while no
+/// account exists `Init` runs the token step; the first build installs the
+/// token's row and the rebuild finds it and leaves it as it is, expiry
+/// included. It used to insert the same `token_hash` again, fail its UNIQUE
+/// constraint and fail the rebuild.
+#[wasm_bindgen_test]
+async fn a_rebuild_with_a_bootstrap_token_configured_boots() {
+    let db: Arc<dyn DatabaseService> = Arc::new(crate::database::test_support::fresh_db().await);
+    // A browser boot tolerates a failed `Init` (it logs it and keeps the
+    // block failed), so each build asks the auth block for its own outcome.
+    let build = || async {
+        let services = BrowserServices::new(Vec::new()).expect("the browser services construct");
+        let builder = services.builder().await.expect("a builder");
+        let wafer = services
+            .boot(builder, Some(&BootstrapTokenSeed))
+            .await
+            .expect("the runtime boots");
+        if let Err(e) = wafer.init_block("wafer-run/auth").await {
+            panic!("auth's Init fails: {e:?}");
+        }
+        wafer
+    };
+
+    drop(build().await);
+    let first = bootstrap_token_rows(&db).await;
+    assert_eq!(first.len(), 1, "the first build installs the token");
+
+    drop(build().await);
+    assert_eq!(
+        bootstrap_token_rows(&db).await,
+        first,
+        "the rebuild leaves the first build's row as it is"
+    );
+}
+
 /// What every block's pre-build migration pass ([`super::apply_block_migrations`])
 /// does with a database file from before the per-file ledger, on real sql.js.
 mod pre_ledger_migrations {

@@ -2583,7 +2583,7 @@ mod security_regression_tests {
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        bootstrap_tokens::insert(&ctx, hash_token(token), &expires)
+        bootstrap_tokens::insert_if_absent(&ctx, &hash_token(token), &expires)
             .await
             .expect("install the bootstrap token");
         let msg = crate::test_support::anon_msg("create", "/b/auth/api/bootstrap");
