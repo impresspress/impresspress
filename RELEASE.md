@@ -19,17 +19,29 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
-### wafer-run ddfa6dfe: Admin → Database opens on Cloudflare
+### wafer-run 96860baa: Admin → Database opens on Cloudflare
 
-**What changes.** The wafer-run pin moves from `1272fd63` to `ddfa6dfe`
-(wafer-run #463, nothing else). The table listing behind Admin → Database
-(`GET /b/admin/api/database/tables`, `/info` and the SSR page) no longer
-lists the internal tables Cloudflare D1 keeps in every database (`_cf_KV`,
-`_cf_METADATA`). D1 refuses to read them, so on Cloudflare the page and the
-`tables` endpoint answered 500 on every load; now they list the
-deployment's own tables. On every target a table whose name merely
-resembles SQLite's reserved `sqlite_` prefix (`sqlite1`, `sqlitex_data`) is
-listed again; the old filter read `_` as a wildcard and hid it.
+**What changes.** The wafer-run pin moves from `1272fd63` to `96860baa`
+(wafer-run #463 and #470, nothing else). Admin → Database
+(`GET /b/admin/api/database/tables` and the SSR page) answered 500 whenever
+the database held a table whose name is not a plain identifier (lowercase
+letters, digits and `_`): the listing returned it, and the row count then
+refused the name before any query ran. Every Cloudflare D1 database holds
+one, D1's internal `_cf_KV`, so on Cloudflare the page failed on every
+load; natively and in the browser it failed once anything created a table
+such as `Foo` or `a-b` outside the migrations. Now:
+
+- a table under any name is listed with its row count, its name quoted as
+  the catalog spells it;
+- the internal tables of the engine are not listed at all: D1's `_cf_KV`
+  and `_cf_METADATA` (which D1 refuses to read) and SQLite's `sqlite_…`
+  tables. A table whose name merely resembles the `sqlite_` prefix
+  (`sqlite1`, `sqlitex_data`) is listed again; the old filter read `_` as a
+  wildcard and hid it.
+
+Opening such a table's schema still takes a plain identifier, as before:
+`/b/admin/api/database/tables/{name}/columns` answers 400 and the page says
+the name is not a valid table name.
 
 **What to do.** Nothing.
 
