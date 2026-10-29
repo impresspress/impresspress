@@ -462,8 +462,8 @@ jobs:
       # main before the per-file ledger, rebuilt with the runner of the time
       # and upgraded through today's, does what its history entry says; and
       # auth 018 drops the JWT blocklist and nothing else, failing whole
-      # where the table is missing. `#[ignore]`d in the run above because it needs this server; it
-      # creates a database of its own per case.
+      # where the table is missing. `#[ignore]`d in the run above because it
+      # needs this server; it creates a database of its own per case.
       - name: Every block's PostgreSQL migration history upgrades as recorded
         env:
           IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay

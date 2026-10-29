@@ -57,8 +57,8 @@ every authenticated request and fails those requests; downgrading across
 migrations is not supported.
 
 **Cloudflare budget.** A fresh Worker database now sends 483 statements for
-its migrations (018's statement and its ledger row are the two new ones),
-within half of the default 1000.
+its migrations, two more than the 481 before it (018's statement and its
+ledger row), within half of the default 1000.
 
 ### wafer-run 1272fd63: strict schema is the only behaviour, on every target
 
@@ -73,7 +73,12 @@ and there is no switch any more:
   Before this release native and browser databases added the column on the
   first write that named it; Cloudflare already refused it.
 - **A read, count or delete against a table no migration created fails**
-  with the backend's `no such table`, instead of answering empty.
+  with the backend's `no such table`, instead of answering empty. One such
+  read is on every fresh install: the runner reads admin's
+  `block_settings` before admin's migrations have created it, and on that
+  failure asks whether the table exists (`schema_table_exists`) before it
+  takes the table as absent. So a fresh Worker database sends one statement
+  more for its migrations than before, 481 rather than 480.
 - **A filter, sort or guard naming a column the table lacks** is refused
   before it is sent, naming the column, on every target. Cloudflare used to
   skip that check, and SQLite then read the unknown name as a string
@@ -236,8 +241,9 @@ COLUMN`s on `users`, and the rebuilds of the tickets and vector tables on
 a Worker that compiles those blocks. Dev never runs on a Worker. The
 fresh-install budget test now counts only the blocks
 `impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
-Worker database sent 480 statements at that release (483 since auth 018,
-above), within half of the default 1000.
+Worker database sent 480 statements at that release (481 since wafer-run
+1272fd63 and 483 since auth 018, both above), within half of the default
+1000.
 
 ### Cloudflare: workers-rs 0.8.7
 
@@ -455,8 +461,9 @@ loss, or recreate the database.
 
 **Cloudflare budget.** A fresh database's `/_deploy/prepare` sent 454
 statements for its migrations at this release, 480 since the
-stamped-column migrations and 483 since auth 018 (counted by a test that
-keeps it within half of the default budget of 1000). Leave
+stamped-column migrations, 481 since wafer-run 1272fd63 and 483 since auth
+018 (counted by a test that keeps it within half of the default budget of
+1000). Leave
 `[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
 fresh install.
 

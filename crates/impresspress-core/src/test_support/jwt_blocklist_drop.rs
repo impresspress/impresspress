@@ -16,8 +16,9 @@
 //!   list.
 //! - **fails whole without the table:** the same database, the table dropped
 //!   by hand before the upgrade. The upgrade fails, not as a refusal, naming
-//!   018 and the backend's own "no such table" error; 018 is not recorded and
-//!   auth's record still names the list before it.
+//!   018 and carrying the backend's own missing-table error (`no such table:
+//!   …` on SQLite, `table "…" does not exist` on PostgreSQL); 018 is not
+//!   recorded and auth's record still names the list before it.
 
 use std::sync::Arc;
 
@@ -55,7 +56,8 @@ fn blocklist_objects_005_creates(backend: Backend) -> Vec<String> {
     objects
 }
 
-/// The schema objects named after the blocklist: the table and its index.
+/// Every schema object whose name starts with the table's: the table, its
+/// index, and on PostgreSQL its primary key's index.
 async fn blocklist_objects(
     db: &Arc<dyn DatabaseService>,
     backend: Backend,

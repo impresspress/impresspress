@@ -200,8 +200,9 @@ pub const RESET_TOKEN_COLUMNS: &str = "017_reset_token_columns";
 ///   drops it on a fresh install.
 /// - **The `suppers_ai__auth__jwt_blocklist` residue** on databases that
 ///   crossed from a state before the `wafer_run__` rename is not 018's
-///   concern: no supported state holds it, and the crossing record
-///   (`migration-history-crossing.txt`) already names it harmless residue.
+///   concern: no supported state's migrations create it, and the crossing
+///   record (`migration-history-crossing.txt`) already names it harmless
+///   residue.
 ///
 /// Tested on both dialects by `test_support::jwt_blocklist_drop`.
 pub const JWT_BLOCKLIST_DROPPED: &str = "018_drop_jwt_blocklist";
