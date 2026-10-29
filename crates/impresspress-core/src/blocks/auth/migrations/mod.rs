@@ -190,7 +190,7 @@ pub const RESET_TOKEN_COLUMNS: &str = "017_reset_token_columns";
 ///   app. There the file fails whole inside its transaction, writes no
 ///   ledger row and leaves `current_hash` alone, and the runner reports it as
 ///   a failed file, not a refusal, carrying the backend's own error (`no
-///   such table: …` on SQLite, `relation "…" does not exist` on PostgreSQL).
+///   such table: …` on SQLite, `table "…" does not exist` on PostgreSQL).
 ///   D1 does not say which statement failed, so there the operator reads the
 ///   message rather than a statement. `IF EXISTS` would record 018 as `ran`
 ///   over a schema the ledger does not describe.

@@ -7,11 +7,13 @@
 //!
 //! - **drops the table and nothing else:** admin's list, then auth's list as
 //!   it stood before 018, each through the real runner; one row seeded into
-//!   every table but `block_settings` (raw SQL naming only the columns each
-//!   table has, [`history::seed`]); then today's auth list. 018 is recorded
-//!   `ran` with its content hash, the table and its index are gone, every
-//!   other seeded row is where it was with every value it was written with,
-//!   the schema is a fresh install's, and auth's record is today's list.
+//!   every table that holds none (raw SQL naming only the columns each table
+//!   has, [`history::seed`]; a table the migrations already filled keeps its
+//!   rows as the ones to find again); then today's auth list. 018 is
+//!   recorded `ran` with its content hash, the table and its index are gone,
+//!   every other seeded row is where it was with every value it was written
+//!   with, the schema is a fresh install's, and auth's record is today's
+//!   list.
 //! - **fails whole without the table:** the same database, the table dropped
 //!   by hand before the upgrade. The upgrade fails, not as a refusal, naming
 //!   018 and the backend's own "no such table" error; 018 is not recorded and
@@ -26,18 +28,31 @@ use super::migration_history::{self as history, NewDatabase, Schema};
 use crate::{
     blocks::auth::migrations::{JWT_BLOCKLIST_DROPPED, MIGRATIONS},
     migration_helper::{self, content_hash, migration_set_hash},
-    platform_state::{applied_migrations::Origin, block_settings},
+    platform_state::applied_migrations::Origin,
 };
 
 const BLOCKLIST: &str = "wafer_run__auth__jwt_blocklist";
 const BLOCKLIST_INDEX: &str = "wafer_run__auth__jwt_blocklist_expires_at_idx";
 
-/// What the backend says when a statement names a table that does not exist.
+/// What the backend says when `DROP TABLE` names a table that does not
+/// exist. PostgreSQL's `DROP TABLE` says `table`, where a read or write of a
+/// missing table says `relation`.
 fn missing_table_error(backend: Backend) -> String {
     match backend {
         Backend::Sqlite => format!("no such table: {BLOCKLIST}"),
-        Backend::Postgres => format!("relation \"{BLOCKLIST}\" does not exist"),
+        Backend::Postgres => format!("table \"{BLOCKLIST}\" does not exist"),
     }
+}
+
+/// The schema objects 005 creates under the blocklist's name: the table and
+/// its index, and on PostgreSQL the primary key's index too (SQLite names
+/// that one `sqlite_autoindex_…`).
+fn blocklist_objects_005_creates(backend: Backend) -> Vec<String> {
+    let mut objects = vec![BLOCKLIST.to_string(), BLOCKLIST_INDEX.to_string()];
+    if backend == Backend::Postgres {
+        objects.push(format!("{BLOCKLIST}_pkey"));
+    }
+    objects
 }
 
 /// The schema objects named after the blocklist: the table and its index.
@@ -116,14 +131,14 @@ async fn drops_the_table_and_nothing_else(
     let db = new_db().await;
     before_018(&db, backend).await?;
     let objects = blocklist_objects(&db, backend).await?;
-    if objects != [BLOCKLIST, BLOCKLIST_INDEX] {
+    if objects != blocklist_objects_005_creates(backend) {
         return Err(format!(
-            "before 018 the database must hold the table and its index, not {objects:?}"
+            "before 018 the database must hold {:?}, not {objects:?}",
+            blocklist_objects_005_creates(backend)
         ));
     }
     let before = Schema::read(&db, backend).await?;
-    // `block_settings` is the record the upgrade restamps.
-    let seeded = history::seed(&db, backend, &before, &[block_settings::TABLE]).await?;
+    let seeded = history::seed(&db, backend, &before, &[]).await?;
     if !seeded.iter().any(|row| row.table == BLOCKLIST) {
         return Err("the seed wrote no blocklist row".to_string());
     }

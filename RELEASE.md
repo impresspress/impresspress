@@ -38,7 +38,7 @@ developer tools on its storage); every database this release upgrades
 otherwise holds it. There 018 fails, not as a refusal: nothing of it
 applies, it stays unrecorded, and the message names `wafer-run/auth`,
 `018_drop_jwt_blocklist` and the database's own error (`no such table:
-wafer_run__auth__jwt_blocklist` on SQLite and D1, `relation
+wafer_run__auth__jwt_blocklist` on SQLite and D1, `table
 "wafer_run__auth__jwt_blocklist" does not exist` on PostgreSQL; D1 does not
 say which statement failed). A native server refuses to start and a
 Cloudflare deploy stops before promotion. In the browser it is the
