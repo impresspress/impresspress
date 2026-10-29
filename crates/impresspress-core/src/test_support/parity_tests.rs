@@ -190,14 +190,12 @@ async fn create_probe_tables(db: &Arc<dyn DatabaseService>) {
 async fn run_both(probes: Vec<Probe>, entry: &str, hops: &[Hop]) -> (String, String) {
     let probes: Vec<Arc<Probe>> = probes.into_iter().map(Arc::new).collect();
 
-    // Both sides run strict schema (the fixture always does) over the
-    // tables the probes read, so a database hop's outcome is the gate's
-    // answer and not a missing table's.
+    // Both sides hold the tables the probes read, so a database hop's
+    // outcome is the gate's answer and not a missing table's.
     let runtime_db: Arc<dyn DatabaseService> = Arc::new(
         wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
             .expect("open in-memory sqlite"),
     );
-    runtime_db.set_strict_schema(true);
     create_probe_tables(&runtime_db).await;
     let mut wafer = super::dispatch::empty_wafer();
     wafer_core::service_blocks::database::register_with(&mut wafer, runtime_db)

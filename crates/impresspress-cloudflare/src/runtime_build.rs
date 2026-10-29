@@ -200,15 +200,10 @@ pub(crate) async fn boot_prepared_runtime(built: &mut BuiltRuntime) -> Result<Bo
 /// rather than a call in this crate.
 ///
 /// Both reads own that tolerance explicitly, through
-/// `DatabaseService::schema_table_exists`. Neither may go back to leaning on
-/// `DbExec::list`'s table-existence guard, because STRICT_SCHEMA — which the
-/// generated `wrangler.toml` sets on every deploy, and which this crate now
-/// applies from construction rather than only at `Init` — disables exactly
-/// that guard: `table_present_for_op` returns `Ok(true)` unconditionally in
-/// strict mode, so the SELECT reaches the backend and gets "no such table".
-/// `block_settings`' own
-/// `read_rows` documents the probe; `repro_cold_start_under_strict_schema`
-/// pins it.
+/// `DatabaseService::schema_table_exists`: the executor has no table-existence
+/// guard, so a `list` of a missing table reaches the backend and gets "no such
+/// table". `block_settings`' own `read_rows` documents the probe;
+/// `a_cold_start_before_any_migration_reads_no_settings` pins it.
 ///
 /// Every other read on this pre-migration window is already safe by ordering,
 /// not by luck: `D1ConfigSource` is reached only through
@@ -336,9 +331,8 @@ where
 
     // 5. ConfigSource: D1-backed, resolving each block against one lazily
     //    fetched unfiltered snapshot of the variables table. The overlay layers
-    //    the Env-owned keys (PROTECTED_ENV_KEYS secrets, BUILDER_WORKER_VAR_KEYS
-    //    vars) on top of D1 rows so they never need to be mirrored into the
-    //    variables table.
+    //    worker::Env secrets (PROTECTED_ENV_KEYS) on top of D1 rows so
+    //    secrets never need to be mirrored into the variables table.
     let cfg_source: Arc<dyn wafer_run::ConfigSource> = Arc::new(
         config_source::D1ConfigSource::with_overlay(db.clone(), overlay),
     );
@@ -443,16 +437,6 @@ struct StructuralConfigInputs {
 }
 
 /// Split [`StructuralConfigInputs`] out of an already-captured environment.
-///
-/// STRICT_SCHEMA (`WAFER_RUN__DATABASE__STRICT_SCHEMA`) is a worker var
-/// (wrangler.toml `[vars]`), not a row in the D1 `variables` table: it is a
-/// deploy-time decision, not an admin-editable runtime toggle. The shared
-/// `wafer-run/database` block declares it and reads it from its
-/// `lifecycle(Init)` config, which the `ConfigSource` resolves — so it is
-/// layered over the D1 rows with the other Env-owned keys (see
-/// [`structural_runtime_config`]), and `Init` calls `set_strict_schema` on the
-/// DB service before it serves any query. Absent var ⇒ the block's declared
-/// default, `false`.
 fn structural_config_inputs(
     environment: &CfEnvironment,
     block_settings_json: String,
@@ -483,8 +467,7 @@ fn structural_config_inputs(
 /// - the Worker vars (`BUILDER_WORKER_VAR_KEYS`). CSP/CORS additions are
 ///   builder-time input: the middleware flow is constructed before lazy block
 ///   config exists, so they must be present in ConfigService before
-///   `builder.build()`. STRICT_SCHEMA rides along as an Env-owned key; the
-///   block that applies it reads it from the `ConfigSource` overlay instead.
+///   `builder.build()`.
 /// - the synthetic `BLOCK_SETTINGS_CONFIG_KEY` → JSON entry so consumer blocks
 ///   (userportal, migration_helper) can read block enablement / migration
 ///   state via `ctx.config_get` without a separate D1 query per request.
@@ -504,12 +487,12 @@ fn structural_config_inputs(
 /// [`add_request_config`] adds afterwards and which carries its reason as an
 /// argument.
 ///
-/// Returns the config alongside the `ConfigSource` overlay: every Env-owned
-/// key — the secrets and the worker vars — is layered over the D1 `variables`
-/// rows, so a key the Worker environment owns resolves from that environment
-/// for a block's `lifecycle(Init)` config too, and never has to be mirrored
-/// into the table. The one such key a block declares today is STRICT_SCHEMA
-/// (`wafer-run/database`); the others are read by no block's `Init`.
+/// Returns the config alongside the `ConfigSource` overlay: the secrets are
+/// layered over the D1 `variables` rows so a secret never has to be mirrored
+/// into that table. Worker vars are not: they are builder-time middleware
+/// input, not per-block config, and a block that declared one as its `Init`
+/// config would then read the admin's saved row, not a Worker var that
+/// silently overrides it.
 fn structural_runtime_config(
     inputs: StructuralConfigInputs,
 ) -> (RuntimeConfig, HashMap<String, String>) {
@@ -520,8 +503,7 @@ fn structural_runtime_config(
         overlay.insert(key.to_string(), value);
     }
     for (key, value) in inputs.worker_vars {
-        config.both(key, value.clone());
-        overlay.insert(key.to_string(), value);
+        config.both(key, value);
     }
     config.both(
         impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
@@ -553,10 +535,10 @@ fn structural_runtime_config(
 /// whole snapshot and then deleted `PROTECTED_ENV_KEYS` and
 /// `BUILDER_WORKER_VAR_KEYS` back out of it by name when their bindings were
 /// gone — the right answer for the keys somebody had listed, and no answer at
-/// all for `WAFER_RUN__DATABASE__STRICT_SCHEMA`, which was on neither list: a
-/// deployment that dropped that var kept serving with strict schema on until
-/// something else forced a rebuild. Deriving the owned set from the struct that
-/// captured it removes the class instead of the instance.
+/// all for an Env-owned key on neither list, which a deployment that dropped
+/// its var kept serving until something else forced a rebuild. Deriving the
+/// owned set from the struct that captured it removes the class instead of the
+/// instance.
 fn request_config_surfaces(
     environment: &CfEnvironment,
     structural_snapshot: &HashMap<String, String>,
@@ -571,11 +553,13 @@ fn request_config_surfaces(
 
     let mut overlay = HashMap::new();
     extend_with_request_config(&mut config_map, &mut overlay, request_config);
-    // Every Env-owned key is layered over the D1 `variables` rows, as the cold
-    // fill does it: a block's `lifecycle(Init)` config then resolves it from
-    // the environment this request sees, and it never has to be mirrored into
-    // that table.
-    overlay.extend(environment.config_map());
+    // Secrets are layered over the D1 `variables` rows for the same reason the
+    // cold fill does it: a secret then never has to be mirrored into that table.
+    for key in PROTECTED_ENV_KEYS {
+        if let Some(value) = environment.config_value(key) {
+            overlay.insert((*key).to_string(), value.to_string());
+        }
+    }
     (config_map, overlay)
 }
 
@@ -679,8 +663,8 @@ fn extend_with_request_config(
 /// merge and a collision was harmless by construction; the two name lists
 /// `extend_with_request_config` checks (`PROTECTED_ENV_KEYS`,
 /// `BUILDER_WORKER_VAR_KEYS`) cover the Env-owned families but not the keys
-/// this pass installs itself — `IMPRESSPRESS_BLOCK_SETTINGS`,
-/// `IMPRESSPRESS_RUN_MIGRATIONS`, `WAFER_RUN__DATABASE__STRICT_SCHEMA`. Asking
+/// this pass installs itself — `IMPRESSPRESS_BLOCK_SETTINGS` and
+/// `IMPRESSPRESS_RUN_MIGRATIONS`. Asking
 /// the `RuntimeConfig` what it already holds covers all of them, and covers
 /// the next structural key without anyone remembering to add it to a list.
 fn add_request_config(
@@ -777,23 +761,16 @@ mod tests {
     /// The warm-request fill takes every Env-owned key from THIS request's
     /// capture, so a binding removed since the runtime was built cannot survive
     /// in the map the request's `ConfigService` reads.
-    ///
-    /// `WAFER_RUN__DATABASE__STRICT_SCHEMA` is the case that used to survive.
-    /// The old code cloned the cached runtime's snapshot and then deleted
-    /// `PROTECTED_ENV_KEYS` and `BUILDER_WORKER_VAR_KEYS` back out of it by
-    /// name; strict schema was on neither list, so a deployment that dropped
-    /// the var kept serving with strict schema on — skipping the table-exists
-    /// probe and the lazy column-add — until something else forced a rebuild.
     #[wasm_bindgen_test]
     fn a_removed_worker_binding_cannot_survive_in_a_warm_requests_config() {
-        let strict_schema = wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY;
+        let csp = impresspress_core::config_vars::CSP_DIRECTIVES_KEY;
         let jwt = impresspress_core::blocks::auth::JWT_SECRET_KEY;
         let block_settings = impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY;
 
         // What the isolate-cached runtime was built with.
         let snapshot = HashMap::from([
             (jwt.to_string(), "old-secret".to_string()),
-            (strict_schema.to_string(), "1".to_string()),
+            (csp.to_string(), "default-src 'self'".to_string()),
             (
                 impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY.to_string(),
                 "https://old.test".to_string(),
@@ -801,8 +778,8 @@ mod tests {
             (block_settings.to_string(), "{}".to_string()),
         ]);
 
-        // What the Worker's bindings say NOW: the secret rotated, strict schema
-        // and CORS were removed.
+        // What the Worker's bindings say NOW: the secret rotated, CSP and CORS
+        // were removed.
         let mut environment = empty_environment();
         environment.set_jwt_secret_for_test("new-secret");
 
@@ -814,7 +791,7 @@ mod tests {
             "a rotated secret must reach this request",
         );
         assert!(
-            !config.contains_key(strict_schema),
+            !config.contains_key(csp),
             "a removed worker var must not be inherited from the cached snapshot",
         );
         assert!(
@@ -832,30 +809,30 @@ mod tests {
             Some("new-secret"),
             "secrets are layered over the D1 variables rows, as on the cold path",
         );
-        assert!(
-            !overlay.contains_key(strict_schema),
-            "a removed worker var must not reach a block's Init config either",
-        );
     }
 
-    /// The warm-request overlay carries the worker vars this request's
-    /// environment binds, as the cold one does. `wafer-run/database` reads
-    /// STRICT_SCHEMA from its `lifecycle(Init)` config — resolved through the
-    /// `ConfigSource` this overlay feeds, not from the `ConfigService` map — and
-    /// a block first initialised on a warm request resolves it here.
+    /// The warm-request overlay carries the secrets this request's environment
+    /// binds and no worker var, as the cold one does: a bound worker var
+    /// reaches the `ConfigService` map, the builder-time surface, and never a
+    /// block's `lifecycle(Init)` config, where it would override the admin's
+    /// saved row.
     #[wasm_bindgen_test]
-    fn a_bound_worker_var_reaches_a_warm_requests_config_source_overlay() {
-        let strict_schema = wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY;
+    fn a_bound_worker_var_stays_out_of_a_warm_requests_config_source_overlay() {
+        let csp = impresspress_core::config_vars::CSP_DIRECTIVES_KEY;
         let mut environment = empty_environment();
-        environment.set_strict_schema_for_test("true");
+        environment.set_csp_directives_for_test("default-src 'self'");
 
-        let (_config, overlay) =
+        let (config, overlay) =
             request_config_surfaces(&environment, &HashMap::new(), &HashMap::new());
 
         assert_eq!(
-            overlay.get(strict_schema).map(String::as_str),
-            Some("true"),
-            "a bound STRICT_SCHEMA var must reach the database block's Init config",
+            config.get(csp).map(String::as_str),
+            Some("default-src 'self'"),
+            "a bound worker var reaches the request's ConfigService",
+        );
+        assert!(
+            !overlay.contains_key(csp),
+            "a worker var is builder-time input, not a block's Init config",
         );
     }
 
@@ -900,7 +877,6 @@ mod tests {
     /// environment and reads nothing itself).
     #[wasm_bindgen_test]
     fn structural_keys_reach_both_config_surfaces() {
-        let strict_schema = wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY;
         let (config, overlay) = structural_runtime_config(StructuralConfigInputs {
             secrets: vec![(
                 impresspress_core::blocks::auth::JWT_SECRET_KEY,
@@ -915,7 +891,6 @@ mod tests {
                     impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
                     "default-src 'self'".to_string(),
                 ),
-                (strict_schema, "true".to_string()),
             ],
             block_settings_json: "{}".to_string(),
             run_migrations: true,
@@ -931,7 +906,6 @@ mod tests {
                 impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
                 "default-src 'self'",
             ),
-            (strict_schema, "true"),
             (impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY, "{}"),
             (impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1"),
         ] {
@@ -946,20 +920,20 @@ mod tests {
             config.service_only_keys().is_empty(),
             "no structural key diverges",
         );
-        // Every Env-owned key is also layered over the D1 `variables` rows the
-        // `ConfigSource` resolves against. STRICT_SCHEMA is the one that
-        // matters there: `wafer-run/database` reads it from its Init config,
-        // not from either surface above, so without the overlay a Worker var
-        // turning it on would be overridden by the block's declared `false`.
-        for (key, value) in [
-            (impresspress_core::blocks::auth::JWT_SECRET_KEY, "jwt"),
-            (
-                impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
-                "*",
-            ),
-            (strict_schema, "true"),
+        // Secrets are also layered over the D1 `variables` rows the
+        // `ConfigSource` resolves against; worker vars are builder-time
+        // middleware input and deliberately are not.
+        assert_eq!(
+            overlay
+                .get(impresspress_core::blocks::auth::JWT_SECRET_KEY)
+                .map(String::as_str),
+            Some("jwt"),
+        );
+        for key in [
+            impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
+            impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
         ] {
-            assert_eq!(overlay.get(key).map(String::as_str), Some(value), "{key}");
+            assert!(!overlay.contains_key(key), "{key} is not in the overlay");
         }
     }
 
@@ -991,15 +965,14 @@ mod tests {
     /// is "the structural one is gone". On `main` the snapshot was cloned
     /// before the request merge and a collision left the structural value
     /// intact; the guard list that replaced that accident covered
-    /// `PROTECTED_ENV_KEYS` and `BUILDER_WORKER_VAR_KEYS` but not the three
-    /// keys the structural pass installs itself. Any key the structural pass
+    /// `PROTECTED_ENV_KEYS` and `BUILDER_WORKER_VAR_KEYS` but not the keys
+    /// the structural pass installs itself. Any key the structural pass
     /// already put on the snapshot is now framework-owned, whatever its name.
     #[wasm_bindgen_test]
     fn request_config_cannot_delete_a_structural_key_from_the_snapshot() {
         let structural = [
             impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
             impresspress_core::migration_helper::RUN_MIGRATIONS_KEY,
-            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY,
             impresspress_core::blocks::auth::JWT_SECRET_KEY,
             impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
         ];

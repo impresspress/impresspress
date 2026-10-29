@@ -79,8 +79,7 @@ pub(crate) fn make_d1_database_service_concrete(
 /// [`make_d1_database_service_concrete`] as a whole cannot run under
 /// `wasm-bindgen-test`. Everything it decides is here, where a test can hand
 /// in a handle directly; what stays uncovered is the binding lookup and the
-/// `Arc`. See `the_service_takes_its_strict_verdict_from_the_environment` and
-/// `the_service_takes_its_query_limit_from_the_environment`.
+/// `Arc`. See `the_service_takes_its_query_limit_from_the_environment`.
 ///
 /// Fails when the deploy's `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` is not a
 /// usable limit.
@@ -92,7 +91,6 @@ pub(crate) fn d1_service(
 ) -> Result<database::D1DatabaseService, String> {
     Ok(database::D1DatabaseService::new(
         db,
-        environment.strict_schema_enabled(),
         binding,
         queries.clone(),
         environment.d1_queries_per_invocation()?,
@@ -318,8 +316,8 @@ mod tests {
     use crate::environment::test_support::empty_environment;
 
     /// A `D1Database` that is never queried — see `database::tests`, which
-    /// uses the same handle for the same reason: `DbExec::strict_schema` is
-    /// plain Rust state, so the `undefined` is never dereferenced.
+    /// uses the same handle for the same reason: `DbExec::statement_budget`
+    /// is plain Rust state, so the `undefined` is never dereferenced.
     fn never_queried_handle() -> worker::D1Database {
         wasm_bindgen::JsCast::unchecked_into::<worker::D1Database>(
             wasm_bindgen::JsValue::undefined(),
@@ -334,29 +332,6 @@ mod tests {
             &database::D1QueryCount::new(),
         )
         .expect("a usable environment")
-    }
-
-    /// The joint between the environment and the adapter.
-    ///
-    /// `database::tests` proves the adapter honours whatever verdict it is
-    /// constructed with, and `environment::tests` proves the environment reads
-    /// the var the way wafer-core does. Neither sees whether this crate
-    /// actually connects the two — a hardcoded `false` here would pass both.
-    #[wasm_bindgen_test]
-    fn the_service_takes_its_strict_verdict_from_the_environment() {
-        let mut on = empty_environment();
-        on.set_strict_schema_for_test("true");
-        assert!(
-            DbExec::strict_schema(&service(&on)),
-            "a deploy that sets the var must get a strict service",
-        );
-
-        let off = empty_environment();
-        assert!(
-            !DbExec::strict_schema(&service(&off)),
-            "and one that does not must not — a hardcoded `true` is as wrong \
-             as a hardcoded `false`",
-        );
     }
 
     /// The D1 service reports this deploy's query limit, not a constant: a

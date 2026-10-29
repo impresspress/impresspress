@@ -120,11 +120,24 @@ fn generate_writes_wrangler_toml_with_required_fields() {
         "deploy toml must not declare a wrangler migrations ledger — \
          schema funnels through /_deploy/init"
     );
-    assert!(
-        body.contains(r#"WAFER_RUN__DATABASE__STRICT_SCHEMA = "true""#),
-        "deploy toml must enable STRICT_SCHEMA so the D1 adapter trusts its \
-         migrated schema and skips per-op introspection round-trips:\n{body}"
-    );
+    // The Worker vars are exactly the ones the Worker reads: a var nothing
+    // reads (a schema knob wafer-run no longer has, say) is a setting that
+    // claims to do something and does not.
+    let parsed: toml::Value = toml::from_str(&body).unwrap();
+    let mut vars: Vec<&str> = parsed["vars"]
+        .as_table()
+        .expect("a [vars] table")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    vars.sort_unstable();
+    let mut expected = vec![
+        impresspress_core::ui::assets::ASSET_BASE_URL_VAR,
+        D1_QUERIES_PER_INVOCATION_KEY,
+        impresspress_password::protocol::SHARDS_VAR,
+    ];
+    expected.sort_unstable();
+    assert_eq!(vars, expected, "{body}");
 }
 
 #[test]

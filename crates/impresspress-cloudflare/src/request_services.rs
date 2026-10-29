@@ -67,10 +67,7 @@ use std::{
     future::Future,
     pin::Pin,
     rc::Rc,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
@@ -699,16 +696,11 @@ fn network() -> Result<Arc<dyn NetworkService>, NetworkError> {
 /// Every answer, errors included, is that service's unchanged — so a write
 /// that duplicates a key is the `AlreadyExists` the `DatabaseService`
 /// contract names (see `database.rs`, "A taken key").
-#[derive(Default)]
-pub(crate) struct ScopedDatabaseService {
-    strict_schema: AtomicBool,
-}
+pub(crate) struct ScopedDatabaseService;
 
 impl ScopedDatabaseService {
     fn current(&self) -> Result<Arc<dyn DatabaseService>, DatabaseError> {
-        let service = database()?;
-        service.set_strict_schema(self.strict_schema.load(Ordering::Relaxed));
-        Ok(service)
+        database()
     }
 }
 
@@ -919,13 +911,6 @@ impl DatabaseService for ScopedDatabaseService {
 
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
         self.current()?.schema_add_column(table, column).await
-    }
-
-    fn set_strict_schema(&self, enabled: bool) {
-        self.strict_schema.store(enabled, Ordering::Relaxed);
-        if let Ok(service) = database() {
-            service.set_strict_schema(enabled);
-        }
     }
 
     /// The current request's D1 budget. Outside a request this is the same
@@ -1191,7 +1176,7 @@ impl ConfigSource for ScopedConfigSource {
 }
 
 pub(crate) fn database_proxy() -> Arc<dyn DatabaseService> {
-    Arc::new(ScopedDatabaseService::default())
+    Arc::new(ScopedDatabaseService)
 }
 
 pub(crate) fn storage_proxy() -> Arc<dyn StorageService> {

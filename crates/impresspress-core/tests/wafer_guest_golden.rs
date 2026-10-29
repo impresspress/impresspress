@@ -275,9 +275,8 @@ fn build_crate(name: &str, root: &Path, dir: &Path) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// An unstarted `Wafer` carrying the real `wafer-run/database` block over an
-/// in-memory SQLite, with strict schema on: a write naming a column the
-/// guest's table does not declare fails, as it does on every target once
-/// lazy column-add is gone.
+/// in-memory SQLite: a write naming a column the guest's table does not
+/// declare fails, as it does on every target.
 ///
 /// The shape `wafer-run`'s own `json_host_codec_e2e` uses: no admin block and
 /// no WRAP grants, so the guest is an ordinary unprivileged caller that
@@ -289,10 +288,6 @@ fn golden_wafer() -> Wafer {
         .build()
         .expect("build a Wafer");
     let sqlite = Arc::new(SQLiteDatabaseService::open_in_memory().expect("in-memory sqlite"));
-    wafer_core::interfaces::database::service::DatabaseService::set_strict_schema(
-        sqlite.as_ref(),
-        true,
-    );
     wafer_core::service_blocks::database::register_with_tables(&mut wafer, sqlite, vec![])
         .expect("register wafer-run/database");
     wafer

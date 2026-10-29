@@ -16,8 +16,7 @@ async fn the_stamped_column_files_are_right_for_both_kinds_of_database() {
     let dirs = Mutex::new(Vec::new());
     let new_db = || {
         let dir = tempfile::tempdir().expect("tempdir");
-        // File-backed, as native opens one, and without strict schema, as
-        // native and the browser ran before it: the lazy writes need it.
+        // File-backed, as native opens one.
         let db: Arc<dyn DatabaseService> = Arc::new(
             wafer_block_sqlite::service::SQLiteDatabaseService::open(
                 dir.path().join("db.sqlite3").to_str().expect("utf-8 path"),

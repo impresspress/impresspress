@@ -66,11 +66,11 @@ const SQL_003_POSTGRES: &str = include_str!("003_legacy_share_token_expiry.postg
 // from the runner that re-ran whole lists; the file's text is shipped and
 // stays.)
 //
-// Until 004 runs, every reservation fails where strict schema is on: taking
-// over a row filters on `claim_id`, and an upload's data names it. Every
-// target applies the block's pending migrations before it serves a release
-// (a Cloudflare deploy in its prepare funnel, a native server at boot, the
-// browser before it builds its runtime), so no build runs without it.
+// Until 004 runs, every reservation fails: taking over a row filters on
+// `claim_id`, and an upload's data names it. Every target applies the block's
+// pending migrations before it serves a release (a Cloudflare deploy in its
+// prepare funnel, a native server at boot, the browser before it builds its
+// runtime), so no build runs without it.
 const SQL_004_SQLITE: &str = include_str!("004_object_claim_id.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_004_POSTGRES: &str = include_str!("004_object_claim_id.postgres.sql");

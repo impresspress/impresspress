@@ -3,8 +3,8 @@
 //! D1 implements only the [`DbExec`] execution *primitives* (prepare/bind/run
 //! via [`json_value_to_js`]); all `get/list/count/sum/create/update/delete`
 //! orchestration — filter/IN expansion, sorted-key INSERT/UPDATE construction,
-//! lazy column-add, table-exists guards — is inherited from the shared
-//! `wafer-core` [`DbExec`] defaults, identical to `wafer-block-sqlite` and
+//! the unknown-column check — is inherited from the shared `wafer-core`
+//! [`DbExec`] defaults, identical to `wafer-block-sqlite` and
 //! `wafer-block-postgres`. The `DatabaseService` impl forwards each method into
 //! the matching `DbExec` default.
 //!
@@ -93,57 +93,33 @@
 //! `a_batch_refused_for_a_taken_key_is_already_exists` pin it for the
 //! single-row and the batch path.
 //!
-//! ## Lazy column-add
+//! ## The schema is the migrations'
 //!
-//! Tables themselves must exist before any `create()` — every block ships
-//! explicit `migrations/*.sql` applied from the `Init` lifecycle. The shared
-//! `DbExec::ensure_data_columns` adds only a missing *column* a write's data
-//! names (always `TEXT` on SQLite), and `DbExec::require_columns` refuses a
-//! read, filter or guard naming an unknown column instead of adding it,
-//! matching the native sqlite/postgres backends. Under STRICT_SCHEMA (below)
-//! neither introspects. Outside STRICT_SCHEMA, reads against a missing table
-//! return empty/NotFound via the `dbx_table_exists` guard the defaults run
-//! first; under it the statement reaches D1 and its "no such table" failure
-//! is `Internal`, as on the native backends.
+//! Every table and column comes from a block's `migrations/*.sql`, applied
+//! through the migration runner; the executor trusts that schema. A write
+//! naming a column the table lacks, or any statement against a missing table,
+//! reaches D1 and fails there (`no such column` / `no such table`, which
+//! [`impresspress_core::sqlite_text_error::statement_error`] classifies as
+//! `Internal`), as on the native backends. The one check the executor runs
+//! first is `DbExec::require_columns`: a filter, sort or guard naming a column
+//! the table lacks is refused as `InvalidArgument` before it is sent, because
+//! SQLite would read the unresolvable `"col"` as a string literal and answer
+//! silently wrong instead of failing.
 //!
-//! ## Schema cache + STRICT_SCHEMA (wafer-run #313)
+//! ## Schema cache (wafer-run #313)
 //!
-//! Each logical op the shared executor runs is fronted by schema introspection
-//! — a table-exists check plus, on the lazy-column paths, a column-list query.
-//! On D1 each is a *network* round-trip that dwarfs the data query. This
-//! adapter therefore opts into the two `DbExec` accessors #313 added:
-//!
-//! - [`schema_cache`](DbExec::schema_cache) returns the isolate's
-//!   [`SchemaCache`], so a warm isolate memoizes those introspection facts and
-//!   issues zero introspection round-trips in steady state. The shared defaults
-//!   own invalidation (lazy `ALTER TABLE`, `exec_raw`/DDL) — D1's own
-//!   schema-*mutation* methods never run on the live path (schema is
-//!   migration-owned; a runtime mutation attempt is an explicit error, see the
-//!   `DatabaseService` impl) and so touch no cache.
-//! - [`strict_schema`](DbExec::strict_schema) reads a flag seeded at
-//!   construction from the deploy's `WAFER_RUN__DATABASE__STRICT_SCHEMA` var
-//!   (see [`D1DatabaseService::new`]) and re-applied at lifecycle `Init` via
-//!   [`set_strict_schema`](DatabaseService::set_strict_schema) for the one
-//!   service a Wafer runtime is built around (the shared `wafer-run/database`
-//!   block reads the same var from its `lifecycle(Init)` config, which the
-//!   `ConfigSource` overlay resolves from the Worker env). When set the executor
-//!   trusts the migrated schema: no table-exists probe, no lazy column-add.
-//!   Production CF deploys enable it (wrangler `[vars]`); a write/query
-//!   referencing an unmigrated column then fails loudly, as intended.
-//!
-//!   One introspection survives strict mode: a sorted or paged `list` ends its
-//!   `ORDER BY` with the table's primary key, which the executor reads with a
-//!   `pragma_table_info` the first time it lists that table
-//!   ([`DbExec::get_primary_key`]) and memoizes in the schema cache (plus one
-//!   table-exists probe for a table with no key).
-//!
-//!   Seeding at construction is what covers the D1 services that never reach
-//!   an `Init`: the audit-row write's handle, built per request inside
-//!   `run_with_config` and used from `ctx.wait_until`, and the handle
-//!   `build_runtime` reads `block_settings` through before a runtime exists.
-//!   Neither is ever handed to `set_strict_schema`, so without the seeding the
-//!   audit-row write would run the lazy column-add path on every insert,
-//!   whatever the deploy configured.
+//! The executor reads a few schema facts before the statement it runs: the
+//! column list (the JSON-declared columns a row decodes with, and the
+//! unknown-column check above), the id policy a `create` mints by, and the
+//! primary key a sorted or paged `list` ends its `ORDER BY` with (plus one
+//! table-exists probe for a table with no key). On D1 each is a *network*
+//! round-trip that dwarfs the data query, so this adapter returns the
+//! isolate's [`SchemaCache`] from [`schema_cache`](DbExec::schema_cache): a
+//! warm isolate memoizes those facts and issues zero introspection round-trips
+//! in steady state. The shared defaults own invalidation (`exec_raw`/DDL); D1's
+//! own schema-*mutation* methods never run on the live path (schema is
+//! migration-owned; a runtime mutation attempt is an explicit error, see the
+//! `DatabaseService` impl) and so touch no cache.
 //!
 //! The cache is the **isolate's**, not the service's ([`isolate_schema_cache`]),
 //! and that is what makes the memoization worth anything: every D1 service is
@@ -154,11 +130,7 @@
 //! the key round trip. What may invalidate the cache is enumerated on
 //! [`D1DatabaseService::schema_cache`].
 
-use std::{
-    cell::Cell,
-    rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{cell::Cell, rc::Rc};
 
 use impresspress_core::IdentityCache;
 use wafer_block::db::{Filter, ListOptions};
@@ -321,20 +293,11 @@ impl D1QueryCount {
 /// Async database service wrapping Cloudflare D1.
 pub struct D1DatabaseService {
     db: D1Database,
-    /// The isolate's memoized table-exists / column-list / primary-key facts
+    /// The isolate's memoized column-list / id-policy / primary-key facts
     /// (see [`isolate_schema_cache`]). An `Rc`, not an owned cache: every
     /// service in the isolate addresses the same D1 database, and each of
     /// them is built per request.
     schema_cache: Rc<SchemaCache>,
-    /// STRICT_SCHEMA flag. Seeded at construction from the deploy's
-    /// `WAFER_RUN__DATABASE__STRICT_SCHEMA` var, and re-applied at lifecycle
-    /// `Init` via [`DatabaseService::set_strict_schema`] for the one service a
-    /// Wafer runtime is built around. When set, the shared executor skips the
-    /// table-exists probe and the lazy column-add; a sorted or paged `list`
-    /// still looks up the table's primary key. `AtomicBool` (not `Cell`) so
-    /// the struct keeps the `Sync` bound `Arc<dyn DatabaseService>` needs; on
-    /// wasm32's single thread the ordering is immaterial.
-    strict_schema: AtomicBool,
     /// This invocation's statement count (see [`D1QueryCount`]).
     queries: D1QueryCount,
     /// Statements one invocation may send: this deploy's
@@ -343,21 +306,7 @@ pub struct D1DatabaseService {
 }
 
 impl D1DatabaseService {
-    /// Wrap a D1 binding, with this deploy's STRICT_SCHEMA verdict already
-    /// applied.
-    ///
-    /// `strict_schema` is a parameter rather than a `false` default a caller
-    /// may later overwrite because not every D1 service reaches a lifecycle
-    /// `Init`: the audit-row write handle and `build_runtime`'s pre-`Init`
-    /// `block_settings` read are both constructed outside any runtime, and a
-    /// default would silently put them on the always-introspect path. Callers
-    /// get the verdict from
-    /// [`CfEnvironment::strict_schema_enabled`](crate::environment::CfEnvironment::strict_schema_enabled).
-    ///
-    /// `Init` still calls [`DatabaseService::set_strict_schema`] on the
-    /// runtime's own service; it reads the same var from its `lifecycle(Init)`
-    /// config, which the `ConfigSource` overlay resolves from the Worker env,
-    /// so it re-affirms this value rather than contradicting it.
+    /// Wrap a D1 binding.
     ///
     /// `binding` is the D1 binding `db` came from. It is the key of the
     /// isolate's schema cache ([`isolate_schema_cache`]): two bindings are two
@@ -366,17 +315,10 @@ impl D1DatabaseService {
     /// `queries` is the invocation's statement count, shared with every other
     /// D1 service built in it, and `query_limit` the statements one invocation
     /// may send (see the module docs on the per-invocation budget).
-    pub fn new(
-        db: D1Database,
-        strict_schema: bool,
-        binding: &str,
-        queries: D1QueryCount,
-        query_limit: u64,
-    ) -> Self {
+    pub fn new(db: D1Database, binding: &str, queries: D1QueryCount, query_limit: u64) -> Self {
         Self {
             db,
             schema_cache: isolate_schema_cache(binding),
-            strict_schema: AtomicBool::new(strict_schema),
             queries,
             query_limit,
         }
@@ -409,12 +351,11 @@ impl D1DatabaseService {
 // SAFETY: `D1DatabaseService` holds a `D1Database` handle scoped to a single
 // Worker isolate. wasm32-unknown-unknown has no threads, so the
 // `Send`/`Sync` bounds required by `Arc<dyn DatabaseService>` are satisfied
-// trivially — no cross-thread aliasing or data races can occur. `strict_schema`
-// (`AtomicBool`) is `Send + Sync` on its own; `schema_cache` is an
-// `Rc<SchemaCache>`, which is not, and is sound here for the same reason the
-// `D1Database` handle is: the `Rc` and every clone of it live in the one
-// isolate that owns this thread-local cache. The `unsafe impl` is required by
-// both.
+// trivially — no cross-thread aliasing or data races can occur.
+// `schema_cache` is an `Rc<SchemaCache>`, which is not `Send + Sync`, and it
+// is sound here for the same reason the `D1Database` handle is: the `Rc` and
+// every clone of it live in the one isolate that owns this thread-local
+// cache. The `unsafe impl` is required by both.
 unsafe impl Send for D1DatabaseService {}
 unsafe impl Sync for D1DatabaseService {}
 
@@ -441,8 +382,6 @@ impl DbExec for D1DatabaseService {
     ///   clear the whole cache after statements they cannot attribute to a
     ///   table. (The admin SQL explorer is not a writer:
     ///   `validate_readonly_query` refuses anything but a read.)
-    /// - **The lazy column-add** (`DbExec::add_column_checked`, non-strict
-    ///   mode only) invalidates the table it alters.
     /// - **`ensure_schema_table`, `schema_add_column`, `schema_drop_table`**
     ///   are refused on D1 (see their impls below): the schema is
     ///   migration-owned, so a block cannot mutate it around the path above.
@@ -457,21 +396,19 @@ impl DbExec for D1DatabaseService {
     ///   `PROBE_INTERVAL_FLOOR_MS + PROBE_INTERVAL_JITTER_MS` away (5-10
     ///   minutes). The rebuild that follows calls [`forget_isolate_schema`].
     ///
-    ///   What can be stale in that window is bounded by what is cached:
-    ///   a negative table-exists is never stored (the shared
-    ///   `DbExec::table_present_for_op` memoizes only a present table), so a table the
-    ///   migration creates is not read as missing; a column list that predates
-    ///   an `ADD COLUMN` only makes the lazy add re-run, which
-    ///   `add_column_checked` treats as benign; and a primary key is stale
-    ///   only if a migration rebuilds the table under a different key, which
-    ///   would make a sorted `list` in an unrebuilt isolate sort by a column
-    ///   that no longer exists until the probe lands.
+    ///   What can be stale in that window is bounded by what is cached. A
+    ///   missing table is never stored (an empty column list is not cached,
+    ///   and only a present table is marked), so a table the migration
+    ///   creates is not read as missing. A column list that predates an
+    ///   `ADD COLUMN` does not refuse the new column: `require_columns`
+    ///   re-reads the table uncached before it refuses a name; until the
+    ///   probe lands, a new JSON column decodes as text. A column list or
+    ///   primary key that still names a column a migration dropped or
+    ///   rebuilt away is the one stale fact that is not caught: the name
+    ///   passes the check, and SQLite reads the unresolvable `"col"` as a
+    ///   string literal until the probe lands.
     fn schema_cache(&self) -> Option<&SchemaCache> {
         Some(&self.schema_cache)
-    }
-
-    fn strict_schema(&self) -> bool {
-        self.strict_schema.load(Ordering::Relaxed)
     }
 
     /// D1's per-invocation query limit and the statements this invocation has
@@ -962,10 +899,9 @@ impl DatabaseService for D1DatabaseService {
     //   set. Impresspress always registers it via `service_blocks::database::register_with`
     //   (empty `tables`), so `handle_lifecycle` takes its `tables.is_empty()` branch
     //   and never calls this.
-    // - `schema_add_column` / `schema_drop_table` have no production caller at all.
-    //   The shared `DbExec` lazy column-add issues its `ALTER TABLE ADD COLUMN` via
-    //   `run_execute` (see `DbExec::add_column_checked`), not this method, and it is
-    //   disabled outright under STRICT_SCHEMA (which live CF deploys set).
+    // - `schema_add_column` / `schema_drop_table` have no production caller at all,
+    //   and no typed write adds a column: a write naming a column the table lacks
+    //   fails in D1.
     //
     // Returning `Ok(())` here would *claim* a mutation happened when nothing did — a
     // silent success that only surfaces later as a confusing "no such table" / "no
@@ -994,10 +930,6 @@ impl DatabaseService for D1DatabaseService {
 
     async fn schema_add_column(&self, table: &str, _column: &Column) -> Result<(), DatabaseError> {
         Err(schema_mutation_unsupported("schema_add_column", table))
-    }
-
-    fn set_strict_schema(&self, enabled: bool) {
-        self.strict_schema.store(enabled, Ordering::Relaxed);
     }
 
     fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
@@ -1272,18 +1204,17 @@ mod tests {
 
     /// A D1 service over `db` with a fresh invocation count and the Workers
     /// Paid query limit, for the tests that are not about the budget.
-    fn service(db: D1Database, strict_schema: bool, binding: &str) -> D1DatabaseService {
-        D1DatabaseService::new(db, strict_schema, binding, D1QueryCount::new(), 1000)
+    fn service(db: D1Database, binding: &str) -> D1DatabaseService {
+        D1DatabaseService::new(db, binding, D1QueryCount::new(), 1000)
     }
 
     /// A `D1Database` that is never queried.
     ///
     /// `unchecked_into` only re-types the `JsValue`; it calls nothing on it.
-    /// The tests below read `DbExec::strict_schema`, which is plain Rust state
-    /// on the adapter (`AtomicBool`), so the `undefined` handle is never
-    /// dereferenced. Constructing a *usable* one needs a workerd D1 binding,
-    /// which neither this runner nor CI has — see the module note above and
-    /// `conformance.rs`.
+    /// The tests that use it read only the adapter's schema cache, which is
+    /// plain Rust state, so the `undefined` handle is never dereferenced.
+    /// Constructing a *usable* one needs a workerd D1 binding, which neither
+    /// this runner nor CI has — see the module note above and `conformance.rs`.
     fn never_queried_handle() -> D1Database {
         wasm_bindgen::JsCast::unchecked_into::<D1Database>(JsValue::undefined())
     }
@@ -1325,11 +1256,11 @@ mod tests {
         wasm_bindgen::JsCast::unchecked_into::<D1Database>(handle)
     }
 
-    /// Under STRICT_SCHEMA (every generated `wrangler.toml`) a `get` against a
-    /// table that does not exist reaches D1, which fails the statement. That
-    /// failure is a fault — `Internal`, as native SQLite and PostgreSQL report
-    /// it — and never `NotFound`, which `crud::get_record` would answer as the
-    /// caller's 404 ("no such row") when nothing could be read at all.
+    /// A `get` against a table that does not exist reaches D1, which fails the
+    /// statement. That failure is a fault — `Internal`, as native SQLite and
+    /// PostgreSQL report it — and never `NotFound`, which `crud::get_record`
+    /// would answer as the caller's 404 ("no such row") when nothing could be
+    /// read at all.
     #[wasm_bindgen_test]
     async fn a_get_against_a_missing_table_is_a_fault_not_an_absent_row() {
         for cause in [
@@ -1337,7 +1268,7 @@ mod tests {
             None,
         ] {
             forget_isolate_schema();
-            let svc = service(missing_table_handle(cause), true, "DB");
+            let svc = service(missing_table_handle(cause), "DB");
             let err = DatabaseService::get(&svc, "impresspress__d1test__never_created", "any-id")
                 .await
                 .expect_err("the statement fails");
@@ -1382,7 +1313,6 @@ mod tests {
     async fn a_raw_query_keeps_its_column_order_integer_like_names_included() {
         let svc = service(
             raw_answer_handle(r#"[["name", "1", "id"], ["x", 1, "r1"], ["y", 1, "r2"]]"#),
-            true,
             "DB",
         );
         let rows = DatabaseService::query_raw(&svc, "SELECT name, 1, id FROM t", &[])
@@ -1400,11 +1330,7 @@ mod tests {
     /// `RecordData`. Alias them apart to see both.
     #[wasm_bindgen_test]
     async fn a_duplicate_column_name_keeps_one_entry() {
-        let svc = service(
-            raw_answer_handle(r#"[["v", "w", "v"], [1, 2, 3]]"#),
-            true,
-            "DB",
-        );
+        let svc = service(raw_answer_handle(r#"[["v", "w", "v"], [1, 2, 3]]"#), "DB");
         let rows = DatabaseService::query_raw(&svc, "SELECT 1 AS v, 2 AS w, 3 AS v", &[])
             .await
             .expect("query");
@@ -1416,7 +1342,7 @@ mod tests {
     #[wasm_bindgen_test]
     async fn an_empty_result_is_no_rows() {
         for answer in [r#"[["a", "b"]]"#, "[]"] {
-            let svc = service(raw_answer_handle(answer), true, "DB");
+            let svc = service(raw_answer_handle(answer), "DB");
             let rows = DatabaseService::query_raw(&svc, "SELECT a, b FROM t WHERE 0", &[])
                 .await
                 .expect("query");
@@ -1432,8 +1358,8 @@ mod tests {
     #[wasm_bindgen_test]
     fn every_d1_service_in_an_isolate_shares_one_schema_cache() {
         forget_isolate_schema();
-        let request_one = service(never_queried_handle(), true, "DB");
-        let request_two = service(never_queried_handle(), true, "DB");
+        let request_one = service(never_queried_handle(), "DB");
+        let request_two = service(never_queried_handle(), "DB");
         let cache = DbExec::schema_cache(&request_one).expect("the D1 backend keeps a cache");
         let other = DbExec::schema_cache(&request_two).expect("so does every other handle");
         assert!(std::ptr::eq(cache, other), "one isolate, one cache");
@@ -1446,135 +1372,17 @@ mod tests {
         );
     }
 
-    /// A `D1Database` double for the table-exists probe: `prepare(sql)` →
-    /// `bind(args)` → `first()` answers one row, `{"present": 0|1}`, which is
-    /// what [`introspect::build_table_exists`] asks for and `scalar_i64` reads
-    /// positionally. `present` is read when `first()` is called, so a test can
-    /// flip it to model a migration landing between two probes; `probes`
-    /// counts the round trips, which is what tells a cached answer from a
-    /// re-read.
-    ///
-    /// The other tests here use an `undefined` handle, which is enough while
-    /// nothing calls it. This one has to call it: the behaviour under test is
-    /// what the guard does with the probe's answer.
-    fn scripted_d1(
-        present: Rc<std::cell::Cell<bool>>,
-        probes: Rc<std::cell::Cell<u32>>,
-    ) -> D1Database {
-        use wasm_bindgen::{closure::Closure, JsCast};
-
-        let statement = js_sys::Object::new();
-        let first = Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |_col: JsValue| {
-            probes.set(probes.get() + 1);
-            let row = js_sys::Object::new();
-            js_sys::Reflect::set(
-                &row,
-                &JsValue::from_str("present"),
-                &JsValue::from(u32::from(present.get())),
-            )
-            .expect("set present");
-            js_sys::Promise::resolve(&JsValue::from(row))
-        });
-        js_sys::Reflect::set(
-            &statement,
-            &JsValue::from_str("first"),
-            first.as_ref().unchecked_ref(),
-        )
-        .expect("set first");
-        first.forget();
-
-        let bound = statement.clone();
-        let bind = Closure::<dyn Fn(JsValue) -> JsValue>::new(move |_args: JsValue| {
-            JsValue::from(bound.clone())
-        });
-        js_sys::Reflect::set(
-            &statement,
-            &JsValue::from_str("bind"),
-            bind.as_ref().unchecked_ref(),
-        )
-        .expect("set bind");
-        bind.forget();
-
-        let db = js_sys::Object::new();
-        let prepared = statement;
-        let prepare = Closure::<dyn Fn(JsValue) -> JsValue>::new(move |_sql: JsValue| {
-            JsValue::from(prepared.clone())
-        });
-        js_sys::Reflect::set(
-            &db,
-            &JsValue::from_str("prepare"),
-            prepare.as_ref().unchecked_ref(),
-        )
-        .expect("set prepare");
-        prepare.forget();
-
-        JsValue::from(db).unchecked_into::<D1Database>()
-    }
-
-    /// A table that does not exist is **not** memoized as missing, so the
-    /// migration that creates it is seen by the next operation rather than by
-    /// the next runtime rebuild.
-    ///
-    /// The shared `DbExec::table_present_for_op` is what this adapter runs,
-    /// so this is a guard on that default as D1 uses it: the cache here is
-    /// isolate-scoped, and a memoized "missing" would make a `list` against
-    /// the table answer an empty `RecordList` — a silent wrong answer, for as
-    /// long as the isolate lives. A positive is still memoized: nothing drops
-    /// a table at runtime on D1.
-    #[wasm_bindgen_test]
-    async fn a_missing_table_is_re_probed_until_it_appears() {
-        forget_isolate_schema();
-        let present = Rc::new(std::cell::Cell::new(false));
-        let probes = Rc::new(std::cell::Cell::new(0u32));
-        let svc = service(
-            scripted_d1(Rc::clone(&present), Rc::clone(&probes)),
-            false,
-            "DB",
-        );
-
-        assert_eq!(
-            DbExec::table_present_for_op(&svc, "later_t").await.ok(),
-            Some(false)
-        );
-        assert!(
-            !DbExec::schema_cache(&svc)
-                .expect("a cache")
-                .table_known_present("later_t"),
-            "a missing table must leave no memoized fact behind"
-        );
-
-        // The migration lands out of band.
-        present.set(true);
-        assert_eq!(
-            DbExec::table_present_for_op(&svc, "later_t").await.ok(),
-            Some(true),
-            "the next operation must see the table, not the isolate's rebuild"
-        );
-        assert_eq!(probes.get(), 2, "both calls probed");
-
-        // …and the positive IS memoized, so the probes stop there.
-        assert_eq!(
-            DbExec::table_present_for_op(&svc, "later_t").await.ok(),
-            Some(true)
-        );
-        assert_eq!(
-            probes.get(),
-            2,
-            "a memoized `present` is served without a probe"
-        );
-    }
-
     /// A second D1 binding is a second database: it must not be answered from
     /// the first's memoized schema, where one table name can mean a different
     /// shape.
     #[wasm_bindgen_test]
     fn a_second_binding_is_not_answered_from_the_firsts_schema() {
         forget_isolate_schema();
-        let primary = service(never_queried_handle(), true, "DB");
+        let primary = service(never_queried_handle(), "DB");
         let cache = DbExec::schema_cache(&primary).expect("a cache");
         cache.set_primary_key_if_gen("shared_name", vec!["id".into()], cache.generation());
 
-        let secondary = service(never_queried_handle(), true, "ARCHIVE_DB");
+        let secondary = service(never_queried_handle(), "ARCHIVE_DB");
         assert_eq!(
             DbExec::schema_cache(&secondary)
                 .expect("a cache")
@@ -1590,10 +1398,10 @@ mod tests {
     #[wasm_bindgen_test]
     fn a_rebuild_forgets_what_the_isolate_had_memoized() {
         forget_isolate_schema();
-        let before = service(never_queried_handle(), true, "DB");
+        let before = service(never_queried_handle(), "DB");
         let cache = DbExec::schema_cache(&before).expect("a cache");
         cache.set_primary_key_if_gen("rebuilt_t", vec!["id".into()], cache.generation());
-        let next_request = service(never_queried_handle(), true, "DB");
+        let next_request = service(never_queried_handle(), "DB");
         assert_eq!(
             DbExec::schema_cache(&next_request)
                 .expect("a cache")
@@ -1604,7 +1412,7 @@ mod tests {
 
         forget_isolate_schema();
 
-        let after = service(never_queried_handle(), true, "DB");
+        let after = service(never_queried_handle(), "DB");
         assert_eq!(
             DbExec::schema_cache(&after)
                 .expect("a cache")
@@ -1612,47 +1420,6 @@ mod tests {
             None,
             "a rebuilt isolate re-introspects rather than trusting the old schema"
         );
-    }
-
-    /// The verdict a D1 service is *born* with is the one the executor reads.
-    ///
-    /// This is what covers the two services that never reach a lifecycle
-    /// `Init` — the audit-row write handle in `run_with_config` and
-    /// `build_runtime`'s pre-`Init` `block_settings` read. Both are built and
-    /// dropped inside one request, so `set_strict_schema` is never called on
-    /// them and their `SchemaCache` never warms: with strict off,
-    /// `create_many`'s `DbExec::ensure_data_columns` introspects on every
-    /// single drain.
-    #[wasm_bindgen_test]
-    fn a_d1_service_is_born_with_the_deploys_strict_schema_verdict() {
-        let strict = service(never_queried_handle(), true, "DB");
-        assert!(
-            DbExec::strict_schema(&strict),
-            "a service constructed with STRICT_SCHEMA on must already skip the \
-             table-exists and column introspection — nothing calls \
-             `set_strict_schema` on the drain or pre-Init handles",
-        );
-
-        let lax = service(never_queried_handle(), false, "DB");
-        assert!(
-            !DbExec::strict_schema(&lax),
-            "and a service constructed with it off must still introspect",
-        );
-    }
-
-    /// `Init` must still be able to speak. `handle_lifecycle` calls
-    /// `set_strict_schema` on the runtime's own service after construction; on
-    /// Cloudflare it reads the same var, so it normally re-affirms the seeded
-    /// value — but the setter has to remain the authority, not be shadowed by
-    /// the constructor.
-    #[wasm_bindgen_test]
-    fn lifecycle_init_still_overrides_the_constructed_verdict() {
-        let svc = service(never_queried_handle(), false, "DB");
-        DatabaseService::set_strict_schema(&svc, true);
-        assert!(DbExec::strict_schema(&svc));
-
-        DatabaseService::set_strict_schema(&svc, false);
-        assert!(!DbExec::strict_schema(&svc));
     }
 
     /// What a [`batching_d1`] double's `batch()` does with what it is handed,
@@ -1766,9 +1533,9 @@ mod tests {
             .expect("set raw");
             raw.forget();
             // A lone statement's `first()`: the executor's one probe of where
-            // a created row's id comes from (`introspect::build_id_policy`),
-            // issued in strict mode too. It answers `0` — the executor mints
-            // the id — as for every `TEXT` primary key impresspress declares.
+            // a created row's id comes from (`introspect::build_id_policy`).
+            // It answers `0` — the executor mints the id — as for every `TEXT`
+            // primary key impresspress declares.
             let first = Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |_col: JsValue| {
                 let row = js_sys::Object::new();
                 js_sys::Reflect::set(&row, &JsValue::from_str("id_policy"), &JsValue::from(0))
@@ -1875,18 +1642,14 @@ mod tests {
 
     /// **`create_many` is one D1 round trip.** The rows reach D1 as ONE
     /// `batch()` of one INSERT each — the call D1 runs as a single implicit
-    /// transaction — rather than a `run()` per row. Strict schema is on, as in
-    /// production, so no introspection statement joins the batch (the id
-    /// policy probe runs on its own, ahead of it).
+    /// transaction — rather than a `run()` per row. No introspection
+    /// statement joins the batch: the id policy probe and the column list run
+    /// on their own, ahead of it.
     #[wasm_bindgen_test]
     async fn create_many_is_one_batch_of_one_insert_per_row() {
         forget_isolate_schema();
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let svc = service(
-            batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
-            "DB",
-        );
+        let svc = service(batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)), "DB");
 
         let inserted = DatabaseService::create_many(&svc, "request_logs", rows(40))
             .await
@@ -1905,11 +1668,7 @@ mod tests {
     async fn run_transaction_decodes_each_result_as_its_op_asked() {
         forget_isolate_schema();
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let svc = service(
-            batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
-            "DB",
-        );
+        let svc = service(batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)), "DB");
         let results = DbExec::run_transaction(
             &svc,
             &[
@@ -1958,7 +1717,6 @@ mod tests {
                     },
                     Rc::new(std::cell::RefCell::new(Vec::new())),
                 ),
-                true,
                 "DB",
             );
             let err = DatabaseService::create_many(&svc, "t", rows(2))
@@ -1983,7 +1741,6 @@ mod tests {
             forget_isolate_schema();
             let svc = service(
                 batching_d1(answer, Rc::new(std::cell::RefCell::new(Vec::new()))),
-                true,
                 "DB",
             );
             let row = std::collections::HashMap::from([
@@ -2033,7 +1790,6 @@ mod tests {
                 },
                 Rc::new(std::cell::RefCell::new(Vec::new())),
             ),
-            true,
             "DB",
         );
         let err = DatabaseService::create_many(&svc, "t", rows(2))
@@ -2072,11 +1828,7 @@ mod tests {
     async fn a_raw_transaction_is_one_batch_of_its_statements() {
         forget_isolate_schema();
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let svc = service(
-            batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
-            "DB",
-        );
+        let svc = service(batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)), "DB");
 
         let counts = DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
             .await
@@ -2113,7 +1865,6 @@ mod tests {
                     },
                     Rc::clone(&batches),
                 ),
-                true,
                 "DB",
             );
             let err = DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
@@ -2141,7 +1892,6 @@ mod tests {
         forget_isolate_schema();
         let svc = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
             "DB",
             queries.clone(),
             4,
@@ -2189,7 +1939,6 @@ mod tests {
                 Rc::new(std::cell::RefCell::new(Vec::new())),
                 &["a"],
             ),
-            true,
             "DB",
         );
         let json = JsonColumns::NONE;
@@ -2276,7 +2025,6 @@ mod tests {
                 },
                 Rc::new(std::cell::RefCell::new(Vec::new())),
             ),
-            true,
             "DB",
         );
         DbExec::run_execute(&svc, "UPDATE t SET a = 1", &[])
@@ -2299,7 +2047,6 @@ mod tests {
         forget_isolate_schema();
         let svc = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
             "DB",
             queries.clone(),
             LIMIT,
@@ -2324,7 +2071,6 @@ mod tests {
         forget_isolate_schema();
         let fresh = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
             "DB",
             D1QueryCount::new(),
             LIMIT,
@@ -2340,81 +2086,115 @@ mod tests {
     /// D1's limit less the reservation is refused before it reaches D1, not
     /// only multi-statement writes — so however the request spends its
     /// budget, the reserved-work handle still writes the row, from a cold
-    /// schema cache, within [`AUDIT_ROW_STATEMENTS`] statements. Both with
-    /// STRICT_SCHEMA (every generated config) and without it, against a fake
-    /// D1 that lists the table's real columns, so a probe added to either
-    /// path that the reservation does not cover fails here.
+    /// schema cache, in exactly [`AUDIT_ROW_STATEMENTS`] statements, against
+    /// a fake D1 that lists the table's real columns. A probe added to the
+    /// path fails here, and so does a reservation larger than the path needs.
     ///
     /// [`AUDIT_ROW_STATEMENTS`]: impresspress_core::after_response::AUDIT_ROW_STATEMENTS
     #[wasm_bindgen_test]
     async fn a_request_that_spends_its_budget_still_has_room_for_its_audit_row() {
         use impresspress_core::after_response::AUDIT_ROW_STATEMENTS;
         const LIMIT: u64 = 10;
-        for strict_schema in [true, false] {
-            let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-            let d1 = || {
-                batching_d1_with_columns(
-                    BatchAnswer::Succeed,
-                    Rc::clone(&batches),
-                    // `impresspress__admin__request_logs` as the admin block's
-                    // migrations leave it: 001's columns and 008's `block`.
-                    &[
-                        "id",
-                        "flow_id",
-                        "method",
-                        "path",
-                        "block",
-                        "status",
-                        "status_code",
-                        "duration_ms",
-                        "error_message",
-                        "client_ip",
-                        "user_id",
-                        "created_at",
-                        "updated_at",
-                    ],
-                )
-            };
-            let queries = D1QueryCount::new();
-            queries.reserve(AUDIT_ROW_STATEMENTS);
-            forget_isolate_schema();
-            let request = D1DatabaseService::new(d1(), strict_schema, "DB", queries.clone(), LIMIT);
-            let ran = spend_everything(&request).await;
-            assert_eq!(ran, LIMIT - AUDIT_ROW_STATEMENTS, "strict={strict_schema}");
-            assert_eq!(queries.sent(), ran, "the refused statement was not sent");
-
-            let audit = D1DatabaseService::new(
-                d1(),
-                strict_schema,
-                "DB",
-                queries.for_reserved_work(),
-                LIMIT,
-            );
-            // The row exactly as the pipeline queues it.
-            let row = impresspress_core::platform_state::request_logs::NewRequestLog {
-                method: "GET",
-                path: "/",
-                status_code: 200,
-                error_message: "",
-                duration_ms: 1,
-                client_ip: "203.0.113.1",
-                user_id: "",
-            }
-            .to_data();
-            DatabaseService::create_many(
-                &audit,
-                impresspress_core::platform_state::request_logs::TABLE,
-                vec![row],
+        let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let d1 = || {
+            batching_d1_with_columns(
+                BatchAnswer::Succeed,
+                Rc::clone(&batches),
+                // `impresspress__admin__request_logs` as the admin block's
+                // migrations leave it: 001's columns and 008's `block`.
+                &[
+                    "id",
+                    "flow_id",
+                    "method",
+                    "path",
+                    "block",
+                    "status",
+                    "status_code",
+                    "duration_ms",
+                    "error_message",
+                    "client_ip",
+                    "user_id",
+                    "created_at",
+                    "updated_at",
+                ],
             )
-            .await
-            .unwrap_or_else(|e| panic!("strict={strict_schema}: the row fits: {e:?}"));
-            assert!(
-                queries.sent() - ran <= AUDIT_ROW_STATEMENTS,
-                "strict={strict_schema}: the row took {} statements",
-                queries.sent() - ran
-            );
-            assert_eq!(batches.borrow().len(), 1, "the row reached D1");
+        };
+        let queries = D1QueryCount::new();
+        queries.reserve(AUDIT_ROW_STATEMENTS);
+        forget_isolate_schema();
+        let request = D1DatabaseService::new(d1(), "DB", queries.clone(), LIMIT);
+        let ran = spend_everything(&request).await;
+        assert_eq!(ran, LIMIT - AUDIT_ROW_STATEMENTS);
+        assert_eq!(queries.sent(), ran, "the refused statement was not sent");
+
+        let audit = D1DatabaseService::new(d1(), "DB", queries.for_reserved_work(), LIMIT);
+        // The row exactly as the pipeline queues it.
+        let row = impresspress_core::platform_state::request_logs::NewRequestLog {
+            method: "GET",
+            path: "/",
+            status_code: 200,
+            error_message: "",
+            duration_ms: 1,
+            client_ip: "203.0.113.1",
+            user_id: "",
         }
+        .to_data();
+        DatabaseService::create_many(
+            &audit,
+            impresspress_core::platform_state::request_logs::TABLE,
+            vec![row],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("the row fits: {e:?}"));
+        assert_eq!(
+            queries.sent() - ran,
+            AUDIT_ROW_STATEMENTS,
+            "the row's statements: the id policy probe, the column list and the insert"
+        );
+        assert_eq!(batches.borrow().len(), 1, "the row reached D1");
+    }
+
+    /// **A write sends no DDL.** A `create` naming a column the table does not
+    /// declare goes to D1 as the one `INSERT`, which D1 then fails with `no
+    /// such column`: the executor reads the table's columns (for its JSON
+    /// columns) and its id policy, and adds nothing. The fake answers the
+    /// insert, so what is counted is what the adapter sent.
+    #[wasm_bindgen_test]
+    async fn a_write_naming_an_undeclared_column_sends_no_ddl() {
+        forget_isolate_schema();
+        let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let queries = D1QueryCount::new();
+        let svc = D1DatabaseService::new(
+            batching_d1_with_columns(
+                BatchAnswer::Succeed,
+                Rc::clone(&batches),
+                &["id", "created_at", "updated_at"],
+            ),
+            "DB",
+            queries.clone(),
+            1000,
+        );
+        let row = std::collections::HashMap::from([(
+            "column_no_migration_declares".to_string(),
+            serde_json::json!("x"),
+        )]);
+        DatabaseService::create_many(&svc, "impresspress__d1test__rows", vec![row])
+            .await
+            .expect("the fake accepts the insert");
+        assert_eq!(
+            queries.sent(),
+            3,
+            "the id policy probe, the column list and the insert; no ALTER"
+        );
+        let batches = batches.borrow();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert!(
+            batches[0][0].starts_with("INSERT INTO")
+                && batches[0][0].contains("column_no_migration_declares"),
+            "{:?}",
+            batches[0]
+        );
     }
 
     /// Run `SELECT 1` through `svc` until it is refused; the statements that
@@ -2451,7 +2231,6 @@ mod tests {
         forget_isolate_schema();
         let request = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
             "DB",
             queries.clone(),
             LIMIT,
@@ -2459,12 +2238,15 @@ mod tests {
         let spent = spend_everything(&request).await;
         let audit = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            true,
             "DB",
             queries.for_reserved_work(),
             LIMIT,
         );
-        DatabaseService::create_many(&audit, "request_logs", rows(1))
+        // A row carrying its own id skips the id policy probe, so it leaves
+        // part of the reservation unused: what the release has to hand back.
+        let mut row = rows(1);
+        row[0].insert("id".to_string(), serde_json::json!("r-1"));
+        DatabaseService::create_many(&audit, "request_logs", row)
             .await
             .expect("the row fits");
         let row = queries.sent() - spent;
@@ -2493,8 +2275,8 @@ mod tests {
                 Rc::new(std::cell::RefCell::new(Vec::new())),
             )
         };
-        let request_a = service(d1(), true, "DB");
-        let request_b = service(d1(), true, "DB");
+        let request_a = service(d1(), "DB");
+        let request_b = service(d1(), "DB");
 
         async fn run(
             svc: &D1DatabaseService,

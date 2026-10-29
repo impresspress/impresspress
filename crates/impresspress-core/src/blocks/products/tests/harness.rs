@@ -37,8 +37,8 @@ pub async fn ctx_with(config: &[(&str, &str)]) -> TestContext {
 ///
 /// Writes through the production database client, so the row must satisfy the
 /// table's schema: NOT NULL columns without a default must be supplied, and
-/// every column named must be one the migrations declare (the fixture runs
-/// strict schema). The db layer stamps `created_at`/`updated_at`, matching
+/// every column named must be one the migrations declare (a write never adds
+/// a column). The db layer stamps `created_at`/`updated_at`, matching
 /// production create behavior.
 pub async fn seed(
     ctx: &TestContext,

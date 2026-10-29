@@ -147,7 +147,8 @@ pub const ROLES_ARE_GRANTS: &str = "016_roles_are_grants";
 ///   always). And the original names are kept, by the user's decision
 ///   (2026-10-29): there are no production users.
 /// - **What that costs.** A native or browser database that served a reset
-///   before strict schema already holds both columns, created lazily. There
+///   before strict schema became the only behaviour already holds both
+///   columns, created lazily. There
 ///   017 fails whole inside its transaction, nothing of it runs, and the
 ///   runner refuses the database by name as drifted schema
 ///   (`Refusal::DriftedSchema`); such a database is recreated. RELEASE.md
@@ -242,12 +243,11 @@ mod strict_upgrade_tests {
     //! ALTERs run right after the base CREATEs). This test covers the path a
     //! LIVE database actually takes when this change deploys: auth tables that
     //! ALREADY exist WITHOUT the `id`/`created_at`/`updated_at` columns
-    //! `db::create` writes (they previously existed only because the runtime's
-    //! lazy column-add materialised them), then the 010 ALTER lands, then
-    //! STRICT_SCHEMA turns lazy column-add OFF. An in-place `CREATE TABLE IF NOT
-    //! EXISTS` edit is a no-op on an existing table, so without 010's ALTER the
-    //! first strict-mode write would fail `no such column` — the regression this
-    //! guards.
+    //! `db::create` writes (they existed only because the runtime's lazy
+    //! column-add, since removed, materialised them), then the 010 ALTER lands.
+    //! An in-place `CREATE TABLE IF NOT EXISTS` edit is a no-op on an existing
+    //! table, so without 010's ALTER the first write would fail `no such
+    //! column` — the regression this guards.
 
     use std::{collections::HashMap, sync::Arc};
 
@@ -345,11 +345,8 @@ mod strict_upgrade_tests {
             "010 must add id + updated_at to the existing sessions table"
         );
 
-        // 4. STRICT_SCHEMA on — the shared executor no longer lazily ADD-COLUMNs.
-        db.set_strict_schema(true);
-
-        // 5. `create` stamps id/created_at/updated_at (the same shape `db::create`
-        //    produces); under strict it INSERTs those columns literally. Before
+        // 4. `create` stamps id/created_at/updated_at (the same shape `db::create`
+        //    produces) and INSERTs those columns literally. Before
         //    010 this failed `no such column: updated_at`. A second user avoids
         //    local_credentials' UNIQUE(user_id).
         db.exec_raw(

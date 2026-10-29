@@ -2007,11 +2007,16 @@ pub mod db {
     /// a block has no separate migration step.
     ///
     /// **`table` must declare `updated_at`.** The host stamps it on every
-    /// write, so a table without it could take no write at all; this refuses
-    /// it here, an `InvalidArgument` naming the column, so the block fails
-    /// when it starts rather than on its first write. A table a block
-    /// creates rows in with [`create`] needs `created_at` as well, which the
-    /// host stamps on insert; a block that only upserts or updates does not.
+    /// write, so a table without it could take no write at all, and the host
+    /// refuses it: `wafer-run`'s `ensure_schema_table` answers
+    /// `database.ensure_table` with an `InvalidArgument` naming the table and
+    /// the column (`exec::require_stamped_columns`), for every guest whatever
+    /// SDK built it. That refusal is the rule; this function applies the same
+    /// one before calling, so the error spells the fix in this SDK's terms
+    /// and costs no host call. Either way the block fails when it starts
+    /// rather than on its first write. A table a block creates rows in with
+    /// [`create`] needs `created_at` as well, which the host stamps on
+    /// insert; a block that only upserts or updates does not.
     pub fn ensure_table(_ctx: &Ctx, table: TableDef) -> Result<(), HostError> {
         if !table
             .columns

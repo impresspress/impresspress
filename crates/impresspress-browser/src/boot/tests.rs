@@ -497,13 +497,13 @@ mod pre_ledger_migrations {
         );
     }
 
-    /// **The password-reset columns take strict writes.** After the boot's
+    /// **The password-reset columns are declared.** After the boot's
     /// pre-build pass over every block's list (auth's 017 included), storing
     /// a reset token, finding the account by it and spending it all succeed
-    /// on real sql.js with strict schema on, as this crate's tests run.
-    /// Without 017 the first write is sql.js's `no such column`.
+    /// on real sql.js. Without 017 the first write is sql.js's `no such
+    /// column`.
     #[wasm_bindgen_test]
-    async fn a_reset_token_is_stored_found_and_spent_under_strict_schema() {
+    async fn a_reset_token_is_stored_found_and_spent_on_the_migrated_schema() {
         let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
         apply_block_migrations(&db)
             .await

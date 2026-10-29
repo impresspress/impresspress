@@ -159,7 +159,8 @@ mod tests {
         let svc =
             make_sqlite_database_service(path.to_str().expect("utf-8 path")).expect("open sqlite");
         svc.exec_raw(
-            "CREATE TABLE dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
+            "CREATE TABLE dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+             created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await

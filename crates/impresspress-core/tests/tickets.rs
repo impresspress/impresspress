@@ -712,15 +712,13 @@ async fn a_refused_dependent_read_is_a_refusal_not_a_default() {
     );
 }
 
-/// Every tickets write path writes, with strict schema on (as every
-/// `TestContext` and every Cloudflare deployment runs): the creation event,
-/// a note, an analysis, a status change's expiry propagated onto the
-/// ticket's events and analyses, and a maintenance pass's status row. Each
-/// names a column the host stamps (`updated_at`, and `created_at` on a
-/// create), which only tickets' 002 declares on `events`, `analyses` and
-/// `maintenance`.
+/// Every tickets write path writes: the creation event, a note, an analysis, a
+/// status change's expiry propagated onto the ticket's events and analyses, and
+/// a maintenance pass's status row. Each names a column the host stamps
+/// (`updated_at`, and `created_at` on a create), which only tickets' 002
+/// declares on `events`, `analyses` and `maintenance`.
 #[tokio::test]
-async fn every_tickets_write_path_writes_under_strict_schema() {
+async fn every_tickets_write_path_writes_on_the_migrated_schema() {
     let ctx = TestContext::with_tickets().await;
     let kind = service::create_type(&ctx, ticket_type("strict-writes"))
         .await

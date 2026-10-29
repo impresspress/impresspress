@@ -19,14 +19,71 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### wafer-run 1272fd63: strict schema is the only behaviour, on every target
+
+**What changes.** The wafer-run pin moves from `f0ca9c79` to `1272fd63`
+(wafer-run #462). The database layer trusts the migrated schema on a native
+server, in the browser (the demo, a dev sandbox) and on Cloudflare alike,
+and there is no switch any more:
+
+- **A write naming a column no migration declared fails**, and adds
+  nothing. The backend answers `no such column` (or `table … has no column
+  named …`), which a block reports as an internal database error, a 500.
+  Before this release native and browser databases added the column on the
+  first write that named it; Cloudflare already refused it.
+- **A read, count or delete against a table no migration created fails**
+  with the backend's `no such table`, instead of answering empty.
+- **A filter, sort or guard naming a column the table lacks** is refused
+  before it is sent, naming the column, on every target. Cloudflare used to
+  skip that check, and SQLite then read the unknown name as a string
+  literal: a filter matched nothing, a sort did not sort.
+- **`WAFER_RUN__DATABASE__STRICT_SCHEMA` and
+  `WAFER_RUN__POSTGRES__STRICT_SCHEMA` are gone.** `impresspress build
+  --target cloudflare` no longer writes the Worker var. A
+  `wrangler_overrides_path` file or a process export that still sets either
+  does nothing; remove it. On native and in the browser the admin's
+  Variables page listed the key under `wafer-run/database`; a row an admin
+  saved for it there is now listed under **Unowned variables** (declared by
+  no block) and does nothing. Delete it there with its delete button.
+- **A sandbox (guest) block whose table does not declare `updated_at` is
+  refused when it is activated.** The host refuses `database.ensure_table`
+  for it, an `InvalidArgument` naming the table and the column, whatever
+  SDK the block was compiled with, so a block compiled before the SDK check
+  of "Schema: every column a write names is declared" (below) is caught
+  too. The fix is the same: add
+  `.column(Column::datetime("updated_at"))` to its `TableDef` and build the
+  block again. A block that creates rows needs `created_at` as well, or its
+  first create fails.
+- **Cloudflare's audit row reserves 3 D1 statements, not 4**, because no
+  write introspects for a lazy column any more: the id policy probe, the
+  column list and the insert. So the lowest
+  `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` a deploy may state is now 4. A
+  D1 `count`, `sum`, `aggregate`, counted delete or increment on a table
+  that nothing else in the isolate has read sends one more statement than
+  before, the column list the name check reads; it is cached per isolate.
+  Two cases read it twice, because the check re-reads an uncached list
+  before it refuses: a checked operation (a filter, sort or guard, or one
+  of those just named) against a table that does not exist, whose empty
+  list is never cached, and one naming a column the table lacks on a cold
+  cache. Both fail anyway; they cost one more statement first.
+
+**Who notices.** Nobody, where every write path is declared: "Schema: every
+column a write names is declared" (below) declared every one the test suites
+and the strict-mode survey before it found. Code of your own (an application block, a sandbox block) that writes
+a column its migrations do not declare now fails that write on native and in
+the browser too. Declare the column in a migration; on a database where an
+earlier build already created it lazily, see "Adding a column a write may
+already have created" in `migration_helper`'s module docs. Cloudflare
+behaves as before apart from the checks and counts above.
+
 ### Schema: every column a write names is declared (auth 017, dev 005, tickets 002, vector 002)
 
 **What was wrong.** The database layer stamps `created_at` on every typed
 insert and `updated_at` on every typed write. Some tables never declared
 the columns a write names. Native and browser databases created such a
-column on the first write that named it (lazy column-add, which is on while
-strict schema is off). Cloudflare runs strict schema, so there the write
-failed:
+column on the first write that named it (lazy column-add, which ran
+wherever strict schema was off, until the entry above made strict the only
+behaviour). Cloudflare ran strict schema, so there the write failed:
 
 - **Password reset, on every Cloudflare deployment.** No migration declared
   `users.reset_token` or `reset_token_expires`. Forgot-password stored
@@ -65,14 +122,14 @@ failed:
   the column, so a block fails when it is activated instead of on its
   first write. The `table` template and the reference page declare
   `created_at` and `updated_at`. A block that is already compiled keeps its
-  old SDK until it is compiled again; then add
+  old SDK until it is compiled again (since the entry above, the host
+  refuses it at activation too); then add
   `.column(Column::datetime("updated_at"))` to its `TableDef`.
   `ensure_table` adds a declared column that an existing table lacks.
 - The test fixtures run with strict schema (every `TestContext`, and every
   database the browser crate's `test_support::fresh_db` hands out), so a
-  tested write naming an undeclared column fails its test.
-  Native and browser deployments still run without it until the pinned
-  wafer-run drops lazy column-add.
+  tested write naming an undeclared column fails its test. Native and
+  browser deployments ran without it until the entry above.
 
 **Two populations, one end state.** On native and in the browser, a
 database that exercised these paths already holds lazily created stamp
@@ -289,7 +346,7 @@ migrating run after the upgrade decides from what the block recorded:
     under a new name.
   - a signal database created on signal's 2026-09-13 first text and next
     migrated on today's list lacks `rooms.id` and `rooms.updated_at`. Writes
-    to rooms fail where strict schema is on (Cloudflare).
+    to rooms fail.
   - on PostgreSQL, a products database from before 2026-07-21 keeps
     `disputes.livemode` in an older declaration.
   The remedy is to recreate the database. In the browser these profiles
@@ -297,7 +354,8 @@ migrating run after the upgrade decides from what the block recorded:
   in the browser's settings.
 - **Drifted:** a file that meets a column a typed write already created (a
   browser profile that wrote with newer code before it migrated, possible
-  where strict schema is off) is refused as drifted, its file rolled back.
+  on native and in the browser until strict schema became the only
+  behaviour) is refused as drifted, its file rolled back.
 
 **Remedy for a refusal.** Nothing is ever erased by the runner.
 
@@ -481,15 +539,11 @@ longer drops it, so device rows survive, as refresh tokens already do.
   re-created, so it is signed out at its next refresh and signs in again.
 - **A database last migrated before 012** (last booted before September
   2026) still has the old `sha256(access_token)`-keyed table, which is no
-  longer converted. What happens next depends on the backend:
-  - **PostgreSQL, or any backend with `WAFER_RUN__DATABASE__STRICT_SCHEMA`
-    on:** every sign-in fails with a `500`.
-  - **SQLite, D1 or the browser on the default settings:** sign-in keeps
-    working, because the missing columns are added on first write. The
-    sessions table then has no key on `family`.
-
-  Either way, recreate that database (pre-1.0 upgrades may require wiping
-  local data).
+  longer converted. Every sign-in on it fails with a `500` (before strict
+  schema became the only behaviour, SQLite and the browser added the
+  missing columns on first write instead, leaving the sessions table with
+  no key on `family`). Recreate that database (pre-1.0 upgrades may require
+  wiping local data).
 - **Cloudflare: this deploy needs a D1 budget of 1000,** for the same reason
   as the 016 upgrade below. Re-running the auth list is 60 statements for
   001–016, more than a budget of 50.
@@ -1469,13 +1523,13 @@ value, URL-encoded (`my%20app`). Nobody else.
 
 **What changes.**
 
-- `WAFER_RUN__DATABASE__STRICT_SCHEMA` and the network limits
-  (`WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`, `…__CONNECT_TIMEOUT_SECS`,
-  `…__READ_TIMEOUT_SECS`, `…__REQUEST_TIMEOUT_SECS`,
-  `…__STREAM_TIMEOUT_SECS`) reach their blocks through each block's start
-  config. Native resolves them from the process environment beneath the
-  variables table; Cloudflare reads STRICT_SCHEMA from the Worker var as
-  before. An invalid network limit now fails the `wafer-run/network` block's
+- The strict-schema switch (removed since; see "wafer-run 1272fd63" above)
+  and the network limits (`WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`,
+  `…__CONNECT_TIMEOUT_SECS`, `…__READ_TIMEOUT_SECS`,
+  `…__REQUEST_TIMEOUT_SECS`, `…__STREAM_TIMEOUT_SECS`) reach their blocks
+  through each block's start config. Native resolves them from the process
+  environment beneath the variables table; Cloudflare read the switch from
+  its Worker var as before. An invalid network limit now fails the `wafer-run/network` block's
   start, naming the key, instead of the process's boot.
 - `/openapi.json` and `/.well-known/agent.json` leave out every block the
   admin toggle has turned off, as `/b/webmcp/manifest.json` already did, and
@@ -2165,12 +2219,13 @@ nothing is backfilled, and nobody is signed out.
 **Without the migration.** Cloudflare deploys always run it. A native
 deployment that skips `--run-migrations` logs the generic `schema drift;
 redeploy with --run-migrations to apply` warning for the files block on each
-boot. With strict schema off (the default there), an upload of a new key still
-works and adds the column. Replacing an object answers `500` until the column
-exists — the take-over checks the row's `claim_id`, and a condition never adds
-a column — so run the migration rather than rely on a first upload. If you have turned
-`WAFER_RUN__DATABASE__STRICT_SCHEMA` **on**, every upload fails on the missing
-column until it runs.
+boot. On that release an upload of a new key still worked there and added the
+column (strict schema was off by default on native). Replacing an object
+answered `500` until the column existed — the take-over checks the row's
+`claim_id`, and a condition never adds a column. Since strict schema became
+the only behaviour (see "wafer-run 1272fd63" above), every upload fails on the
+missing column until the migration runs, and every target runs it before it
+serves.
 
 ### Files: each upload stores its bytes under a key of its own (migration 005) — upgrade with `--run-migrations`
 
@@ -2219,10 +2274,10 @@ as done. Pinned on SQLite by `replay_tests` and on PostgreSQL by the CI step
 that replays the set over seeded rows. Nobody is signed out; files migrations
 touch no auth table.
 
-**Without the migration, and during a rollout.** As for 004: a native
-deployment with strict schema off adds the column on the first upload, one with
-`WAFER_RUN__DATABASE__STRICT_SCHEMA` on fails every upload until 005 runs, and
-Cloudflare deploys always run it. While a rollout is part-way, an isolate still
+**Without the migration, and during a rollout.** As for 004: on that release a
+native deployment added the column on the first upload; since strict schema
+became the only behaviour every upload fails until 005 runs, and every target
+runs it before it serves. While a rollout is part-way, an isolate still
 on the previous release writes a replacement's bytes at the object key and
 leaves `blob_key` as it was, so that row keeps serving the blob it named before
 rather than the replacement, until the next upload of the key. The bytes that
@@ -2781,11 +2836,11 @@ the key still leaves the stored value alone.
 the block's migrations through `/_deploy/init` on every deploy, so a Cloudflare
 deployment gets it without doing anything. A native deployment that skips the
 flag logs the generic `schema drift; redeploy with --run-migrations to apply`
-warning for the llm block on each boot; providers keep working, because a
-native deployment leaves `WAFER_RUN__DATABASE__STRICT_SCHEMA` off and the
-column is then added on the first provider write. If you have turned strict
-schema **on**, the migration is not optional — a provider create or edit will
-fail on the missing column until it runs.
+warning for the llm block on each boot; on that release providers kept
+working, because a native deployment then added the column on the first
+provider write. Since strict schema became the only behaviour (see "wafer-run
+1272fd63" above), a provider create or edit fails on the missing column until
+the migration runs, and every target runs it before it serves.
 
 ### Admin: a user holds each role once (migration 004), and deleting a role revokes it
 

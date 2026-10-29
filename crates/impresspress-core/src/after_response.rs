@@ -79,7 +79,7 @@
 //! request that queued neither (every SSE stream without the `resp.stream`
 //! marker) runs no after-response work at all, so its
 //! [`AUDIT_ROW_STATEMENTS`] stay reserved for the whole stream. That is
-//! four of a thousand, harmless and older than final writes; it is not a
+//! three of a thousand, harmless and older than final writes; it is not a
 //! reason to route final writes through that work.
 
 use std::{
@@ -96,13 +96,12 @@ use wafer_core::interfaces::database::service::DatabaseService;
 use crate::{deferred::DeferredTask, IsolateCell};
 
 /// The most D1 statements writing one audit row with `create_many` sends:
-/// the id-policy probe (the row carries no `id`), the column list the lazy
-/// column-add reads when STRICT_SCHEMA is off, the column list the JSON
-/// column lookup reads, and the insert. The two probes and the column list
-/// are cached per isolate after their first answer, so a warm isolate sends
-/// only the insert. A column the table lacks would add an `ALTER` each; the
-/// table's migration creates every column the row names, so none is counted.
-pub const AUDIT_ROW_STATEMENTS: u64 = 4;
+/// the id-policy probe (the row carries no `id`), the column list the JSON
+/// column lookup reads, and the insert. The probe and the column list are
+/// cached per isolate after their first answer, so a warm isolate sends only
+/// the insert. No write adds a column: the table's migration declares every
+/// column the row names.
+pub const AUDIT_ROW_STATEMENTS: u64 = 3;
 
 /// The statements to reserve for a request's audit row under the
 /// request-log policy `policy` (the raw
@@ -796,7 +795,6 @@ mod tests {
                 schema_columns: forward,
                 schema_drop_table: forward,
                 schema_add_column: forward,
-                set_strict_schema: forward,
                 statement_budget: custom,
             }
 

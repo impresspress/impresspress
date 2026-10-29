@@ -205,7 +205,7 @@ mod tests {
 #[cfg(test)]
 mod planning {
     use wafer_block::db::{Filter, FilterOp};
-    use wafer_sql_utils::{aggregate, ddl, query, Backend};
+    use wafer_sql_utils::{aggregate, query, Backend};
 
     const SQLITE: Backend = Backend::Sqlite;
 
@@ -257,16 +257,6 @@ mod planning {
             stmt.sql,
             r#"UPDATE "items" SET "a_col" = ?, "b_col" = ? WHERE "id" = ?"#
         );
-    }
-
-    /// Lazily added columns are always `TEXT` on SQLite (D1 + sql.js),
-    /// whatever the value a write carries.
-    #[test]
-    fn lazy_column_add_is_text_on_sqlite() {
-        let stmt =
-            ddl::build_add_column_for_value("items", "newcol", &serde_json::json!(42), SQLITE)
-                .expect("a plain column name");
-        assert_eq!(stmt.sql, r#"ALTER TABLE "items" ADD COLUMN "newcol" TEXT"#);
     }
 
     /// `get`-by-id and the table-exists probe both bind their argument rather

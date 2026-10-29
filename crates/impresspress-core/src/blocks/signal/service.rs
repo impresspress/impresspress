@@ -479,21 +479,16 @@ mod tests {
         );
     }
 
-    /// A room is opened and answered with strict schema on, which every
-    /// `TestContext` runs (as every Cloudflare deployment does): the shared
+    /// A room is opened and answered: the shared
     /// `db::create`/`db::update_by_filters_count` defaults name the
     /// synthesized `id` and the stamped `updated_at`, so the migration must
     /// declare both or these writes fail in the backend.
     #[tokio::test]
-    async fn a_room_can_be_opened_and_answered_under_strict_schema() {
+    async fn a_room_can_be_opened_and_answered_on_the_migrated_schema() {
         let ctx = TestContext::with_signal().await;
-        open_room(&ctx, "AB2CD3", &sdp(1), 600)
-            .await
-            .expect("open under strict schema");
+        open_room(&ctx, "AB2CD3", &sdp(1), 600).await.expect("open");
         assert_eq!(offer_for(&ctx, "AB2CD3").await.expect("offer"), sdp(1));
-        answer_room(&ctx, "AB2CD3", &sdp(2))
-            .await
-            .expect("answer under strict schema");
+        answer_room(&ctx, "AB2CD3", &sdp(2)).await.expect("answer");
         assert_eq!(
             take_answer(&ctx, "AB2CD3").await.expect("take"),
             Some(sdp(2))

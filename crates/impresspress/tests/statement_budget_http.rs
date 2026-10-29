@@ -95,7 +95,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            set_strict_schema: forward,
             statement_budget: custom,
         }
 

@@ -310,18 +310,16 @@ impl TestContext {
     /// production `DatabaseBlock` and hand back a context routing
     /// `wafer-run/database` at it.
     ///
-    /// The service runs with strict schema, as every Cloudflare deployment
-    /// does and as every target will once the pinned wafer-run drops the
-    /// lazy alternative: a typed write naming a column no migration declared
-    /// fails in the backend, and a read of a table no migration created is
-    /// the backend's `no such table`. So a fixture has to build the schema
-    /// its code reads, through that code's migrations, and a suite that
-    /// passes here proves every write path is declared.
+    /// The service trusts its schema, as every target does: a typed write
+    /// naming a column no migration declared fails in the backend, and a
+    /// read of a table no migration created is the backend's `no such
+    /// table`. So a fixture has to build the schema its code reads, through
+    /// that code's migrations, and a suite that passes here proves every
+    /// write path it exercises is declared.
     fn over(
         svc: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
         db_file: Option<Arc<TempDbFile>>,
     ) -> Self {
-        svc.set_strict_schema(true);
         let database_block: Arc<dyn Block> = Arc::new(
             wafer_core::service_blocks::database::DatabaseBlock::new(svc.clone()),
         );
@@ -1908,7 +1906,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            set_strict_schema: forward,
             statement_budget: forward,
         }
 
@@ -2001,7 +1998,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            set_strict_schema: forward,
             statement_budget: forward,
         }
 
@@ -5423,13 +5419,13 @@ mod tests {
         assert_eq!(output_json(out).await, serde_json::json!({"ok": true}));
     }
 
-    /// Every `TestContext` runs strict schema: a typed write naming a column
-    /// no migration declared fails in the backend, rather than adding the
-    /// column, and a read of a table no migration created is the backend's
-    /// error, not an empty answer. What lets a green suite say every write
-    /// path is declared.
+    /// A `TestContext` behaves as every target does: a typed write naming a
+    /// column no migration declared fails in the backend, rather than adding
+    /// the column, and a read of a table no migration created is the
+    /// backend's error, not an empty answer. What lets a green suite say
+    /// every write path it exercises is declared.
     #[tokio::test]
-    async fn a_test_context_runs_strict_schema() {
+    async fn a_test_context_refuses_undeclared_columns_and_missing_tables() {
         const TABLE: &str = "impresspress__test__strict_probe";
         let ctx = TestContext::new().await;
         // Test-fixture setup: a table declaring the stamped columns only.

@@ -859,19 +859,7 @@ fn base_toml(cfg: &CloudflareConfig, role: ConfigRole) -> toml::Value {
     );
 
     // Plain worker vars (`env.var(...)`), read at runtime by the CF adapter.
-    // STRICT_SCHEMA on: the D1 database service trusts its migrated schema and
-    // skips the per-op table-exists probe + lazy ADD COLUMN, removing a network
-    // round-trip per logical op on D1. This is a deploy-time operational
-    // decision (not an admin-editable runtime toggle), so it lives here rather
-    // than in the D1 `variables` table. The adapter's `build_runtime` threads
-    // this into the config snapshot so the `wafer-run/database` block applies
-    // it at Init. A consumer that needs the self-healing lazy-schema behavior
-    // can flip it back off via `wrangler_overrides_path`.
     let mut vars = toml::map::Map::new();
-    vars.insert(
-        wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY.into(),
-        Value::String("true".into()),
-    );
     // Every generated config represents code that can actually run
     // (`wrangler dev`, the upload-only candidate, or the final promoted
     // version), so this belongs at the base level rather than only on the

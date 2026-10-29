@@ -112,6 +112,12 @@ jobs:
       - name: Lint — wasm-pack and cargo install --path run the lock check
         run: bash scripts/grep-guard-locked.sh
 
+      # wafer-run has no strict-schema switch any more (strict is the only
+      # behaviour). The compiler catches the removed API; this catches a
+      # Worker var, an env export or a comment that still names the switch.
+      - name: Lint — nothing names the removed strict-schema switch
+        run: bash scripts/grep-guard-strict-schema.sh
+
       # A context stored in block or service state is a reference cycle
       # through the registered blocks: the runtime is never freed. The
       # `Weak` probe tests prove the runtime drops; this points a reviewer at

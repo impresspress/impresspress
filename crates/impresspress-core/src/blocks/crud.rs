@@ -253,9 +253,9 @@ impl std::fmt::Display for Fault {
 /// or `db::create` against a table the request never named, where a
 /// `NotFound` names no row of the caller's and is therefore a 500.
 ///
-/// A missing table is not a `NotFound` on any backend under STRICT_SCHEMA
-/// (every Cloudflare deploy): the statement fails, and that failure is
-/// `Internal`, so it is a 500 whichever way `not_found` is set.
+/// A missing table is not a `NotFound` on any backend: the statement fails,
+/// and that failure is `Internal`, so it is a 500 whichever way `not_found`
+/// is set.
 pub fn classify_db_error(
     error: wafer_run::WaferError,
     not_found: Option<&str>,
@@ -941,15 +941,14 @@ mod db_error_tests {
         TestContext::new().await.running_as("test/ungranted")
     }
 
-    /// Under strict schema — what every Cloudflare deploy runs, and every
-    /// `TestContext` — a statement against a table that does not exist
-    /// reaches native SQLite and fails.
+    /// A statement against a table that does not exist reaches native SQLite
+    /// and fails.
     /// The routes that name a row (`get_record`, `update_record`,
     /// `delete_record`) must answer that as the fault it is, a 500, not as
     /// the caller's missing row. A real missing table, not a hand-built
     /// error: the fixture never creates it.
     #[tokio::test]
-    async fn a_missing_table_under_strict_schema_is_a_500_not_the_callers_404() {
+    async fn a_missing_table_is_a_500_not_the_callers_404() {
         const NEVER_CREATED: &str = "impresspress__crudtest__never_created";
         // Run as the block the table would belong to, so the only thing
         // wrong with each statement is the table it names.
@@ -1046,15 +1045,28 @@ mod db_error_tests {
             &ctx.fixture(),
             &wafer_block::wire::database::TableDef {
                 name: FOREIGN_TABLE.to_string(),
-                columns: vec![wafer_block::wire::database::ColumnDef {
-                    name: "id".to_string(),
-                    kind: "text".to_string(),
-                    nullable: false,
-                    primary_key: true,
-                    auto_increment: false,
-                    unique: false,
-                    default: None,
-                }],
+                // `updated_at` because the host refuses a table without it:
+                // every write stamps it.
+                columns: vec![
+                    wafer_block::wire::database::ColumnDef {
+                        name: "id".to_string(),
+                        kind: "text".to_string(),
+                        nullable: false,
+                        primary_key: true,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                    wafer_block::wire::database::ColumnDef {
+                        name: "updated_at".to_string(),
+                        kind: "datetime".to_string(),
+                        nullable: true,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                ],
                 indexes: vec![],
                 primary_key: vec![],
                 unique_keys: vec![],
