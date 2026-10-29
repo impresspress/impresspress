@@ -73,17 +73,27 @@ pub use declared_keys::filter_to_declared_keys;
 ///
 /// `listener_flow` is the flow the HTTP listener dispatches every request to
 /// ([`IMPRESSPRESS_LISTENER_FLOW`] for impresspress itself); `hooks` add the
-/// consumer's blocks and flows.
+/// consumer's blocks and flows. `port`, when given, replaces the port of the
+/// `IMPRESSPRESS_LISTEN` address (process environment first, then the env
+/// file, then the `0.0.0.0:8090` default) and keeps its host: it is the
+/// `impresspress serve --port` flag.
 ///
 /// Every boot applies the database's pending block migrations before it
 /// serves a request, and refuses to start if one fails (see
-/// [`start_native`]).
-pub async fn run(repo_root: &Path, listener_flow: &str, hooks: AppHooks) -> anyhow::Result<()> {
+/// [`start_native`]). It also refuses to start when its env file cannot
+/// be loaded (see [`load_dotenv`]): a malformed line would otherwise drop
+/// every setting on and after it.
+pub async fn run(
+    repo_root: &Path,
+    listener_flow: &str,
+    hooks: AppHooks,
+    port: Option<u16>,
+) -> anyhow::Result<()> {
     // 1. Load .env file (before reading any env vars). Anchored to
     // `repo_root` so the boot path doesn't depend on the process cwd —
     // mutating cwd globally would leak into anything else this binary
     // (or a future caller) spawns.
-    load_dotenv(repo_root);
+    load_dotenv(repo_root).context("refusing to start: the env file cannot be loaded")?;
 
     // 2. Initialize tracing / logging
     let log_format = std::env::var("IMPRESSPRESS_LOG_FORMAT").unwrap_or_else(|_| "text".into());
@@ -91,7 +101,12 @@ pub async fn run(repo_root: &Path, listener_flow: &str, hooks: AppHooks) -> anyh
     tracing::info!("impresspress starting (Rust/WAFER runtime)");
 
     // 3. Read infrastructure config from IMPRESSPRESS_* env vars
-    let infra = InfraConfig::from_env();
+    let mut infra = InfraConfig::from_env();
+    if let Some(port) = port {
+        infra
+            .override_port(port)
+            .context("apply the --port override")?;
+    }
     tracing::info!(
         listen = %infra.listen,
         db = %infra.db_type,

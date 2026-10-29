@@ -316,11 +316,6 @@ pub const TABLE_EXCLUDED: &[&str] = &[
     tokens::TABLE,
     api_keys::TABLE,
     bootstrap_tokens::TABLE,
-    // The retired JWT blocklist. Migration 005 creates it, but nothing reads
-    // or writes it — an access token is refused once its login family's row
-    // is gone (`crypto::verify_access_token`) — so no repo module names it.
-    // Its rows are instance state like the rest here.
-    "wafer_run__auth__jwt_blocklist",
     oauth_pkce::TABLE,
     pats::TABLE,
     provider_links::TABLE,

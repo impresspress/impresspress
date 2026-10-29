@@ -3,9 +3,10 @@
 //! `lifecycle(Init)` delegates to it) via
 //! [`crate::migration_helper::apply_migrations`].
 //!
-//! Hash-gated apply — runs only when the SQL hash differs from the recorded
-//! `current_hash` in `impresspress__admin__block_settings`. Concatenated SQL of
-//! all migration scripts is hashed and tracked.
+//! Each file runs once, as one transaction with its row in the per-file
+//! migration ledger (`impresspress__admin__applied_migrations`); a release
+//! runs only the files the ledger does not record. `migration_helper`'s
+//! module docs describe the runner.
 
 const SQL_001_SQLITE: &str = include_str!("001_auth_schema.sqlite.sql");
 #[cfg(feature = "postgres")]
@@ -58,6 +59,9 @@ const SQL_016_POSTGRES: &str = include_str!("016_roles_are_grants.postgres.sql")
 const SQL_017_SQLITE: &str = include_str!("017_reset_token_columns.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_017_POSTGRES: &str = include_str!("017_reset_token_columns.postgres.sql");
+const SQL_018_SQLITE: &str = include_str!("018_drop_jwt_blocklist.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_018_POSTGRES: &str = include_str!("018_drop_jwt_blocklist.postgres.sql");
 
 /// Basename of the API-key expiry repair, named once so the migration list
 /// and the test that drives it cannot drift apart.
@@ -157,6 +161,52 @@ pub const ROLES_ARE_GRANTS: &str = "016_roles_are_grants";
 ///   no reset was ever stored.
 pub const RESET_TOKEN_COLUMNS: &str = "017_reset_token_columns";
 
+/// Basename of the migration that drops the retired JWT blocklist.
+///
+/// # The 018 note
+///
+/// `wafer_run__auth__jwt_blocklist` (005) recorded the `jti` of each access
+/// token ended by logout or by revoking a device. It became a second record
+/// of the same end: an access token authenticates only while its login
+/// family's session row is live (`crypto::verify_access_token` reads
+/// `repo::sessions::is_live` and the account's `auth_version`), and both of
+/// the blocklist's writers deleted that row first. Nothing has read or
+/// written the table since (RELEASE.md, "Auth: the JWT blocklist is
+/// retired"), and access tokens carry no `jti`. 018 drops it, and its index
+/// with it.
+///
+/// - **Nobody is signed out.** Every blocklisted `jti` belongs to a family
+///   whose session row is gone and cannot return, so dropping the rows
+///   un-revokes nothing. No foreign key names the table in either direction
+///   (005's `user_id` has no `REFERENCES`), so SQLite's implicit `DELETE`
+///   cascades nowhere; no session, refresh token, API key or account row
+///   changes.
+/// - **A plain `DROP TABLE`, no `IF EXISTS`.** The ledger runs 018 only on a
+///   database that records 001–017, directly or by adoption from a supported
+///   history state, and 005 created the table on every one of them: a fresh
+///   install, a ledger-era database, and every `Applied` state of the
+///   history table, whose compositions all carry 005's `wafer_run__` text.
+///   A database without it was adopted wrongly or edited by hand outside the
+///   app. There the file fails whole inside its transaction, writes no
+///   ledger row and leaves `current_hash` alone, and the runner reports it as
+///   a failed file, not a refusal, carrying the backend's own error (`no
+///   such table: …` on SQLite, `table "…" does not exist` on PostgreSQL).
+///   D1 does not say which statement failed, so there the operator reads the
+///   message rather than a statement. `IF EXISTS` would record 018 as `ran`
+///   over a schema the ledger does not describe.
+/// - **005 and 010 stay as shipped.** A shipped file is immutable: the ledger
+///   pins each file's content hash, so 005 still creates the table and 010
+///   still adds its `id`, `created_at` and `updated_at` columns before 018
+///   drops it on a fresh install.
+/// - **The `suppers_ai__auth__jwt_blocklist` residue** on databases that
+///   crossed from a state before the `wafer_run__` rename is not 018's
+///   concern: no supported state's migrations create it, and the crossing
+///   record (`migration-history-crossing.txt`) already names it harmless
+///   residue.
+///
+/// Tested on both dialects by `test_support::jwt_blocklist_drop`.
+pub const JWT_BLOCKLIST_DROPPED: &str = "018_drop_jwt_blocklist";
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle(Init)` apply path (auth's `init`).
 /// Order here is the apply order.
@@ -178,6 +228,7 @@ pub const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     (API_KEY_EXPIRY_CANONICAL, SQL_015_SQLITE),
     (ROLES_ARE_GRANTS, SQL_016_SQLITE),
     (RESET_TOKEN_COLUMNS, SQL_017_SQLITE),
+    (JWT_BLOCKLIST_DROPPED, SQL_018_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
@@ -203,6 +254,7 @@ pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     (API_KEY_EXPIRY_CANONICAL, SQL_015_POSTGRES),
     (ROLES_ARE_GRANTS, SQL_016_POSTGRES),
     (RESET_TOKEN_COLUMNS, SQL_017_POSTGRES),
+    (JWT_BLOCKLIST_DROPPED, SQL_018_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
 pub const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

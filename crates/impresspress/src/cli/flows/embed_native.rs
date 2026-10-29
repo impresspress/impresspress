@@ -45,7 +45,17 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(repo_root: &Path, release: bool, _port: Option<u16>) -> Result<()> {
+pub async fn serve(repo_root: &Path, release: bool, port: Option<u16>) -> Result<()> {
+    // The server is the app's own binary, which reads its listen address
+    // itself (`IMPRESSPRESS_LISTEN` when it boots through
+    // `impresspress_server::run`): nothing this CLI hands it is guaranteed to
+    // reach its listener, so the flag is refused rather than ignored.
+    if let Some(port) = port {
+        bail!(
+            "--port {port} is not supported for an embedded native app: its own binary \
+             chooses its listen address; set IMPRESSPRESS_LISTEN in its .env instead"
+        );
+    }
     build(repo_root, release).await?;
 
     // Locate target/<profile>/<bin-name>. Read Cargo.toml to find the bin.

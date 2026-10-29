@@ -24,7 +24,9 @@ Open <http://127.0.0.1:8090/b/auth/login> and sign in with `admin@example.com` a
 
 The email and password are read only on the first start, while there are no accounts: they create the admin, and are ignored after that. Set the email without the password (or a `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_TOKEN`) and that first start refuses to run.
 
-Every start applies the database's pending block migrations before the server takes a request, and refuses to start if a block fails to initialize. Before 1.0 an upgrade may require wiping `data/`; a change to auth's migrations signs every user out.
+The same variables can live in a `.env` file in the directory you start from (or the file `IMPRESSPRESS_ENV_FILE` names); a variable already exported wins. `serve --port` replaces the port of `IMPRESSPRESS_LISTEN` and keeps its host.
+
+Every start applies the database's pending block migrations before the server takes a request, and refuses to start if a block fails to initialize or if the `.env` file cannot be read or has a line it cannot parse (quote a value that contains spaces: `KEY="two words"`). Before 1.0 an upgrade may require wiping `data/`; a change to auth's migrations signs every user out.
 
 To pepper password hashes with a key kept outside the database, export
 `IMPRESSPRESS_PASSWORD_PEPPER_KEY` (generate one with `openssl rand -base64 32`

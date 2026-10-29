@@ -628,6 +628,20 @@ const REWRITES: &[(&str, &str, &str, &str)] = &[(
     "014 empties every stored provider token",
 )];
 
+/// The tables a migration file drops on purpose, as `(block, file, table,
+/// why)`: a seeded row there is gone once the upgrade has run that file and
+/// the table is absent from the upgraded schema, and only then. A row whose
+/// table survives the upgrade is still reported lost, so a file that
+/// emptied the table instead of dropping it fails the check.
+/// [`check_states`] fails an entry whose table a fresh install still has,
+/// or whose file the block does not ship: the entry would excuse nothing.
+const RETIRES: &[(&str, &str, &str, &str)] = &[(
+    "wafer-run/auth",
+    crate::blocks::auth::migrations::JWT_BLOCKLIST_DROPPED,
+    "wafer_run__auth__jwt_blocklist",
+    "018 drops the retired JWT blocklist",
+)];
+
 /// One row seeded into one table: how to find it again.
 #[derive(Debug, Clone)]
 pub struct Seeded {
@@ -960,6 +974,14 @@ pub async fn case(
                     && change.starts_with(&format!("{column}: "))
             })
         })
+        .filter(|change| {
+            !RETIRES.iter().any(|(block, file, table, _)| {
+                *block == migrations.block
+                    && ran(file)
+                    && change == table
+                    && !after.tables.contains_key(*table)
+            })
+        })
         .collect();
     let report = CaseReport {
         ledger,
@@ -1072,9 +1094,11 @@ pub struct StatesReport {
 ///
 /// - **supported, direct** (path i): the state's own list run by the old
 ///   runner, stamped, seeded, upgraded. It must converge, every seeded row
-///   must survive with every value it was written with, the ledger must hold the `Applied` files as `adopted`
-///   from the state's hash and the rest as `ran` (nothing, for today's own
-///   list, which takes the fast path), and `current_hash` must be today's;
+///   must survive with every value it was written with (but for the columns
+///   `REWRITES` declares and the tables `RETIRES` declares, once their
+///   file ran), the ledger must hold the `Applied` files as `adopted` from
+///   the state's hash and the rest as `ran` (nothing, for today's own list,
+///   which takes the fast path), and `current_hash` must be today's;
 /// - **supported, from its horizon** — every supported state from the
 ///   block's horizon in order up to this one (path ii, the chain a database
 ///   created at the horizon and migrated at each later visit took): it must
@@ -1107,6 +1131,20 @@ async fn check_block(
         return Ok(());
     }
     let fresh = fresh_install(&new_db().await, backend, migrations).await?;
+    for (_, file, table, why) in RETIRES.iter().filter(|(b, ..)| *b == migrations.block) {
+        if !files.iter().any(|(name, _)| name == file) {
+            report.problems.push(format!(
+                "{} RETIRES ({why}) names {file}, which the block does not ship",
+                migrations.block
+            ));
+        }
+        if fresh.tables.contains_key(*table) {
+            report.problems.push(format!(
+                "{} RETIRES ({why}) names {table}, which a fresh install still has",
+                migrations.block
+            ));
+        }
+    }
     let resolved: Vec<Vec<(String, String)>> = history
         .iter()
         .map(|state| resolve(migrations, backend, state))

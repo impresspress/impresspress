@@ -16,7 +16,7 @@
 //! `tests/dev_blocks.rs` already makes for `"impresspress__products__products"`.
 #![cfg(feature = "block-dev")]
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use impresspress_core::{
     blocks::{
@@ -32,7 +32,8 @@ use impresspress_core::{
     },
     platform_state::{user_roles, variables},
     test_support::{
-        admin_msg, anon_msg, output_http_json, output_http_status, TestContext, WriteLog,
+        admin_msg, anon_msg, migration_history as history, output_http_json, output_http_status,
+        TestContext, WriteLog,
     },
     util::json_map,
 };
@@ -42,6 +43,7 @@ use wafer_core::{
     interfaces::database::service::{DatabaseError, DatabaseService, StatementBudget},
 };
 use wafer_run::Block;
+use wafer_sql_utils::Backend;
 
 // ---------------------------------------------------------------------------
 // Table names this crate keeps private, restated here — see the module docs.
@@ -60,11 +62,12 @@ const LINE_ITEMS_TABLE: &str = "impresspress__products__line_items";
 // Coverage: every declared table has a decision.
 // ---------------------------------------------------------------------------
 
-/// Every table name created by a `CREATE TABLE [IF NOT EXISTS] <name>`
-/// statement anywhere under the three blocks' own migration directories,
-/// less any renamed away by `ALTER TABLE <name> RENAME TO …` —
-/// the ground truth of what tables actually exist, read straight off the
-/// `.sql` files rather than off any Rust-side declaration of them.
+/// The tables a fresh install of the three blocks has: admin's list, then
+/// auth's and products', each applied to an empty SQLite database through
+/// the real runner in boot order (admin first, as every target applies it),
+/// and read back from the migrated schema. That is the ground truth of what
+/// tables exist: whatever the files create, rebuild, rename or drop, in the
+/// order the runner runs them, with nothing to re-derive from the SQL text.
 ///
 /// This is why the coverage test below does not need (and, for auth, has no
 /// other way to get) a `BlockInfo.collections`-style list: `BlockInfo`'s own
@@ -72,89 +75,71 @@ const LINE_ITEMS_TABLE: &str = "impresspress__products__line_items";
 /// call) and, as this test caught once already, can fall behind a table a
 /// migration created — `impresspress__products__stripe_events` (migration
 /// `003_stripe_events`) was never added to `ProductsBlock::info().collections`
-/// at all. Scanning the migrations directly cannot have that gap: a table
-/// with no `CREATE TABLE` here does not exist, and one that exists has no
-/// way to hide from this scan the way it could from a hand-kept list.
-fn tables_created_in_migrations() -> BTreeSet<String> {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut tables = BTreeSet::new();
-    for block in ["products", "admin", "auth"] {
-        let dir = manifest_dir
-            .join("src/blocks")
-            .join(block)
-            .join("migrations");
-        let entries =
-            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
-        for entry in entries {
-            let path = entry.expect("dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sql") {
-                continue;
-            }
-            let sql = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            for line in sql.lines() {
-                let Some(rest) = line.trim_start().strip_prefix("CREATE TABLE") else {
-                    continue;
-                };
-                let rest = rest.trim_start();
-                let rest = rest
-                    .strip_prefix("IF NOT EXISTS")
-                    .map_or(rest, str::trim_start);
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| !c.is_whitespace() && *c != '(')
-                    .collect();
-                assert!(
-                    !name.is_empty(),
-                    "{}: a `CREATE TABLE` line with no table name: {line:?}",
-                    path.display()
-                );
-                tables.insert(name);
-            }
-            // A table created only to be renamed (admin 009 rebuilds
-            // `block_settings` as `…_v2`, then renames it back) never exists
-            // once its file has run.
-            let words: Vec<&str> = sql
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("--"))
-                .flat_map(str::split_whitespace)
-                .collect();
-            for at in 0..words.len().saturating_sub(4) {
-                if words[at].eq_ignore_ascii_case("ALTER")
-                    && words[at + 1].eq_ignore_ascii_case("TABLE")
-                    && words[at + 3].eq_ignore_ascii_case("RENAME")
-                    && words[at + 4].eq_ignore_ascii_case("TO")
-                {
-                    tables.remove(words[at + 2]);
-                }
-            }
-        }
+/// at all. A table the migrated schema has cannot hide from it the way it
+/// could from a hand-kept list.
+///
+/// SQLite only. The export and import run on SQLite, D1 and the browser's
+/// SQLite, never on PostgreSQL, and the two dialects' lists building the
+/// same tables is the business of the migration-history lanes, which
+/// compare every block's PostgreSQL install with its upgrades.
+async fn tables_a_fresh_install_has() -> BTreeSet<String> {
+    let products = ProductsBlock::new().info().name;
+    let order = [
+        impresspress_core::blocks::admin::ADMIN_BLOCK_ID,
+        impresspress_core::blocks::auth::AUTH_BLOCK_ID,
+        products.as_str(),
+    ];
+    // `blocks()` lists admin first, as every target applies it.
+    let blocks: Vec<_> = history::blocks()
+        .into_iter()
+        .filter(|m| order.contains(&m.block))
+        .collect();
+    assert_eq!(
+        blocks.iter().map(|m| m.block).collect::<Vec<_>>(),
+        order,
+        "the three blocks, admin first"
+    );
+    let db: Arc<dyn DatabaseService> = Arc::new(
+        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory().expect("open sqlite"),
+    );
+    for result in history::apply_fresh_blocks(&db, Backend::Sqlite, &blocks).await {
+        result.unwrap_or_else(|e| panic!("a fresh install failed: {e}"));
     }
-    tables
+    history::Schema::read(&db, Backend::Sqlite)
+        .await
+        .expect("read the migrated schema")
+        .tables
+        .into_keys()
+        .collect()
 }
 
-#[test]
-fn every_declared_table_of_the_three_blocks_has_an_export_decision() {
-    let mut declared: BTreeSet<String> = tables_created_in_migrations();
+/// Every name `TABLE_ALLOWLIST` and `TABLE_EXCLUDED` decide on.
+fn decided() -> BTreeSet<&'static str> {
+    data_snapshot::TABLE_ALLOWLIST
+        .iter()
+        .map(|(table, _)| *table)
+        .chain(data_snapshot::TABLE_EXCLUDED.iter().copied())
+        .collect()
+}
+
+#[tokio::test]
+async fn every_declared_table_of_the_three_blocks_has_an_export_decision() {
+    let mut declared: BTreeSet<String> = tables_a_fresh_install_has().await;
     // Cross-checked, not replaced, against the two feature blocks' own
     // advisory `BlockInfo.collections` — a table one of them lists that no
     // migration actually creates would be exactly the "declared but not
-    // real" mirror image of the `stripe_events` gap the migration scan
+    // real" mirror image of the `stripe_events` gap the migrated schema
     // exists to catch, and belongs in this failure too.
     for info in [ProductsBlock::new().info(), AdminBlock::new().info()] {
         declared.extend(info.collections.iter().map(|c| c.name.clone()));
     }
     assert!(
         declared.len() > 40,
-        "the migration scan found {} tables — it lost its way",
+        "the fresh install has {} tables — it lost its way",
         declared.len()
     );
 
-    let decided: BTreeSet<&str> = data_snapshot::TABLE_ALLOWLIST
-        .iter()
-        .map(|(table, _)| *table)
-        .chain(data_snapshot::TABLE_EXCLUDED.iter().copied())
-        .collect();
+    let decided = decided();
     let undecided: Vec<&String> = declared
         .iter()
         .filter(|table| !decided.contains(table.as_str()))
@@ -163,6 +148,24 @@ fn every_declared_table_of_the_three_blocks_has_an_export_decision() {
         undecided.is_empty(),
         "tables with no export decision: {undecided:?} — add each to TABLE_ALLOWLIST or \
          TABLE_EXCLUDED deliberately"
+    );
+}
+
+/// The converse: every decision names a table a fresh install has. A
+/// decision about a table no migration leaves behind (one a migration
+/// dropped, or a misspelling) is dead, and says something false about the
+/// schema.
+#[tokio::test]
+async fn every_export_decision_names_a_table_a_fresh_install_has() {
+    let tables = tables_a_fresh_install_has().await;
+    let dead: Vec<&str> = decided()
+        .into_iter()
+        .filter(|table| !tables.contains(*table))
+        .collect();
+    assert!(
+        dead.is_empty(),
+        "TABLE_ALLOWLIST or TABLE_EXCLUDED names tables a fresh install does not have: \
+         {dead:?} — remove each"
     );
 }
 
@@ -1645,10 +1648,8 @@ fn owned_tables_covers_every_allowlisted_table_with_an_owner_column() {
 
 /// Every SQLite migration of the three blocks, concatenated.
 ///
-/// The same three directories `tables_created_in_migrations` reads, and for
-/// the same reason: the schema is the ground truth for what the import can
-/// actually do, and a Rust-side declaration of it is a second copy that can
-/// fall behind.
+/// The schema is the ground truth for what the import can actually do, and
+/// a Rust-side declaration of it is a second copy that can fall behind.
 fn sqlite_migration_sql() -> String {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
