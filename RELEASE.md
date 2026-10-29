@@ -41,6 +41,12 @@ installing it at once leave one row, and neither fails.
 - **A token that expired unredeemed stays expired.** Configure a different
   token and restart or redeploy. The new token gets its own row. The old
   row stays in the table but can no longer be redeemed.
+- **Configuring a different token does not revoke the old one.** If the old
+  token has not expired, it stays redeemable until its 24 hours run out,
+  even after the new one has created the admin, and it still grants admin as
+  a bearer token. Do not rotate a token to shut out someone who has the old
+  one; wait for it to expire. Making redemption spend every outstanding token
+  is tracked as its own fix.
 - **Upgrading needs no action.** A deployment stuck on this, with the token
   set and no account, starts on the new build. Its row is the one the first
   boot wrote, so if that boot was more than 24 hours ago the token has

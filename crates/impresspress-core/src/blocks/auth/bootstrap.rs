@@ -26,14 +26,23 @@
 //! and a later settings edit cannot fail a running site's `Init`.
 //!
 //! Until then [`run`] runs on every `Init`, and every runtime build runs
-//! `Init`: each native start, each Cloudflare isolate and prepared plan. So
-//! the token step installs a token once, on the first `Init` that sees it,
-//! and every later one finds that row and leaves it alone
-//! ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable for
-//! 24 hours from that first install, however often the runtime is rebuilt; a
-//! token that expired unredeemed stays expired, and the operator configures a
-//! different one. A different token gets its own row; the earlier one is
-//! still redeemable until it expires.
+//! `Init`: each native start, each Cloudflare isolate and prepared plan, each
+//! browser rebuild. So the token step installs a token once, on the first
+//! `Init` that sees it, and every later one finds that row and leaves it
+//! alone ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable
+//! for 24 hours from that first install, however often the runtime is
+//! rebuilt; a token that expired unredeemed stays expired, and the operator
+//! configures a different one.
+//!
+//! Configuring a different token installs a row of its own and does not
+//! revoke the earlier one. That is a known gap, not a design: until the
+//! earlier row expires it can still be redeemed — even after another token
+//! has created the admin, minting a second admin — and it still answers
+//! `AuthServiceImpl::require_role(Admin)` as a bearer. `run` does not revoke
+//! on rotation, because an isolate still on the old config during a rollout
+//! would delete the new row and re-install its own; the fix belongs to
+//! redemption (spend every row once the first account exists) and to
+//! `require_role` (honour a token only while `users` is empty).
 
 use wafer_core::clients::crypto;
 use wafer_run::{context::Context, ErrorCode, WaferError};

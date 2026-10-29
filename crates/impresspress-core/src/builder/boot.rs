@@ -31,9 +31,8 @@ pub const PREPARE_RUNTIME_PLAN_KEY: &str = "IMPRESSPRESS_PREPARE_RUNTIME_PLAN";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPolicy {
     /// Log and continue. The runtime is published even with a broken block, so
-    /// one misconfigured block cannot wedge a whole server. Used by the
-    /// long-lived targets (native, browser), which can be inspected and fixed
-    /// in place.
+    /// one misconfigured block cannot wedge a whole page. Used by the browser,
+    /// whose runtime is long-lived, inspectable and rebuilt on demand.
     Tolerant,
     /// Fail closed on the first failure. Used by the Cloudflare request path:
     /// publishing a runtime with a failed lazy-init slot would let concurrent
@@ -41,7 +40,9 @@ pub enum InitPolicy {
     /// execution model for a request-isolated platform.
     Strict,
     /// Capture every outcome and keep going, so the caller can render the full
-    /// picture. Used by `/_deploy/init`, whose whole product is the report.
+    /// picture. Used by `/_deploy/init`, whose whole product is the report, and
+    /// by the native boot (`impresspress_server::boot_native`), which names
+    /// every failed block and then refuses to start.
     Reported,
 }
 
