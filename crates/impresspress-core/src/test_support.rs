@@ -37,6 +37,7 @@ mod dispatch;
 pub mod dom;
 #[cfg(test)]
 pub mod htmx;
+pub mod jwt_blocklist_drop;
 pub mod migration_history;
 #[cfg(test)]
 mod parity_tests;

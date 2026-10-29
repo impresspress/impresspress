@@ -61,11 +61,10 @@
 //!
 //! Tables that are *near* credentials but hold none are deliberately left
 //! readable, and `tests/admin/sql_explorer_secrets.rs` records why for each:
-//! `sessions` (see below), `jwt_blocklist` (retired and unused; its old rows
-//! are revoked `jti`s, identifiers of tokens rather than tokens),
-//! `block_settings` (`current_hash`/`seed_defaults_hash` are migration-state
-//! digests), `applied_migrations` (`content_sha256` is a digest of a
-//! migration file's statements), `orgs`, `rate_limits`.
+//! `sessions` (see below), `block_settings`
+//! (`current_hash`/`seed_defaults_hash` are migration-state digests),
+//! `applied_migrations` (`content_sha256` is a digest of a migration file's
+//! statements), `orgs`, `rate_limits`.
 //!
 //! `wafer_run__auth__sessions` is the one worth spelling out, because its name
 //! argues for inclusion and its schema does not. It is keyed on the

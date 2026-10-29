@@ -13,6 +13,9 @@
 //!   lazily created column's type, nullability and default included, and
 //!   auth 017 is refused by name where a password reset was stored lazily
 //!   (`impresspress_core::test_support::stamped_columns`).
+//! - **Auth 018** drops the JWT blocklist and nothing else, and on a
+//!   database without the table fails whole with PostgreSQL's own error,
+//!   recording nothing (`impresspress_core::test_support::jwt_blocklist_drop`).
 //! - **Every state upgrades as its entry says:** every supported entry of
 //!   every block's PostgreSQL history, rebuilt with the runner from before
 //!   the ledger and upgraded through today's, converges on a fresh install's
@@ -38,7 +41,9 @@ use std::{
     },
 };
 
-use impresspress_core::test_support::{migration_history as history, stamped_columns};
+use impresspress_core::test_support::{
+    jwt_blocklist_drop, migration_history as history, stamped_columns,
+};
 use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_sql_utils::Backend;
 
@@ -202,6 +207,18 @@ async fn the_stamped_column_files_are_right_for_both_kinds_of_database_on_postgr
         Box::pin(server.database()) as Pin<Box<dyn Future<Output = Arc<dyn DatabaseService>> + '_>>
     };
     let problems = stamped_columns::check(Backend::Postgres, &new_db).await;
+    server.drop_all().await;
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a PostgreSQL server named by IMPRESSPRESS_TEST_POSTGRES_URL"]
+async fn auth_018_drops_the_blocklist_and_nothing_else_on_postgres() {
+    let server = Server::connect("impresspress_auth_018").await;
+    let new_db = || {
+        Box::pin(server.database()) as Pin<Box<dyn Future<Output = Arc<dyn DatabaseService>> + '_>>
+    };
+    let problems = jwt_blocklist_drop::check(Backend::Postgres, &new_db).await;
     server.drop_all().await;
     assert!(problems.is_empty(), "{problems:#?}");
 }

@@ -8,22 +8,24 @@
 //!
 //! - **fresh:** every block's list from empty; each new file runs and is
 //!   recorded `ran`.
-//! - **lazy:** every block's list up to its new file, rows seeded with raw
-//!   SQL that names only the columns that list creates, then the stamped
+//! - **lazy:** every block's list up to its new file (the files before it:
+//!   a real database stood exactly there), rows seeded with raw SQL that
+//!   names only the columns that list creates, then the stamped
 //!   columns as the executor's lazy column-add created them before strict
 //!   schema became the only behaviour (wafer-run `f0ca9c79`): a raw `ALTER
 //!   TABLE … ADD COLUMN "c" TEXT` per column, nullable with no default, the
 //!   definition `column_type_for_value` gave a string on both dialects, and
 //!   the value its write stamped. That definition is the thing the
 //!   PostgreSQL files' `IF NOT EXISTS` rests on. Then today's lists through
-//!   the real runner: no refusal, each new file `ran`, the schema equal to
+//!   the real runner, which runs each new file and every later one, as a
+//!   deployment does: no refusal, each new file `ran`, the schema equal to
 //!   the fresh install's — every column's declared type, nullability and
 //!   default included — and every seeded value where the files say it lands.
 //! - **lazy reset token:** the same, plus a password reset written before
 //!   strict schema. `users` cannot be rebuilt (six cascading foreign keys),
 //!   so auth 017 adds its columns plainly and that database is refused by
-//!   name as drifted schema, 017 unrecorded, while every other block
-//!   upgrades.
+//!   name as drifted schema, 017 and every auth file after it unrecorded,
+//!   while every other block upgrades.
 
 use std::sync::Arc;
 
@@ -77,8 +79,8 @@ fn new_file(migrations: &BlockMigrations) -> Option<&'static str> {
         .map(|(_, file)| *file)
 }
 
-/// Every block's list as it was before its new file: today's, less that
-/// file, which must be the list's last.
+/// Every block's list as it was before its new file: the files before it.
+/// The new file and every later one are left to the upgrade.
 async fn apply_before_new_files(
     db: &Arc<dyn DatabaseService>,
     backend: Backend,
@@ -86,20 +88,10 @@ async fn apply_before_new_files(
     for migrations in history::blocks() {
         let (files, history_rows) = migrations.for_backend(backend);
         let upto = match new_file(migrations) {
-            Some(file) => {
-                let at = files
-                    .iter()
-                    .position(|(name, _)| *name == file)
-                    .ok_or_else(|| format!("{} does not ship {file}", migrations.block))?;
-                if at + 1 != files.len() {
-                    return Err(format!(
-                        "{file} is no longer {}'s last file: this engine applies the list \
-                         before it",
-                        migrations.block
-                    ));
-                }
-                at
-            }
+            Some(file) => files
+                .iter()
+                .position(|(name, _)| *name == file)
+                .ok_or_else(|| format!("{} does not ship {file}", migrations.block))?,
             None => files.len(),
         };
         migration_helper::apply_pending_via_service(
@@ -555,11 +547,24 @@ async fn check_cases(
         }
     }
     check_ran(&reset, Some(auth), "lazy reset token", problems).await;
+    // The refusal stops the block: neither 017 nor any auth file after it
+    // runs.
+    let (auth_files, _) = crate::blocks::auth::migrations::MIGRATIONS.for_backend(backend);
+    let from = auth_files
+        .iter()
+        .position(|(name, _)| *name == reset_file)
+        .ok_or_else(|| format!("auth does not ship {reset_file}"))?;
     match history::ledger(&reset, auth).await {
-        Ok(rows) if rows.iter().any(|r| r.file_name == reset_file) => problems.push(format!(
-            "lazy reset token: {reset_file} is recorded although it was refused"
-        )),
-        Ok(_) => {}
+        Ok(rows) => {
+            for (file, _) in &auth_files[from..] {
+                if rows.iter().any(|r| r.file_name == *file) {
+                    problems.push(format!(
+                        "lazy reset token: {file} is recorded although auth was refused at \
+                         {reset_file}"
+                    ));
+                }
+            }
+        }
         Err(e) => problems.push(format!("lazy reset token: auth ledger: {e}")),
     }
     check_values(&reset, "lazy reset token", problems).await;
