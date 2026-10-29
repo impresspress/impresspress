@@ -59,10 +59,24 @@ export function serviceWorkerStub({ controlled = false, hasRegistration = true }
 // Builds one fresh, isolated instance of the composed script. Each instance
 // gets its own stub `document`/`window`/`fetch`, so no test can leak
 // registered tools or a `generation` count into another.
-export function instantiate({ serviceWorker = undefined, respond } = {}) {
+//
+// `registries` puts WebMCP registries where a browser would: `navigator` for
+// `navigator.modelContext`, `document` for `document.modelContext` (see
+// `registries.mjs` for the shapes). Left out, the stub navigator gets one
+// that records every call in `registerCalls`/`unregisterCalls`.
+export function instantiate({ serviceWorker = undefined, respond, registries } = {}) {
   const fetchCalls = [];
   const registerCalls = [];
   const unregisterCalls = [];
+  const recording = {
+    registerTool(options) {
+      registerCalls.push(options.name);
+    },
+    unregisterTool(name) {
+      unregisterCalls.push(name);
+    }
+  };
+  const placed = registries || { navigator: recording };
 
   const defaultRespond = () => ({
     ok: true,
@@ -73,7 +87,7 @@ export function instantiate({ serviceWorker = undefined, respond } = {}) {
   // Every event the tail dispatched on `window`, by type, in order.
   const windowEvents = [];
   const sandbox = {
-    document: {},
+    document: placed.document ? { modelContext: placed.document } : {},
     window: {
       dispatchEvent(event) {
         windowEvents.push(event.type);
@@ -83,14 +97,7 @@ export function instantiate({ serviceWorker = undefined, respond } = {}) {
     Event,
     navigator: {
       serviceWorker,
-      modelContext: {
-        registerTool(options) {
-          registerCalls.push(options.name);
-        },
-        unregisterTool(name) {
-          unregisterCalls.push(name);
-        }
-      }
+      ...(placed.navigator ? { modelContext: placed.navigator } : {})
     },
     fetch(...args) {
       fetchCalls.push(args);
@@ -116,7 +123,7 @@ export function instantiate({ serviceWorker = undefined, respond } = {}) {
 ${tail}
 return {
   generation: function () { return generation },
-  get registered() { return registered.slice() },
+  get registered() { return registrar.names() },
   refresh,
   whenControlled,
   toolOptions

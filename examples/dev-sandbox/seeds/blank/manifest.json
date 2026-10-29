@@ -25,8 +25,8 @@
     },
     "llms": {
       "path": "llms.txt",
-      "sha256": "2652c337266a1d7efc0f461f03e086a48366ab69b77201e076a7b05450abcd6e",
-      "size": 9220
+      "sha256": "3ee3a62c67b4f88d603bbe428e98df24842c613cedf64912cbe96b75411bbd45",
+      "size": 9277
     }
   }
 }

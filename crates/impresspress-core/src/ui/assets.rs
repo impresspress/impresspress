@@ -249,14 +249,17 @@ pub fn webmcp_js_url() -> String {
 /// The composed WebMCP tool-registration script, served on every page.
 ///
 /// Fetches the auth-filtered manifest at `/b/webmcp/manifest.json` and
-/// registers each tool via `navigator.modelContext.registerTool` (no-ops on
-/// browsers without WebMCP, and on insecure pages). On a service-worker build the first
-/// fetch waits for the worker to take control of the page (see
-/// `assets/webmcp.js`); `window.__impresspressWebmcp.refresh()` re-fetches
-/// the manifest and swaps out whatever this script previously registered.
+/// registers each tool on every WebMCP registry the browser provides —
+/// `navigator.modelContext` (Chrome) and `document.modelContext` (the Codex /
+/// ChatGPT in-app browser) — through `webmcpRegistrar` in `webmcp-core.js`
+/// (no-ops on browsers without WebMCP, and on insecure pages). On a
+/// service-worker build the first fetch waits for the worker to take control
+/// of the page (see `assets/webmcp.js`); `window.__impresspressWebmcp.refresh()`
+/// re-fetches the manifest and swaps out whatever this script previously
+/// registered.
 ///
 /// `build.rs` composes it from `assets/webmcp-core.js` (the shared
-/// `buildRequest`/`toolOptions` fragment) and `assets/webmcp.js` (the tail),
+/// `webmcpRegistrar`/`buildRequest`/`toolOptions` fragment) and `assets/webmcp.js` (the tail),
 /// so this is one `include_str!` of a finished artifact rather than a runtime
 /// `format!` — the same shape `css()` has, and for the same reason: the
 /// manifest hash has to describe the bytes that are actually served, and

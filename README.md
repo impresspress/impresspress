@@ -66,10 +66,10 @@ other suites.
 
 ## WebMCP
 
-Every page Impresspress serves registers its tools with the browser's agent through the WebMCP API. The tools are not hand-written: each block declares typed HTTP endpoints, the runtime projects the ones marked as agent tools into a manifest at `/b/webmcp/manifest.json` (filtered to what the current visitor may call), and a small script turns each manifest entry into a `registerTool` call:
+Every page Impresspress serves registers its tools with the browser's agent through the WebMCP API. The tools are not hand-written: each block declares typed HTTP endpoints, the runtime projects the ones marked as agent tools into a manifest at `/b/webmcp/manifest.json` (filtered to what the current visitor may call), and a small script turns each manifest entry into a `registerTool` call on every registry the browser provides — `navigator.modelContext` (Chrome) and `document.modelContext` (the OpenAI Codex / ChatGPT in-app browser), once if they are the same object:
 
 ```javascript
-navigator.modelContext.registerTool({
+registry.registerTool({
   name: tool.name,                 // e.g. "search_products"
   description: tool.description,   // from the endpoint's doc comment
   inputSchema: tool.inputSchema,   // derived from the endpoint's typed request
@@ -78,10 +78,10 @@ navigator.modelContext.registerTool({
     const response = await fetch(req.url, req.init);
     return { content: [{ type: 'text', text: await response.text() }] };
   }
-});
+}, { signal });                    // aborting it takes the tool back
 ```
 
-- [`crates/impresspress-core/src/ui/assets/webmcp-core.js`](crates/impresspress-core/src/ui/assets/webmcp-core.js) — `buildRequest` and `toolOptions`, the shared half.
+- [`crates/impresspress-core/src/ui/assets/webmcp-core.js`](crates/impresspress-core/src/ui/assets/webmcp-core.js) — `webmcpRegistrar` (finds the browser's registries, registers on each, takes the tools back), `buildRequest` and `toolOptions`: the shared half.
 - [`crates/impresspress-core/src/ui/assets/webmcp.js`](crates/impresspress-core/src/ui/assets/webmcp.js) — registers the site's public tools on every page (also served at the stable `/b/webmcp/webmcp.js` for pages an agent writes itself).
 - [`crates/impresspress-core/src/blocks/dev/assets/dev.js`](crates/impresspress-core/src/blocks/dev/assets/dev.js) — the dev sandbox's page-scoped `dev_*` / `shop_*` tools, registered only on `/b/dev`, plus `dev_compile_block` and `dev_export`.
 - The manifest projection lives in wafer-run's `wafer_core::discovery` (`generate_webmcp_report`, `generate_webmcp_selected`); the sandbox's curated list is [`blocks/dev/tools.rs`](crates/impresspress-core/src/blocks/dev/tools.rs).

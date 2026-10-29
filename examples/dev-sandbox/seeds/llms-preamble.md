@@ -31,8 +31,9 @@ built.
 2. Open `/b/dev/enter`. It signs you in and lands on the workspace page,
    `/b/dev`. There is no form to fill in and there are no credentials to
    type.
-3. Use the tools the workspace page publishes. A browser with WebMCP sees
-   them as tools; a browser without it runs the same tools from the
+3. Use the tools the workspace page publishes. A browser with WebMCP
+   (`navigator.modelContext` or `document.modelContext`) sees them as
+   tools; a browser without it runs the same tools from the
    Tool console on the same page -- see "If your browser has no WebMCP"
    below.
    Either way they are:

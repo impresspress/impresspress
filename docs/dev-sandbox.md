@@ -142,6 +142,10 @@ is doing without leaving the page.
 
 ### Without WebMCP
 
+The page hands its tools to every WebMCP registry the browser provides:
+`navigator.modelContext` (Chrome) and `document.modelContext` (the OpenAI
+Codex / ChatGPT in-app browser). A browser with either has WebMCP.
+
 An agent whose browser has no WebMCP — a cloud browser driving the page, say
 — is not handed the tools, so the page offers them as controls. The **Tool
 console** lists every tool the page publishes (`#dev-console-tool`), shows

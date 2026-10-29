@@ -235,7 +235,8 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // `sandbox` is NOT a prompt-injection boundary, and cannot
                 // be one while this frame carries `allow-same-origin` on
                 // same-origin content: the framed page can read and write
-                // `parent.navigator.modelContext` (including `registerTool`)
+                // the parent's WebMCP registries (`parent.navigator.modelContext`,
+                // `parent.document.modelContext`, including `registerTool`)
                 // and `parent.__impresspressWebmcp` (set by `webmcp.js`,
                 // which every SSR page — this one included — loads), and
                 // per the HTML spec a same-origin frame with both
@@ -612,10 +613,18 @@ mod tests {
             "the console's list must be filled in exactly one place"
         );
         assert_eq!(
-            js.matches("navigator.modelContext.registerTool(").count(),
+            js.matches("webmcp.register(options)").count(),
             1,
             "and WebMCP must be handed tools from that same place"
         );
+        // Every registry the browser provides is reached through the one
+        // helper in webmcp-core.js: no call site asks a registry directly.
+        assert_eq!(
+            js.matches(".registerTool(").count(),
+            1,
+            "only `webmcpRegistrar` calls a registry's registerTool"
+        );
+        assert!(js.contains("[navigator.modelContext, document.modelContext]"));
         // …and the console calls the published `execute`, building no
         // request itself: `buildRequest` is called once, in `toolOptions`
         // (webmcp-core.js).

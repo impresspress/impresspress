@@ -3,27 +3,26 @@
 // The manifest is generated server-side from each block's endpoint
 // declarations and filtered to this session's auth level, so whatever
 // arrives here is exactly what this visitor is allowed to invoke. The
-// script's only job is translating that into registerTool calls.
+// script's only job is translating that into registerTool calls, on every
+// registry the browser provides.
 
-// Browsers without WebMCP get nothing. This ships on every page, so it
-// must never throw on an unsupported browser — or on an insecure page,
-// where Chrome does not expose `navigator.modelContext` at all
-// (`'modelContext' in navigator` is false, which is what the guard reads).
-if (!('modelContext' in navigator) || typeof navigator.modelContext.registerTool !== 'function') {
+// Every registry the browser provides — `navigator.modelContext`,
+// `document.modelContext`, or both (see `webmcpRegistries`, webmcp-core.js).
+// Browsers without WebMCP get nothing. This ships on every page, so it must
+// never throw on an unsupported browser — or on an insecure page, where
+// Chrome does not expose `navigator.modelContext` at all.
+var registrar = webmcpRegistrar();
+if (!registrar.available) {
   return;
 }
 
-function register(tool) {
-  navigator.modelContext.registerTool(toolOptions(tool));
-}
-
-// Names this script itself registered, so `refresh()` can drop exactly what
-// it added rather than guessing at the agent's whole tool set. `generation`
-// counts completed `load()` calls — a caller can poll it to notice a refresh
-// landed without threading a callback through `refresh()`'s promise.
-var registered = [];
+// `generation` counts completed `load()` calls — a caller can poll it to
+// notice a refresh landed without threading a callback through `refresh()`'s
+// promise. What this script itself registered is `registrar`'s to know, so
+// `refresh()` drops exactly what it added rather than guessing at the agent's
+// whole tool set.
 var generation = 0;
-// Whether a `load()` is in flight. A refresh empties `registered` before it
+// Whether a `load()` is in flight. A refresh clears `registrar` before it
 // fetches, so for that while the list says nothing about what the site
 // offers — `count()` reports no number until the load has settled.
 var loading = false;
@@ -35,19 +34,6 @@ var loading = false;
 // nor when a refresh changes the set.
 var LOADED_EVENT = 'impresspress:webmcp-loaded';
 
-function unregisterAll() {
-  if (typeof navigator.modelContext.unregisterTool === 'function') {
-    registered.forEach(function (name) {
-      try {
-        navigator.modelContext.unregisterTool(name);
-      } catch (e) {
-        // already gone
-      }
-    });
-  }
-  registered = [];
-}
-
 function load() {
   loading = true;
   return fetch('/b/webmcp/manifest.json', { credentials: 'same-origin' })
@@ -56,17 +42,21 @@ function load() {
       if (!manifest || !Array.isArray(manifest.tools)) {
         return;
       }
-      // Per-tool try/catch: `registerTool` throwing on one malformed tool
-      // must not abort registration of every tool after it (the outer
-      // `.catch` would swallow it silently, leaving a half-registered page).
-      manifest.tools.forEach(function (tool) {
+      // Per tool: one malformed manifest entry (`toolOptions` throwing) or
+      // one tool a registry refuses must not cost every tool after it (the
+      // outer `.catch` would swallow it silently, leaving a half-registered
+      // page). `register` never rejects — a refusal is part of its answer —
+      // and the load settles only once every registry has answered, so
+      // `count()` states what the browser accepted.
+      return Promise.all(manifest.tools.map(function (tool) {
+        var options;
         try {
-          register(tool);
-          registered.push(tool.name);
+          options = toolOptions(tool);
         } catch (e) {
-          // One tool the browser rejected is not a reason to lose the rest.
+          return null;
         }
-      });
+        return registrar.register(options);
+      }));
     })
     .catch(function () {
       // A failed manifest fetch means no tools. That is a degraded page,
@@ -93,7 +83,7 @@ function load() {
 // can no longer act on, or worse, ones that still work but no longer mean
 // what their description says.
 function refresh() {
-  unregisterAll();
+  registrar.clear();
   return load();
 }
 
@@ -101,10 +91,10 @@ window.__impresspressWebmcp = {
   refresh: refresh,
   generation: function () { return generation; },
   // How many tools this script's last completed load registered with the
-  // browser — only the ones the browser accepted (`load` keeps no others) —
+  // browser — only the ones a registry accepted (`registrar` keeps no others) —
   // or `null` before the first load has settled and while a refresh is in
   // flight, when there is no such number to state.
-  count: function () { return loading || generation === 0 ? null : registered.length; }
+  count: function () { return loading || generation === 0 ? null : registrar.names().length; }
 };
 
 var sw = navigator.serviceWorker;

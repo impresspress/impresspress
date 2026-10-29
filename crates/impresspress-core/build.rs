@@ -139,10 +139,11 @@ const FILE_ASSETS: &[(&str, &str, &str)] = &[
 
 /// The WebMCP script is COMPOSED, not served raw.
 ///
-/// `webmcp-core.js` is a fragment — the shared `buildRequest`/`toolOptions`
-/// logic, with no IIFE and no `'use strict'`. `webmcp.js` is a tail written to
-/// run inside that wrapper. Neither half is a valid script on its own, so the
-/// only bytes that may ever reach a browser are the composed ones.
+/// `webmcp-core.js` is a fragment — the shared `webmcpRegistrar`/
+/// `buildRequest`/`toolOptions` logic, with no IIFE and no `'use strict'`.
+/// `webmcp.js` is a tail written to run inside that wrapper. Neither half is a
+/// valid script on its own, so the only bytes that may ever reach a browser
+/// are the composed ones.
 ///
 /// Composing here rather than at runtime is what keeps the manifest honest:
 /// the hash in `/b/static/webmcp-{hash}.js` is the hash of the bytes actually
