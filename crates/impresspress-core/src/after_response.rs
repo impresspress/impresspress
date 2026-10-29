@@ -79,7 +79,7 @@
 //! request that queued neither (every SSE stream without the `resp.stream`
 //! marker) runs no after-response work at all, so its
 //! [`AUDIT_ROW_STATEMENTS`] stay reserved for the whole stream. That is
-//! four of a thousand, harmless and older than final writes; it is not a
+//! three of a thousand, harmless and older than final writes; it is not a
 //! reason to route final writes through that work.
 
 use std::{

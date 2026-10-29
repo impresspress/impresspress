@@ -112,11 +112,11 @@
 //!
 //! No write adds a column any more, but until 2026-10 a native or browser
 //! database added one on the first typed write that named it, so such a
-//! database may hold a column no migration declared. A new file that adds
-//! such a column is refused as drifted schema on exactly those databases. So before a file
-//! adds a column to an existing table, look for any code that ever wrote it
-//! there, current code and code since removed alike (`git log -S'"<name>"'`),
-//! and choose:
+//! database may hold a column no migration declared. A new file that adds such
+//! a column is refused as drifted schema on exactly those databases. So before
+//! a file adds a column to an existing table, look for any code that ever wrote
+//! it there, current code and code since removed alike (`git log
+//! -S'"<name>"'`), and choose:
 //!
 //! - a **rebuild** of the table (SQLite: a `_v2` table, the rows copied by
 //!   name, the old table dropped, its indexes recreated; PostgreSQL:

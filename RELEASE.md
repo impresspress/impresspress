@@ -41,7 +41,10 @@ and there is no switch any more:
   `WAFER_RUN__POSTGRES__STRICT_SCHEMA` are gone.** `impresspress build
   --target cloudflare` no longer writes the Worker var. A
   `wrangler_overrides_path` file or a process export that still sets either
-  does nothing; remove it.
+  does nothing; remove it. On native and in the browser the admin's
+  Variables page listed the key under `wafer-run/database`; a row an admin
+  saved for it there is now listed under **Unowned variables** (declared by
+  no block) and does nothing. Delete it there with its delete button.
 - **A sandbox (guest) block whose table does not declare `updated_at` is
   refused when it is activated.** The host refuses `database.ensure_table`
   for it, an `InvalidArgument` naming the table and the column, whatever
@@ -58,6 +61,11 @@ and there is no switch any more:
   D1 `count`, `sum`, `aggregate`, counted delete or increment on a table
   that nothing else in the isolate has read sends one more statement than
   before, the column list the name check reads; it is cached per isolate.
+  Two cases read it twice, because the check re-reads an uncached list
+  before it refuses: a checked operation (a filter, sort or guard, or one
+  of those just named) against a table that does not exist, whose empty
+  list is never cached, and one naming a column the table lacks on a cold
+  cache. Both fail anyway; they cost one more statement first.
 
 **Who notices.** Nobody, where every write path is declared: "Schema: every
 column a write names is declared" (below) declared every one the test suites

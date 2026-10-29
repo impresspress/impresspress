@@ -1212,9 +1212,9 @@ mod tests {
     ///
     /// `unchecked_into` only re-types the `JsValue`; it calls nothing on it.
     /// The tests that use it read only the adapter's schema cache, which is
-    /// plain Rust state, so the `undefined` handle is never dereferenced. Constructing a *usable* one needs a workerd D1 binding,
-    /// which neither this runner nor CI has — see the module note above and
-    /// `conformance.rs`.
+    /// plain Rust state, so the `undefined` handle is never dereferenced.
+    /// Constructing a *usable* one needs a workerd D1 binding, which neither
+    /// this runner nor CI has — see the module note above and `conformance.rs`.
     fn never_queried_handle() -> D1Database {
         wasm_bindgen::JsCast::unchecked_into::<D1Database>(JsValue::undefined())
     }
@@ -1256,11 +1256,11 @@ mod tests {
         wasm_bindgen::JsCast::unchecked_into::<D1Database>(handle)
     }
 
-    /// A `get` against a
-    /// table that does not exist reaches D1, which fails the statement. That
-    /// failure is a fault — `Internal`, as native SQLite and PostgreSQL report
-    /// it — and never `NotFound`, which `crud::get_record` would answer as the
-    /// caller's 404 ("no such row") when nothing could be read at all.
+    /// A `get` against a table that does not exist reaches D1, which fails the
+    /// statement. That failure is a fault — `Internal`, as native SQLite and
+    /// PostgreSQL report it — and never `NotFound`, which `crud::get_record`
+    /// would answer as the caller's 404 ("no such row") when nothing could be
+    /// read at all.
     #[wasm_bindgen_test]
     async fn a_get_against_a_missing_table_is_a_fault_not_an_absent_row() {
         for cause in [

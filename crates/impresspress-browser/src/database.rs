@@ -23,18 +23,17 @@
 //!
 //! ## Schema cache
 //!
-//! The shared executor fronts its operations with introspection: a column
-//! list (the JSON columns a row decodes with, and the unknown-column check),
-//! the id policy a `create` mints by, and a primary-key lookup before every
-//! sorted or paged `list`, whose `ORDER BY` ends with the key. Each of those
-//! is a `bridge::db_query_raw` round trip into sql.js, so this backend
-//! memoizes them in [`SCHEMA_CACHE`], one cache for the one database. The
-//! shared defaults invalidate it on every schema change they make
-//! (`exec_raw`, `ensure_schema_table`); the
-//! schema changes made anywhere else invalidate it themselves: this file's own
-//! `schema_drop_table` / `schema_add_column`, `vector::service`'s DDL (through
-//! [`forget_table_schema`]), and `db_init` reopening the database (through
-//! [`forget_schema`]).
+//! The shared executor fronts its operations with introspection: a column list
+//! (the JSON columns a row decodes with, and the unknown-column check), the id
+//! policy a `create` mints by, and a primary-key lookup before every sorted or
+//! paged `list`, whose `ORDER BY` ends with the key. Each of those is a
+//! `bridge::db_query_raw` round trip into sql.js, so this backend memoizes them
+//! in [`SCHEMA_CACHE`], one cache for the one database. The shared defaults
+//! invalidate it on every schema change they make (`exec_raw`,
+//! `ensure_schema_table`); the schema changes made anywhere else invalidate it
+//! themselves: this file's own `schema_drop_table` / `schema_add_column`,
+//! `vector::service`'s DDL (through [`forget_table_schema`]), and `db_init`
+//! reopening the database (through [`forget_schema`]).
 //!
 //! ## The `DatabaseService` impl is a ledger, not a list of forwards
 //!
@@ -289,8 +288,8 @@ where
 ///   more specific and more actionable of the two. The flush is still
 ///   *attempted* — a failed logical operation may have applied some of its
 ///   statements already (an `ensure_schema_table` whose `CREATE TABLE` ran
-///   before a refused `ADD COLUMN`), and skipping the flush would leave those in memory until some unrelated
-///   later mutation happened to write them out.
+///   before a refused `ADD COLUMN`), and skipping the flush would leave those
+///   in memory until some unrelated later mutation happened to write them out.
 pub(crate) fn resolve_flush_outcome<T, E>(op: Result<T, E>, flush: Result<(), E>) -> Result<T, E> {
     match (op, flush) {
         (Ok(v), Ok(())) => Ok(v),

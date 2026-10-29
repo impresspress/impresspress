@@ -35,11 +35,12 @@ pub(crate) fn now() -> String {
 /// A column can arrive in two shapes, and both are flattened here; of the
 /// two points below, the second is the one that matters:
 ///
-/// * A column declared `TEXT` comes back as the literal string on every
-///   backend (SQLite, Postgres, D1, the browser's sql.js). A column declared
-///   JSON — or one an earlier build's lazy column-add created for an
-///   object/array value — comes back already decoded. `RecordExt::str_field` collapses the decoded case to
-///   `""`, which would silently lose a whole manifest, so both are accepted.
+/// * A column declared `TEXT` comes back as the literal string on every backend
+///   (SQLite, Postgres, D1, the browser's sql.js). A column declared JSON — or
+///   one an earlier build's lazy column-add created for an object/array value —
+///   comes back already decoded. `RecordExt::str_field` collapses the decoded
+///   case to `""`, which would silently lose a whole manifest, so both are
+///   accepted.
 /// * Re-encoding a decoded value yields canonical JSON, whereas the literal
 ///   string is whatever was stored. Left alone, the *same manifest* would read
 ///   back differently depending on how its column is declared — and since

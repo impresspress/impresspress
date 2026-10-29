@@ -82,9 +82,9 @@ pub(crate) use impresspress_core::config_vars::{
 /// D1-backed `ConfigSource`: the flow already exists by the time per-block
 /// config is resolvable.
 ///
-/// `IMPRESSPRESS_REQUEST_LOG`, the knob, is here for another reason: that one
-/// does **not** apply to it — it is read per request, long after both exist. It is here
-/// for a different reason: it is an infrastructure key
+/// `IMPRESSPRESS_REQUEST_LOG`, the knob, is read per request, long after the
+/// flow exists, so that reason does **not** apply to it. It is here because it
+/// is an infrastructure key
 /// ([`impresspress_core::config_vars::is_infrastructure_key`]), so
 /// `blocks::config` answers it from the boot map whatever the `variables`
 /// table holds and `CONFIG_SET` refuses to write it. A Worker var is the only

@@ -331,9 +331,8 @@ where
 
     // 5. ConfigSource: D1-backed, resolving each block against one lazily
     //    fetched unfiltered snapshot of the variables table. The overlay layers
-    //    the Env-owned keys (PROTECTED_ENV_KEYS secrets, BUILDER_WORKER_VAR_KEYS
-    //    vars) on top of D1 rows so they never need to be mirrored into the
-    //    variables table.
+    //    worker::Env secrets (PROTECTED_ENV_KEYS) on top of D1 rows so
+    //    secrets never need to be mirrored into the variables table.
     let cfg_source: Arc<dyn wafer_run::ConfigSource> = Arc::new(
         config_source::D1ConfigSource::with_overlay(db.clone(), overlay),
     );
@@ -488,11 +487,12 @@ fn structural_config_inputs(
 /// [`add_request_config`] adds afterwards and which carries its reason as an
 /// argument.
 ///
-/// Returns the config alongside the `ConfigSource` overlay: every Env-owned
-/// key — the secrets and the worker vars — is layered over the D1 `variables`
-/// rows, so a key the Worker environment owns resolves from that environment
-/// for a block's `lifecycle(Init)` config too, and never has to be mirrored
-/// into the table.
+/// Returns the config alongside the `ConfigSource` overlay: the secrets are
+/// layered over the D1 `variables` rows so a secret never has to be mirrored
+/// into that table. Worker vars are not: they are builder-time middleware
+/// input, not per-block config, and a block that declared one as its `Init`
+/// config would then read the admin's saved row, not a Worker var that
+/// silently overrides it.
 fn structural_runtime_config(
     inputs: StructuralConfigInputs,
 ) -> (RuntimeConfig, HashMap<String, String>) {
@@ -503,8 +503,7 @@ fn structural_runtime_config(
         overlay.insert(key.to_string(), value);
     }
     for (key, value) in inputs.worker_vars {
-        config.both(key, value.clone());
-        overlay.insert(key.to_string(), value);
+        config.both(key, value);
     }
     config.both(
         impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
@@ -554,11 +553,13 @@ fn request_config_surfaces(
 
     let mut overlay = HashMap::new();
     extend_with_request_config(&mut config_map, &mut overlay, request_config);
-    // Every Env-owned key is layered over the D1 `variables` rows, as the cold
-    // fill does it: a block's `lifecycle(Init)` config then resolves it from
-    // the environment this request sees, and it never has to be mirrored into
-    // that table.
-    overlay.extend(environment.config_map());
+    // Secrets are layered over the D1 `variables` rows for the same reason the
+    // cold fill does it: a secret then never has to be mirrored into that table.
+    for key in PROTECTED_ENV_KEYS {
+        if let Some(value) = environment.config_value(key) {
+            overlay.insert((*key).to_string(), value.to_string());
+        }
+    }
     (config_map, overlay)
 }
 
@@ -760,7 +761,6 @@ mod tests {
     /// The warm-request fill takes every Env-owned key from THIS request's
     /// capture, so a binding removed since the runtime was built cannot survive
     /// in the map the request's `ConfigService` reads.
-    ///
     #[wasm_bindgen_test]
     fn a_removed_worker_binding_cannot_survive_in_a_warm_requests_config() {
         let csp = impresspress_core::config_vars::CSP_DIRECTIVES_KEY;
@@ -809,30 +809,30 @@ mod tests {
             Some("new-secret"),
             "secrets are layered over the D1 variables rows, as on the cold path",
         );
-        assert!(
-            !overlay.contains_key(csp),
-            "a removed worker var must not reach a block's Init config either",
-        );
     }
 
-    /// The warm-request overlay carries the worker vars this request's
-    /// environment binds, as the cold one does. A block's `lifecycle(Init)`
-    /// config resolves through the `ConfigSource` this overlay feeds, not
-    /// from the `ConfigService` map, and a block first initialised on a warm
-    /// request resolves an Env-owned key here.
+    /// The warm-request overlay carries the secrets this request's environment
+    /// binds and no worker var, as the cold one does: a bound worker var
+    /// reaches the `ConfigService` map, the builder-time surface, and never a
+    /// block's `lifecycle(Init)` config, where it would override the admin's
+    /// saved row.
     #[wasm_bindgen_test]
-    fn a_bound_worker_var_reaches_a_warm_requests_config_source_overlay() {
+    fn a_bound_worker_var_stays_out_of_a_warm_requests_config_source_overlay() {
         let csp = impresspress_core::config_vars::CSP_DIRECTIVES_KEY;
         let mut environment = empty_environment();
         environment.set_csp_directives_for_test("default-src 'self'");
 
-        let (_config, overlay) =
+        let (config, overlay) =
             request_config_surfaces(&environment, &HashMap::new(), &HashMap::new());
 
         assert_eq!(
-            overlay.get(csp).map(String::as_str),
+            config.get(csp).map(String::as_str),
             Some("default-src 'self'"),
-            "a bound worker var must reach a block's Init config",
+            "a bound worker var reaches the request's ConfigService",
+        );
+        assert!(
+            !overlay.contains_key(csp),
+            "a worker var is builder-time input, not a block's Init config",
         );
     }
 
@@ -920,21 +920,20 @@ mod tests {
             config.service_only_keys().is_empty(),
             "no structural key diverges",
         );
-        // Every Env-owned key is also layered over the D1 `variables` rows the
-        // `ConfigSource` resolves against, so a block's Init config reads the
-        // Worker's value, never a table row.
-        for (key, value) in [
-            (impresspress_core::blocks::auth::JWT_SECRET_KEY, "jwt"),
-            (
-                impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
-                "*",
-            ),
-            (
-                impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
-                "default-src 'self'",
-            ),
+        // Secrets are also layered over the D1 `variables` rows the
+        // `ConfigSource` resolves against; worker vars are builder-time
+        // middleware input and deliberately are not.
+        assert_eq!(
+            overlay
+                .get(impresspress_core::blocks::auth::JWT_SECRET_KEY)
+                .map(String::as_str),
+            Some("jwt"),
+        );
+        for key in [
+            impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
+            impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
         ] {
-            assert_eq!(overlay.get(key).map(String::as_str), Some(value), "{key}");
+            assert!(!overlay.contains_key(key), "{key} is not in the overlay");
         }
     }
 

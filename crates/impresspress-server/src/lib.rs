@@ -448,17 +448,17 @@ pub async fn build_native_runtime(
         },
     );
 
-    // The blocks' declared keys resolve from the variables table, then from
-    // the process environment. The table wins where it holds a row: the env
-    // loop in `seed_and_load` has already applied the precedence for every
-    // key impresspress declares. The environment answers the keys only
-    // wafer-run's own service blocks declare — the `WAFER_RUN__NETWORK__*`
-    // limits — which `filter_to_declared_keys` keeps out of the table (they
-    // are operator deploy decisions, not admin-editable rows) and which the
-    // network block reads from its `lifecycle(Init)` config alone: it
-    // consults neither `config_get` nor the process environment itself. Only the exports the
-    // seeder would accept take part (`usable_env_exports`), so one it refuses
-    // — a blank value, a runtime-owned key, a value its key's declared rule
+    // The blocks' declared keys resolve from the variables table, then from the
+    // process environment. The table wins where it holds a row: the env loop in
+    // `seed_and_load` has already applied the precedence for every key
+    // impresspress declares. The environment answers the keys only wafer-run's
+    // own service blocks declare — the `WAFER_RUN__NETWORK__*` limits — which
+    // `filter_to_declared_keys` keeps out of the table (they are operator
+    // deploy decisions, not admin-editable rows) and which the network block
+    // reads from its `lifecycle(Init)` config alone: it consults neither
+    // `config_get` nor the process environment itself. Only the exports the
+    // seeder would accept take part (`usable_env_exports`), so one it refuses —
+    // a blank value, a runtime-owned key, a value its key's declared rule
     // refuses — cannot reach a block's Init this way instead.
     let mut block_config =
         impresspress_core::platform_state::variables::usable_env_exports(app_env);

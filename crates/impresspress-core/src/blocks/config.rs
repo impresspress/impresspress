@@ -212,10 +212,10 @@ pub struct VariablesConfigBlock {
     /// not claim, so a new config op added upstream keeps working here.
     inner: Arc<dyn Block>,
     /// The target's boot map: what the table cannot hold, or must not be
-    /// trusted for. Env and worker bindings, builder-time vars (CORS, CSP),
-    /// the block-settings JSON, runtime markers, and the JWT secret. Native and the browser do
-    /// not copy the variables table into it — this block serves stored
-    /// variables from the table itself.
+    /// trusted for. Env and worker bindings, builder-time vars (CORS, CSP), the
+    /// block-settings JSON, runtime markers, and the JWT secret. Native and the
+    /// browser do not copy the variables table into it — this block serves
+    /// stored variables from the table itself.
     boot: Arc<dyn ConfigService>,
     /// The platform database, held as the raw service rather than reached
     /// through `ctx`.

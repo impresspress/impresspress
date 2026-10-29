@@ -151,9 +151,9 @@ async fn map_index_row(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // The SQLite service stores all auto-created columns as TEXT, so the
-    // numeric registry values arrive as JSON strings (e.g. `"384"`)
-    // rather than numbers. The RecordExt accessors handle both shapes.
+    // A value an earlier build wrote as a string (e.g. `"384"`) can come
+    // back as a JSON string rather than a number; the RecordExt accessors
+    // handle both shapes.
     let dimensions = rec.u64_field("dimensions") as u32;
     let keyword_search = rec.bool_field("keyword_search");
 

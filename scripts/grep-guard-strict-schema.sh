@@ -16,13 +16,14 @@
 # `strict_schema…` name except the `…_strict_schema_columns` migration
 # basenames, which are file names, not the switch).
 #
-# Where it looks: every tracked file under `crates/`, `.github/`, `scripts/`
-# and `examples/`, plus `justfile` and `README.md`. Not RELEASE.md and not
-# `docs/`, which record what earlier releases did. Not the migration files
-# (`*.sql`): auth 010, products 004 and signal 001 explain themselves by the
-# switch in their header comments, and a shipped migration's text is history
-# (its hash and ledger row pin what ran), so it is not rewritten. This
-# script names the pattern, so it is left out too.
+# Where it looks: every tracked file, except:
+#   * RELEASE.md and `docs/`, which record what earlier releases did;
+#   * the six migration files below, named one by one: auth 010, products 004
+#     and signal 001, both dialects, explain themselves by the switch in their
+#     header comments, and a shipped migration's text is history (the ledger
+#     row and the history table pin what ran), so it is not rewritten. Any
+#     other migration, a new one included, is scanned;
+#   * this script, which names the pattern.
 #
 # Usage: scripts/grep-guard-strict-schema.sh  (from anywhere in the repository)
 set -euo pipefail
@@ -47,8 +48,25 @@ self_check() {
 
 self_check || exit 2
 
-if ! files="$(git ls-files -- crates .github scripts examples justfile README.md |
-  grep -v -e '\.sql$' -e '^scripts/grep-guard-strict-schema\.sh$')" || [ -z "$files" ]; then
+exempt=(
+  RELEASE.md
+  scripts/grep-guard-strict-schema.sh
+  crates/impresspress-core/src/blocks/auth/migrations/010_strict_schema_columns.sqlite.sql
+  crates/impresspress-core/src/blocks/auth/migrations/010_strict_schema_columns.postgres.sql
+  crates/impresspress-core/src/blocks/products/migrations/004_strict_schema_columns.sqlite.sql
+  crates/impresspress-core/src/blocks/products/migrations/004_strict_schema_columns.postgres.sql
+  crates/impresspress-core/src/blocks/signal/migrations/001_signal_rooms.sqlite.sql
+  crates/impresspress-core/src/blocks/signal/migrations/001_signal_rooms.postgres.sql
+)
+for f in "${exempt[@]}"; do
+  if [ ! -f "$f" ]; then
+    echo "grep-guard-strict-schema: exempted $f does not exist; update the list" >&2
+    exit 1
+  fi
+done
+
+if ! files="$(git ls-files | grep -v -e '^docs/' | grep -v -x -F -f <(printf '%s\n' "${exempt[@]}"))" ||
+  [ -z "$files" ]; then
   echo "grep-guard-strict-schema: no files found; the file list is broken" >&2
   exit 1
 fi

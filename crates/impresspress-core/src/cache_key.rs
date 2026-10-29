@@ -286,10 +286,10 @@ fn sensitive_check_columns(table: CachedTable) -> Option<(&'static str, &'static
 /// `sensitive` column so this stays in exact parity with the display-masking
 /// path: the SQLite service can hand the flag back as a `"1"` string (from a
 /// `TEXT` column, as every column an earlier build's lazy column-add created
-/// was), a bool, or a float, and a flag-only-sensitive row stored any of those ways must
-/// still be treated as sensitive here, or it would leak into KV while the
-/// display path correctly masks it. See the note in the
-/// body on why `json_as_i64` was the wrong decoder for exactly this.
+/// was), a bool, or a float, and a flag-only-sensitive row stored any of those
+/// ways must still be treated as sensitive here, or it would leak into KV while
+/// the display path correctly masks it. See the note in the body on why
+/// `json_as_i64` was the wrong decoder for exactly this.
 pub fn row_is_sensitive(table: CachedTable, row: &impl RowColumns) -> bool {
     let Some((key_col, sensitive_col)) = sensitive_check_columns(table) else {
         return false;
@@ -758,10 +758,10 @@ mod tests {
 
     #[test]
     fn row_is_sensitive_true_when_flag_set_as_string() {
-        // A `TEXT` column (as every lazily added one was) can round-trip as
-        // "1" rather than a JSON number. `row_is_sensitive` must accept that the same way the
-        // display-masking path (`crate::util::flag_is_set`) does, or a
-        // string-stored sensitive flag would leak into the KV cache while
+        // A `TEXT` column (as every lazily added one was) can round-trip as "1"
+        // rather than a JSON number. `row_is_sensitive` must accept that the
+        // same way the display-masking path (`crate::util::flag_is_set`) does,
+        // or a string-stored sensitive flag would leak into the KV cache while
         // still being masked on display — see the parity note on
         // `row_is_sensitive`.
         let mut r = variables_row("SITE_NAME", 0);
