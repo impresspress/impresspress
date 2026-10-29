@@ -19,6 +19,20 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### wafer-run ddfa6dfe: Admin → Database opens on Cloudflare
+
+**What changes.** The wafer-run pin moves from `1272fd63` to `ddfa6dfe`
+(wafer-run #463, nothing else). The table listing behind Admin → Database
+(`GET /b/admin/api/database/tables`, `/info` and the SSR page) no longer
+lists the internal tables Cloudflare D1 keeps in every database (`_cf_KV`,
+`_cf_METADATA`). D1 refuses to read them, so on Cloudflare the page and the
+`tables` endpoint answered 500 on every load; now they list the
+deployment's own tables. On every target a table whose name merely
+resembles SQLite's reserved `sqlite_` prefix (`sqlite1`, `sqlitex_data`) is
+listed again; the old filter read `_` as a wildcard and hid it.
+
+**What to do.** Nothing.
+
 ### Cloudflare: the site is served at `/`, as on native
 
 **What changes.** `impresspress build/deploy --target cloudflare` stages the

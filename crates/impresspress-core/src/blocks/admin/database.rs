@@ -470,6 +470,47 @@ mod tests {
         assert_eq!(output_http_status(out).await, 404);
     }
 
+    /// An engine's own tables are not the schema's: D1 keeps `_cf_KV` and
+    /// `_cf_METADATA` in `sqlite_master` and answers a read of either with
+    /// `SQLITE_AUTH`, so listing one made the table list count it and the
+    /// database page 500 on Cloudflare. SQLite lets the fixture create the
+    /// table; the listings must still leave it out.
+    #[tokio::test]
+    async fn an_engines_reserved_tables_are_not_listed() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.database_service()
+            .exec_raw(
+                "CREATE TABLE \"_cf_KV\" (key TEXT PRIMARY KEY, value BLOB)",
+                &[],
+            )
+            .await
+            .expect("create D1's internal table");
+        let roles = crate::blocks::admin::ROLES_TABLE;
+
+        let tables = output_json(api(&ctx, "/b/admin/api/database/tables").await).await;
+        let listed: Vec<&str> = tables
+            .as_array()
+            .expect("an array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(listed.contains(&roles), "{listed:?}");
+        assert!(!listed.contains(&"_cf_KV"), "{listed:?}");
+
+        let info = output_json(api(&ctx, "/b/admin/api/database/info").await).await;
+        let listed: Vec<&str> = info["tables"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(listed.contains(&roles), "{listed:?}");
+        assert!(!listed.contains(&"_cf_KV"), "{listed:?}");
+        assert_eq!(info["table_count"], listed.len(), "{info}");
+    }
+
     /// Control: healthy reads answer the tables with counts and the columns.
     #[tokio::test]
     async fn healthy_reads_answer_tables_and_columns() {
