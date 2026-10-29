@@ -1,7 +1,8 @@
 //! Sealed × native: prebuilt server bin already on PATH (this CLI binary).
 //! `build` runs block discovery + frontend asset prep into the runtime's
 //! storage path. `serve` does `build` then boots the in-process server
-//! using cwd's .env via `impresspress_server::run`.
+//! using cwd's .env via `impresspress_server::run`; `--port` replaces the
+//! port of its `IMPRESSPRESS_LISTEN` address.
 
 use std::path::Path;
 
@@ -38,12 +39,13 @@ pub async fn build(repo_root: &Path, _release: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(repo_root: &Path, release: bool, _port: Option<u16>) -> Result<()> {
+pub async fn serve(repo_root: &Path, release: bool, port: Option<u16>) -> Result<()> {
     build(repo_root, release).await?;
     impresspress_server::run(
         repo_root,
         impresspress_server::IMPRESSPRESS_LISTENER_FLOW,
         impresspress_server::AppHooks::none(),
+        port,
     )
     .await
 }
