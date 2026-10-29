@@ -35,7 +35,13 @@ pub enum Command {
         #[arg(long)]
         release: bool,
 
-        /// Override the listen port. Native: from .env. Web: defaults to 8080.
+        /// Override the listen port.
+        ///
+        /// Native: replaces the port of the `IMPRESSPRESS_LISTEN` address
+        /// (process environment, then `.env`, then `0.0.0.0:8090`) and keeps
+        /// its host; refused for an embedded native app, whose own binary
+        /// chooses its address. Web: defaults to 8080. Cloudflare: the
+        /// `wrangler dev` port, defaults to 8787.
         ///
         /// Every target applies pending block migrations before it serves:
         /// a native server at every boot (refusing to start if one fails),
