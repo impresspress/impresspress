@@ -28,7 +28,7 @@ async fn run_refuses_to_start_on_an_unparseable_env_line() {
 
     let outcome = tokio::time::timeout(
         Duration::from_secs(60),
-        run(root, IMPRESSPRESS_LISTENER_FLOW, AppHooks::none()),
+        run(root, IMPRESSPRESS_LISTENER_FLOW, AppHooks::none(), None),
     )
     .await
     .expect("run booted and served instead of refusing to start");

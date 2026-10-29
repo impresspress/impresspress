@@ -97,7 +97,7 @@ fn failing_line(content: &str, text: &str, index: usize) -> Option<usize> {
         end = content[end..]
             .find('\n')
             .map_or(content.len(), |i| end + i + 1);
-        let failed = dotenvy::from_read_iter(content[..end].as_bytes()).find_map(Result::err);
+        let failed = dotenvy::from_read_iter(&content.as_bytes()[..end]).find_map(Result::err);
         if let Some(dotenvy::Error::LineParse(t, i)) = failed {
             if t == text && i == index {
                 return Some(line_of(end - 1));
@@ -396,6 +396,25 @@ impl InfraConfig {
             listener: ListenerEnv::from_vars(|key| std::env::var(key).ok()),
         }
     }
+
+    /// Serve on `port` instead of the port `IMPRESSPRESS_LISTEN` (or its
+    /// default) gives, keeping that address's host. Fails when `listen` has
+    /// no `host:port` shape to replace the port of.
+    pub fn override_port(&mut self, port: u16) -> Result<()> {
+        self.listen = listen_with_port(&self.listen, port)?;
+        Ok(())
+    }
+}
+
+/// `listen` with its port replaced by `port`: the text after the last `:` is
+/// the port, so a bracketed IPv6 host (`[::1]:8090`) keeps its brackets.
+fn listen_with_port(listen: &str, port: u16) -> Result<String> {
+    match listen.rsplit_once(':') {
+        Some((host, _)) if !host.is_empty() => Ok(format!("{host}:{port}")),
+        _ => Err(anyhow!(
+            "{LISTEN_VAR}={listen} is not a host:port address, so its port cannot be replaced"
+        )),
+    }
 }
 
 impl std::fmt::Debug for InfraConfig {
@@ -435,6 +454,26 @@ mod infra_config_tests {
         let shown = format!("{infra:?}");
         assert!(!shown.contains("hunter2"), "{shown}");
         assert!(shown.contains("db.internal:5432/prod"), "{shown}");
+    }
+
+    #[test]
+    fn override_port_keeps_the_host() {
+        for (listen, expected) in [
+            ("127.0.0.1:8090", "127.0.0.1:9123"),
+            ("0.0.0.0:8090", "0.0.0.0:9123"),
+            ("localhost:8090", "localhost:9123"),
+            ("[::1]:8090", "[::1]:9123"),
+        ] {
+            assert_eq!(super::listen_with_port(listen, 9123).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn override_port_refuses_an_address_without_a_port() {
+        for listen in ["8090", ":8090", ""] {
+            let err = super::listen_with_port(listen, 9123).unwrap_err();
+            assert!(err.to_string().contains("IMPRESSPRESS_LISTEN"), "{err}");
+        }
     }
 }
 

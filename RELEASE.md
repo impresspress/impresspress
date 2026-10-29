@@ -19,6 +19,35 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Native: an env file that cannot be loaded stops the boot; `serve --port` works
+
+**What changes.**
+
+- **A native server refuses to start when its `.env` cannot be loaded.**
+  Before, a line it could not parse — typically an unquoted value with a
+  space, `SITE_NAME=My Site` — silently ended the load there: every variable
+  on and after that line was missing (in the reported run, the bootstrap
+  admin was never created) and nothing was logged. Now the boot fails with
+  the file and line number, e.g. `refusing to start: the env file cannot be
+  loaded: /srv/site/.env:4: env file line cannot be parsed, …`. An unreadable
+  `.env` fails the same way. No `.env` at all is still fine.
+- **`IMPRESSPRESS_ENV_FILE` must name an existing file**, read relative to the
+  process cwd as documented. A missing one used to print a warning and boot
+  without it, and a relative name was also searched for in parent
+  directories; now it stops the boot.
+- **`impresspress serve --port N` now sets a sealed native server's port**,
+  keeping the host of `IMPRESSPRESS_LISTEN` (`0.0.0.0` by default). It used
+  to be ignored. For an embedded native app (your own binary) the flag is
+  refused: that binary chooses its own address.
+- **Embedders:** `impresspress_server::run` takes a fourth argument, the port
+  override (`None` keeps `IMPRESSPRESS_LISTEN`), and
+  `impresspress_native::load_dotenv` returns a `Result` the caller must not
+  boot past.
+
+**What to do.** Quote any `.env` value that contains spaces
+(`KEY="two words"`) and check that a configured `IMPRESSPRESS_ENV_FILE`
+exists, then restart.
+
 ### wafer-run 1272fd63: strict schema is the only behaviour, on every target
 
 **What changes.** The wafer-run pin moves from `f0ca9c79` to `1272fd63`
