@@ -1,31 +1,110 @@
 //! Environment-variable bootstrap helpers for native WAFER apps.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    io,
+    path::{Path, PathBuf},
+};
 
-/// Load `.env` from `dir`. Honors `IMPRESSPRESS_ENV_FILE` for an explicit
-/// path (absolute or relative to the current process cwd); otherwise
-/// looks for `<dir>/.env`. Failures on the explicit-path form are logged
-/// to stderr but do not abort. The default form silently skips when no
-/// `.env` file is present, matching `dotenvy::dotenv` semantics.
+use anyhow::{anyhow, Context, Result};
+
+/// Names an env file to load in place of `<dir>/.env`.
+const ENV_FILE_VAR: &str = "IMPRESSPRESS_ENV_FILE";
+
+/// Load the env file into the process environment. Honors
+/// `IMPRESSPRESS_ENV_FILE` for an explicit path (absolute or relative to the
+/// current process cwd); otherwise loads `<dir>/.env`. A variable already
+/// set in the process environment keeps its value.
+///
+/// `<dir>/.env` is optional: when there is none, nothing is loaded and this
+/// returns `Ok`. Every other failure is an error — a file that cannot be
+/// read, a line that cannot be parsed, or an `IMPRESSPRESS_ENV_FILE` that
+/// names no file — because each one leaves the process running without
+/// settings the operator wrote down: a parse error stops the load at that
+/// line, so every variable on or after it (a bootstrap admin, a database
+/// path) would silently be missing. The caller must not boot on an error.
+/// The message names the file and, for a parse error, the line number; it
+/// never quotes the line, which can hold a secret.
 ///
 /// Taking the dir explicitly (instead of relying on `dotenvy::dotenv`'s
 /// implicit cwd walk) lets the CLI pin the env-file lookup to the
 /// detected repo root without mutating global process state via
 /// `std::env::set_current_dir`.
-pub fn load_dotenv(dir: &Path) {
-    if let Ok(path) = std::env::var("IMPRESSPRESS_ENV_FILE") {
-        match dotenvy::from_filename(&path) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("warning: failed to load env file '{path}': {e}");
+pub fn load_dotenv(dir: &Path) -> Result<()> {
+    match std::env::var_os(ENV_FILE_VAR) {
+        Some(path) => load_env_file(&PathBuf::from(path), Presence::Required)
+            .with_context(|| format!("{ENV_FILE_VAR} names an env file that cannot be loaded")),
+        None => load_env_file(&dir.join(".env"), Presence::Optional),
+    }
+}
+
+/// Whether a missing env file is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    /// The default `<dir>/.env`: absent means "no env file".
+    Optional,
+    /// A file the operator named: absent is an error.
+    Required,
+}
+
+/// Read `path` and load its variables; see [`load_dotenv`].
+fn load_env_file(path: &Path, presence: Presence) -> Result<()> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && presence == Presence::Optional => {
+            return Ok(())
+        }
+        Err(e) => return Err(anyhow!(e).context(format!("read env file {}", path.display()))),
+    };
+    match dotenvy::from_read(content.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(dotenvy::Error::LineParse(text, index)) => {
+            let at = match failing_line(&content, &text, index) {
+                Some(n) => format!("{}:{n}", path.display()),
+                None => path.display().to_string(),
+            };
+            Err(anyhow!(
+                "{at}: env file line cannot be parsed, so it and every line after it \
+                 were not loaded (quote a value that contains spaces, e.g. KEY=\"two words\", \
+                 and close every quote)"
+            ))
+        }
+        Err(e) => Err(anyhow!(e).context(format!("load env file {}", path.display()))),
+    }
+}
+
+/// The 1-based physical line of `content` that dotenvy failed on with
+/// `LineParse(text, index)`.
+///
+/// dotenvy reports no position, and its `text` is not reliably the line: a
+/// bad value reports only the value, and a trailing comment is cut off. So
+/// the line is found by parsing again (without touching the environment):
+/// it is the first physical line `L` such that lines `1..=L` alone fail with
+/// the same error the whole file did. Every logical line before the failing
+/// one parsed, and a prefix cut inside a multi-line value fails differently
+/// (with that value's quote open). One case reports differently:
+/// a quote (or trailing backslash) left open runs to the end of the file, so
+/// dotenvy hands back the rest of the file from where the open value's line
+/// starts, which locates that line directly.
+fn failing_line(content: &str, text: &str, index: usize) -> Option<usize> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let line_of = |offset: usize| content[..offset].matches('\n').count() + 1;
+    if index == text.len() && !text.is_empty() && content.ends_with(text) {
+        return Some(line_of(content.len() - text.len()));
+    }
+    let mut end = 0;
+    while end < content.len() {
+        end = content[end..]
+            .find('\n')
+            .map_or(content.len(), |i| end + i + 1);
+        let failed = dotenvy::from_read_iter(content[..end].as_bytes()).find_map(Result::err);
+        if let Some(dotenvy::Error::LineParse(t, i)) = failed {
+            if t == text && i == index {
+                return Some(line_of(end - 1));
             }
         }
-        return;
     }
-    let candidate = dir.join(".env");
-    if candidate.is_file() {
-        let _ = dotenvy::from_path(&candidate);
-    }
+    None
 }
 
 /// Collect env vars that look like app config — i.e. any key containing
@@ -93,6 +172,124 @@ mod tests {
     fn filter_app_env_vars_empty_iterator_returns_empty_map() {
         let out = filter_app_env_vars(std::iter::empty());
         assert!(out.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod env_file_tests {
+    //! Each test loads keys no other test uses: loading writes the process
+    //! environment, which every test in this binary shares.
+
+    use super::*;
+
+    fn write(dir: &tempfile::TempDir, content: &str) -> PathBuf {
+        let path = dir.path().join(".env");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_missing_default_env_file_loads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        load_env_file(&dir.path().join(".env"), Presence::Optional).unwrap();
+    }
+
+    #[test]
+    fn a_missing_named_env_file_is_an_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prod.env");
+        let err = load_env_file(&path, Presence::Required).unwrap_err();
+        let shown = format!("{err:#}");
+        assert!(shown.contains(&path.display().to_string()), "{shown}");
+    }
+
+    #[test]
+    fn a_well_formed_env_file_loads_without_overriding_the_process_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ENV_FILE_TEST_WELL_FORMED_KEPT", "from-process");
+        let path = write(
+            &dir,
+            "# comment\n\nENV_FILE_TEST_WELL_FORMED=\"two words\"\n\
+             ENV_FILE_TEST_WELL_FORMED_KEPT=from-file\n",
+        );
+        load_env_file(&path, Presence::Optional).unwrap();
+        assert_eq!(
+            std::env::var("ENV_FILE_TEST_WELL_FORMED").unwrap(),
+            "two words"
+        );
+        assert_eq!(
+            std::env::var("ENV_FILE_TEST_WELL_FORMED_KEPT").unwrap(),
+            "from-process"
+        );
+    }
+
+    /// The reported bug: an unquoted value with a space stopped the load at
+    /// that line, so the bootstrap admin on a later line was never created,
+    /// and nothing said so.
+    #[test]
+    fn an_unparseable_line_is_an_error_naming_file_and_line_but_not_its_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "ENV_FILE_TEST_BAD_BEFORE=ok\n\
+             # a comment counts as a line\n\
+             ENV_FILE_TEST_BAD_SECRET=hunter2 hunter3\n\
+             ENV_FILE_TEST_BAD_AFTER=never-loaded\n",
+        );
+        let err = load_env_file(&path, Presence::Optional).unwrap_err();
+        let shown = format!("{err:#}");
+        assert!(shown.contains(&format!("{}:3:", path.display())), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(std::env::var("ENV_FILE_TEST_BAD_AFTER").is_err());
+    }
+
+    #[test]
+    fn an_unreadable_env_file_is_an_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: present, but not readable as
+        // one.
+        let path = dir.path().join(".env");
+        std::fs::create_dir(&path).unwrap();
+        let err = load_env_file(&path, Presence::Optional).unwrap_err();
+        let shown = format!("{err:#}");
+        assert!(shown.contains(&path.display().to_string()), "{shown}");
+    }
+
+    /// The line dotenvy failed on, for `content`.
+    fn line_of_error(content: &str) -> Option<usize> {
+        match dotenvy::from_read_iter(content.as_bytes()).find_map(Result::err) {
+            Some(dotenvy::Error::LineParse(text, index)) => failing_line(content, &text, index),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failing_line_counts_physical_lines_past_crlf_and_blank_lines() {
+        assert_eq!(line_of_error("A=1\r\n\r\nB=x y\r\nC=2\r\n"), Some(3));
+    }
+
+    #[test]
+    fn failing_line_is_found_when_dotenvy_reports_only_the_value() {
+        // dotenvy's error text is `x y`, which also appears on line 1.
+        assert_eq!(line_of_error("A=\"x y\"\nB=x y\n"), Some(2));
+    }
+
+    #[test]
+    fn failing_line_is_found_past_a_trailing_comment_and_a_multi_line_value() {
+        assert_eq!(
+            line_of_error("A=\"one\ntwo\"\nB=x y # note\nC=1\n"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn failing_line_is_found_without_a_final_newline() {
+        assert_eq!(line_of_error("A=1\nB=x y"), Some(2));
+    }
+
+    #[test]
+    fn failing_line_of_an_unclosed_quote_is_where_it_opens() {
+        assert_eq!(line_of_error("A=1\nB=\"open\nstill open\n"), Some(2));
     }
 }
 
