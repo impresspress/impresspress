@@ -285,7 +285,7 @@ async fn seeded_before_llms() -> TestContext {
     seed_info::set_llms_published(&ctx, None)
         .await
         .expect("nothing published");
-    wafer_core::clients::storage::delete(&ctx, publisher::SITE_FOLDER, seed::LLMS_PATH)
+    wafer_core::clients::storage::delete(&ctx, &publisher::site_folder(), seed::LLMS_PATH)
         .await
         .expect("remove the published file");
     assert!(published_llms(&ctx).await.is_none());

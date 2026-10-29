@@ -19,6 +19,41 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: the site is served at `/`, as on native
+
+**What changes.** `impresspress build/deploy --target cloudflare` stages the
+site directory (`frontend/build/`, else `public/` — the same one the native
+flows copy) under the storage folder `wafer-run/web/site`, the folder
+`wafer-run/web` serves `/**` from. Before, it staged `public/` under logical
+keys `public/…`, which nothing reads, so a Cloudflare deploy answered `/` and
+every site path with a 404 while native served the site. `frontend/build/`
+was not staged at all. `dist/` and `content/` are still staged under their
+own names. The deploy log now names the site directory it staged.
+
+**Who notices.**
+
+- **A consumer with a `public/` (or `frontend/build/`) site:** the site is
+  served after the next deploy. `/` itself serves it only with
+  `WAFER_RUN_SHARED__HAS_LANDING_PAGE=true` (default `false` on every server
+  target; see the README's "Serving your own site").
+- **A repo with both `frontend/build/` and `public/`** now serves
+  `frontend/build/` on Cloudflare, as native always did, and no longer
+  uploads `public/` at all.
+- **A consumer that worked around this with `cloudflare.r2.release_assets_dir
+  = "public"` + `release_assets_prefix = "wafer-run/web/site"`:** every
+  deploy now fails with an `R2 release asset key collision`, because the same
+  files are staged twice. Remove both lines; the site is staged there
+  without them. A workaround that pointed `release_assets_dir` at a directory
+  other than the site directory keeps working as long as no file in it has
+  the same path as one in the site.
+- **`cloudflare.r2.release_assets_exclude` patterns written for site files**
+  must now match `wafer-run/web/site/…` instead of `public/…`; a `public/…`
+  pattern matches nothing any more.
+- **A consumer block that read the storage folder `public`** (none in this
+  repository or its known consumers) no longer finds those keys. Ship that
+  directory explicitly: `release_assets_dir = "public"` +
+  `release_assets_prefix = "public"`.
+
 ### Auth: the retired JWT blocklist table is dropped (auth 018)
 
 **What changes.** Auth's new migration `018_drop_jwt_blocklist` drops

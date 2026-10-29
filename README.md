@@ -44,6 +44,21 @@ If you commit from this checkout, point git at the repository's hooks once so fo
 git config core.hooksPath .githooks
 ```
 
+### Serving your own site
+
+A repo's own static site is `frontend/build/` if it exists, else `public/`.
+Every server target puts it in the storage folder `wafer-run/web/site`, which
+the `wafer-run/web` block serves for any path no block claims: `impresspress
+build`/`serve --target native` copy it to `data/storage/wafer-run/web/site/`,
+and `--target cloudflare` uploads it to R2 under that folder.
+
+`/` itself is the router's, not the site's: it redirects to the login page
+(or the user portal when signed in) unless `WAFER_RUN_SHARED__HAS_LANDING_PAGE`
+is `true`, in which case it serves the site's `index.html`. It defaults to
+`false` on every server target (a browser sandbox build turns it on). Set it like any shared variable, on the admin's
+Variables page (`/b/admin/settings/variables`) on any target, or natively
+in the environment (`.env`) as well.
+
 ### Running the tests
 
 ```sh

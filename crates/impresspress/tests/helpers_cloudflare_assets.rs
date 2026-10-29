@@ -2,8 +2,9 @@ use std::{fs, path::Path};
 
 #[cfg(feature = "embed-assets")]
 use impresspress::cli::helpers::cloudflare::assets::ui_asset_entries;
-use impresspress::cli::helpers::cloudflare::assets::{
-    release_manifest_from_staged_dir, resolve_asset_base_url, stage,
+use impresspress::cli::helpers::{
+    cloudflare::assets::{release_manifest_from_staged_dir, resolve_asset_base_url, stage},
+    frontend,
 };
 use tempfile::tempdir;
 
@@ -44,30 +45,24 @@ fn release_assets_carry_their_type_and_a_utf8_charset() {
 }
 
 #[test]
-fn stage_copies_dist_and_content_skips_missing_public() {
+fn stage_copies_dist_and_content_under_their_own_names() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     fs::create_dir_all(root.join("dist/sub")).unwrap();
     fs::write(root.join("dist/index.html"), "hello").unwrap();
     fs::write(root.join("dist/sub/app.js"), "console.log(1);").unwrap();
-    fs::create_dir_all(root.join("content")).unwrap();
-    fs::write(root.join("content/page.md"), "# hi").unwrap();
-    // public/ intentionally missing
+    // content/ intentionally missing
 
     let out = root.join("target/impresspress-cloudflare");
     fs::create_dir_all(&out).unwrap();
 
     let report = stage(root, &out, None, Path::new(""), &[]).unwrap();
-    assert_eq!(report.files_copied, 3);
-    assert!(
-        report.dirs_skipped.contains(&"public"),
-        "expected 'public' in skipped dirs: {:?}",
-        report.dirs_skipped
-    );
+    assert_eq!(report.files_copied, 2);
+    assert_eq!(report.dirs_skipped, vec!["content"]);
+    assert!(report.site_dir.is_none());
 
     assert!(out.join("assets/dist/index.html").is_file());
     assert!(out.join("assets/dist/sub/app.js").is_file());
-    assert!(out.join("assets/content/page.md").is_file());
 }
 
 #[test]
@@ -77,7 +72,101 @@ fn stage_returns_zero_files_when_no_dirs_present() {
     fs::create_dir_all(&out).unwrap();
     let report = stage(tmp.path(), &out, None, Path::new(""), &[]).unwrap();
     assert_eq!(report.files_copied, 0);
-    assert_eq!(report.dirs_skipped.len(), 3);
+    assert_eq!(report.dirs_skipped, vec!["dist", "content"]);
+    assert!(report.site_dir.is_none());
+}
+
+/// The release set's logical keys, sorted.
+fn staged_keys(out: &Path) -> Vec<String> {
+    let release = release_manifest_from_staged_dir(&out.join("assets")).unwrap();
+    release.files.into_iter().map(|e| e.logical_key).collect()
+}
+
+/// Regression: a consumer's `public/` was staged under `public/…`, a storage
+/// folder nothing reads, so `/` answered 404 on Cloudflare while native
+/// served the same site. It lands in the folder `wafer-run/web` serves
+/// (`web_root = "site"` under the block's own namespace).
+#[test]
+fn stage_puts_the_public_site_where_the_web_block_serves_it() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("public/images")).unwrap();
+    fs::write(root.join("public/index.html"), "<h1>shop</h1>").unwrap();
+    fs::write(root.join("public/images/cat.png"), "png").unwrap();
+    let out = root.join("target/impresspress-cloudflare");
+
+    stage(root, &out, None, Path::new(""), &[]).unwrap();
+
+    assert_eq!(
+        staged_keys(&out),
+        vec![
+            "wafer-run/web/site/images/cat.png",
+            "wafer-run/web/site/index.html",
+        ]
+    );
+}
+
+/// The Cloudflare deploy and the native flows agree on both halves: the
+/// same directory is the site (`frontend/build/` over `public/`), and it
+/// lands in the same storage folder.
+#[test]
+fn stage_and_native_flows_share_the_site_dir_and_its_folder() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("frontend/build")).unwrap();
+    fs::write(root.join("frontend/build/index.html"), "built").unwrap();
+    fs::create_dir_all(root.join("public")).unwrap();
+    fs::write(root.join("public/index.html"), "raw").unwrap();
+    let out = root.join("target/impresspress-cloudflare");
+
+    let report = stage(root, &out, None, Path::new(""), &[]).unwrap();
+    frontend::stage_native_site(root).unwrap();
+
+    assert_eq!(report.site_dir, frontend::find_frontend_dir(root));
+    assert!(report.site_dir.unwrap().ends_with("frontend/build"));
+    assert_eq!(
+        staged_keys(&out),
+        vec![format!("{}/index.html", frontend::SITE_STORAGE_FOLDER)]
+    );
+    let native = frontend::native_site_dir(root);
+    assert_eq!(
+        native.strip_prefix(root.join("data/storage")).unwrap(),
+        Path::new(frontend::SITE_STORAGE_FOLDER)
+    );
+    assert_eq!(
+        fs::read(native.join("index.html")).unwrap(),
+        fs::read(
+            out.join("assets")
+                .join(frontend::SITE_STORAGE_FOLDER)
+                .join("index.html")
+        )
+        .unwrap()
+    );
+}
+
+/// A configured release-assets directory aimed at the site folder (the
+/// workaround before the site was staged there) still deploys; one that
+/// writes the same key as the site is refused rather than silently winning.
+#[test]
+fn stage_refuses_a_release_assets_dir_overwriting_the_site() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("site-release")).unwrap();
+    fs::write(root.join("site-release/index.html"), "release").unwrap();
+    let out = root.join("target/impresspress-cloudflare");
+    let prefix = Path::new(frontend::SITE_STORAGE_FOLDER);
+
+    let report = stage(root, &out, Some(Path::new("site-release")), prefix, &[]).unwrap();
+    assert!(report.site_dir.is_none());
+    assert_eq!(
+        staged_keys(&out),
+        vec![format!("{}/index.html", frontend::SITE_STORAGE_FOLDER)]
+    );
+
+    fs::create_dir_all(root.join("public")).unwrap();
+    fs::write(root.join("public/index.html"), "public").unwrap();
+    let err = stage(root, &out, Some(Path::new("site-release")), prefix, &[]).unwrap_err();
+    assert!(err.to_string().contains("key collision"), "got: {err}");
 }
 
 #[test]

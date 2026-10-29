@@ -15,6 +15,36 @@ const WEB_BLOCK: &str = "wafer-run/web";
 const CORS_BLOCK: &str = "wafer-run/cors";
 const SECURITY_HEADERS_BLOCK: &str = "wafer-run/security-headers";
 
+/// The `web_root` the site-main flow gives `wafer-run/web`: the folder,
+/// inside the web block's own storage namespace, it serves the site from.
+pub const SITE_WEB_ROOT: &str = "site";
+
+/// Where a deployment's site lives in storage, on every target: the folder
+/// `wafer-run/web` reads [`SITE_WEB_ROOT`] as. A plain folder a block names
+/// resolves under that block's own namespace (wafer-core's
+/// `interfaces::storage::handler::resolve_folder`), so this is the web
+/// block's name joined with its root; a test below resolves it the way the
+/// storage handler does.
+///
+/// Every writer of the site writes here:
+///
+/// * the native CLI flows (`sealed × native`, `embed × native`) copy the site
+///   directory into `<storage root>/` + this;
+/// * the Cloudflare deploy stages it under this logical key prefix in the R2
+///   release set;
+/// * the dev block's publisher (`blocks::dev::publisher`) writes each
+///   published file to [`site_storage_folder_absolute`].
+///
+/// A site anywhere else is a set of objects nothing serves.
+pub const SITE_STORAGE_FOLDER: &str = "wafer-run/web/site";
+
+/// [`SITE_STORAGE_FOLDER`] as any block other than `wafer-run/web` names it
+/// to a storage client: a leading `@` makes a folder absolute instead of
+/// relative to the calling block's namespace (`resolve_folder`).
+pub fn site_storage_folder_absolute() -> String {
+    format!("@{SITE_STORAGE_FOLDER}")
+}
+
 /// Register the site-main flow (used with impresspress/router).
 ///
 /// `cors_allowed_origins` and `csp_directives` are the operator-configured
@@ -118,7 +148,7 @@ pub fn site_main_block_configs(
             merged(
                 declared(existing_block_configs, WEB_BLOCK),
                 serde_json::json!({
-                    "web_root": "site", "web_spa": "true", "web_index": "index.html"
+                    "web_root": SITE_WEB_ROOT, "web_spa": "true", "web_index": "index.html"
                 }),
                 &[],
             ),
@@ -258,6 +288,73 @@ fn combine_csp(before: &str, after: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A context whose only fact is the block that made the call — all
+    /// `resolve_folder` reads.
+    #[derive(Clone)]
+    struct CallerCtx(&'static str);
+
+    #[async_trait::async_trait]
+    impl wafer_run::context::Context for CallerCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: wafer_run::Message,
+            _input: wafer_run::InputStream,
+        ) -> wafer_run::OutputStream {
+            unreachable!("resolve_folder calls no block")
+        }
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: wafer_run::ResourceType,
+            _access: wafer_block::ResourceAccess,
+        ) -> bool {
+            false
+        }
+        fn caller_id(&self) -> Option<&str> {
+            Some(self.0)
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+        fn clone_arc(&self) -> std::sync::Arc<dyn wafer_run::context::Context> {
+            std::sync::Arc::new(self.clone())
+        }
+    }
+
+    /// The folder every site writer targets is the one the storage handler
+    /// resolves for `wafer-run/web` reading the root this flow configures,
+    /// and the one the dev publisher's absolute name resolves to.
+    #[test]
+    fn the_site_storage_folder_is_where_the_web_block_reads_its_root() {
+        use wafer_core::interfaces::storage::handler::resolve_folder;
+        let web = config_for(&site_main_block_configs("", "", &[]), WEB_BLOCK).clone();
+        assert_eq!(web["web_root"], SITE_WEB_ROOT);
+        let routes = site_main::default_routes();
+        let fallback = routes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["block"] == WEB_BLOCK)
+            .unwrap();
+        assert_eq!(fallback["config"]["web_root"], SITE_WEB_ROOT);
+
+        let read_by_web = resolve_folder(&CallerCtx(WEB_BLOCK), "get", "folder", SITE_WEB_ROOT)
+            .expect("the web block's root resolves");
+        assert_eq!(read_by_web, SITE_STORAGE_FOLDER);
+        let written_by_dev = resolve_folder(
+            &CallerCtx("impresspress/dev"),
+            "put",
+            "folder",
+            &site_storage_folder_absolute(),
+        )
+        .expect("the absolute site folder resolves");
+        assert_eq!(written_by_dev, SITE_STORAGE_FOLDER);
+    }
 
     /// What `impresspress-web`'s `RuntimeFactory` declares on a
     /// `browser-devtools` build with `[sandbox] mode = "workspace"` (`runtime_factory.rs`):

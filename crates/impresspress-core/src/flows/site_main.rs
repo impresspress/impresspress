@@ -44,6 +44,6 @@ pub fn default_routes() -> serde_json::Value {
         { "path": "/health",                  "block": "impresspress/router" },
         { "path": "/openapi.json",            "block": "impresspress/router" },
         { "path": "/.well-known/agent.json",  "block": "impresspress/router" },
-        { "path": "/**",            "block": "wafer-run/web", "config": { "web_root": "site", "web_spa": "true", "web_index": "index.html" } }
+        { "path": "/**",            "block": "wafer-run/web", "config": { "web_root": super::SITE_WEB_ROOT, "web_spa": "true", "web_index": "index.html" } }
     ])
 }
