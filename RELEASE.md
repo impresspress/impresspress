@@ -19,6 +19,47 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Auth: the retired JWT blocklist table is dropped (auth 018)
+
+**What changes.** Auth's new migration `018_drop_jwt_blocklist` drops
+`wafer_run__auth__jwt_blocklist` and its index. Nothing has read or written
+the table since "Auth: the JWT blocklist is retired" (below): an access token
+authenticates only while its device's session row is live. Its rows name
+tokens whose sign-in had already ended, so dropping them un-revokes nothing.
+
+**Deploying it.** One file runs, in one transaction with its record, on
+every target; on Cloudflare it is one D1 batch of two statements.
+**Nobody is signed out**: no session, refresh-token, API-key or account row
+changes. The admin's Database page lists one table fewer.
+
+**A database without the table** was adopted from a wrong record or edited
+by hand outside the app (`wrangler d1 execute`, `sqlite3`, the browser's
+developer tools on its storage); every database this release upgrades
+otherwise holds it. There 018 fails, not as a refusal: nothing of it
+applies, it stays unrecorded, and the message names `wafer-run/auth`,
+`018_drop_jwt_blocklist` and the database's own error (`no such table:
+wafer_run__auth__jwt_blocklist` on SQLite and D1, `relation
+"wafer_run__auth__jwt_blocklist" does not exist` on PostgreSQL; D1 does not
+say which statement failed). A native server refuses to start and a
+Cloudflare deploy stops before promotion. In the browser it is the
+`initialize` stage, which erases and starts afresh in a build rendered to
+erase on recovery (the demo), as for any migration that fails ("Migrations:
+recorded per file", below). The remedy is that entry's: restore a backup
+taken before the upgrade, or recreate the database.
+
+**Rollback.** A build from before 018 sees a record it does not know and
+refuses it as "migrated by a newer build": a native server does not start, a
+Cloudflare deploy through `impresspress deploy` stops, a browser bundle stops
+without erasing. `wrangler rollback`, or promoting an older version, serves,
+because the request path never plans migrations, and no build since the
+blocklist was retired reads the table. A build from before that read it on
+every authenticated request and fails those requests; downgrading across
+migrations is not supported.
+
+**Cloudflare budget.** A fresh Worker database now sends 483 statements for
+its migrations (018's statement and its ledger row are the two new ones),
+within half of the default 1000.
+
 ### wafer-run 1272fd63: strict schema is the only behaviour, on every target
 
 **What changes.** The wafer-run pin moves from `f0ca9c79` to `1272fd63`
@@ -195,7 +236,8 @@ COLUMN`s on `users`, and the rebuilds of the tickets and vector tables on
 a Worker that compiles those blocks. Dev never runs on a Worker. The
 fresh-install budget test now counts only the blocks
 `impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
-Worker database sends 480 statements, within half of the default 1000.
+Worker database sent 480 statements at that release (483 since auth 018,
+above), within half of the default 1000.
 
 ### Cloudflare: workers-rs 0.8.7
 
@@ -412,9 +454,9 @@ and is refused as "its tracking was lost", rolled back. Restore
 loss, or recreate the database.
 
 **Cloudflare budget.** A fresh database's `/_deploy/prepare` sent 454
-statements for its migrations at this release, and 480 since the
-stamped-column migrations (counted by a test that keeps it within half of
-the default budget of 1000). Leave
+statements for its migrations at this release, 480 since the
+stamped-column migrations and 483 since auth 018 (counted by a test that
+keeps it within half of the default budget of 1000). Leave
 `[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
 fresh install.
 
@@ -451,6 +493,7 @@ Until then the table keeps whatever rows it had; nothing reads them, they
 name tokens rather than hold them, and they stay out of every data export.
 *Since "Migrations: recorded per file"* (above), adding an auth migration
 runs only that file, so dropping the table no longer costs the whole list.
+*Since auth 018* (above), the table is dropped.
 
 **Deploying this release** adds no migration, re-runs nothing and signs
 nobody out.

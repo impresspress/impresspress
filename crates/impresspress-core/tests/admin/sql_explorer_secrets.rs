@@ -878,21 +878,25 @@ fn the_registry_and_the_clearances_still_describe_the_schema() {
 }
 
 /// The tables a reviewer would expect to be refused and deliberately are not,
-/// stated so the boundary is not read as "everything auth touches".
+/// stated so the boundary is not read as "everything auth touches". Each is a
+/// table the migrations leave behind ([`migration_schema`], which applies
+/// every `DROP TABLE`) or the ledger, which the runner creates rather than a
+/// migration, so a row about a dropped table fails here instead of vouching
+/// for nothing.
 #[test]
 fn deliberately_readable_tables_stay_readable() {
     let refused: BTreeSet<&str> = SECRET_TABLES.iter().map(|e| e.table).collect();
+    let schema = migration_schema();
+    let exists = |table: &str| {
+        schema.contains_key(table)
+            || table == impresspress_core::platform_state::applied_migrations::TABLE
+    };
     for (table, why) in [
         (
             "wafer_run__auth__sessions",
             "a device list since migration 012 dropped and recreated it: \
              family/user_id/auth_method/timestamps, no token_hash, and its repo \
              module says nothing authenticates against it",
-        ),
-        (
-            "wafer_run__auth__jwt_blocklist",
-            "retired and unused; its old rows are revoked `jti`s: identifiers \
-             of tokens, not tokens",
         ),
         ("wafer_run__auth__orgs", "org names and verification refs"),
         ("wafer_run__auth__rate_limits", "counters keyed by bucket"),
@@ -911,6 +915,10 @@ fn deliberately_readable_tables_stay_readable() {
              the migration files' statements",
         ),
     ] {
+        assert!(
+            exists(table),
+            "{table} is no table the migrations leave behind; drop this row ({why})"
+        );
         assert!(
             !refused.contains(table),
             "{table} became refused; if that is right, drop this row and say why ({why})"
