@@ -408,7 +408,32 @@ impl LegalPagesBlock {
             // symmetric: skipping the seed costs one retry on the next
             // boot, while seeding wrongly publishes a second set of Terms
             // and Privacy documents over live ones.
-            Err(_) => return,
+            //
+            // This narrows that window; it does not close it. Two isolates
+            // cold-starting together both probe an empty table, both see
+            // empty, and both publish — and `001_legalpages_schema.sqlite.sql`
+            // indexes `(doc_type, status)` without a UNIQUE constraint, so
+            // nothing downstream rejects the duplicate. (Contrast
+            // `impresspress__admin__roles`, whose
+            // `impresspress__admin__roles_name_uniq` unique index is what makes
+            // the same fail-open in `admin/iam.rs` harmless.) Closing it needs
+            // a partial unique index on the published row, which is a schema
+            // change and not this function's to make.
+            //
+            // LOG IT. A silent `return` here is the only remaining signal
+            // that legal pages were never seeded: under STRICT_SCHEMA a
+            // missing or renamed collection, or a D1 read failure (quota
+            // exhaustion is routine on this account), fails the probe on
+            // every `Init`, and `/b/legalpages/terms` then serves "No
+            // document has been published yet" forever with nothing in
+            // `wrangler tail` to say why.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "legalpages: seed probe failed; skipping seed to avoid duplicating live documents"
+                );
+                return;
+            }
         }
 
         for (doc_type, title, content) in &[
@@ -425,8 +450,8 @@ impl LegalPagesBlock {
         ] {
             // Seed through the same service fn both publish surfaces use —
             // the published-document shape (status/version/published_at/…)
-            // exists exactly once, in `service.rs`. The table is empty here
-            // (count == 0 above), so the archive pass is a no-op.
+            // exists exactly once, in `service.rs`. The probe above returned
+            // no rows, so the table is empty and the archive pass is a no-op.
             if let Err(e) = service::publish_document(
                 ctx,
                 service::PublishRequest {
@@ -772,16 +797,24 @@ mod seed_defaults_tests {
         assert_eq!(types, vec!["privacy", "terms"]);
     }
 
+    /// Named for what it actually pins. It does NOT verify `skip_count` —
+    /// that is `the_seed_probe_reads_at_most_one_row_and_never_counts`'s job,
+    /// and it is the only test that catches a flip (verified by flipping it:
+    /// this test stays green, because the backend's own `COUNT(*)` is emitted
+    /// inside the `database.list` op as a batched statement, so breaking the
+    /// `database.count` WIRE op cannot observe it).
+    ///
+    /// What it does pin: the `database.count` dependency is gone rather than
+    /// moved. The old code called `db::count` here and read its failure as
+    /// `unwrap_or(0)` — "the table is empty" — then seeded a second pair of
+    /// published legal documents on top of the first. With that op broken, the
+    /// old code duplicates and the new code does not.
     #[tokio::test]
-    async fn an_already_seeded_table_is_left_alone_without_issuing_a_count() {
+    async fn a_broken_count_op_does_not_duplicate_the_defaults() {
         let ctx = ctx_with_schema().await;
         LegalPagesBlock::new().seed_defaults(&ctx).await;
         assert_eq!(doc_count(&ctx).await, 2);
 
-        // `database.count` is broken for this table, so a probe that still
-        // reaches for COUNT(*) sees an error. The old code read that error
-        // as `unwrap_or(0)` — "the table is empty" — and seeded a second
-        // pair of published legal documents on top of the first.
         let failing = FailingDbOpContext::new(ctx, vec![("database.count", COLLECTION)]);
         LegalPagesBlock::new().seed_defaults(&failing).await;
 
