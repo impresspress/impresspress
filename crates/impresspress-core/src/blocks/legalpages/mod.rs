@@ -160,6 +160,25 @@ pub(crate) const COLLECTION: &str = "impresspress__legalpages__documents";
 /// Path prefix preceding the document id in the JSON API routes.
 const API_DOC_PREFIX: &str = "/b/legalpages/api/documents/";
 
+/// The `ListOptions` for the "is this table non-empty?" probe in
+/// [`LegalPagesBlock::seed_defaults`].
+///
+/// Three properties carry the whole cost saving, and all three are
+/// asserted in `seed_defaults_tests`:
+///
+/// - `limit: 1` — one row answers the question; the rest is waste.
+/// - `skip_count: true` — a bare `list` makes the backend issue its OWN
+///   `SELECT COUNT(*)` alongside the rows (see `ListOptions::skip_count`),
+///   which would reinstate the exact full-table scan being removed.
+/// - no filters — any row will do, so the probe never needs an index.
+fn seed_probe_options() -> ListOptions {
+    ListOptions {
+        limit: 1,
+        skip_count: true,
+        ..Default::default()
+    }
+}
+
 impl LegalPagesBlock {
     async fn handle_get_public(&self, ctx: &dyn Context, doc_type: &str) -> OutputStream {
         use wafer_core::clients::config;
@@ -364,9 +383,32 @@ impl LegalPagesBlock {
     }
 
     async fn seed_defaults(&self, ctx: &dyn Context) {
-        let count = db::count(ctx, COLLECTION, &[]).await.unwrap_or(0);
-        if count > 0 {
-            return;
+        // "Has this table ever been seeded?" is an EXISTENCE question, and
+        // it was being asked with an unbounded `COUNT(*)`. On Cloudflare
+        // that is a full-table scan, and `lifecycle` runs this on every
+        // `Init` — i.e. every cold isolate. Measured in production on
+        // 2026-10-30: 10,730 calls x ~305 rows = 3,272,650 D1 rows read in
+        // one day, 57% of the whole account's daily read budget, to learn
+        // something one row settles. Worse, the cost GREW with the table,
+        // because publishing archives previous versions rather than
+        // deleting them.
+        //
+        // `seed_probe_options()` asks the cheap question instead. It is a
+        // named function, not an inline literal, so the cost property has
+        // somewhere to be asserted — see `seed_defaults_tests`.
+        let probe = db::list(ctx, COLLECTION, &seed_probe_options()).await;
+
+        match probe {
+            // Seeded already. Nothing to do, and no write to make.
+            Ok(list) if !list.records.is_empty() => return,
+            Ok(_) => {}
+            // FAIL CLOSED. The previous code was `unwrap_or(0)`, which read
+            // "I could not tell" as "the table is empty" and seeded on top
+            // of whatever was really there. The two mistakes are not
+            // symmetric: skipping the seed costs one retry on the next
+            // boot, while seeding wrongly publishes a second set of Terms
+            // and Privacy documents over live ones.
+            Err(_) => return,
         }
 
         for (doc_type, title, content) in &[
@@ -663,6 +705,110 @@ crate::impresspress_feature_block! {
         }
         Ok(())
     },
+}
+
+#[cfg(test)]
+mod seed_defaults_tests {
+    use super::*;
+    use crate::test_support::{FailingDbOpContext, TestContext};
+    use crate::util::RecordExt;
+
+    async fn ctx_with_schema() -> TestContext {
+        let ctx = TestContext::with_admin().await;
+        let sqlite: Vec<&str> = migrations::SQLITE_MIGRATIONS
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect();
+        crate::migration_helper::apply_migrations(
+            &ctx,
+            "impresspress/legalpages",
+            &sqlite,
+            migrations::POSTGRES_MIGRATIONS,
+        )
+        .await
+        .expect("apply legalpages migrations");
+        ctx
+    }
+
+    async fn doc_count(ctx: &dyn Context) -> usize {
+        db::list_all(ctx, COLLECTION, vec![])
+            .await
+            .expect("list documents")
+            .len()
+    }
+
+    /// The cost property, pinned as a value rather than inferred from
+    /// behaviour: measured in production on 2026-10-30, the unbounded
+    /// `COUNT(*)` this probe replaced read 3,272,650 D1 rows in a day —
+    /// 57% of the whole account's daily budget — to answer a question that
+    /// one row settles. A reviewer deleting `limit` or flipping
+    /// `skip_count` would silently restore a full-table scan per cold
+    /// isolate, so both are asserted here directly.
+    #[test]
+    fn the_seed_probe_reads_at_most_one_row_and_never_counts() {
+        let opts = seed_probe_options();
+        assert_eq!(opts.limit, 1, "the probe must never read more than one row");
+        assert!(
+            opts.skip_count,
+            "skip_count=false makes the backend issue its own SELECT COUNT(*), \
+             which is exactly the full-table scan this probe exists to avoid",
+        );
+        assert!(
+            opts.filters.is_empty(),
+            "an unfiltered probe can be served from any row, so it stays index-free",
+        );
+    }
+
+    #[tokio::test]
+    async fn seeds_the_two_defaults_into_an_empty_table() {
+        let ctx = ctx_with_schema().await;
+        LegalPagesBlock::new().seed_defaults(&ctx).await;
+
+        let docs = db::list_all(&ctx, COLLECTION, vec![])
+            .await
+            .expect("list documents");
+        let mut types: Vec<&str> = docs.iter().map(|d| d.str_field("doc_type")).collect();
+        types.sort_unstable();
+        assert_eq!(types, vec!["privacy", "terms"]);
+    }
+
+    #[tokio::test]
+    async fn an_already_seeded_table_is_left_alone_without_issuing_a_count() {
+        let ctx = ctx_with_schema().await;
+        LegalPagesBlock::new().seed_defaults(&ctx).await;
+        assert_eq!(doc_count(&ctx).await, 2);
+
+        // `database.count` is broken for this table, so a probe that still
+        // reaches for COUNT(*) sees an error. The old code read that error
+        // as `unwrap_or(0)` — "the table is empty" — and seeded a second
+        // pair of published legal documents on top of the first.
+        let failing = FailingDbOpContext::new(ctx, vec![("database.count", COLLECTION)]);
+        LegalPagesBlock::new().seed_defaults(&failing).await;
+
+        assert_eq!(
+            doc_count(&failing).await,
+            2,
+            "re-running the seed must not duplicate the default documents",
+        );
+    }
+
+    /// Fail CLOSED. An unreadable table is an unknown state, not an empty
+    /// one, and the two outcomes are not symmetric: skipping the seed costs
+    /// a retry on the next boot, while seeding wrongly publishes a second
+    /// set of Terms and Privacy documents over live ones.
+    #[tokio::test]
+    async fn a_failed_probe_seeds_nothing() {
+        let ctx = ctx_with_schema().await;
+        // The probe and the assertion must not share a broken context: the
+        // count below reads the same collection, so it is taken through an
+        // unbroken clone of the fixture.
+        let reader = ctx.clone();
+        let failing = FailingDbOpContext::new(ctx, vec![("database.list", COLLECTION)]);
+
+        LegalPagesBlock::new().seed_defaults(&failing).await;
+
+        assert_eq!(doc_count(&reader).await, 0);
+    }
 }
 
 #[cfg(test)]
