@@ -46,7 +46,7 @@ pub struct VariableRow {
     /// Stored as the integer column `sensitive` (migration 001).
     pub sensitive: bool,
     /// The `{ORG}__{BLOCK}` prefix of the key (migration 002): what
-    /// `D1ConfigSource` groups rows by, so a block sees only its own. `None`
+    /// [`crate::config_source::DatabaseConfigSource`] groups rows by, so a block sees only its own. `None`
     /// for shared (`WAFER_RUN_SHARED__*`) and ad hoc keys, whose column stays
     /// NULL.
     pub block: Option<String>,
@@ -115,7 +115,7 @@ pub fn block_for_key(key: &str) -> Option<String> {
 /// derive it from the key ([`block_for_key`]); an auto-generated secret is
 /// tagged with the block that declared it
 /// ([`crate::config_vars::screaming_block`]), because that is the block
-/// `D1ConfigSource` must hand the row to.
+/// [`crate::config_source::DatabaseConfigSource`] must hand the row to.
 #[derive(Debug, Clone)]
 pub struct NewVariable {
     pub key: String,
@@ -1542,6 +1542,95 @@ async fn load_rows(db: &Arc<dyn DatabaseService>) -> Result<Vec<LoadedRow>, Stri
     Ok(rows)
 }
 
+/// The whole table as one bounded, unfiltered read: what a config snapshot is
+/// built from.
+///
+/// Read with [`cache_key::full_table_list_opts`](crate::cache_key::full_table_list_opts),
+/// a shape `cache_key::read_key` deliberately refuses to cache (pinned by
+/// `the_config_source_snapshot_shape_is_deliberately_uncacheable`): the KV row
+/// cache has no invalidation story for a whole-table key, and an unfiltered
+/// read returns sensitive rows that must never reach KV. So it goes to the
+/// database every time it is called, and the caller decides how long to keep
+/// it.
+///
+/// One page, refused when it may be truncated: see
+/// [`UnfilteredReadError::MayBeTruncated`].
+pub async fn read_unfiltered(
+    db: &Arc<dyn DatabaseService>,
+) -> Result<UnfilteredRead, UnfilteredReadError> {
+    let opts = crate::cache_key::full_table_list_opts();
+    let listed = db
+        .list(TABLE, &opts)
+        .await
+        .map_err(UnfilteredReadError::Read)?;
+    let returned = listed.records.len();
+    if let Some(limit) = opts.limit.filter(|&limit| returned >= limit as usize) {
+        return Err(UnfilteredReadError::MayBeTruncated { returned, limit });
+    }
+    // A row the codec rejects (no `key`) is dropped rather than failing the
+    // read: one malformed row must not leave every block on its defaults.
+    let rows = listed
+        .records
+        .iter()
+        .filter_map(|record| VariableRow::from_record(&record.id, &record.data).ok())
+        .collect();
+    Ok(UnfilteredRead { rows, returned })
+}
+
+/// What [`read_unfiltered`] returned.
+#[derive(Debug, Clone)]
+pub struct UnfilteredRead {
+    /// Every row that decoded.
+    pub rows: Vec<VariableRow>,
+    /// How many records the database returned, including any that did not
+    /// decode: a reader can tell "the table is empty" from "rows exist but
+    /// none was usable".
+    pub returned: usize,
+}
+
+/// Why [`read_unfiltered`] produced no rows to build config from.
+#[derive(Debug)]
+pub enum UnfilteredReadError {
+    /// The database failed the read.
+    Read(wafer_core::interfaces::database::service::DatabaseError),
+    /// The page came back exactly full, so rows may have been dropped.
+    ///
+    /// One unfiltered read shares a single row budget across the whole table,
+    /// where the per-block query it replaced gave every block its own, and
+    /// `skip_count` leaves no `total_count` to check against — so an
+    /// exactly-full page cannot be told apart from a truncated one.
+    /// Continuing would resolve some blocks against config that exists but
+    /// was not returned: silently on defaults, or hard-failing on a required
+    /// key that is actually present. `build_runtime` makes the same call when
+    /// block settings cannot be read ("Propagate rather than fabricate"), and
+    /// this is the same situation.
+    MayBeTruncated {
+        /// Records the page held.
+        returned: usize,
+        /// The page's limit.
+        limit: u32,
+    },
+}
+
+impl std::fmt::Display for UnfilteredReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // The database's own text, unwrapped: this is what a config load
+            // reported before the read moved here.
+            Self::Read(e) => std::fmt::Display::fmt(e, f),
+            Self::MayBeTruncated { returned, limit } => write!(
+                f,
+                "variables snapshot returned {returned} rows, at or above the {limit}-row query \
+                 limit: the table may be truncated, and resolving block config from a partial \
+                 snapshot would silently leave blocks on their defaults. Raise the limit or \
+                 paginate this read."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UnfilteredReadError {}
+
 /// A decoded row plus how its `sensitive` column was actually spelled on disk.
 struct LoadedRow {
     row: VariableRow,
@@ -2254,7 +2343,7 @@ mod tests {
     }
 
     /// A shared or ad hoc key has no block prefix: the column stays NULL,
-    /// which is what `D1ConfigSource` relies on to keep it out of every
+    /// which is what `DatabaseConfigSource` relies on to keep it out of every
     /// block's config.
     #[tokio::test]
     async fn a_key_without_a_block_prefix_keeps_the_column_null() {

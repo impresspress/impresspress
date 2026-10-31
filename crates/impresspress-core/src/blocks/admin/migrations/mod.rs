@@ -13,9 +13,10 @@ const SQL_001_SQLITE: &str = include_str!("001_admin_schema.sqlite.sql");
 const SQL_001_POSTGRES: &str = include_str!("001_admin_schema.postgres.sql");
 // 002's header comment — in BOTH dialect files — says the `block` column is
 // "for indexed per-block lookup by D1ConfigSource". That was true when the
-// migration shipped and is not any more: `D1ConfigSource` reads the whole
-// variables table once and groups by `block` in memory, issuing no
-// `WHERE block = ?` at all (see that module's doc). The column and the index
+// migration shipped and is not any more: the config source (now
+// `crate::config_source::DatabaseConfigSource`) reads the whole variables
+// table once and groups by `block` in memory, issuing no `WHERE block = ?`
+// at all (see that module's doc). The column and the index
 // this migration creates are still live — `block` is exactly what the
 // in-memory grouping keys on — so only the query strategy moved on.
 //

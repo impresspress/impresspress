@@ -20,12 +20,10 @@
 //! code lines are kept, so nothing hides behind a `//` on the same line as
 //! code. What this gate still does NOT cover, stated so it is not mistaken
 //! for more than it is: other workspace crates (the CLI's `boot_lifecycle` and
-//! `native_wrap_grants` tests seed fixtures through `DatabaseService`, and
-//! the Cloudflare adapter's `D1ConfigSource` reads the variables table on
-//! its production config path; all of them name `platform_state::*::TABLE`
-//! and decode through the row types, so they are consumers of this module's
-//! public surface rather than bypasses of it, but no test in this crate can
-//! see them), non-Rust sources (the migrations under
+//! `native_wrap_grants` tests seed fixtures through `DatabaseService`; they
+//! name `platform_state::*::TABLE` and decode through the row types, so they
+//! are consumers of this module's public surface rather than bypasses of it,
+//! but no test in this crate can see them), non-Rust sources (the migrations under
 //! `blocks/admin/migrations/` define the tables), and the files on the
 //! allowlists below — each listed individually with its reason, so a NEW
 //! file naming a table fails the gate and has to justify itself here.

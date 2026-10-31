@@ -70,7 +70,7 @@ use wafer_run::{
 
 use crate::{
     config_generation::config_write_generation,
-    // audit-allow: this block never reaches the table under WRAP — it reads and writes through `variables`' boot-flavour API (`load_all`, `find_by_key`, `set`) over the raw `DatabaseService` that `builder::registration` hands it, the same way `D1ConfigSource` reads this table, so no grant applies (a `ctx`-routed read IS denied: see `the_config_block_reads_the_variables_table_under_wrap`); the audit also derives the caller `impresspress/config` from the file path, while the block registers as `wafer-run/config`
+    // audit-allow: this block never reaches the table under WRAP — it reads and writes through `variables`' boot-flavour API (`load_all`, `find_by_key`, `set`) over the raw `DatabaseService` that `builder::registration` hands it, the same way `config_source::DatabaseConfigSource` reads this table, so no grant applies (a `ctx`-routed read IS denied: see `the_config_block_reads_the_variables_table_under_wrap`); the audit also derives the caller `impresspress/config` from the file path, while the block registers as `wafer-run/config`
     platform_state::variables,
     util::{is_sensitive_key, validate_config_value},
 };
@@ -230,7 +230,7 @@ pub struct VariablesConfigBlock {
     /// Reading the platform's own config store through the raw service is the
     /// established shape, not a workaround: `variables`' boot-flavour API is
     /// documented as "over `DatabaseService`, before WRAP", and
-    /// `D1ConfigSource` reads the same table the same way for the same
+    /// `config_source::DatabaseConfigSource` reads the same table the same way for the same
     /// reason.
     db: Arc<dyn DatabaseService>,
     /// The `variables` table, memoized alongside the config-write generation
@@ -273,7 +273,7 @@ impl VariablesConfigBlock {
     /// One query, not one per key. A single page render reads roughly eight
     /// branding keys through `config::get_default`; a row fetch per key would
     /// turn that into eight D1 round-trips per request on Workers, where CPU
-    /// and latency are the scarce resources. `D1ConfigSource::cached_snapshot`
+    /// and latency are the scarce resources. `DatabaseConfigSource::cached_snapshot`
     /// solves the same problem the same way and against the same counter, so
     /// the two invalidate together.
     ///

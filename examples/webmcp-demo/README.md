@@ -151,8 +151,8 @@ supported way to change a role.
 
 `WAFER_RUN_SHARED__ENVIRONMENT`, `FRONTEND_URL` and `APP_NAME` edits made in
 the admin UI do not reach the Worker yet: on Workers a shared variable's D1
-row belongs to no block's config (`impresspress-cloudflare`'s
-`config_source.rs`). The demo runs on their defaults (`development`:
+row belongs to no block's config (`impresspress-core`'s
+`config_source/database.rs`). The demo runs on their defaults (`development`:
 discovery documents carry `Access-Control-Allow-Origin: *`, cookies are not
 `Secure`).
 

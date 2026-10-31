@@ -78,7 +78,6 @@
 
 mod boot_hooks;
 pub mod config_service;
-pub mod config_source;
 // Compile-time `DatabaseService` conformance assertions for the D1 and
 // KV-cached adapters (wafer-run #319 shared suite). Gated behind the
 // off-by-default `conformance-check` feature so the suite never enters the

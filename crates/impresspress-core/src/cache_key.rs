@@ -44,7 +44,7 @@ pub fn bumps_config_version(table: &str) -> bool {
 use wafer_block::db::{Filter, FilterOp, ListOptions};
 
 /// Minimum `limit` value treated as "all matching rows". Matches the
-/// `D1ConfigSource` and admin block list shapes. Anything smaller is
+/// config-source snapshot and admin block list shapes. Anything smaller is
 /// treated as paginated and bypasses cache.
 const FULL_LIMIT_THRESHOLD: u32 = 10_000;
 
@@ -71,7 +71,7 @@ fn key_column(table: CachedTable) -> &'static str {
 /// wants a KV-cached per-block read constructs its `ListOptions` here instead
 /// of open-coding the shape, so it can't silently drift out of cache coverage.
 ///
-/// NO PRODUCTION CALLER TODAY. `D1ConfigSource` was the only one; it now reads
+/// NO PRODUCTION CALLER TODAY. The config source was the only one; it now reads
 /// the variables table once via [`full_table_list_opts`] and groups in memory,
 /// because one query per block meant one KV read per block on every cold
 /// hydration. With no caller issuing that shape, [`read_key`] never matches a
@@ -106,7 +106,8 @@ pub fn block_list_opts(table: CachedTable, value: &str) -> ListOptions {
 ///
 /// - [`crate::platform_state::block_settings::load`]'s full-table read — recognized
 ///   by [`read_key`] and cached under the `__all__` sentinel;
-/// - `D1ConfigSource`'s single variables snapshot — deliberately NOT cached
+/// - the config source's single variables snapshot
+///   ([`crate::platform_state::variables::read_unfiltered`]) — deliberately NOT cached
 ///   (see `read_key`'s zero-filter arm, and the test that pins it). One
 ///   uncached D1 query replaces one KV read per configured block, which on a
 ///   22-block deployment is 22 KV reads traded for a single unfiltered read
@@ -140,7 +141,7 @@ pub fn read_key(table: CachedTable, opts: &ListOptions) -> Option<String> {
         // `platform_state::block_settings::read_rows` issues, reached from
         // `load` and `load_and_seed`) cache it under the all-rows sentinel.
         // For `variables` REFUSE it: the only filterless
-        // variables list is `D1ConfigSource`'s whole-table snapshot, and
+        // variables list is the config source's whole-table snapshot, and
         // there is no invalidation story for a whole-table variables key —
         // `invalidate_keys` emits the all-rows key for `block_settings`
         // alone, so a variables write would leave such an entry stale until
@@ -532,7 +533,8 @@ mod tests {
         assert_eq!(read_key(CachedTable::Variables, &full_table_opts()), None);
     }
 
-    /// The shape `D1ConfigSource` actually issues for its one-query snapshot
+    /// The shape `variables::read_unfiltered` actually issues for the config
+    /// source's one-query snapshot
     /// must stay uncacheable, and that is load-bearing rather than incidental.
     ///
     /// Caching it would need an invalidation story this module does not have:
